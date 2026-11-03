@@ -147,6 +147,9 @@ keybindings:
     bindings: ['{{MOD}}+ctrl+t']
   - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1" -ToggleMode']
     bindings: ['{{MOD}}+ctrl+d']
+  # Game mode: stop the bar, widgets, launcher and live wallpaper to free RAM; press again to restore.
+  - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\toggles.ps1" -Action gamemode']
+    bindings: ['{{MOD}}+shift+g']
   # Reload everything (end4: Ctrl+Super+R restarts the shell). One sequential command: shell-exec
   # doesn't wait, so a separate taskkill + zebar raced and could leave no Zebar running.
   - commands: ['wm-reload-config', 'shell-exec --hide-window powershell -NoProfile -Command "Stop-Process -Name zebar -Force -ErrorAction SilentlyContinue; Wait-Process -Name zebar -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 300; Start-Process zebar"']

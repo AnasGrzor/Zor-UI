@@ -165,6 +165,23 @@ try {
       if (-not $item) { throw 'That clipboard item is gone.' }
       Out-Json @{ ok = ([Windows.ApplicationModel.DataTransfer.Clipboard]::SetHistoryItemAsContent($item).ToString() -eq 'Success') }
     }
+    'gamemode'   {
+      # Frees RAM for games: stops Zebar (its widgets, webviews and bridge streams go with it), Flow
+      # Launcher and Wallpaper Engine's wallpapers; run again to bring them back. GlazeWM keeps
+      # running so the shortcut still works. "On" = Zebar not running, so no state file can go stale.
+      $we = (Get-Process wallpaper64, wallpaper32 -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+      $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
+      if (Get-Process zebar -ErrorAction SilentlyContinue) {
+        Stop-Process -Name zebar, Flow.Launcher -Force -ErrorAction SilentlyContinue
+        if ($we) { & $we -control stop }
+        Out-Json @{ gamemode = $true }
+      } else {
+        if ($we) { & $we -control play }
+        Start-Process zebar
+        if (Test-Path $flow) { Start-Process $flow }
+        Out-Json @{ gamemode = $false }
+      }
+    }
     'brightness' { Out-Json @{ brightness = (Set-Brightness ([int]$Value)) } }
     'osk'        { Start-Process osk; Out-Json @{ ok = $true } }
     { $_ -in 'colorpick', 'screentranslate' } {

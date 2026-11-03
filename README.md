@@ -93,6 +93,7 @@ Re-running `install.ps1` updates everything and keeps your `config.json` setting
 | `Mod+Ctrl+T` | Pick a wallpaper (image or video) and regenerate colors |
 | `Mod+Ctrl+D` | Toggle dark / light |
 | `Mod+Ctrl+R` | Restart the bar and reload GlazeWM |
+| `Mod+Shift+G` | Game mode: stop the bar, widgets, launcher and live wallpaper to free RAM (about 2 GB here). Press again to bring them back. |
 | `Mod+Enter` or `Mod+T` | Terminal |
 | `Mod+E` / `Mod+W` / `Mod+C` | File Explorer / Edge / VS Code |
 | `Mod+Shift+S` | Screen snip |

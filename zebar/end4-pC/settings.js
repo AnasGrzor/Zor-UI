@@ -230,7 +230,7 @@ const pages = {
     const groups = [
       ['dashboard', 'Shell', [[`${m}+A`, 'Left sidebar: home, AI, translator, anime, football'], [`${m}+N`, 'Right sidebar: toggles, notifications, calendar'],
         [`${m}+I`, 'Settings'], [`${m}+/`, 'This keybinds list'], [cfg.modKey === 'lwin' ? 'Win+Tab' : 'Alt+`', 'Overview'], ['Alt+Space', 'Launcher'],
-        [`${m}+Ctrl+T`, 'Pick a wallpaper and regenerate colors'], [`${m}+Ctrl+D`, 'Dark / light'], [`${m}+Ctrl+R`, 'Restart the bar and reload GlazeWM'],
+        [`${m}+Ctrl+T`, 'Pick a wallpaper and regenerate colors'], [`${m}+Ctrl+D`, 'Dark / light'], [`${m}+Ctrl+R`, 'Restart the bar and reload GlazeWM'], [`${m}+Shift+G`, 'Game mode: free RAM (press again to restore)'],
         ['Ctrl+PgUp / PgDn', 'Switch tabs in a sidebar or here'], ['Esc', 'Close a sidebar or this window']]],
       ['apps', 'Apps', [[`${m}+Enter / ${m}+T`, 'Terminal'], [`${m}+E`, 'File Explorer'], [`${m}+W`, 'Edge'], [`${m}+C`, 'VS Code'],
         [`${m}+Shift+S`, 'Screen snip'], [`${m}+K`, 'On-screen keyboard']]],

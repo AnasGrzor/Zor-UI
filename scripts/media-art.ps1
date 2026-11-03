@@ -49,7 +49,10 @@ try {
   if ($null -eq $props.Thumbnail) { Out-Json @{ ok = $false; title = $props.Title }; exit 0 }
 
   $winrtStream = Await ($props.Thumbnail.OpenReadAsync()) $streamType
-  $src = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($winrtStream)
+  # PowerShell 5.1 can't cast the WinRT stream to IInputStream itself ("no overload"); reflection's
+  # Invoke does the COM interface lookup, the same way Await does for IAsyncOperation.
+  $asStream = [System.IO.WindowsRuntimeStreamExtensions].GetMethod('AsStreamForRead', [Type[]]@([Windows.Storage.Streams.IInputStream]))
+  $src = $asStream.Invoke($null, @($winrtStream))
   $tmp = "$Out.$PID.tmp"
   $dst = [System.IO.File]::Create($tmp)
   try { $src.CopyTo($dst) } finally { $dst.Dispose(); $src.Dispose() }

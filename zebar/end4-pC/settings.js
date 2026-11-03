@@ -160,11 +160,12 @@ const pages = {
     </div>
     <h2>${icon('desktop_windows')}Desktop</h2>
     <div class="card">
-      ${sw('desktopWidgets', 'Desktop widgets', 'Pick which cards show below, top to bottom', 'widgets')}
+      ${sw('desktopWidgets', 'Desktop widgets', 'Pick the cards below, then drag them anywhere on the desktop', 'widgets')}
       <div class="chips">${DESKTOP_WIDGETS.map(([id, n]) => `<button class="chip${get('desktop.widgets').includes(id) ? ' sel' : ''}" data-dwidget="${id}">${n}</button>`).join('')}</div>
       ${seg('desktop.clock', [['cookie', 'Cookie'], ['analog', 'Analog'], ['digital', 'Digital'], ['pixel', 'Pixel']], 'Clock style', 'schedule')}
       ${text('desktop.worldClocks', 'World clock cities', 'Comma separated time zones, e.g. Europe/Paris, Asia/Dubai', 'public')}
       ${text('desktop.text', 'Custom text', 'Shown by the Custom text card', 'text_fields')}
+      <div class="row">${icon('restart_alt')}<div class="lbl">Card positions<small>Put every card back in one column on the left</small></div><button class="chip" data-act="reset-desk">Reset layout</button></div>
       ${sw('visualizer.desktop', 'Desktop visualizer', 'Audio bars along the bottom of the screen (cava)', 'equalizer')}
       ${num('visualizer.bars', 'Visualizer bars', 16, 160, 'bar_chart')}
       ${text('userName', 'Your name', 'Shown in the greeting and sidebar', 'person')}
@@ -310,7 +311,14 @@ document.addEventListener('click', async e => {
   if (d.dwidget) {
     const cur = new Set(get('desktop.widgets'));
     cur.has(d.dwidget) ? cur.delete(d.dwidget) : cur.add(d.dwidget);
-    await set('desktop.widgets', DESKTOP_WIDGETS.map(([id]) => id).filter(id => cur.has(id))); return render();
+    await set('desktop.widgets', DESKTOP_WIDGETS.map(([id]) => id).filter(id => cur.has(id)));
+    if (cur.has(d.dwidget)) zebar.startWidgetPreset('desk-' + d.dwidget, 'default').catch(() => {});   // turned-off cards close themselves
+    return render();
+  }
+  if (d.act === 'reset-desk') {
+    localStorage.removeItem('end4-pC.deskPos');
+    await set('desktop.layoutReset', Date.now());   // config change reloads every card, now without a saved spot
+    return toast('Layout reset');
   }
   if (d.league) {
     const cur = new Set(get('football.leagues') || []);

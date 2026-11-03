@@ -1,15 +1,26 @@
 import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid } from './lib/core.js';
 import * as timer from './lib/timer.js';
+import { defaultSlot, onScreen } from './lib/desk.js';
 
+// Every desktop card is its own window ("desk-clock", "desk-weather", ...), so it can be dragged
+// anywhere. The "desktop" widget in Zebar's startup list only opens the enabled cards and leaves.
+const widget = zebar.currentWidget();
+const tauri = widget.window.tauri;
+const stop = () => { tauri.close(); return new Promise(() => {}); };
 const cfg = await config();
-if (cfg.desktopWidgets === false) zebar.currentWidget().window.tauri.close();
+const me = widget.name.replace(/^desk-/, '');
+if (cfg.desktopWidgets === false) await stop();
+if (widget.name === 'desktop') {
+  for (const id of cfg.desktop.widgets) await zebar.startWidgetPreset('desk-' + id, 'default').catch(e => console.warn(e));
+  await stop();
+}
+if (!cfg.desktop.widgets.includes(me)) await stop();   // turned off in Settings
+document.documentElement.style.visibility = 'hidden';  // until it's moved to its spot
 reloadOnConfigChange();
 await watchTheme();
 
-// One card per entry of config.json desktop.widgets, in that order (Settings > Bar & desktop).
-const on = new Set(cfg.desktop.widgets);
-for (const id of cfg.desktop.widgets)
-  if (/^[a-z]+$/.test(id) && !document.getElementById(id)) $('#col').insertAdjacentHTML('beforeend', `<div class="w" id="${id}"></div>`);
+const on = new Set([me]);
+$('#col').insertAdjacentHTML('beforeend', `<div class="w" id="${me}"></div>`);
 
 const providers = zebar.createProviderGroup({
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },
@@ -252,3 +263,50 @@ card('notes', renderNotes);
 card('text', renderText);
 setInterval(everySecond, 1000);
 setInterval(everyMinute, 60000);
+
+// ---------------------------------------------------------------- size, place and drag
+const ipc = (cmd, args = {}) => window.__TAURI_INTERNALS__.invoke('plugin:window|' + cmd, { label: tauri.label, ...args });
+const POS_KEY = 'end4-pC.deskPos';
+const saved = () => { try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch { return {}; } };
+
+// The window follows the card's size (cards grow and shrink: to-do items, media on/off).
+new ResizeObserver(() => {
+  const r = $('#col').getBoundingClientRect();
+  tauri.setSize({ type: 'Logical', width: Math.ceil(r.width), height: Math.max(1, Math.ceil(r.height)) }).catch(() => {});
+}).observe($('#col'));
+
+// Saved spot (physical px, from a drag) if it's still on a monitor, else the default stack.
+// The window starts on the primary monitor (zpack preset), so its scale converts the default.
+const monitors = await ipc('available_monitors').catch(() => []);
+let pos = saved()[me];
+if (!pos || (monitors.length && !onScreen(pos, monitors))) {
+  const d = defaultSlot(cfg.desktop.widgets, me, screen.availHeight);
+  pos = { x: Math.round(d.x * devicePixelRatio), y: Math.round(d.y * devicePixelRatio) };
+}
+await tauri.setPosition({ type: 'Physical', ...pos }).catch(e => console.warn(e));
+document.documentElement.style.visibility = '';
+
+// Drag the card by any spot that isn't a control. A move under 4px still counts as a click.
+let drag = null, swallowClick = false;
+document.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || e.target.closest('button, textarea, input, a')) return;
+  document.body.setPointerCapture(e.pointerId);
+  drag = { sx: e.screenX, sy: e.screenY, from: pos, moved: false, raf: 0 };
+});
+document.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = (e.screenX - drag.sx) * devicePixelRatio, dy = (e.screenY - drag.sy) * devicePixelRatio;
+  if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+  drag.moved = true;
+  pos = { x: Math.round(drag.from.x + dx), y: Math.round(drag.from.y + dy) };
+  cancelAnimationFrame(drag.raf);
+  drag.raf = requestAnimationFrame(() => tauri.setPosition({ type: 'Physical', ...pos }).catch(() => {}));
+});
+document.addEventListener('pointerup', () => {
+  if (drag?.moved) {
+    localStorage.setItem(POS_KEY, JSON.stringify({ ...saved(), [me]: pos }));
+    swallowClick = true;
+  }
+  drag = null;
+});
+document.addEventListener('click', e => { if (swallowClick) { e.stopPropagation(); swallowClick = false; } }, true);

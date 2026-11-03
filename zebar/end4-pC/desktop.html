@@ -7,7 +7,11 @@
   <link rel="stylesheet" href="./lib/base.css" />
   <style>
     /* Column of end4 desktop widgets, pinned to the desktop (bottom-most). */
-    #col { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
+    /* One card per window (desktop.js sizes the window to #col and moves it when dragged). */
+    html, body { overflow: hidden; background: transparent; }
+    #col { display: flex; flex-direction: column; width: 310px; padding: 4px; cursor: grab; user-select: none; }
+    #col:active { cursor: grabbing; }
+    #col textarea { cursor: text; user-select: text; }
     .w { background: color-mix(in srgb, var(--surface-container-low) 88%, transparent); border-radius: var(--round-lg); overflow: hidden; }
 
     /* cookie clock */

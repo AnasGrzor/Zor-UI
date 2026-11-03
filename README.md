@@ -124,8 +124,9 @@ Click the chip to open the timer.
 
 **Desktop widgets.** Settings → Bar & desktop picks the cards shown on the desktop. The choices are clock,
 weather, week, greeting, media, calendar, to-do (the same list as the sidebar), notes, timer, world clock,
-resources and custom text. The clock has four styles: cookie, analog, digital and pixel. The desktop column
-is 740 px tall, so turning on every card cuts off the bottom ones.
+resources and custom text. The clock has four styles: cookie, analog, digital and pixel. Each card is its own
+window: drag it anywhere, on either monitor, and it stays there. **Reset layout** in the same page puts every
+card back in a column on the left.
 
 **Wallpaper Engine.** Settings → Wallpapers lists everything you've subscribed to on the Workshop, plus
 your own projects. Search by name or tag, filter by type, and click one to set it. end4 takes its colors from

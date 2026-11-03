@@ -39,7 +39,7 @@ the same design with Windows tools:
 | cava | `end4_bridge.py visualizer`: WASAPI loopback + FFT, drawn by Zebar |
 | AI chat (Gemini, Mistral, Ollama…) | Same providers plus Claude, OpenAI and OpenRouter, streamed through `end4_bridge.py` |
 | Translator (`trans`, Google) | Google Translate through `end4_bridge.py` |
-| Anime (booru) and online wallpapers | yande.re, Konachan, Danbooru, waifu.im and Wallhaven |
+| Anime (booru) and online wallpapers | yande.re, Konachan, Danbooru and Wallhaven |
 | Football (`football.py`, ESPN) | end4's own `football.py`, unchanged apart from its cache folder |
 | Notifications (Quickshell server) | Windows' notification history, shown in the right sidebar |
 | Night light (hyprsunset) | Gamma ramp on every display (the way f.lux does it) |

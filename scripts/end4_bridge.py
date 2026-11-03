@@ -15,6 +15,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py secret-set <name> [value]   /  secret-status
     end4_bridge.py notifications           /  notifications-dismiss <id...|all>
     end4_bridge.py nightlight on|off|status [kelvin]
+    end4_bridge.py color-pick              (full-screen picker; copies the hex colour)
     end4_bridge.py config-set <key> <json>
     end4_bridge.py presets-online          /  preset-apply-online <name>
     end4_bridge.py presets-local           /  preset-save <name>  /  preset-apply-local <name>  /  preset-delete <name>
@@ -286,9 +287,16 @@ def cmd_booru(source, page="1", *tags):
     items = []
     try:
         if source in ("yandere", "konachan"):
-            base = "https://yande.re" if source == "yandere" else ("https://konachan.com" if nsfw else "https://konachan.net")
-            url = f"{base}/post.json?" + urllib.parse.urlencode({"tags": _booru_tags(tags, nsfw, "rating:safe"), "limit": limit, "page": page})
-            for it in get_json(url):
+            bases = ["https://yande.re"] if source == "yandere" else (["https://konachan.com", "https://konachan.net"] if nsfw else ["https://konachan.net"])
+            q = "/post.json?" + urllib.parse.urlencode({"tags": _booru_tags(tags, nsfw, "rating:safe"), "limit": limit, "page": page})
+            for base in bases:   # konachan.com is blocked on some networks; .net is the same site, safe posts only
+                try:
+                    posts = get_json(base + q)
+                    break
+                except (OSError, ValueError):
+                    if base == bases[-1]:
+                        raise
+            for it in posts:
                 if not it.get("file_url"):
                     continue
                 items.append({"id": it["id"], "preview": it.get("preview_url"), "sample": it.get("sample_url") or it["file_url"],
@@ -303,14 +311,8 @@ def cmd_booru(source, page="1", *tags):
                               "file": it["file_url"], "w": it.get("image_width"), "h": it.get("image_height"), "tags": it.get("tag_string", ""),
                               "nsfw": it.get("rating") not in ("g", "s"), "page": f"https://danbooru.donmai.us/posts/{it['id']}", "source": it.get("source") or ""})
         elif source == "waifuim":
-            params = [("PageSize", limit), ("IsNsfw", "All" if nsfw else "False"), ("Page", page)]
-            params += [("IncludedTags", t.lower()) for t in tags if t]
-            data = get_json("https://api.waifu.im/images?" + urllib.parse.urlencode(params))
-            for it in data.get("items", data.get("images", [])):
-                u = it.get("url")
-                items.append({"id": it.get("id") or it.get("image_id"), "preview": it.get("sample_url") or u, "sample": u, "file": u,
-                              "w": it.get("width"), "h": it.get("height"), "tags": " ".join(t.get("name", "") for t in it.get("tags", [])),
-                              "nsfw": bool(it.get("isNsfw", it.get("is_nsfw"))), "page": it.get("source") or u, "source": it.get("source") or ""})
+            # api.waifu.im no longer exists and waifu.im now serves an unrelated spam page (Nov 2026).
+            return out({"error": "waifu.im has shut down. Pick another source."})
         elif source == "wallhaven":
             key = secret_get("wallhaven")
             params = {"q": " ".join(tags), "page": page, "purity": "110" if (nsfw and key) else "100",
@@ -325,6 +327,8 @@ def cmd_booru(source, page="1", *tags):
         else:
             return out({"error": f"unknown source {source}"})
     except Exception as e:  # noqa: BLE001
+        if re.search(r"curl: \(35\)|Connection was reset|ConnectionReset|WinError 10054", str(e)):
+            return out({"error": f"{source}: the connection was reset. Your network or ISP is probably blocking this site; it should work over a VPN."})
         return out({"error": f"{source}: {e}"})
     if not nsfw:
         items = [i for i in items if not i["nsfw"]]
@@ -1226,7 +1230,68 @@ def cmd_focus_widget(widget, x="0", y="0"):
     out({"ok": u.GetForegroundWindow() == h})
 
 
+# ===================================================================== color picker (end4's hyprpicker toggle)
+def cmd_color_pick():
+    """Freezes every monitor in a full-screen overlay with a magnifier; a click copies the pixel's
+    hex colour to the clipboard, Esc or right-click cancels. Prints {"hex": "#rrggbb"} or {"cancelled": true}."""
+    import ctypes
+    import tkinter as tk
+    from PIL import Image, ImageGrab, ImageTk
+    u = ctypes.windll.user32
+    u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))   # physical pixels, so the overlay lines up with the shot
+    vx, vy, vw, vh = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))   # SM_[XY]VIRTUALSCREEN, SM_C[XY]VIRTUALSCREEN
+    shot = ImageGrab.grab(all_screens=True).convert("RGB")
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.geometry(f"{vw}x{vh}{vx:+d}{vy:+d}")
+    canvas = tk.Canvas(root, width=vw, height=vh, highlightthickness=0, cursor="crosshair")
+    canvas.pack()
+    bg = ImageTk.PhotoImage(shot)
+    canvas.create_image(0, 0, image=bg, anchor="nw")
+    zoom = canvas.create_image(0, 0, anchor="nw")
+    frame = canvas.create_rectangle(0, 0, 0, 0, outline="white", width=2)
+    label_bg = canvas.create_rectangle(0, 0, 0, 0, fill="#1e1e1e", outline="")
+    label = canvas.create_text(0, 0, anchor="nw", fill="white", font=("Segoe UI", 12, "bold"))
+    state = {"hex": None, "img": None}
+
+    def hex_at(x, y):
+        return "#%02x%02x%02x" % shot.getpixel((min(max(x, 0), shot.width - 1), min(max(y, 0), shot.height - 1)))
+
+    def move(e):
+        x, y, n, k = e.x, e.y, 11, 12                       # 11x11 pixels shown 12x
+        crop = shot.crop((x - n // 2, y - n // 2, x + n // 2 + 1, y + n // 2 + 1)).resize((n * k, n * k), Image.NEAREST)
+        state["img"] = ImageTk.PhotoImage(crop)
+        side = n * k
+        ox = x + 24 if x + 24 + side < vw else x - 24 - side
+        oy = y + 24 if y + 24 + side + 30 < vh else y - 24 - side - 30
+        canvas.itemconfigure(zoom, image=state["img"])
+        canvas.coords(zoom, ox, oy)
+        canvas.coords(frame, ox + n // 2 * k, oy + n // 2 * k, ox + (n // 2 + 1) * k, oy + (n // 2 + 1) * k)
+        canvas.itemconfigure(label, text=hex_at(x, y))
+        canvas.coords(label, ox + 6, oy + side + 6)
+        canvas.coords(label_bg, ox, oy + side, ox + side, oy + side + 30)
+
+    def pick(e):
+        state["hex"] = hex_at(e.x, e.y)
+        canvas.itemconfigure(label, text=f"Copied {state['hex']}")
+        root.after(500, root.destroy)
+
+    root.bind("<Motion>", move)
+    root.bind("<Button-1>", pick)
+    root.bind("<Button-3>", lambda e: root.destroy())
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.after(50, root.focus_force)
+    root.after(60000, root.destroy)   # never leave a frozen full-screen overlay behind (no focus = no Esc)
+    root.mainloop()
+    if not state["hex"]:
+        return out({"cancelled": True})
+    subprocess.run(["clip"], input=state["hex"].encode(), creationflags=0x08000000)   # CREATE_NO_WINDOW
+    out({"hex": state["hex"]})
+
+
 COMMANDS = {
+    "color-pick": cmd_color_pick,
     "focus-widget": cmd_focus_widget,
     "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,

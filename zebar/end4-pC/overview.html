@@ -24,6 +24,14 @@
     .search input { flex: 1; border: 0; outline: none; background: transparent; font-size: 16px; }
     .search .ms { color: var(--on-surface-variant); }
     .hint { font-size: 12px; color: var(--on-surface-variant); text-align: center; margin-top: -6px; }
+    /* clipboard history (";" in the search, like end4's launcher) */
+    #grid.list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+    .clip { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; border-radius: var(--round-md); background: var(--layer2); text-align: left; flex: none; }
+    .clip:hover { background: var(--layer3); }
+    .clip.sel { outline: 2px solid var(--primary); }
+    .clip .tx { flex: 1; min-width: 0; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .clip time { font-size: 11.5px; color: var(--on-surface-variant); flex: none; }
+    .clip .ms { color: var(--on-surface-variant); }
 
     #grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(5, 1fr); grid-auto-rows: 1fr; gap: 10px; }
     .ws { display: flex; flex-direction: column; min-height: 0; border-radius: var(--round-lg); background: var(--layer1); padding: 10px; border: 2px solid transparent; transition: border-color 0.2s, background 0.2s; }
@@ -55,8 +63,9 @@
 </head>
 <body>
   <div id="panel">
-    <label class="search"><span class="ms">search</span><input id="q" placeholder="Search windows" autocomplete="off" autofocus /></label>
-    <div class="hint">Enter to focus · arrows to move · drag a window onto a workspace to move it · Esc to close</div>
+    <label class="search"><span class="ms">search</span><input id="q" placeholder="Search windows, or type ; for clipboard history" autocomplete="off" autofocus />
+      <button class="icon-btn" id="clip-btn" title="Clipboard history (;)"><span class="ms">content_paste</span></button></label>
+    <div class="hint" id="hint">Enter to focus · arrows to move · drag a window onto a workspace to move it · Esc to close</div>
     <div id="grid"></div>
   </div>
   <script type="module" src="./overview.js"></script>

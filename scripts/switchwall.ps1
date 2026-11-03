@@ -110,23 +110,51 @@ try {
     $ErrorActionPreference = 'Stop'
     if (-not (Test-Path $frame)) { throw "Couldn't read a frame from $Live" }
     $Image = $frame
-  } elseif ($Image -and -not $Live -and $state -and $state.live) {
-    # Back to a static wallpaper: stop whichever app was playing the live one.
+  } elseif ($Image -and -not $Live -and (($state -and $state.live) -or ($weRunning = [bool](Get-Process wallpaper32, wallpaper64 -ErrorAction SilentlyContinue)))) {
+    # Back to a static wallpaper: stop whichever app was playing the live one. Wallpaper Engine is
+    # closed even when end4 didn't start it (state.live empty): it draws over the Windows wallpaper.
     $ErrorActionPreference = 'Continue'
-    if ("$($state.live)".StartsWith('we:')) { $null = & $Python -X utf8 $Bridge we-close 2>$null }
+    if ($weRunning -or "$($state.live)".StartsWith('we:')) { $null = & $Python -X utf8 $Bridge we-close 2>$null }
     elseif ($lively) { & $lively closewp --monitor -1 2>$null | Out-Null }
     $ErrorActionPreference = 'Stop'
   }
 
-  # 1. Wallpaper (SPI_SETDESKWALLPAPER, persisted + broadcast).
+  # 1. Wallpaper. IDesktopWallpaper crossfades to the new picture (end4 animates its wallpaper
+  #    changes); SPI_SETDESKWALLPAPER, which switches instantly, is the fallback.
   if ($Image) { $Image = (Resolve-Path $Image).Path }
   if ($Image -and -not $ThemeOnly) {
     if (-not ('W.Wall' -as [type])) {
-      Add-Type -Name Wall -Namespace W -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int SystemParametersInfo(int a, int b, string c, int d);'
+      Add-Type -Namespace W -Name Wall -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int SystemParametersInfo(int a, int b, string c, int d);'
+      Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+namespace W {
+  // Methods up to SetPosition, in vtable order; only SetWallpaper and SetPosition are called.
+  [ComImport, Guid("B92B56A9-8B55-4E14-9A89-0199BBB6F93B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IDesktopWallpaper {
+    void SetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string monitorId, [MarshalAs(UnmanagedType.LPWStr)] string path);
+    IntPtr GetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string monitorId);
+    IntPtr GetMonitorDevicePathAt(uint index);
+    uint GetMonitorDevicePathCount();
+    void GetMonitorRECT([MarshalAs(UnmanagedType.LPWStr)] string monitorId, IntPtr rect);
+    void SetBackgroundColor(uint color);
+    uint GetBackgroundColor();
+    void SetPosition(int position);
+  }
+  [ComImport, Guid("C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD")] public class DesktopWallpaperClass { }
+  public static class Fade {
+    public static void Set(string path) {
+      var dw = (IDesktopWallpaper)new DesktopWallpaperClass();
+      dw.SetPosition(4);           // DWPOS_FILL
+      dw.SetWallpaper(null, path); // every monitor
+    }
+  }
+}
+'@
     }
     Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '10'   # Fill
     Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value '0'
-    [W.Wall]::SystemParametersInfo(0x0014, 0, $Image, 0x01 -bor 0x02) | Out-Null
+    try { [W.Fade]::Set($Image) }
+    catch { [W.Wall]::SystemParametersInfo(0x0014, 0, $Image, 0x01 -bor 0x02) | Out-Null }
   }
 
   # 2. Palette -> Zebar / GlazeWM / Flow Launcher / Terminal.

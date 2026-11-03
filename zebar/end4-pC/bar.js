@@ -1,6 +1,6 @@
 import {
   zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openHere, mediaClock,
-  weatherIcon, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream,
+  weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, monthGrid,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
 import * as timer from './lib/timer.js';
@@ -18,6 +18,7 @@ const providers = zebar.createProviderGroup({
   network: { type: 'network', refreshInterval: cfg.showNetSpeed ? 2000 : 5000 },
   audio: { type: 'audio' },
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },
+  ip: { type: 'ip', refreshInterval: 6 * 60 * 60 * 1000 },
   date: { type: 'date', formatting: cfg.clockFormat, refreshInterval: 1000 },
   systray: { type: 'systray' },
   keyboard: { type: 'keyboard', refreshInterval: 2000 },
@@ -169,6 +170,71 @@ renderTimer();
 
 // ---------------------------------------------------------------- events
 const here = name => openHere(name, out.glazewm?.currentMonitor);   // popups open on this bar's monitor
+
+// ---------------------------------------------------------------- hover popups (end4's bar popups)
+// One "bar-popup" window serves every bar (bar-popup.html); this bar sends it the hovered group's
+// details and the spot under that group.
+zebar.startWidgetPreset('bar-popup', 'default').catch(() => {});   // ignored when it's already open
+const popChan = new BroadcastChannel('end4-bar-popup');
+const gb = n => `${(n / 1073741824).toFixed(1)} GB`;
+const span = ms => { const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
+const kv = (ic, k, v) => `<div class="kv"><span>${icon(ic)}${k}</span><b>${v}</b></div>`;
+const POPUPS = {
+  'g-clock': () => {
+    const now = new Date();
+    return `<h4>${icon('calendar_month')}${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</h4>
+      <div class="cal">${['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map(d => `<span class="dow">${d}</span>`).join('')}
+      ${monthGrid(now).map(c => `<span class="${c.out ? 'out' : ''}${c.today ? ' today' : ''}">${c.d}</span>`).join('')}</div>`;
+  },
+  'g-res': () => {
+    const c = out.cpu, m = out.memory;
+    return `<h4>${icon('monitoring')}Resources</h4>${kv('memory', 'CPU', `${Math.round(c?.usage ?? 0)}%`)}
+      ${c ? kv('speed', 'Clock', `${(c.frequency / 1000).toFixed(2)} GHz`) + kv('developer_board', 'Cores', `${c.physicalCoreCount} cores, ${c.logicalCoreCount} threads`) : ''}
+      ${m ? kv('memory_alt', 'RAM', `${gb(m.usedMemory)} of ${gb(m.totalMemory)}`) : ''}
+      ${m?.totalSwap ? kv('swap_horiz', 'Page file', `${gb(m.usedSwap)} of ${gb(m.totalSwap)}`) : ''}`;
+  },
+  'g-weather': () => {
+    const w = out.weather;
+    return w && `<h4>${icon(weatherIcon(w.status))}${esc(out.ip?.approxCity || 'Weather')}</h4><div class="big">${temp(w, cfg.tempUnit)}</div>
+      ${kv('cloud', 'Sky', esc(weatherText(w.status)))}${w.windSpeed != null ? kv('air', 'Wind', `${(+w.windSpeed).toFixed(1)} km/h`) : ''}`;
+  },
+  'g-net': () => {
+    const n = out.network, t = n?.traffic, ip = n?.defaultInterface?.ipv4Addresses?.[0];
+    return t && `<h4>${icon(networkIcon(n))}${esc(n.defaultGateway?.ssid || n.defaultInterface?.friendlyName || 'Network')}</h4>
+      ${kv('arrow_downward', 'Download', rate(t.received.bytes))}${kv('arrow_upward', 'Upload', rate(t.transmitted.bytes))}
+      ${kv('data_usage', 'Since start-up', `${gb(t.totalReceived.bytes)} down, ${gb(t.totalTransmitted.bytes)} up`)}${ip ? kv('lan', 'IP', esc(ip)) : ''}`;
+  },
+  'g-sys': () => {
+    const a = out.audio?.defaultPlaybackDevice, n = out.network, b = out.battery;
+    const batt = b && b.state !== 'unknown' && b.chargePercent != null;
+    return `<h4>${icon('tune')}Quick settings <span class="muted" style="font-weight:400">(click to open)</span></h4>
+      ${kv(volumeIcon(a), 'Volume', a ? `${Math.round(a.volume)}%${a.isMuted ? ', muted' : ''}` : 'No device')}
+      ${kv(networkIcon(n), 'Network', esc(n?.defaultGateway?.ssid || (n?.defaultInterface ? prettyNet(n.defaultInterface.type) : 'Offline')))}
+      ${batt ? kv(batteryIcon(b), 'Battery', `${Math.round(b.chargePercent)}%, ${b.state}`) : ''}
+      ${batt && b.isCharging && b.timeTillFull ? kv('schedule', 'Full in', span(b.timeTillFull)) : ''}
+      ${batt && !b.isCharging && b.timeTillEmpty ? kv('schedule', 'Time left', span(b.timeTillEmpty)) : ''}
+      ${batt && b.healthPercent ? kv('health_and_safety', 'Health', `${Math.round(b.healthPercent)}%`) : ''}`;
+  },
+};
+const prettyNet = t => ({ ethernet: 'Ethernet', wifi: 'Wi-Fi', proprietary_virtual: 'VPN' })[t] || 'Connected';
+
+let hoverId = '', hoverTimer;
+async function postPopup() {
+  const el = $('#' + hoverId), html = hoverId && POPUPS[hoverId]();
+  if (!el || !html) return;
+  const r = el.getBoundingClientRect(), dpr = devicePixelRatio;
+  const p = await zebar.currentWidget().window.tauri.outerPosition();   // physical px
+  popChan.postMessage({ show: true, id: hoverId, html, x: p.x + (r.left + r.width / 2) * dpr, y: p.y + (r.bottom + 4) * dpr, minX: p.x });
+}
+const hidePopup = () => { clearTimeout(hoverTimer); if (hoverId) popChan.postMessage({ show: false, id: hoverId }); hoverId = ''; };
+for (const id of Object.keys(POPUPS)) {
+  const el = $('#' + id);
+  el.addEventListener('mouseenter', () => { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { hoverId = id; postPopup(); }, 350); });
+  el.addEventListener('mouseleave', hidePopup);
+  el.addEventListener('mousedown', hidePopup);   // a click opens a sidebar instead
+}
+setInterval(() => hoverId && postPopup(), 1000);   // live numbers while it's open
+window.addEventListener('beforeunload', hidePopup);
 localStorage.setItem('end4.barAlive', Date.now());
 setInterval(() => localStorage.setItem('end4.barAlive', Date.now()), 2000);
 $('#btn-left').addEventListener('click', () => here('sidebar-left'));
@@ -202,6 +268,7 @@ media.addEventListener('contextmenu', e => { e.preventDefault(); here('sidebar-l
 $('#g-utils').addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'snip') run('toggles', '-Action', 'snip');
+  if (act === 'pick') run('toggles', '-Action', 'colorpick');
   if (act === 'wall') run('switchwall');
   if (act === 'mode') run('switchwall', '-ToggleMode');
 });

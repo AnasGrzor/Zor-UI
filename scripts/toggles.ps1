@@ -17,7 +17,11 @@ $StateDir = Join-Path $env:LOCALAPPDATA 'end4-pC'
 $CaffeinePid = Join-Path $StateDir 'caffeine.pid'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
-function Out-Json($obj) { $obj | ConvertTo-Json -Compress -Depth 4 }
+# Non-ASCII goes out as \uXXXX: Windows PowerShell writes stdout in the console code page, which
+# would turn clipboard text, plan names (™) etc. into '?'.
+function Out-Json($obj) {
+  [regex]::Replace(($obj | ConvertTo-Json -Compress -Depth 4), '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+}
 
 # ---------------------------------------------------------------- WinRT radios
 $script:asTask = $null
@@ -101,6 +105,23 @@ function Set-Brightness([int]$pct) {
 $PersonalizeKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
 function Get-DarkMode { return ((Get-ItemProperty $PersonalizeKey -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 0) }
 
+# ------------------------------------------------------------------ power plans (end4's power profile toggle)
+# Windows 11's power-mode slider only works on the Balanced plan, so this switches whole plans.
+function Get-PowerPlans {
+  powercfg /list | ForEach-Object {
+    if ($_ -match '([0-9a-f-]{36})\s+\((.+)\)(\s*\*)?') { [ordered]@{ id = $Matches[1]; name = $Matches[2]; active = [bool]$Matches[3] } }
+  }
+}
+
+# ------------------------------------------------------------------ clipboard history (Win+V's list)
+function Get-ClipItems {
+  [Windows.ApplicationModel.DataTransfer.Clipboard, Windows.ApplicationModel.DataTransfer, ContentType = WindowsRuntime] | Out-Null
+  [Windows.ApplicationModel.DataTransfer.ClipboardHistoryItemsResult, Windows.ApplicationModel.DataTransfer, ContentType = WindowsRuntime] | Out-Null
+  if (-not [Windows.ApplicationModel.DataTransfer.Clipboard]::IsHistoryEnabled()) { throw 'Clipboard history is off. Turn it on in Settings > System > Clipboard (or press Win+V).' }
+  $r = Await ([Windows.ApplicationModel.DataTransfer.Clipboard]::GetHistoryItemsAsync()) ([Windows.ApplicationModel.DataTransfer.ClipboardHistoryItemsResult])
+  return @($r.Items)
+}
+
 # ------------------------------------------------------------------ dispatch
 try {
   switch ($Action) {
@@ -116,8 +137,42 @@ try {
     'wifi'       { Out-Json @{ wifi = (Set-Radio 'WiFi' $Value) } }
     'bluetooth'  { Out-Json @{ bluetooth = (Set-Radio 'Bluetooth' $Value) } }
     'caffeine'   { Out-Json @{ caffeine = (Switch-Caffeine) } }
+    'powerplan'  {
+      # No value: list plans. 'next': switch to the plan after the active one.
+      $plans = @(Get-PowerPlans)
+      if ($Value -eq 'next' -and $plans.Count -gt 1) {
+        $i = [array]::FindIndex($plans, [Predicate[object]]{ param($p) $p.active })
+        $next = $plans[($i + 1) % $plans.Count]
+        powercfg /setactive $next.id
+        $plans = @(Get-PowerPlans)
+      }
+      Out-Json @{ plans = $plans }
+    }
+    'clipboard'  {
+      $items = Get-ClipItems
+      $list = for ($i = 0; $i -lt [Math]::Min($items.Count, 30); $i++) {
+        $c = $items[$i].Content
+        $text = if ($c.Contains('Text')) { Await ($c.GetTextAsync()) ([string]) } else { $null }
+        if ($text -and $text.Length -gt 400) { $text = $text.Substring(0, 400) }
+        [ordered]@{ i = $i; text = $text; image = [bool]$c.Contains('Bitmap'); time = $items[$i].Timestamp.ToUnixTimeSeconds() }
+      }
+      Out-Json @{ items = @($list) }
+    }
+    'clipboard-set' {
+      # Value: index from 'clipboard'. Makes that history item the current clipboard content.
+      $items = Get-ClipItems
+      $item = $items[[int]$Value]
+      if (-not $item) { throw 'That clipboard item is gone.' }
+      Out-Json @{ ok = ([Windows.ApplicationModel.DataTransfer.Clipboard]::SetHistoryItemAsContent($item).ToString() -eq 'Success') }
+    }
     'brightness' { Out-Json @{ brightness = (Set-Brightness ([int]$Value)) } }
     'osk'        { Start-Process osk; Out-Json @{ ok = $true } }
+    'colorpick'  {
+      # Detached, so it outlives the sidebar that started it. The bridge copies the picked hex.
+      $pyw = Join-Path $StateDir 'venv\Scripts\pythonw.exe'
+      Start-Process $pyw -ArgumentList '-X', 'utf8', "`"$(Join-Path $PSScriptRoot 'end4_bridge.py')`"", 'color-pick'
+      Out-Json @{ ok = $true }
+    }
     'snip'       { Start-Process 'ms-screenclip:'; Out-Json @{ ok = $true } }
     'settings'   {
       # Value is a ms-settings page name, e.g. "nightlight", "network-wifi", "bluetooth".

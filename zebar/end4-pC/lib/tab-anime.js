@@ -3,12 +3,12 @@
 import { $, esc, icon, bridge, config, openUrl } from './core.js';
 
 const SOURCES = [
-  ['yandere', 'yande.re'], ['konachan', 'Konachan'], ['danbooru', 'Danbooru'], ['waifuim', 'waifu.im'], ['wallhaven', 'Wallhaven'],
+  ['yandere', 'yande.re'], ['konachan', 'Konachan'], ['danbooru', 'Danbooru'], ['wallhaven', 'Wallhaven'],
 ];
 
 export async function mountAnime(root) {
   const cfg = await config();
-  let source = cfg.booru.source || 'yandere', tags = '', page = 1, items = [], loading = false, error = '';
+  let source = cfg.booru.source === 'waifuim' ? 'wallhaven' : cfg.booru.source || 'yandere', tags = '', page = 1, items = [], loading = false, error = '';
 
   root.innerHTML = `
     <div class="chips" id="an-src">${SOURCES.map(([id, n]) => `<button class="chip${id === source ? ' sel' : ''}" data-src="${id}">${n}</button>`).join('')}</div>

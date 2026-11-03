@@ -199,7 +199,7 @@ const pages = {
     <div class="card"><div class="row">${icon('language')}<div class="lbl">Translate into</div><select class="field" data-select="translator.target" style="max-width:260px;height:40px">${langOpts}</select></div></div>
     <h2>${icon('photo_library')}Anime & wallpapers</h2>
     <div class="card">
-      ${seg('booru.source', [['yandere', 'yande.re'], ['konachan', 'Konachan'], ['danbooru', 'Danbooru'], ['waifuim', 'waifu.im'], ['wallhaven', 'Wallhaven']], 'Default source', 'image_search')}
+      ${seg('booru.source', [['yandere', 'yande.re'], ['konachan', 'Konachan'], ['danbooru', 'Danbooru'], ['wallhaven', 'Wallhaven']], 'Default source', 'image_search')}
       ${sw('booru.allowNsfw', 'Allow NSFW results', 'Off by default. Applies to every source.', 'explicit')}
     </div>
     <h2>${icon('sports_soccer')}Football</h2>

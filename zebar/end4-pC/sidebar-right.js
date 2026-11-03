@@ -18,6 +18,7 @@ let out = providers.outputMap;
 let sys = { loaded: false, wifi: null, bluetooth: null, caffeine: false, darkMode: null, brightness: null, night: false };
 const busy = new Set();
 bridge('nightlight', 'status').then(r => { sys.night = !!r.on; renderToggles(); });
+run('toggles', '-Action', 'powerplan').then(r => { sys.plan = r.plans?.find(p => p.active)?.name || null; renderToggles(); });
 run('toggles', '-Action', 'status').then(s => { if (!s.error) { delete s.darkMode; sys = { ...sys, ...s }; } sys.loaded = true; renderToggles(); renderSliders(); });
 
 // ---------------------------------------------------------------- header
@@ -47,6 +48,9 @@ function toggleDefs() {
     { id: 'nightlight', icon: 'nightlight', label: 'Night light', on: sys.night, sub: sys.nightError || (sys.night ? `${cfg.nightLight.kelvin}K` : 'Off'), settings: 'nightlight' },
     { id: 'snip', icon: 'screenshot_region', label: 'Screen snip', on: false, sub: 'Region capture' },
     { id: 'osk', icon: 'keyboard', label: 'Keyboard', on: false, sub: 'On-screen' },
+    { id: 'power', icon: /saver/i.test(sys.plan) ? 'energy_savings_leaf' : /perform/i.test(sys.plan) ? 'bolt' : 'balance', label: 'Power plan',
+      on: !!sys.plan && !/saver/i.test(sys.plan), sub: sys.plan === undefined ? '…' : sys.plan || 'Unavailable', settings: 'powersleep' },
+    { id: 'colorpick', icon: 'colorize', label: 'Color picker', on: false, sub: 'Copies the hex' },
   ];
 }
 
@@ -78,6 +82,8 @@ async function toggle(id) {
     });
     case 'snip': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'snip');
     case 'osk': return run('toggles', '-Action', 'osk');
+    case 'power': return exec(async () => { const r = await run('toggles', '-Action', 'powerplan', '-Value', 'next'); if (r.plans) sys.plan = r.plans.find(p => p.active)?.name || null; });
+    case 'colorpick': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'colorpick');
   }
 }
 

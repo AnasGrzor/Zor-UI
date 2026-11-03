@@ -1,4 +1,4 @@
-import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime, waveSvg, volumeIcon } from './lib/core.js';
+import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime, waveSvg, volumeIcon, bridge } from './lib/core.js';
 import * as timer from './lib/timer.js';
 import { defaultSlot, onScreen } from './lib/desk.js';
 
@@ -286,34 +286,64 @@ function tickNowPlaying() {
     renderVolume();
   }
 }
-// System volume (the same as the right sidebar's slider). Not moved by updates while it's dragged.
+// The playing app's own volume (Windows' per-app mixer, end4_bridge.py mixer), found by the media
+// session's app id ("Spotify.exe", "MSEdge", ...). Falls back to the system volume when the mixer has
+// no matching app (some Store apps). Not moved by updates while it's being dragged.
+let appVol = null;   // { app, volume, muted } from the mixer, or null: system volume
+let appVolTimer;
+const sessionApp = s => String(s?.sessionId || '').split(/[\\!]/).pop().replace(/\.exe$/i, '').toLowerCase();
+async function loadAppVolume() {
+  const want = sessionApp(out.media?.currentSession);
+  const r = want ? await bridge('mixer') : {};
+  appVol = (r.apps || []).find(a => a.app.toLowerCase() === want) || null;
+  renderVolume();
+}
+if (on.has('cover')) { loadAppVolume(); setInterval(loadAppVolume, 4000); }   // apps start and stop playing
 function renderVolume() {
   const dev = out.audio?.defaultPlaybackDevice, vol = $('#cover .vol');
   if (!vol) return;
-  $('#cover .volrow').hidden = !dev;
-  if (!dev) return;
-  setHTML($('#cover [data-act="mute"]'), icon(volumeIcon(dev), { fill: true }));
+  $('#cover .volrow').hidden = !appVol && !dev;
+  if (!appVol && !dev) return;
+  const muted = appVol ? appVol.muted : dev.isMuted, level = appVol ? appVol.volume : dev.volume;
+  const v = muted ? 0 : Math.round(level);
+  setHTML($('#cover [data-act="mute"]'), icon(volumeIcon({ volume: v, isMuted: muted }), { fill: true }));
+  vol.title = appVol ? `${appVol.app} volume` : 'System volume';
   if (vol.dragging) return;
-  const v = dev.isMuted ? 0 : Math.round(dev.volume);
   vol.value = v;
   vol.style.setProperty('--v', `${v}%`);
   setHTML($('#cover .volval'), `${v}%`);
+}
+function setVolume(v) {
+  if (!appVol) {
+    out.audio?.setVolume(v);
+    if (out.audio?.defaultPlaybackDevice?.isMuted) out.audio.setMute(false);
+    return;
+  }
+  const app = appVol.app;
+  if (appVol.muted) { appVol.muted = false; bridge('mixer', 'mute', app, 0); }
+  appVol.volume = v;
+  clearTimeout(appVolTimer);
+  appVolTimer = setTimeout(() => bridge('mixer', 'volume', app, v), 150);   // one bridge call per pause in the drag
+}
+function toggleMute() {
+  const dev = out.audio?.defaultPlaybackDevice;
+  if (appVol) { appVol.muted = !appVol.muted; bridge('mixer', 'mute', appVol.app, appVol.muted ? 1 : 0); }
+  else if (dev) out.audio.setMute(!dev.isMuted);
+  renderVolume();
 }
 $('#cover')?.addEventListener('input', e => {
   if (!e.target.matches('.vol')) return;
   const v = +e.target.value;
   e.target.style.setProperty('--v', `${v}%`);
   setHTML($('#cover .volval'), `${v}%`);
-  out.audio?.setVolume(v);
-  if (out.audio?.defaultPlaybackDevice?.isMuted) out.audio.setMute(false);
+  setVolume(v);
 });
 $('#cover')?.addEventListener('pointerdown', e => { if (e.target.matches('.vol')) e.target.dragging = true; });
 document.addEventListener('pointerup', () => { const v = $('#cover .vol'); if (v) v.dragging = false; });
 for (const id of ['lyrics', 'cover']) $('#' + id)?.addEventListener('click', e => {
   const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
   if (ctl) return out.media?.[ctl]();
-  const dev = out.audio?.defaultPlaybackDevice;
-  if (e.target.closest('[data-act="mute"]') && dev) return out.audio.setMute(!dev.isMuted);
+  if (e.target.closest('[data-act="mute"]')) return toggleMute();
   const seek = e.target.closest('.seek'), s = out.media?.currentSession;
   const dur = s ? (s.endTime || 0) - (s.startTime || 0) : 0;
   if (seek && dur > 0) { const r = seek.getBoundingClientRect(); mclock.seek(((e.clientX - r.left) / r.width) * dur).then(tickNowPlaying); }

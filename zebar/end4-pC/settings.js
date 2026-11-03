@@ -173,7 +173,7 @@ const pages = {
         `<div class="bl-col" data-col="${sd}"><h4>${title}</h4>${barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') })
           .filter(m => m[1] === sd).map(([id]) => {
             const [, , label, ic] = BAR_MODULES.find(m => m[0] === id);
-            return `<div class="bl-item" draggable="true" tabindex="0" data-bl="${id}"${id === 'media' ? ' title="Hidden while the Dynamic Island shows"' : ''}>${icon('drag_indicator')}${icon(ic)}<span class="ellipsis">${label}</span></div>`;
+            return `<div class="bl-item" tabindex="0" data-bl="${id}"${id === 'media' ? ' title="Hidden while the Dynamic Island shows"' : ''}>${icon('drag_indicator')}${icon(ic)}<span class="ellipsis">${label}</span></div>`;
           }).join('')}</div>`).join('')}</div>
       <div class="lbl" style="font-size:12px;color:var(--on-surface-variant);margin-top:8px">Utility buttons</div>
       <div class="chips">${[['snip', 'Screen snip'], ['pick', 'Color picker'], ['wall', 'Wallpaper'], ['mode', 'Dark mode']].map(([v, l]) =>
@@ -198,9 +198,10 @@ const pages = {
         <select class="field" data-select="desktop.images.${id}.shape" style="max-width:130px;height:40px">${IMAGE_SHAPES.map(([v, l]) =>
           `<option value="${v}"${get(`desktop.images.${id}.shape`) === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
         <button class="chip" data-pick-image="${id}">${icon('folder_open')}Choose</button>
-        <button class="chip" data-wall-image="${id}">${icon('wallpaper')}Wallpaper</button></div>
+        <button class="chip" data-wall-image="${id}">${icon('wallpaper')}Wallpaper</button>
+        <button class="chip${get('desktop.widgets').includes(id) ? ' sel' : ''}" data-dwidget="${id}" title="Show or hide this card">${icon(get('desktop.widgets').includes(id) ? 'visibility' : 'visibility_off')}${get('desktop.widgets').includes(id) ? 'On' : 'Off'}</button></div>
       ${slider(`desktop.images.${id}.size`, `Image ${i + 1} size`, 120, 800, 10, v => `${v}px`, 'aspect_ratio')}`).join('')}
-      <div class="muted" style="font-size:12px">Turn a card on with the Image chips above.</div></div>
+      <div class="muted" style="font-size:12px">Choosing a picture turns its card on. On/Off shows or hides the card.</div></div>
     <h2>${icon('timer')}Pomodoro</h2>
     <div class="card">
       ${num('timer.focus', 'Focus minutes', 1, 180, 'center_focus_strong')}
@@ -270,6 +271,13 @@ const pages = {
       <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\end4-pC\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>`;
   },
 };
+
+// Picking a picture turns its card on (a card is only open when it's in desktop.widgets).
+async function showCard(id) {
+  const cur = get('desktop.widgets');
+  if (!cur.includes(id)) await set('desktop.widgets', DESKTOP_WIDGETS.map(([w]) => w).filter(w => cur.includes(w) || w === id));
+  zebar.startWidgetPreset('desk-' + id, 'default').catch(() => {});
+}
 
 // ---------------------------------------------------------------- render
 function render() {
@@ -347,10 +355,10 @@ document.addEventListener('click', async e => {
   }
   if (d.pickImage) {
     const r = await bridge('pick-image', d.pickImage);
-    if (r.file) { await set(`desktop.images.${d.pickImage}.file`, r.file); render(); }
+    if (r.file) { await set(`desktop.images.${d.pickImage}.file`, r.file); await showCard(d.pickImage); render(); }
     return r.error && toast(r.error);
   }
-  if (d.wallImage) { await set(`desktop.images.${d.wallImage}.file`, 'wallpaper.jpg'); return render(); }
+  if (d.wallImage) { await set(`desktop.images.${d.wallImage}.file`, 'wallpaper.jpg'); await showCard(d.wallImage); return render(); }
   if (d.dwidget) {
     const cur = new Set(get('desktop.widgets'));
     cur.has(d.dwidget) ? cur.delete(d.dwidget) : cur.add(d.dwidget);
@@ -443,42 +451,52 @@ document.addEventListener('submit', async e => {
   }
 });
 // ---------------------------------------------------------------- bar layout: drag and drop
-// Saving config.json reloads the bar, so the new order shows right away.
-let blDrag = null;
+// Pointer events, not HTML drag and drop: Tauri handles file drops on Windows, which keeps the
+// webview's dragover/drop events from firing. Saving config.json reloads the bar right away.
+let bl = null;   // { id, item, x, y, ghost }
 const layoutNow = () => barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') });
 const blIndex = (col, y) => {   // drop position among the column's other parts
   const items = [...col.querySelectorAll('.bl-item:not(.dragging)')];
   const i = items.findIndex(it => { const r = it.getBoundingClientRect(); return y < r.top + r.height / 2; });
   return i < 0 ? items.length : i;
 };
-const blClear = () => { $('.bl-ph')?.remove(); $$('.bl-col.over, .bl-item.dragging').forEach(x => x.classList.remove('over', 'dragging')); };
-document.addEventListener('dragstart', e => {
+const blColAt = e => document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-col]');
+const blClear = () => { $('.bl-ph')?.remove(); $('.bl-ghost')?.remove(); $$('.bl-col.over, .bl-item.dragging').forEach(x => x.classList.remove('over', 'dragging')); };
+document.addEventListener('pointerdown', e => {
   const it = e.target.closest?.('[data-bl]');
-  if (!it) return;
-  blDrag = it.dataset.bl;
-  it.classList.add('dragging');
-  e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', blDrag);
+  if (!it || e.button !== 0) return;
+  bl = { id: it.dataset.bl, item: it, x: e.clientX, y: e.clientY, ghost: null };
+  it.setPointerCapture(e.pointerId);
 });
-document.addEventListener('dragover', e => {
-  const col = e.target.closest?.('[data-col]');
-  if (!col || !blDrag) return;
-  e.preventDefault();
+document.addEventListener('pointermove', e => {
+  if (!bl) return;
+  if (!bl.ghost) {
+    if (Math.hypot(e.clientX - bl.x, e.clientY - bl.y) < 4) return;
+    bl.ghost = bl.item.cloneNode(true);
+    bl.ghost.classList.add('bl-ghost');
+    bl.ghost.style.width = `${bl.item.offsetWidth}px`;
+    document.body.append(bl.ghost);
+    bl.item.classList.add('dragging');
+  }
+  bl.ghost.style.transform = `translate(${e.clientX - 20}px, ${e.clientY - 18}px)`;
+  const col = blColAt(e);
   $$('.bl-col.over').forEach(c => c !== col && c.classList.remove('over'));
+  if (!col) return $('.bl-ph')?.remove();
   col.classList.add('over');
   const items = [...col.querySelectorAll('.bl-item:not(.dragging)')], i = blIndex(col, e.clientY);
   const ph = $('.bl-ph') || Object.assign(document.createElement('div'), { className: 'bl-ph' });
   items[i] ? col.insertBefore(ph, items[i]) : col.append(ph);
 });
-document.addEventListener('drop', async e => {
-  const col = e.target.closest?.('[data-col]');
-  if (!col || !blDrag) return;
-  e.preventDefault();
-  const l = placeModule(layoutNow(), blDrag, col.dataset.col, blIndex(col, e.clientY));
-  blDrag = null; blClear();
-  await set('bar.modules', l); render();
+document.addEventListener('pointerup', async e => {
+  if (!bl) return;
+  const drag = bl, col = drag.ghost && blColAt(e), index = col && blIndex(col, e.clientY);
+  bl = null;
+  blClear();
+  if (!col) return;
+  await set('bar.modules', placeModule(layoutNow(), drag.id, col.dataset.col, index));
+  render();
 });
-document.addEventListener('dragend', () => { blDrag = null; blClear(); });
+document.addEventListener('pointercancel', () => { bl = null; blClear(); });
 document.addEventListener('keydown', async e => {   // keyboard: up/down reorders, left/right changes column
   const it = e.target.closest?.('[data-bl]');
   if (!it || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;

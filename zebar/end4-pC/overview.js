@@ -62,7 +62,7 @@ function render() {
       <div class="wins">${wins.map(w => {
         const i = flat.push(w) - 1;
         const app = prettyApp(w.processName);
-        return `<button class="win${i === sel ? ' sel' : ''}${w.hasFocus ? ' focused' : ''}" draggable="true" data-win="${w.id}" data-i="${i}">
+        return `<button class="win${i === sel ? ' sel' : ''}${w.hasFocus ? ' focused' : ''}" data-win="${w.id}" data-i="${i}">
           <span class="app s${hashSlot(w.processName)}">${esc(app.charAt(0))}</span>
           <span class="tx"><b class="ellipsis">${esc(app)}</b><span class="ellipsis">${esc(w.title)}</span></span>
           ${w.state?.type === 'floating' ? `<span class="badge">${icon('picture_in_picture')}</span>` : ''}
@@ -109,24 +109,39 @@ $('#grid').addEventListener('auxclick', e => {
   if (w && e.button === 1) wm?.runCommand('close', w.dataset.win); // middle-click closes, like end4
 });
 
-// drag a window onto another workspace to move it
-let dragId = null;
-$('#grid').addEventListener('dragstart', e => {
+// Drag a window onto another workspace to move it. Pointer events, not HTML drag and drop: Tauri
+// handles file drops on Windows, which keeps the webview's dragover/drop events from firing.
+let drag = null, dragged = false;   // drag: { id, x, y, ghost }
+const wsAt = e => document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-ws]');
+$('#grid').addEventListener('pointerdown', e => {
   const w = e.target.closest('[data-win]');
-  if (!w) return;
-  dragId = w.dataset.win;
-  w.classList.add('dragging');
-  e.dataTransfer.effectAllowed = 'move';
+  if (!w || e.button !== 0) return;
+  drag = { id: w.dataset.win, el: w, x: e.clientX, y: e.clientY, ghost: null };
+  w.setPointerCapture(e.pointerId);
 });
-$('#grid').addEventListener('dragend', () => { dragId = null; $$('.dragging, .drop').forEach(x => x.classList.remove('dragging', 'drop')); });
-$('#grid').addEventListener('dragover', e => {
-  const ws = e.target.closest('[data-ws]');
-  if (!ws || !dragId) return;
-  e.preventDefault();
+document.addEventListener('pointermove', e => {
+  if (!drag) return;
+  if (!drag.ghost) {
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+    drag.ghost = drag.el.cloneNode(true);
+    Object.assign(drag.ghost.style, { position: 'fixed', left: '0', top: '0', width: `${drag.el.offsetWidth}px`, pointerEvents: 'none', zIndex: 1000, opacity: 0.9 });
+    document.body.append(drag.ghost);
+    drag.el.classList.add('dragging');
+  }
+  drag.ghost.style.transform = `translate(${e.clientX - 30}px, ${e.clientY - 20}px)`;
+  const ws = wsAt(e);
   $$('.drop').forEach(x => x !== ws && x.classList.remove('drop'));
-  ws.classList.add('drop');
+  ws?.classList.add('drop');
 });
-$('#grid').addEventListener('drop', e => {
-  const ws = e.target.closest('[data-ws]');
-  if (ws && dragId) { e.preventDefault(); wm?.runCommand(`move --workspace ${ws.dataset.ws}`, dragId); }
+document.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const d = drag, ws = d.ghost && wsAt(e);
+  drag = null;
+  d.ghost?.remove();
+  $$('.dragging, .drop').forEach(x => x.classList.remove('dragging', 'drop'));
+  if (!d.ghost) return;               // a plain click: focus the window as usual
+  dragged = true;                     // swallow the click that follows the drag
+  setTimeout(() => (dragged = false), 0);
+  if (ws) wm?.runCommand(`move --workspace ${ws.dataset.ws}`, d.id);
 });
+document.addEventListener('click', e => { if (dragged) { e.stopPropagation(); e.preventDefault(); } }, true);

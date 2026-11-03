@@ -78,6 +78,9 @@
     .bl-item:focus-visible { outline: 2px solid var(--primary); }
     .bl-item.dragging { opacity: 0.35; }
     .bl-ph { height: 3px; margin: -1px 4px; border-radius: 2px; background: var(--primary); }
+    .bl-ghost { position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none; opacity: 0.92; cursor: grabbing;
+      background: var(--secondary-container); color: var(--on-secondary-container); box-shadow: 0 8px 24px color-mix(in srgb, #000 35%, transparent); }
+    .bl-item { touch-action: none; }
     .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
     .keys kbd { font-family: var(--font); background: var(--layer2); border-radius: 6px; padding: 3px 8px; white-space: nowrap; }
     .toast { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--inverse-surface); color: var(--inverse-on-surface); padding: 10px 18px; border-radius: var(--round-full); font-size: 13px; box-shadow: var(--shadow); z-index: 10; animation: pop-in 0.25s var(--ease); }

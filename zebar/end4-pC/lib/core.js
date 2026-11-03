@@ -1,5 +1,6 @@
 // end4-pC for Windows - shared helpers for every widget in the pack.
 import * as zebar from 'https://esm.sh/zebar@3.0';
+import { pickLyrics, plainText } from './lyricpick.js';
 
 export { zebar };
 
@@ -404,7 +405,7 @@ export function lyricQueries(title, artist = '') {
   return [...new Set(qs.filter(Boolean))];
 }
 
-const LYRIC_STORE = 'end4.lyrics';
+const LYRIC_STORE = 'end4.lyrics.v2';   // v2: looser matching, so misses cached before it are retried
 const lyricStore = () => { try { return JSON.parse(localStorage.getItem(LYRIC_STORE)) || {}; } catch { return {}; } };
 function remember(key, value) {
   const all = lyricStore();
@@ -441,9 +442,8 @@ export async function lyrics(session) {
     for (const query of found ? [] : lyricQueries(session.title, session.artist)) {
       const s = await lrclibFetch('https://lrclib.net/api/search?' + new URLSearchParams({ q: query }));
       if (s.status === 429 || s.status >= 500) return null;
-      const list = s.ok ? await s.json() : [];
-      const fits = (Array.isArray(list) ? list : []).filter(x => !(dur > 0) || Math.abs(x.duration - dur) <= 5);
-      found = parse(fits.find(x => x.syncedLyrics) || fits.find(x => x.plainLyrics));
+      const pick = pickLyrics(s.ok ? await s.json() : [], { dur, title: session.title, artist: session.artist });
+      found = pick && (pick.synced ? parse(pick.item) : { plain: plainText(pick.item) });
       if (found) break;
     }
     remember(key, found);

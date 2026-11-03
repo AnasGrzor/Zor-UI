@@ -1,6 +1,6 @@
 import {
   zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openHere, mediaClock,
-  weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, monthGrid,
+  weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, bridge, monthGrid,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
 import * as timer from './lib/timer.js';
@@ -48,9 +48,29 @@ function renderResources() {
     <div class="res" title="RAM"><div class="ring-wrap">${ring(mem / 100, { size: 24, stroke: 2.5 })}${icon('memory_alt')}</div>${Math.round(mem)}</div>`);
 }
 
+// Dynamic Island (end4's DiOsd): for a moment after the volume or mic changes, the media pill
+// shows the new level, then goes back to the song.
+let osd = null, osdTimer, lastAudio = null;
+function watchAudio() {
+  const a = out.audio?.defaultPlaybackDevice, m = out.audio?.defaultRecordingDevice;
+  if (!a) return;
+  const now = `${Math.round(a.volume)}|${a.isMuted}|${!!m?.isMuted}`;
+  if (lastAudio !== null && now !== lastAudio) {
+    osd = lastAudio.split('|')[2] !== String(!!m?.isMuted)
+      ? { icon: m.isMuted ? 'mic_off' : 'mic', text: m.isMuted ? 'Microphone muted' : 'Microphone on' }
+      : { icon: volumeIcon(a), value: a.isMuted ? 0 : a.volume, text: a.isMuted ? 'Muted' : `${Math.round(a.volume)}%` };
+    clearTimeout(osdTimer);
+    osdTimer = setTimeout(() => { osd = null; renderMedia(); }, 1800);
+  }
+  lastAudio = now;
+}
+
 function renderMedia() {
   const s = out.media?.currentSession;
   clock.update(s);
+  $('#g-media').classList.toggle('osd', !!osd);
+  if (osd) return setHTML($('#g-media'), `${icon(osd.icon, { fill: true })}${osd.value != null
+    ? `<span class="osd-bar"><span style="width:${Math.round(osd.value)}%"></span></span>` : ''}<span class="title">${osd.text}</span>`);
   if (!s || !s.title) return setHTML($('#g-media'), '');
   const dur = (s.endTime || 0) - (s.startTime || 0);
   const prog = dur > 0 ? clock.position() / dur : 0;
@@ -129,6 +149,21 @@ function renderSystem() {
 
 // Pomodoro / stopwatch chip (end4's Dynamic Island timer). Whichever bar sees a phase end first
 // ends it and shows the toast; the "done" chip is shared so every monitor's bar shows it.
+// Screen recording chip (started from the right sidebar). Checks now and then that ffmpeg is
+// still running, so a recording that died doesn't leave the chip behind.
+function renderRec() {
+  const started = Number(localStorage.getItem('end4-pC.rec')) || 0;
+  setHTML($('#g-rec'), started ? `${icon('stop_circle', { fill: true })}${timer.clock((Date.now() - started) / 1000)}` : '');
+}
+setInterval(async () => {
+  if (localStorage.getItem('end4-pC.rec') && !(await bridge('record')).recording) { localStorage.removeItem('end4-pC.rec'); renderRec(); }
+}, 15000);
+$('#g-rec').addEventListener('click', async () => {
+  localStorage.removeItem('end4-pC.rec');
+  renderRec();
+  await bridge('record', 'stop');   // opens Explorer on the new file
+});
+
 function renderTimer() {
   const done = timer.tick(cfg);
   if (done) { localStorage.setItem('end4-pC.timerDone', done); run('toggles', '-Action', 'timer-done', '-Value', done); }
@@ -150,6 +185,7 @@ function renderNet() {
 
 function render() {
   out = providers.outputMap;
+  watchAudio();
   renderNet();
   renderActiveWindow();
   renderResources();
@@ -165,7 +201,7 @@ function render() {
 providers.onOutput(render);
 render();
 // Keep the media progress ring moving between provider updates.
-setInterval(() => { out.media?.currentSession?.isPlaying && renderMedia(); renderTimer(); }, 1000);
+setInterval(() => { out.media?.currentSession?.isPlaying && renderMedia(); renderTimer(); renderRec(); }, 1000);
 renderTimer();
 
 // ---------------------------------------------------------------- events

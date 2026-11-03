@@ -56,6 +56,9 @@
     #g-media .ring-wrap { position: relative; width: 26px; height: 26px; }
     #g-media .ring-wrap .ms { position: absolute; inset: 0; display: grid; place-items: center; font-size: 16px; }
     #g-media .title { max-width: 230px; font-size: 13px; }
+    #g-media.osd { gap: 8px; padding: 0 12px; background: var(--secondary-container); color: var(--on-secondary-container); }
+    #g-media .osd-bar { width: 110px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--on-secondary-container) 20%, transparent); overflow: hidden; }
+    #g-media .osd-bar span { display: block; height: 100%; border-radius: 3px; background: var(--primary); transition: width 0.15s var(--ease-fx); }
 
     /* workspaces */
     #g-ws { gap: 0; padding: 0 4px; }
@@ -87,6 +90,8 @@
     #g-timer { font-size: 13px; gap: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
     #g-timer .ms { font-size: 18px; }
     #g-timer.done { background: var(--primary); color: var(--on-primary); }
+    #g-rec { font-size: 13px; gap: 4px; cursor: pointer; font-variant-numeric: tabular-nums; background: var(--error); color: var(--on-error); }
+    #g-rec .ms { font-size: 18px; }
     #g-net { font-size: 11px; line-height: 1.1; font-variant-numeric: tabular-nums; flex-direction: column; align-items: flex-end; justify-content: center; gap: 0; min-width: 64px; }
     #g-net span { display: flex; align-items: center; gap: 2px; }
     #g-net .ms { font-size: 12px; }
@@ -115,6 +120,7 @@
       <div class="group" id="g-ws"></div>
       <div class="group" id="g-clock" title="Open calendar"></div>
       <div class="group" id="g-timer" title="Timer (click to open)"></div>
+      <div class="group" id="g-rec" title="Recording the screen (click to stop)"></div>
       <div class="group" id="g-utils">
         <button data-act="snip" title="Screen snip"><span class="ms">screenshot_region</span></button>
         <button data-act="pick" title="Color picker (copies the hex)"><span class="ms">colorize</span></button>

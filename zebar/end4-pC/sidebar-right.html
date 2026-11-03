@@ -60,6 +60,16 @@
 
     #sliders { display: flex; flex-direction: column; gap: 6px; }
 
+    /* per-app volume (end4's volume mixer) */
+    #mixer-btn { align-self: flex-start; }
+    #mixer-btn.sel { background: var(--secondary-container); color: var(--on-secondary-container); }
+    #mixer { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+    #mixer[hidden] { display: none; }
+    .mix { display: flex; align-items: center; gap: 6px; }
+    .mix .slider { flex: 1; }
+    .mix .name { position: relative; z-index: 1; font-size: 13px; color: var(--on-primary); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mix.muted .slider { opacity: 0.55; }
+
     /* bottom group: calendar / to-do tabs */
     #bottom { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--layer1); border-radius: var(--round-lg); overflow: hidden; }
     .tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
@@ -142,6 +152,8 @@
     </div>
     <div id="toggles"></div>
     <div id="sliders"></div>
+    <button class="chip" id="mixer-btn"><span class="ms">tune</span>App volume</button>
+    <div id="mixer" class="scroll" hidden></div>
     <div id="bottom">
       <div class="tabs">
         <button data-tab="notif" class="sel"><span class="ms">notifications</span>Notifications<span class="badge" id="notif-count"></span></button>

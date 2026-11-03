@@ -112,9 +112,10 @@ if (-not (Test-Path $venvPy)) {
   if ((Split-Path $py -Leaf) -eq 'py.exe') { Invoke-Native { & $py -3 -m venv $venv } } else { Invoke-Native { & $py -m venv $venv } }
   if (-not (Test-Path $venvPy)) { throw "Couldn't create the Python venv at $venv." }
 }
-# pillow + materialyoucolor: colors. numpy + soundcard: visualizer. imageio-ffmpeg: live wallpaper frames.
-Invoke-Native { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pillow materialyoucolor numpy 'soundcard>=0.4.3' imageio-ffmpeg psutil 2>&1 | ForEach-Object { Info $_ } }
-if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, numpy, soundcard, imageio-ffmpeg, psutil).' }
+# pillow + materialyoucolor: colors. numpy + soundcard: visualizer. imageio-ffmpeg: live wallpaper frames,
+# screen recording. pycaw: per-app volume.
+Invoke-Native { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pillow materialyoucolor numpy 'soundcard>=0.4.3' imageio-ffmpeg psutil pycaw 2>&1 | ForEach-Object { Info $_ } }
+if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, numpy, soundcard, imageio-ffmpeg, psutil, pycaw).' }
 
 # ------------------------------------------------------------------ 3. zebar widget pack
 Step "Installing the Zebar widget pack to $Pack"
@@ -176,7 +177,7 @@ $settings = [ordered]@{
     [ordered]@{ pack = 'end4-pC'; widget = 'bar'; preset = 'default' },
     [ordered]@{ pack = 'end4-pC'; widget = 'desktop'; preset = 'default' },
     [ordered]@{ pack = 'end4-pC'; widget = 'visualizer'; preset = 'default' }
-  )
+  ) + @(if ($cfg.dock -and $cfg.dock.enabled) { [ordered]@{ pack = 'end4-pC'; widget = 'dock'; preset = 'default' } })
 }
 Write-Text $zebarSettings ($settings | ConvertTo-Json -Depth 5)
 

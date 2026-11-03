@@ -128,6 +128,23 @@ resources and custom text. The clock has four styles: cookie, analog, digital an
 window: drag it anywhere, on either monitor, and it stays there. **Reset layout** in the same page puts every
 card back in a column on the left.
 
+**Right sidebar tools.** **App volume** under the sliders sets each app's volume and mute. **Screen record**
+records the primary monitor (video only) to `Videos\Recordings`; a red chip in the bar shows the time and stops
+it. **Screen translate** freezes the screen: drag over some text, and Windows' OCR reads it and the translation
+(into the translator's language) is drawn on top and copied. Windows only reads languages added in Settings >
+Time & language > Language. **Color picker** copies the hex code of any pixel, and **Power plan** switches
+between Windows' power plans.
+
+**Bar.** Hover the clock, CPU/RAM, weather, network speed or system icons for details. When the volume or
+microphone changes, the media pill shows the new level for a moment (end4's Dynamic Island).
+
+**Overview.** Type `;` (or press the paste button) to see clipboard history (`Win+V` must be turned on) and
+copy an item back.
+
+**Dock.** Settings > Bar & desktop > Dock adds end4's dock along the bottom: pinned apps, then every app
+with an open window. Click focuses an app (again cycles its windows) or starts a pinned one; right-click pins
+or unpins it. It's off by default because Windows' taskbar does the same job.
+
 **Wallpaper Engine.** Settings → Wallpapers lists everything you've subscribed to on the Workshop, plus
 your own projects. Search by name or tag, filter by type, and click one to set it. end4 takes its colors from
 the wallpaper: a frame for video wallpapers, the preview image for scenes and web wallpapers. With **Follow
@@ -169,6 +186,9 @@ also open from Settings → Config file. Command-line equivalents:
 - end4's AI **tools**: there, the AI can run shell commands and edit the shell config. Here it only chats, on purpose.
 - Uploading your own preset to the gallery. The gallery stores Linux configs, so Windows setups are saved locally instead.
 - Hyprland-only settings pages (animations, decorations, monitor layout). GlazeWM's equivalents live in its `config.yaml`.
+- A do-not-disturb toggle. Windows 11 has no API for it.
+- Wi-Fi and Bluetooth device lists. Use the toggle's right-click, which opens Windows Settings.
+- Recording sound with the screen. The recorder captures video only.
 
 ## Requirements and notes
 

@@ -16,6 +16,10 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py notifications           /  notifications-dismiss <id...|all>
     end4_bridge.py nightlight on|off|status [kelvin]
     end4_bridge.py color-pick              (full-screen picker; copies the hex colour)
+    end4_bridge.py mixer [volume <app> <0-100> | mute <app> <0|1>]
+    end4_bridge.py record start|stop|status  (primary monitor, saved in Videos/Recordings)
+    end4_bridge.py app-icons <process names...>  /  launch <pinned app name>
+    end4_bridge.py screen-translate        (full-screen: drag over text, OCR + translate)
     end4_bridge.py config-set <key> <json>
     end4_bridge.py presets-online          /  preset-apply-online <name>
     end4_bridge.py presets-local           /  preset-save <name>  /  preset-apply-local <name>  /  preset-delete <name>
@@ -189,7 +193,7 @@ def cmd_config_set(key, value_json):
         node = node[p]
     node[parts[-1]] = json.loads(value_json)
     save_json(CONFIG, cfg)
-    if key.startswith("visualizer") or key == "desktopWidgets":
+    if key.startswith("visualizer") or key in ("desktopWidgets", "dock.enabled"):
         sync_zebar_startup(cfg)
     out({"ok": True})
 
@@ -204,6 +208,8 @@ def sync_zebar_startup(cfg):
         mine.append({"pack": "end4-pC", "widget": "desktop", "preset": "default"})
     if cfg.get("visualizer", {}).get("desktop", True):
         mine.append({"pack": "end4-pC", "widget": "visualizer", "preset": "default"})
+    if cfg.get("dock", {}).get("enabled", False):
+        mine.append({"pack": "end4-pC", "widget": "dock", "preset": "default"})
     s["startupConfigs"] = mine + keep
     save_json(path, s)
 
@@ -260,15 +266,20 @@ def cmd_download_wallpaper(url, *flags):
 
 
 # ===================================================================== translate
+def translate_text(text, target, source="auto"):
+    """Google Translate (the endpoint end4's translator uses). Returns (translation, detected language)."""
+    q = urllib.parse.urlencode({"client": "gtx", "sl": source or "auto", "tl": target, "dt": "t", "q": text})
+    data = get_json("https://translate.googleapis.com/translate_a/single?" + q)
+    return "".join(seg[0] for seg in data[0] if seg and seg[0]), (data[2] if len(data) > 2 else source)
+
+
 def cmd_translate(target, source, *text):
     text = " ".join(text).strip()
     if not text:
         return out({"text": "", "detected": source})
-    q = urllib.parse.urlencode({"client": "gtx", "sl": source or "auto", "tl": target, "dt": "t", "q": text})
     try:
-        data = get_json("https://translate.googleapis.com/translate_a/single?" + q)
-        result = "".join(seg[0] for seg in data[0] if seg and seg[0])
-        out({"text": result, "detected": data[2] if len(data) > 2 else source})
+        result, detected = translate_text(text, target, source)
+        out({"text": result, "detected": detected})
     except Exception as e:  # noqa: BLE001
         out({"error": f"Translation failed: {e}"})
 
@@ -1230,6 +1241,248 @@ def cmd_focus_widget(widget, x="0", y="0"):
     out({"ok": u.GetForegroundWindow() == h})
 
 
+# ===================================================================== volume mixer (end4's VolumeDialog)
+def _mixer_groups():
+    """Audio sessions grouped by app (Discord, browsers... run several), without end4's own Python."""
+    from pycaw.pycaw import AudioUtilities
+    groups = {}
+    for s in AudioUtilities.GetAllSessions():
+        try:
+            exe = s.Process.exe() if s.Process else ""
+            if s.Process and any("end4_bridge" in a for a in s.Process.cmdline()):
+                continue                               # the visualizer's loopback capture
+        except Exception:  # noqa: BLE001  (process gone or access denied)
+            exe = ""
+        name = Path(exe).stem if exe else ("System sounds" if s.ProcessId == 0 else str(s.ProcessId))
+        groups.setdefault(name, []).append(s)
+    return groups
+
+
+def cmd_mixer(action="list", app="", value=""):
+    """mixer [list] | mixer volume <app> <0-100> | mixer mute <app> <0|1>"""
+    groups = _mixer_groups()
+    if action in ("volume", "mute"):
+        if app not in groups:
+            return out({"error": f"{app} isn't playing audio any more"})
+        for s in groups[app]:
+            v = s.SimpleAudioVolume
+            if action == "volume":
+                v.SetMasterVolume(max(0, min(100, float(value))) / 100, None)
+            else:
+                v.SetMute(1 if value == "1" else 0, None)
+    out({"apps": [{"app": name, "volume": round(ss[0].SimpleAudioVolume.GetMasterVolume() * 100),
+                   "muted": bool(ss[0].SimpleAudioVolume.GetMute())} for name, ss in sorted(groups.items(), key=lambda g: g[0].lower())]})
+
+
+# ===================================================================== dock (end4's Dock)
+def _dock_pinned():
+    return [p for p in config().get("dock", {}).get("pinned", []) if isinstance(p, dict) and p.get("name") and p.get("path")]
+
+
+def cmd_app_icons(*names):
+    """Saves a PNG icon per app into the pack's icons folder (shown by the dock) and returns each
+    app's exe path. Names are GlazeWM process names; pinned apps are found even when not running."""
+    import psutil
+    want = {n.lower(): n for n in names if re.fullmatch(r"[\w .+-]{1,80}", n)}
+    exes = {p["name"]: p["path"] for p in _dock_pinned() if p["name"].lower() in want}
+    for proc in psutil.process_iter(["name", "exe"]):
+        n = re.sub(r"\.exe$", "", proc.info["name"] or "", flags=re.I)
+        if n.lower() in want and proc.info["exe"]:
+            exes.setdefault(want[n.lower()], proc.info["exe"])
+    folder = PACK / "icons"
+    folder.mkdir(parents=True, exist_ok=True)
+    todo = {n: e for n, e in exes.items() if not (folder / f"{n}.png").exists() and Path(e).is_file()}
+    if todo:
+        q = lambda s: "'" + str(s).replace("'", "''") + "'"   # PowerShell single-quoted string
+        ps = "Add-Type -AssemblyName System.Drawing; " + "; ".join(
+            f"try {{ [Drawing.Icon]::ExtractAssociatedIcon({q(e)}).ToBitmap().Save({q(folder / (n + '.png'))}) }} catch {{ }}" for n, e in todo.items())
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, timeout=30, creationflags=NO_WINDOW)
+    out({"exes": exes})
+
+
+def cmd_launch(name):
+    """Starts an app pinned to the dock. Only paths saved in config.json's dock.pinned can be started."""
+    for p in _dock_pinned():
+        if p["name"] == name and Path(p["path"]).is_file():
+            os.startfile(p["path"])  # noqa: S606 - the user's own pinned app
+            return out({"ok": True})
+    out({"ok": False, "error": f"{name} isn't pinned"})
+
+
+# ===================================================================== screen recorder (end4's record.sh)
+REC_STATE = ROOT / "recording.json"
+
+
+def _recording():
+    """The running recording ({pid, file, started}) or None."""
+    st = load_json(REC_STATE, None)
+    if not st:
+        return None
+    try:
+        import psutil
+        if "ffmpeg" in psutil.Process(st["pid"]).name().lower():
+            return st
+    except Exception:  # noqa: BLE001  (gone: psutil.NoSuchProcess, or bad state)
+        pass
+    REC_STATE.unlink(missing_ok=True)
+    return None
+
+
+def cmd_record(action="status"):
+    """record start | stop | status. Records the primary monitor (video only) to Videos\\Recordings."""
+    st = _recording()
+    if action == "start" and not st:
+        import ctypes
+        import imageio_ffmpeg
+        u = ctypes.windll.user32
+        u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        w, h = u.GetSystemMetrics(0) // 2 * 2, u.GetSystemMetrics(1) // 2 * 2   # primary monitor; x264 needs even sizes
+        folder = Path.home() / "Videos" / "Recordings"
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / time.strftime("end4-%Y%m%d-%H%M%S.mp4")
+        # Fragmented MP4 (1 s fragments): stopping kills ffmpeg, and the file still plays.
+        args = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-y", "-f", "gdigrab", "-framerate", "30", "-draw_mouse", "1",
+                "-offset_x", "0", "-offset_y", "0", "-video_size", f"{w}x{h}", "-i", "desktop",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", "-g", "30",
+                "-movflags", "+frag_keyframe+empty_moov+default_base_moof", str(dest)]
+        p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=0x00000008 | 0x00000200 | NO_WINDOW)   # detached, own group: outlives the widget
+        st = {"pid": p.pid, "file": str(dest), "started": time.time()}
+        save_json(REC_STATE, st)
+    elif action == "stop" and st:
+        import psutil
+        psutil.Process(st["pid"]).kill()
+        REC_STATE.unlink(missing_ok=True)
+        subprocess.Popen(["explorer", "/select,", st["file"]])
+        return out({"recording": False, "file": st["file"]})
+    out({"recording": bool(st), **(st or {})})
+
+
+# ===================================================================== screen translator (end4's ScreenTranslator)
+# Windows' own OCR (Windows.Media.Ocr), in the languages installed in Windows Settings > Language.
+OCR_PS = r'''
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
+function Await($op, [Type]$t) { $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $task.Wait(-1) | Out-Null; $task.Result }
+[Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime] | Out-Null
+[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bmp = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+$lines = foreach ($l in $res.Lines) {
+  $r = $l.Words | ForEach-Object { $_.BoundingRect }
+  $x = ($r | Measure-Object X -Minimum).Minimum; $y = ($r | Measure-Object Y -Minimum).Minimum
+  [ordered]@{ text = $l.Text; x = $x; y = $y; w = ($r | ForEach-Object { $_.X + $_.Width } | Measure-Object -Maximum).Maximum - $x
+              h = ($r | ForEach-Object { $_.Y + $_.Height } | Measure-Object -Maximum).Maximum - $y }
+}
+$json = @{ lines = @($lines); language = $engine.RecognizerLanguage.LanguageTag } | ConvertTo-Json -Compress -Depth 4
+[regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+'''
+
+
+def ocr_image(png):
+    """Lines of text in an image: [{text, x, y, w, h}] in its pixels."""
+    script = f"$Path = '{str(png).replace(chr(39), chr(39) * 2)}'\n" + OCR_PS
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+                       capture_output=True, text=True, timeout=60, creationflags=NO_WINDOW)
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    if not line.startswith("{"):
+        raise OSError((r.stderr or "OCR failed").strip()[:300])
+    return json.loads(line)["lines"]
+
+
+def cmd_screen_translate():
+    """Drag a box over text on any monitor: Windows OCR reads it, and the translation (into the
+    translator's language from Settings) is drawn over it and copied. Click, Esc or right-click closes."""
+    import ctypes
+    import tkinter as tk
+    from PIL import ImageGrab, ImageTk
+    u = ctypes.windll.user32
+    u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    vx, vy, vw, vh = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+    shot = ImageGrab.grab(all_screens=True).convert("RGB")
+    target = config().get("translator", {}).get("target", "en")
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.geometry(f"{vw}x{vh}{vx:+d}{vy:+d}")
+    canvas = tk.Canvas(root, width=vw, height=vh, highlightthickness=0, cursor="crosshair")
+    canvas.pack()
+    bg = ImageTk.PhotoImage(shot)
+    canvas.create_image(0, 0, image=bg, anchor="nw")
+    box = canvas.create_rectangle(0, 0, 0, 0, outline="#ffffff", width=2, dash=(6, 4))
+    status = canvas.create_text(20, 20, anchor="nw", fill="white", font=("Segoe UI", 14, "bold"),
+                                text="Drag over the text to translate  (Esc to cancel)")
+    st = {"start": None, "done": False, "text": ""}
+
+    def say(msg):
+        canvas.itemconfigure(status, text=msg)
+        root.update()
+
+    def press(e):
+        if st["done"]:
+            return root.destroy()
+        st["start"] = (e.x, e.y)
+
+    def drag(e):
+        if st["start"] and not st["done"]:
+            canvas.coords(box, *st["start"], e.x, e.y)
+
+    def release(e):
+        if not st["start"] or st["done"]:
+            return
+        (x0, y0), (x1, y1) = st["start"], (e.x, e.y)
+        x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return
+        st["done"] = True
+        say("Reading text…")
+        crop = shot.crop((x0, y0, x1, y1))
+        if crop.width < 400:   # Windows OCR reads small text better enlarged
+            crop = crop.resize((crop.width * 2, crop.height * 2))
+        scale = crop.width / (x1 - x0)
+        png = ROOT / "ocr.png"
+        crop.save(png)
+        try:
+            lines = ocr_image(png)
+            if not lines:
+                return say("No text found. Other scripts need their language added in Windows Settings > Language.  (Click to close)")
+            say("Translating…")
+            joined = "\n".join(l["text"] for l in lines)
+            result, _ = translate_text(joined, target)
+        except Exception as ex:  # noqa: BLE001
+            return say(f"Failed: {ex}  (Click to close)"[:200])
+        st["text"] = result
+        parts = result.split("\n")
+        if len(parts) != len(lines):   # lines merged or split: show it as one block over the box
+            lines, parts = [{"x": 0, "y": 0, "w": (x1 - x0) * scale, "h": (y1 - y0) * scale}], [result]
+        for l, t in zip(lines, parts):
+            lx, ly = x0 + l["x"] / scale, y0 + l["y"] / scale
+            lw, lh = l["w"] / scale, l["h"] / scale
+            size = max(9, int(lh * 0.8)) if len(parts) > 1 else 14
+            canvas.create_rectangle(lx - 3, ly - 2, lx + lw + 3, ly + lh + 2, fill="#1e1e1e", outline="")
+            canvas.create_text(lx, ly, anchor="nw", fill="white", text=t, width=max(lw, 120) if len(parts) == 1 else 0,
+                               font=("Segoe UI", -size))
+        say(f"Translated to {target} and copied.  Click anywhere to close.")
+
+    root.bind("<ButtonPress-1>", press)
+    root.bind("<B1-Motion>", drag)
+    root.bind("<ButtonRelease-1>", release)
+    root.bind("<Button-3>", lambda e: root.destroy())
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.after(50, root.focus_force)
+    root.after(120000, root.destroy)   # never leave a frozen full-screen overlay behind
+    root.mainloop()
+    if st["text"]:
+        subprocess.run(["clip"], input=st["text"].encode("utf-16-le"), creationflags=NO_WINDOW)
+    out({"text": st["text"]} if st["text"] else {"cancelled": True})
+
+
 # ===================================================================== color picker (end4's hyprpicker toggle)
 def cmd_color_pick():
     """Freezes every monitor in a full-screen overlay with a magnifier; a click copies the pixel's
@@ -1292,6 +1545,10 @@ def cmd_color_pick():
 
 COMMANDS = {
     "color-pick": cmd_color_pick,
+    "mixer": cmd_mixer,
+    "record": cmd_record,
+    "app-icons": cmd_app_icons, "launch": cmd_launch,
+    "screen-translate": cmd_screen_translate,
     "focus-widget": cmd_focus_widget,
     "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,

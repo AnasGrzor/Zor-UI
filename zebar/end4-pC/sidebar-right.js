@@ -1,4 +1,4 @@
-import { zebar, $, $$, esc, icon, ring, setHTML, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
+import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
 import * as timer from './lib/timer.js';
 
 await openOnTargetMonitor();
@@ -51,8 +51,15 @@ function toggleDefs() {
     { id: 'power', icon: /saver/i.test(sys.plan) ? 'energy_savings_leaf' : /perform/i.test(sys.plan) ? 'bolt' : 'balance', label: 'Power plan',
       on: !!sys.plan && !/saver/i.test(sys.plan), sub: sys.plan === undefined ? '…' : sys.plan || 'Unavailable', settings: 'powersleep' },
     { id: 'colorpick', icon: 'colorize', label: 'Color picker', on: false, sub: 'Copies the hex' },
+    { id: 'screentranslate', icon: 'translate', label: 'Screen translate', on: false, sub: `Into ${cfg.translator.target}` },
+    { id: 'record', icon: recStarted() ? 'stop_circle' : 'screen_record', label: 'Screen record', on: !!recStarted(),
+      sub: recStarted() ? `Recording ${timer.clock((Date.now() - recStarted()) / 1000)}` : 'Primary monitor' },
   ];
 }
+
+// Screen recording: the bar shows it too (red chip) and can stop it.
+const recStarted = () => Number(localStorage.getItem('end4-pC.rec')) || 0;
+setInterval(() => recStarted() && renderToggles(), 1000);
 
 function renderToggles() {
   setHTML($('#toggles'), toggleDefs().map(t => `
@@ -83,7 +90,12 @@ async function toggle(id) {
     case 'snip': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'snip');
     case 'osk': return run('toggles', '-Action', 'osk');
     case 'power': return exec(async () => { const r = await run('toggles', '-Action', 'powerplan', '-Value', 'next'); if (r.plans) sys.plan = r.plans.find(p => p.active)?.name || null; });
-    case 'colorpick': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'colorpick');
+    case 'record': return exec(async () => {
+      if (recStarted()) { await bridge('record', 'stop'); localStorage.removeItem('end4-pC.rec'); return; }
+      const r = await bridge('record', 'start');
+      if (r.recording) { localStorage.setItem('end4-pC.rec', Math.round(r.started * 1000)); zebar.currentWidget().window.tauri.close(); }
+    });
+    case 'colorpick': case 'screentranslate': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', id);
   }
 }
 
@@ -127,6 +139,52 @@ function paint(el, v) {
   el.querySelector('.val').textContent = `${Math.round(v)}%`;
 }
 function debounce(fn, ms) { let t; return v => { clearTimeout(t); t = setTimeout(() => fn(v), ms); }; }
+
+// ---------------------------------------------------------------- per-app volume (end4's volume mixer)
+let mixerOpen = false, mixer = [];
+const setAppVolume = {};   // one debounced setter per app
+async function loadMixer() {
+  const r = await bridge('mixer');
+  mixer = r.apps || [];
+  renderMixer();
+}
+function renderMixer() {
+  $('#mixer-btn').classList.toggle('sel', mixerOpen);
+  const host = $('#mixer');
+  host.hidden = !mixerOpen;
+  if (!mixerOpen) return;
+  const key = mixer.map(m => m.app).join('|');
+  if (host.__key !== key) {   // rebuild only when apps come or go, so a drag isn't interrupted
+    host.__key = key;
+    host.innerHTML = mixer.length ? mixer.map(m => `<div class="mix" data-app="${esc(m.app)}">
+      <div class="slider"><div class="fill"></div><span class="name">${esc(prettyApp(m.app))}</span><span class="val"></span><input type="range" min="0" max="100" step="1" /></div>
+      <button class="icon-btn" data-mute title="Mute"></button></div>`).join('') : '<div class="muted" style="font-size:13px">No app is playing audio</div>';
+    for (const row of host.querySelectorAll('.mix')) {
+      const app = row.dataset.app, input = row.querySelector('input'), sl = row.querySelector('.slider');
+      setAppVolume[app] ??= debounce(v => bridge('mixer', 'volume', app, v), 150);
+      input.addEventListener('input', () => { paint(sl, +input.value); setAppVolume[app](+input.value); });
+      input.addEventListener('pointerdown', () => (sl.dragging = true));
+      input.addEventListener('pointerup', () => (sl.dragging = false));
+    }
+  }
+  for (const m of mixer) {
+    const row = host.querySelector(`[data-app="${CSS.escape(m.app)}"]`), sl = row.querySelector('.slider');
+    row.classList.toggle('muted', m.muted);
+    setHTML(row.querySelector('[data-mute]'), icon(m.muted ? 'volume_off' : 'volume_up'));
+    if (!sl.dragging) { row.querySelector('input').value = m.volume; paint(sl, m.volume); }
+  }
+}
+$('#mixer-btn').addEventListener('click', () => { mixerOpen = !mixerOpen; renderMixer(); if (mixerOpen) loadMixer(); });
+$('#mixer').addEventListener('click', async e => {
+  const row = e.target.closest('[data-mute]')?.closest('.mix');
+  if (!row) return;
+  const m = mixer.find(x => x.app === row.dataset.app);
+  m.muted = !m.muted;
+  renderMixer();
+  const r = await bridge('mixer', 'mute', m.app, m.muted ? 1 : 0);
+  if (r.apps) { mixer = r.apps; renderMixer(); }
+});
+setInterval(() => mixerOpen && loadMixer(), 3000);   // apps start and stop playing
 
 // ---------------------------------------------------------------- calendar
 let calMonth = new Date();

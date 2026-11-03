@@ -166,6 +166,7 @@ const pages = {
       ${text('desktop.worldClocks', 'World clock cities', 'Comma separated time zones, e.g. Europe/Paris, Asia/Dubai', 'public')}
       ${text('desktop.text', 'Custom text', 'Shown by the Custom text card', 'text_fields')}
       <div class="row">${icon('restart_alt')}<div class="lbl">Card positions<small>Put every card back in one column on the left</small></div><button class="chip" data-act="reset-desk">Reset layout</button></div>
+      ${sw('dock.enabled', 'Dock', 'Pinned apps and open windows along the bottom. Right-click an app to pin it', 'dock_to_bottom')}
       ${sw('visualizer.desktop', 'Desktop visualizer', 'Audio bars along the bottom of the screen (cava)', 'equalizer')}
       ${num('visualizer.bars', 'Visualizer bars', 16, 160, 'bar_chart')}
       ${text('userName', 'Your name', 'Shown in the greeting and sidebar', 'person')}
@@ -301,6 +302,7 @@ document.addEventListener('click', async e => {
     await set(d.switch, v);
     if (d.switch === 'visualizer.desktop' && v) zebar.startWidgetPreset('visualizer', 'default').catch(() => {});
     if (d.switch === 'desktopWidgets' && v) zebar.startWidgetPreset('desktop', 'default').catch(() => {});
+    if (d.switch === 'dock.enabled' && v) zebar.startWidgetPreset('dock', 'default').catch(() => {});   // turning it off: it closes itself
     return;
   }
   if (d.seg) { await set(d.seg, JSON.parse(d.v)); return render(); }

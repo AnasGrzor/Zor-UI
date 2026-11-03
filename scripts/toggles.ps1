@@ -167,10 +167,11 @@ try {
     }
     'brightness' { Out-Json @{ brightness = (Set-Brightness ([int]$Value)) } }
     'osk'        { Start-Process osk; Out-Json @{ ok = $true } }
-    'colorpick'  {
-      # Detached, so it outlives the sidebar that started it. The bridge copies the picked hex.
+    { $_ -in 'colorpick', 'screentranslate' } {
+      # Full-screen bridge tools, started detached so they outlive the sidebar that started them.
+      $tool = @{ colorpick = 'color-pick'; screentranslate = 'screen-translate' }[$Action]
       $pyw = Join-Path $StateDir 'venv\Scripts\pythonw.exe'
-      Start-Process $pyw -ArgumentList '-X', 'utf8', "`"$(Join-Path $PSScriptRoot 'end4_bridge.py')`"", 'color-pick'
+      Start-Process $pyw -ArgumentList '-X', 'utf8', "`"$(Join-Path $PSScriptRoot 'end4_bridge.py')`"", $tool
       Out-Json @{ ok = $true }
     }
     'snip'       { Start-Process 'ms-screenclip:'; Out-Json @{ ok = $true } }

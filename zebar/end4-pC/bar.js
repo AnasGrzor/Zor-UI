@@ -405,13 +405,19 @@ island.addEventListener('click', e => {
   if (focus) { diFocus = focus; return renderIsland(); }
   const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
   if (ctl) return out.media?.[ctl]();
-  const state = island.dataset.state;
-  if (state === 'media') return out.media?.togglePlayPause();
-  if (state === 'recording') return $('#g-rec').click();   // stops it
-  if (state === 'timer') return $('#g-timer').click();     // opens the timer
-  if (state === 'notification') { diNotif = null; localStorage.setItem('end4-pC.rightTab', 'notif'); renderIsland(); return here('sidebar-right'); }
-  if (state === 'idle') return here('sidebar-right');
+  openIslandPanel();
 });
+// Click: the island expands into a panel under it (island-panel.html). The click that closed the
+// panel (it closes when it loses focus) mustn't open it again.
+async function openIslandPanel() {
+  if (Date.now() - Number(localStorage.getItem('end4.closedAt.island-panel') || 0) < 600) return;
+  diNotif = null;
+  renderIsland();
+  const r = island.getBoundingClientRect(), dpr = devicePixelRatio;
+  const p = await zebar.currentWidget().window.tauri.outerPosition();
+  localStorage.setItem('end4.islandAt', JSON.stringify({ x: p.x + (r.left + r.width / 2) * dpr, y: p.y + (r.bottom + 2) * dpr }));
+  zebar.startWidgetPreset('island-panel', 'default').catch(e => console.warn(e));
+}
 island.addEventListener('contextmenu', e => { e.preventDefault(); here('sidebar-left'); });   // player and lyrics
 island.addEventListener('wheel', e => {   // like the volume icon: scroll for volume
   const a = out.audio, dev = a?.defaultPlaybackDevice;

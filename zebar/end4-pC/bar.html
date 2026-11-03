@@ -106,6 +106,18 @@
     #g-sys .batt { display: flex; align-items: center; gap: 2px; font-size: 12.5px; }
     #g-sys .batt.low { color: var(--error); }
     .paused { background: var(--error); color: var(--on-error); }
+
+    /* Settings > Bar: styles and hidden modules */
+    [hidden] { display: none !important; }
+    #bar.flat { inset: 0; height: 56px; border-radius: 0; border-width: 0 0 1px; box-shadow: none; padding: 0 10px; }
+    #bar.islands { background: none; border: 0; box-shadow: none; }
+    #bar.islands .group, #bar.islands #btn-left, #bar.islands .aw {
+      background: var(--layer0); border: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent);
+      box-shadow: 0 2px 8px color-mix(in srgb, #000 25%, transparent); }
+    #bar.islands .aw { height: 34px; padding: 0 14px; border-radius: var(--round-full); }
+    #bar.g-outlined .group { background: none; border: 1px solid color-mix(in srgb, var(--outline-variant) 70%, transparent); }
+    #bar.g-none .group { background: none; }
+    #bar.g-none .group:hover, #bar.g-outlined .group:hover { background: var(--hover); }
   </style>
 </head>
 <body>

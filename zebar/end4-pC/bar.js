@@ -4,9 +4,30 @@ import {
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
 import * as timer from './lib/timer.js';
+import { barLayout } from './lib/barlayout.js';
 
 const cfg = await config();
 reloadOnConfigChange();
+
+// ---------------------------------------------------------------- layout (Settings > Bar)
+// Modules move into their side in the saved order; hidden ones stay in the page (hidden) so the
+// rendering code doesn't have to care.
+const MODULE_EL = {
+  launcher: ['#btn-left'], window: ['.aw'], resources: ['#g-res'], media: ['#g-media'], workspaces: ['#g-ws'],
+  clock: ['#g-clock', '#g-timer', '#g-rec'], utils: ['#g-utils'], weather: ['#g-weather'], wm: ['#g-wm'],
+  netspeed: ['#g-net'], tray: ['#g-tray'], system: ['#g-sys'],
+};
+const SIDE_EL = { left: '#bar > .left', center: '#bar > .center', right: '#bar > .right' };
+const layout = barLayout(cfg.bar.modules, { netSpeed: cfg.showNetSpeed });
+for (const [id, side] of layout)
+  for (const sel of MODULE_EL[id]) {
+    const el = $(sel);
+    el.hidden = side === 'hidden';
+    if (!el.hidden) $(SIDE_EL[side]).append(el);
+  }
+const netShown = layout.some(m => m[0] === 'netspeed' && m[1] !== 'hidden');
+$('#bar').classList.add(cfg.bar.style, 'g-' + cfg.bar.groups);
+for (const b of document.querySelectorAll('#g-utils [data-act]')) b.hidden = !cfg.bar.utils.includes(b.dataset.act);
 await watchTheme(t => setHTML($('#mode-icon'), t.mode === 'dark' ? 'dark_mode' : 'light_mode'));
 
 const providers = zebar.createProviderGroup({
@@ -15,7 +36,7 @@ const providers = zebar.createProviderGroup({
   cpu: { type: 'cpu', refreshInterval: 3000 },
   memory: { type: 'memory', refreshInterval: 3000 },
   battery: { type: 'battery', refreshInterval: 15000 },
-  network: { type: 'network', refreshInterval: cfg.showNetSpeed ? 2000 : 5000 },
+  network: { type: 'network', refreshInterval: netShown ? 2000 : 5000 },
   audio: { type: 'audio' },
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },
   ip: { type: 'ip', refreshInterval: 6 * 60 * 60 * 1000 },
@@ -179,7 +200,7 @@ function renderTimer() {
 
 const rate = b => (b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB/s` : `${Math.round(b / 1e3)} KB/s`);
 function renderNet() {
-  const t = cfg.showNetSpeed && out.network?.traffic;
+  const t = netShown && out.network?.traffic;
   setHTML($('#g-net'), t ? `<span>${icon('arrow_upward')}${rate(t.transmitted.bytes)}</span><span>${icon('arrow_downward')}${rate(t.received.bytes)}</span>` : '');
 }
 
@@ -328,7 +349,7 @@ $('#g-sys').addEventListener('wheel', e => {
 }, { passive: true });
 
 // ---------------------------------------------------------------- optional bar visualizer (end4's bar "Visualizer" module)
-if (cfg.visualizer.bar) {
+if (cfg.visualizer.bar && !$('#g-media').hidden) {
   const canvas = document.createElement('canvas');
   canvas.id = 'bar-viz';
   $('#g-media').after(canvas);

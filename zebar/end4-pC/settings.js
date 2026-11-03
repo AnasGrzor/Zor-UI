@@ -1,6 +1,7 @@
 // end4-pC for Windows - settings app (end4's Settings window + presets gallery).
 import { zebar, $, $$, esc, icon, config, watchTheme, run, bridge, popupBehaviour, openUrl } from './lib/core.js';
 import { LANGS } from './lib/tab-translate.js';
+import { BAR_MODULES, barLayout, moveModule } from './lib/barlayout.js';
 
 let cfg = await config();
 let theme = {};
@@ -161,7 +162,23 @@ const pages = {
       ${seg('tempUnit', [['C', '°C'], ['F', '°F']], 'Temperature', 'thermostat')}
       ${sw('showKeyboardLayout', 'Keyboard layout indicator', '', 'keyboard')}
       ${sw('visualizer.bar', 'Visualizer in the bar', 'Small cava-style bars next to the media', 'graphic_eq')}
-      ${sw('showNetSpeed', 'Network speed', 'Upload and download rate next to the tray', 'swap_vert')}
+    </div>
+    <h2>${icon('dashboard_customize')}Bar layout</h2>
+    <div class="card">
+      ${seg('bar.style', [['float', 'Float'], ['flat', 'Flat'], ['islands', 'Islands']], 'Bar style', 'style')}
+      ${seg('bar.groups', [['filled', 'Filled'], ['outlined', 'Outlined'], ['none', 'None']], 'Group backgrounds', 'rounded_corner')}
+      <div class="muted" style="font-size:12px;margin:6px 0 2px">Where each part goes. The arrows move it left or right within its side.</div>
+      ${barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') }).map(([id, side]) => {
+        const [, , label, ic] = BAR_MODULES.find(m => m[0] === id);
+        return `<div class="row">${icon(ic)}<div class="lbl">${label}</div>
+          <div class="seg">${[['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['hidden', 'Hide']].map(([v, l]) =>
+            `<button class="${side === v ? 'sel' : ''}" data-bm="${id}" data-side="${v}">${l}</button>`).join('')}</div>
+          <button class="icon-btn" data-bm-move="${id}" data-d="-1" title="Move left"${side === 'hidden' ? ' disabled' : ''}>${icon('arrow_back')}</button>
+          <button class="icon-btn" data-bm-move="${id}" data-d="1" title="Move right"${side === 'hidden' ? ' disabled' : ''}>${icon('arrow_forward')}</button></div>`;
+      }).join('')}
+      <div class="lbl" style="font-size:12px;color:var(--on-surface-variant);margin-top:8px">Utility buttons</div>
+      <div class="chips">${[['snip', 'Screen snip'], ['pick', 'Color picker'], ['wall', 'Wallpaper'], ['mode', 'Dark mode']].map(([v, l]) =>
+        `<button class="chip${get('bar.utils').includes(v) ? ' sel' : ''}" data-bu="${v}">${l}</button>`).join('')}</div>
     </div>
     <h2>${icon('desktop_windows')}Desktop</h2>
     <div class="card">
@@ -323,6 +340,17 @@ document.addEventListener('click', async e => {
   if (d.step) {
     const v = Math.max(+d.min, Math.min(+d.max, (get(d.step) || 0) + +d.d));
     await set(d.step, v); return render();
+  }
+  if (d.bm || d.bmMove) {
+    let l = barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') });
+    if (d.bm) l.find(m => m[0] === d.bm)[1] = d.side;
+    else l = moveModule(l, d.bmMove, +d.d);
+    await set('bar.modules', l); return render();   // the bar reloads when config.json changes
+  }
+  if (d.bu) {
+    const cur = new Set(get('bar.utils'));
+    cur.has(d.bu) ? cur.delete(d.bu) : cur.add(d.bu);
+    await set('bar.utils', ['snip', 'pick', 'wall', 'mode'].filter(v => cur.has(v))); return render();
   }
   if (d.pickImage) {
     const r = await bridge('pick-image', d.pickImage);

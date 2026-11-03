@@ -30,6 +30,7 @@ const DEFAULTS = {
   wallpaperEngine: { follow: true, path: '' },
   timer: { focus: 25, short: 5, long: 15, cycles: 4 },
   dock: { enabled: false, pinned: [] },
+  bar: { style: 'float', groups: 'filled', modules: null, utils: ['snip', 'pick', 'wall', 'mode'] },   // modules: lib/barlayout.js
   desktop: { widgets: ['clock', 'weather', 'week', 'greet', 'media'], clock: 'cookie', worldClocks: ['Europe/London', 'America/New_York', 'Asia/Tokyo'], text: '' },
 };
 
@@ -69,7 +70,7 @@ export function config() {
     .catch(() => ({}))
     .then(c => {
       const merged = { ...DEFAULTS, ...c };
-      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine', 'timer', 'desktop', 'dock'])
+      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine', 'timer', 'desktop', 'dock', 'bar'])
         merged[k] = { ...DEFAULTS[k], ...(c[k] || {}) };
       document.documentElement.style.setProperty('--opaque', `${Math.round((1 - (merged.transparency || 0)) * 100)}%`);
       return merged;

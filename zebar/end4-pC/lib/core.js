@@ -367,6 +367,16 @@ export function mediaClock({ resync = 0 } = {}) {
   return clock;
 }
 
+/** Material 3 "wavy" progress (W px wide): a sine wave up to p (0-1), a faint line after it. Drawn in currentColor. */
+export function waveSvg(W, p, playing) {
+  const mid = 11, x = Math.max(0, Math.min(1, p)) * W, phase = playing ? performance.now() / 160 : 0;
+  let d = `M0 ${mid}`;
+  for (let i = 2; i <= x; i += 2) d += ` L${i} ${(mid + 3 * Math.sin(i / 4 - phase)).toFixed(1)}`;
+  return `<svg width="${W}" height="22" style="display:block;overflow:visible"><path d="${d}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    ${x + 8 < W ? `<line x1="${x + 8}" y1="${mid}" x2="${W}" y2="${mid}" stroke="currentColor" stroke-opacity="0.4" stroke-width="3" stroke-linecap="round"/>` : ''}
+    <rect x="${Math.max(0, x - 1.5)}" y="3" width="3" height="16" rx="1.5" fill="currentColor"/></svg>`;
+}
+
 export const fmtTime = s => {
   s = Math.max(0, Math.floor(s || 0));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;

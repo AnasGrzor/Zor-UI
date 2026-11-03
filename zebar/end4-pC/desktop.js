@@ -1,4 +1,4 @@
-import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime } from './lib/core.js';
+import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime, waveSvg } from './lib/core.js';
 import * as timer from './lib/timer.js';
 import { defaultSlot, onScreen } from './lib/desk.js';
 
@@ -272,16 +272,6 @@ function renderNowPlaying() {
     <div class="seekrow"><div class="ctl-row">${btn('previous', 'skip_previous')}</div><div class="seek" title="Click to seek"></div><div class="ctl-row">${btn('next', 'skip_next')}</div></div></div>`);
   tickNowPlaying();
 }
-// Material 3 "wavy" progress: a sine wave up to the position, a flat line after it.
-function wave(el, p, playing) {
-  const W = el.clientWidth || 260, mid = 11, x = Math.max(0, Math.min(1, p)) * W;
-  const phase = playing ? performance.now() / 160 : 0;
-  let d = `M0 ${mid}`;
-  for (let i = 2; i <= x; i += 2) d += ` L${i} ${(mid + 3 * Math.sin(i / 4 - phase)).toFixed(1)}`;
-  return `<svg width="${W}" height="22"><path d="${d}" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-    ${x + 8 < W ? `<line x1="${x + 8}" y1="${mid}" x2="${W}" y2="${mid}" stroke="rgba(255,255,255,0.4)" stroke-width="3" stroke-linecap="round"/>` : ''}
-    <rect x="${Math.max(0, x - 1.5)}" y="3" width="3" height="16" rx="1.5" fill="#fff"/></svg>`;
-}
 function tickNowPlaying() {
   const s = out.media?.currentSession;
   if (!s?.title || !np.key) return;
@@ -290,7 +280,7 @@ function tickNowPlaying() {
   if (on.has('cover')) {
     setHTML($('#cover .time'), `${fmtTime(pos)}${dur > 0 ? ' / ' + fmtTime(dur) : ''}`);
     const seek = $('#cover .seek');
-    if (seek) setHTML(seek, wave(seek, dur > 0 ? pos / dur : 0, s.isPlaying));
+    if (seek) setHTML(seek, waveSvg(seek.clientWidth || 260, dur > 0 ? pos / dur : 0, s.isPlaying));
   }
 }
 for (const id of ['lyrics', 'cover']) $('#' + id)?.addEventListener('click', e => {

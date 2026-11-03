@@ -993,9 +993,11 @@ def cmd_we_sync():
             except (OSError, subprocess.SubprocessError):
                 cur = ""
             if cur and we_key(cur) != last:
-                st = load_json(ROOT / "state.json", {})
-                live = str(st.get("live") or "")
-                if not live.startswith("we:") or we_key(live[3:]) != we_key(cur):   # changed outside end4
+                live = str(load_json(ROOT / "state.json", {}).get("live") or "")
+                following = live.startswith("we:")
+                # On start, Wallpaper Engine's saved wallpaper is often stale (end4 may have closed it
+                # for a picture), so only catch up if end4 was following WE and WE has moved on since.
+                if (last is not None or following) and not (following and we_key(live[3:]) == we_key(cur)):
                     res = _we_theme(cur)
                     out({"changed": cur, "ok": bool(res.get("ok", True))})
                 last = we_key(cur)

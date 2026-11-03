@@ -52,7 +52,7 @@ const providers = zebar.createProviderGroup({
 let out = providers.outputMap;
 const clock = mediaClock({ resync: 30000 });
 let chosen = null;          // sessionId picked from the chips, else current session
-let art = '', lyr = null, trackKey = '';
+let art = '', lyr, trackKey = '';   // lyr: undefined = searching, null = none found
 
 const session = () => {
   const all = out.media?.allSessions || [];
@@ -69,7 +69,7 @@ function renderPlayer() {
   }
   const key = `${s.sessionId}|${s.title}|${s.artist}`;
   if (key !== trackKey) {
-    trackKey = key; art = ''; lyr = null;
+    trackKey = key; art = ''; lyr = undefined;
     albumArt(s).then(u => { if (trackKey === key) { art = u; renderPlayer(); } });
     if (cfg.lyrics) lyrics(s).then(l => { if (trackKey === key) { lyr = l; renderPlayer(); } });
   }
@@ -95,14 +95,26 @@ function renderPlayer() {
 function renderLyrics(pos) {
   const box = $('#lyrics');
   if (!box) return;
-  if (!lyr) return setHTML(box, cfg.lyrics ? `<div class="none">No lyrics found</div>` : '');
+  if (!lyr) return setHTML(box, cfg.lyrics ? `<div class="none">${lyr === undefined ? 'Searching lyrics…' : 'No lyrics found'}</div>` : '');
   if (lyr.plain) return setHTML(box, `<div class="inner scroll" style="position:static;height:100%;overflow:auto">${lyr.plain.map(l => `<div class="l">${esc(l)}</div>`).join('')}</div>`);
   const idx = currentLyricIndex(lyr.synced, pos);
-  if (box.__idx === idx && box.__lyr === lyr) return;
-  box.__idx = idx; box.__lyr = lyr;
-  setHTML(box, `<div class="inner">${lyr.synced.map((l, i) => `<div class="l${i === idx ? ' cur' : ''}">${esc(l.text) || '♪'}</div>`).join('')}</div>`);
-  const inner = box.firstElementChild, cur = inner.children[Math.max(0, idx)];
-  if (cur) inner.style.transform = `translateY(${box.clientHeight / 2 - cur.offsetTop - cur.offsetHeight / 2}px)`;
+  // Build the list once per song and only move the highlight, so the slide can animate
+  // (rebuilding the HTML on every line made it jump).
+  const fresh = box.__lyr !== lyr || !box.querySelector('.inner');
+  if (!fresh && box.__idx === idx) return;
+  if (fresh) {
+    setHTML(box, `<div class="inner">${lyr.synced.map(l => `<div class="l">${esc(l.text) || '♪'}</div>`).join('')}</div>`);
+    box.__lyr = lyr;
+  }
+  const inner = box.firstElementChild;
+  inner.children[box.__idx]?.classList.remove('cur');
+  const cur = inner.children[Math.max(0, idx)];
+  if (idx >= 0) cur?.classList.add('cur');
+  box.__idx = idx;
+  if (!cur) return;
+  if (fresh) inner.style.transition = 'none';   // first placement: no slide from the top
+  inner.style.transform = `translateY(${box.clientHeight / 2 - cur.offsetTop - cur.offsetHeight / 2}px)`;
+  if (fresh) { inner.offsetHeight; inner.style.transition = ''; }   // reflow, then re-enable the slide
 }
 
 function tick() {

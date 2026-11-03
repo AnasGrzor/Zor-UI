@@ -367,30 +367,73 @@ export async function albumArt(session) {
   return artUrl;
 }
 
-/** Synced lyrics from lrclib.net (same source end4 uses). */
-const lyricCache = new Map();
+/**
+ * Synced lyrics from lrclib.net (same source end4 uses). Music apps give clean title/artist, so
+ * try lrclib's exact lookup first. Browser players (YouTube) give titles like
+ * "Lyrical: Song | Movie | Singer" and a label channel as "artist", so then search free text with
+ * pieces of the title, accepting only results whose length matches the video (±5 s) so a
+ * different song with a similar name can't slip in. Results (and misses) are kept in localStorage:
+ * every sidebar open is a fresh page, and lrclib rate-limits repeated searches.
+ */
+const LYRIC_NOISE = /\b(official|lyrics?|lyrical|video|audio|full song|full video|hd|4k|hq|visuali[sz]er|ost|season \d+|coke studio|remaster(ed)?|live)\b/i;
+const LABELS = /^(t-series|zee music company|sony music.*|saregama.*|tips official|yrf|speed records|eros now music|.*vevo)$/i;
+
+export function lyricQueries(title, artist = '') {
+  const parts = title.replace(/[[(【][^\])】]*[\])】]/g, ' ')                  // (Official Video), [LYRICS]
+    .replace(/^\s*(lyrical|full video|full song|video|audio)\s*:\s*/i, '')
+    .split(/\s*[|｜•]\s*|\s+[-–—]\s+/).map(p => p.trim()).filter(p => p && !LYRIC_NOISE.test(p));
+  const who = artist.replace(/\s*-\s*Topic$/i, '').trim();
+  const withArtist = q => who && !LABELS.test(who) && !q.toLowerCase().includes(who.toLowerCase()) ? `${q} ${who}` : q;
+  const qs = [parts.length > 1 ? withArtist(parts.slice(0, 2).join(' ')) : null, parts[0] && withArtist(parts[0]), parts[1]];
+  return [...new Set(qs.filter(Boolean))];
+}
+
+const LYRIC_STORE = 'end4.lyrics';
+const lyricStore = () => { try { return JSON.parse(localStorage.getItem(LYRIC_STORE)) || {}; } catch { return {}; } };
+function remember(key, value) {
+  const all = lyricStore();
+  all[key] = { v: value, at: Date.now() };
+  const keys = Object.keys(all).sort((a, b) => all[b].at - all[a].at);
+  for (const k of keys.slice(40)) delete all[k];   // keep the 40 most recent tracks
+  try { localStorage.setItem(LYRIC_STORE, JSON.stringify(all)); } catch { /* full: skip caching */ }
+}
+
+// lrclib sits behind Cloudflare, which answers 503 "retry-after: 1" whenever it's busy (about half
+// of searches); the same request usually works a second later.
+async function lrclibFetch(url) {
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(url);
+    if (!(r.status === 429 || r.status >= 500) || attempt === 3) return r;
+    await new Promise(res => setTimeout(res, 1000 * (attempt + 1)));
+  }
+}
+
 export async function lyrics(session) {
   if (!session?.title) return null;
   const key = `${session.artist}|${session.title}`;
-  if (lyricCache.has(key)) return lyricCache.get(key);
-  lyricCache.set(key, null);
-  const q = new URLSearchParams({ track_name: session.title, artist_name: session.artist || '' });
-  if (session.albumTitle) q.set('album_name', session.albumTitle);
+  const hit = lyricStore()[key];
+  if (hit && (hit.v || Date.now() - hit.at < 6 * 3600e3)) return hit.v;   // retry misses after 6 h
   const dur = Math.round((session.endTime || 0) - (session.startTime || 0));
-  if (dur > 0) q.set('duration', dur);
+  const parse = d => parseLrc(d?.syncedLyrics) || (d?.plainLyrics ? { plain: d.plainLyrics.split('\n') } : null);
   try {
-    let r = await fetch('https://lrclib.net/api/get?' + q);
-    let data = r.ok ? await r.json() : null;
-    if (!data?.syncedLyrics) {
-      const s = await fetch('https://lrclib.net/api/search?' + new URLSearchParams({ track_name: session.title, artist_name: session.artist || '' }));
+    const q = new URLSearchParams({ track_name: session.title, artist_name: session.artist || '' });
+    if (session.albumTitle) q.set('album_name', session.albumTitle);
+    if (dur > 0) q.set('duration', dur);
+    const r = await lrclibFetch('https://lrclib.net/api/get?' + q);
+    if (r.status === 429 || r.status >= 500) return null;   // rate-limited or down: try again next time, don't cache
+    let found = r.ok ? parse(await r.json()) : null;
+    for (const query of found ? [] : lyricQueries(session.title, session.artist)) {
+      const s = await lrclibFetch('https://lrclib.net/api/search?' + new URLSearchParams({ q: query }));
+      if (s.status === 429 || s.status >= 500) return null;
       const list = s.ok ? await s.json() : [];
-      data = list.find(x => x.syncedLyrics) || list[0] || null;
+      const fits = (Array.isArray(list) ? list : []).filter(x => !(dur > 0) || Math.abs(x.duration - dur) <= 5);
+      found = parse(fits.find(x => x.syncedLyrics) || fits.find(x => x.plainLyrics));
+      if (found) break;
     }
-    const parsed = parseLrc(data?.syncedLyrics) || (data?.plainLyrics ? { plain: data.plainLyrics.split('\n') } : null);
-    lyricCache.set(key, parsed);
-    return parsed;
+    remember(key, found);
+    return found;
   } catch {
-    return null;
+    return null;                                       // offline: don't cache, try again next time
   }
 }
 

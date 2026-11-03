@@ -59,13 +59,23 @@ function renderMedia() {
     <span class="title ellipsis">${esc(text)}</span>`);
 }
 
+// Workspaces 1-5 are bound to the main monitor and 6-10 to the other (bind_to_monitor in GlazeWM's
+// config), so each bar shows only its own monitor's set.
+// shortcut: a 3rd monitor shows the same 6-10 set; give it its own range if anyone runs three.
+function myWorkspaces(wm) {
+  const all = Array.from({ length: cfg.workspaces }, (_, i) => i + 1);
+  if ((wm.allMonitors?.length || 1) < 2) return all;
+  const m = wm.currentMonitor;
+  return all.filter(i => (m && (m.x || m.y) ? i > 5 : i <= 5));
+}
+
 function renderWorkspaces() {
   const wm = out.glazewm;
   if (!wm) return setHTML($('#g-ws'), '');
   const shown = wm.displayedWorkspace?.name;
   const byName = Object.fromEntries((wm.allWorkspaces || []).map(w => [w.name, w]));
   let html = '';
-  for (let i = 1; i <= cfg.workspaces; i++) {
+  for (const i of myWorkspaces(wm)) {
     const w = byName[String(i)];
     const occ = w && w.children?.length > 0;
     const active = shown === String(i);
@@ -176,7 +186,11 @@ $('#g-ws').addEventListener('click', e => {
   if (b) out.glazewm?.runCommand(`focus --workspace ${b.dataset.ws}`);
 });
 $('#g-ws').addEventListener('wheel', e => {
-  out.glazewm?.runCommand(e.deltaY > 0 ? 'focus --next-active-workspace' : 'focus --prev-active-workspace');
+  // GlazeWM's next/prev-active-workspace crosses monitors; cycle this monitor's open workspaces instead.
+  const wm = out.glazewm, mine = myWorkspaces(wm || {}).map(String);
+  const open = (wm?.currentMonitor?.children || []).map(w => w.name).filter(n => mine.includes(n)).sort((a, b) => a - b);
+  const i = open.indexOf(wm?.displayedWorkspace?.name);
+  if (open.length > 1) wm.runCommand(`focus --workspace ${open[(i + (e.deltaY > 0 ? 1 : -1) + open.length) % open.length]}`);
 }, { passive: true });
 $('#g-ws').addEventListener('contextmenu', e => { e.preventDefault(); here('overview'); });
 

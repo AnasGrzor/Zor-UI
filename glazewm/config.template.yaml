@@ -4,11 +4,13 @@
 # if you want to regenerate this file from the template.
 
 general:
-  startup_commands: ['shell-exec zebar']
+  # Flow Launcher (Alt+Space) starts here: its own "start on login" setting is off by default.
+  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
   shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F']
   config_reload_commands: []
   focus_follows_cursor: false
-  toggle_workspace_on_refocus: true
+  # Off: pressing the key (or dot) of the workspace you're on must not jump elsewhere.
+  toggle_workspace_on_refocus: false
   cursor_jump:
     enabled: true
     trigger: 'monitor_focus'
@@ -19,8 +21,8 @@ gaps:
   scale_with_dpi: true
   inner_gap: '10px'
   outer_gap:
-    # The Zebar bar is 44px tall with a 6px margin, so leave room for it.
-    top: '58px'
+    # The bar reserves its own strip (dockToEdge in zpack.json), so this is a normal gap.
+    top: '10px'
     right: '10px'
     bottom: '10px'
     left: '10px'
@@ -52,16 +54,28 @@ window_behavior:
       shown_on_top: false
 
 workspaces:
+  # 1-5 live on the main monitor, 6-10 on the next one (0 = leftmost screen), so each bar
+  # shows its own and switching never pulls a workspace across. Set by install.ps1.
   - name: '1'
+    bind_to_monitor: {{MAIN}}
   - name: '2'
+    bind_to_monitor: {{MAIN}}
   - name: '3'
+    bind_to_monitor: {{MAIN}}
   - name: '4'
+    bind_to_monitor: {{MAIN}}
   - name: '5'
+    bind_to_monitor: {{MAIN}}
   - name: '6'
+    bind_to_monitor: {{SECOND}}
   - name: '7'
+    bind_to_monitor: {{SECOND}}
   - name: '8'
+    bind_to_monitor: {{SECOND}}
   - name: '9'
+    bind_to_monitor: {{SECOND}}
   - name: '10'
+    bind_to_monitor: {{SECOND}}
 
 window_rules:
   - commands: ['ignore']

@@ -186,7 +186,14 @@ $glazeCfg = Join-Path $Glzr 'glazewm\config.yaml'
 Backup $glazeCfg
 $overview = if ($Mod -eq 'win') { 'lwin+tab' } else { 'alt+oem_tilde' }   # keep Alt+Tab for Windows
 $yaml = [IO.File]::ReadAllText((Join-Path $Repo 'glazewm\config.template.yaml'))
+# Workspaces 1-5 go on the main monitor, 6-10 on another. GlazeWM numbers monitors from the left;
+# with one monitor, index 1 doesn't exist and GlazeWM puts 6-10 on the only one.
+Add-Type -AssemblyName System.Windows.Forms
+$screens = @([System.Windows.Forms.Screen]::AllScreens | Sort-Object { $_.Bounds.X }, { $_.Bounds.Y })
+$mainIdx = [Math]::Max(0, [array]::IndexOf($screens, ($screens | Where-Object Primary | Select-Object -First 1)))
+$secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Object { $_ -ne $mainIdx })[0] } else { 1 }
 $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
+$yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"
 
@@ -252,8 +259,11 @@ if (-not $glaze) {
     Invoke-Native { & $glaze command wm-reload-config 2>&1 | Out-Null }
     Start-Process zebar
   } else {
-    Start-Process $glaze
+    Start-Process $glaze   # its startup_commands also start Flow Launcher
   }
+  # GlazeWM's startup_commands only run when GlazeWM starts, so start Flow Launcher now if needed.
+  $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
+  if ((Test-Path $flow) -and -not (Get-Process Flow.Launcher -ErrorAction SilentlyContinue)) { Start-Process $flow }
 }
 
 $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }

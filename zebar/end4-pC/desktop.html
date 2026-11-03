@@ -103,6 +103,51 @@
     #resources .ring-wrap { position: relative; width: 56px; height: 56px; }
     #resources .ring-wrap b { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; font-weight: 500; }
     #text { font-size: 20px; font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    /* lyrics cards (end4's media widget with lyrics): "lyrics" = card, "cover" = blurred cover */
+    body[data-card="lyrics"] #col, body[data-card="cover"] #col { width: 428px; }
+    .lyr { position: relative; overflow: hidden; text-align: center;
+      -webkit-mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent); }
+    .lyr .inner { position: absolute; left: 0; right: 0; transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1); will-change: transform; }
+    .lyr .l { padding: 3px 10px; font-size: 13px; opacity: 0.45; transition: opacity 0.4s ease, transform 0.4s ease; }
+    .lyr .l.cur { opacity: 1; transform: scale(1.18); font-weight: 500; }
+    .lyr .none { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0.6; font-size: 13px; }
+    .np-none { display: flex; align-items: center; gap: 10px; padding: 16px; color: var(--on-surface-variant); font-size: 13px; }
+    .ctl-row { display: flex; align-items: center; gap: 6px; }
+    .ctl-row button { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; }
+    .ctl-row button:hover { background: var(--hover); }
+    .ctl-row .play { width: 46px; height: 46px; background: var(--primary); color: var(--on-primary); }
+    .ctl-row .play:hover { background: var(--primary); filter: brightness(1.08); }
+
+    #lyrics { background: color-mix(in srgb, var(--primary-container) 80%, transparent); color: var(--on-primary-container); }
+    #lyrics .top { display: flex; gap: 14px; }
+    #lyrics .art { width: 120px; height: 120px; flex: none; background: var(--secondary-container); display: grid; place-items: center; }
+    #lyrics .art img { width: 100%; height: 100%; object-fit: cover; }
+    #lyrics .meta { flex: 1; min-width: 0; padding: 14px 14px 10px 0; display: flex; flex-direction: column; }
+    #lyrics .meta b { font-size: 16px; font-weight: 500; }
+    #lyrics .meta small { font-size: 13.5px; opacity: 0.8; }
+    #lyrics .ctl-row { margin-top: auto; justify-content: flex-end; }
+    #lyrics .lyr { height: 230px; margin-top: 4px; }
+    #lyrics .lyr .l.cur { font-size: 14.5px; }
+
+    #cover { position: relative; color: #fff; background: #222; }
+    #cover .bg { position: absolute; inset: -40px; background-size: cover; background-position: center; filter: blur(28px) saturate(1.3); opacity: 0.85; }
+    #cover .bg::after { content: ''; position: absolute; inset: 0; background: color-mix(in srgb, var(--surface) 35%, transparent); }
+    #cover .body { position: relative; padding: 14px; text-shadow: 0 1px 6px rgba(0,0,0,0.45); }
+    #cover .row { display: flex; gap: 14px; }
+    #cover .art { width: 150px; height: 150px; flex: none; border-radius: var(--round-md); overflow: hidden; background: rgba(255,255,255,0.12); display: grid; place-items: center; box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
+    #cover .art img { width: 100%; height: 100%; object-fit: cover; }
+    #cover .lyr { flex: 1; height: 150px; text-align: left; }
+    #cover .lyr .l { padding: 3px 18% 3px 0; transform-origin: left center; }   /* room for the 1.18x current line */
+    #cover .t { margin-top: 12px; font-size: 16px; font-weight: 500; }
+    #cover small { font-size: 12.5px; opacity: 0.85; }
+    #cover .mid { display: flex; align-items: center; justify-content: space-between; }
+    #cover .time { font-size: 13px; opacity: 0.9; font-variant-numeric: tabular-nums; }
+    #cover .ctl-row .play { background: rgba(255,255,255,0.85); color: #222; border-radius: var(--round-md); }
+    #cover .seekrow { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+    #cover .seek { flex: 1; height: 22px; cursor: pointer; }
+    #cover .seek svg { display: block; width: 100%; height: 22px; overflow: visible; }
+    #cover .ctl-row button:hover { background: rgba(255,255,255,0.15); }
   </style>
 </head>
 <body>

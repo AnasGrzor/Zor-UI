@@ -1,4 +1,4 @@
-import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow } from './lib/core.js';
+import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime } from './lib/core.js';
 import * as timer from './lib/timer.js';
 import { defaultSlot, onScreen } from './lib/desk.js';
 
@@ -21,6 +21,7 @@ await watchTheme();
 
 const on = new Set([me]);
 $('#col').insertAdjacentHTML('beforeend', `<div class="w" id="${me}"></div>`);
+document.body.dataset.card = me;   // per-card width (desktop.html)
 
 const providers = zebar.createProviderGroup({
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },
@@ -235,6 +236,72 @@ function renderText() {
   setHTML($('#text'), cfg.desktop.text ? `<div class="pad">${esc(cfg.desktop.text)}</div>` : '');
 }
 
+// ---------------------------------------------------------------- lyrics cards (end4's media widget with lyrics)
+// "lyrics": cover, title and controls over synced lyrics. "cover": the same on a blurred cover,
+// with a wavy progress bar. The card's shell only changes with the song or play state; the time,
+// wave and lyric highlight are updated in place so the lyrics can slide.
+const mclock = mediaClock({ resync: 30000 });
+let np = { key: '', art: '', lyr: undefined };
+const COOKIE_BTN = `clip-path:path('${cookiePath(23, 23, 23, 8, 0.1, 120)}')`;
+function nowPlaying() {
+  const s = out.media?.currentSession;
+  mclock.update(s);
+  if (!s?.title) { np.key = ''; return null; }
+  const key = `${s.sessionId}|${s.title}|${s.artist}`;
+  if (key !== np.key) {
+    np = { key, art: '', lyr: undefined };
+    albumArt(s).then(u => { if (np.key === key) { np.art = u; renderNowPlaying(); } });
+    if (cfg.lyrics) lyrics(s).then(l => { if (np.key === key) { np.lyr = l; renderNowPlaying(); } });
+  }
+  return s;
+}
+function renderNowPlaying() {
+  const s = nowPlaying(), id = on.has('lyrics') ? 'lyrics' : 'cover';
+  if (!s) return setHTML($('#' + id), `<div class="np-none">${icon('music_off')}Nothing playing</div>`);
+  const btn = (ctl, ic, extra = '') => `<button data-ctl="${ctl}" ${extra}>${icon(ic, { fill: true })}</button>`;
+  const play = style => btn('togglePlayPause', s.isPlaying ? 'pause' : 'play_arrow', `class="play" style="${style}"`);
+  const art = np.art ? `<img src="${np.art}" alt="" />` : icon('music_note', { fill: true });
+  if (id === 'lyrics') setHTML($('#lyrics'), `<div class="top"><div class="art">${art}</div>
+    <div class="meta"><b class="ellipsis">${esc(s.artist || s.title)}</b><small class="ellipsis">${esc(s.artist ? s.title : '')}</small>
+    <div class="ctl-row">${btn('previous', 'skip_previous')}${play(COOKIE_BTN)}${btn('next', 'skip_next')}</div></div></div>
+    <div class="lyr"></div>`);
+  else setHTML($('#cover'), `<div class="bg" style="${np.art ? `background-image:url('${np.art}')` : ''}"></div>
+    <div class="body"><div class="row"><div class="art">${art}</div><div class="lyr"></div></div>
+    <div class="t ellipsis">${esc(s.title)}</div><small class="ellipsis">${esc(s.artist || '')}</small>
+    <div class="mid"><span class="time"></span><div class="ctl-row">${play('')}</div></div>
+    <div class="seekrow"><div class="ctl-row">${btn('previous', 'skip_previous')}</div><div class="seek" title="Click to seek"></div><div class="ctl-row">${btn('next', 'skip_next')}</div></div></div>`);
+  tickNowPlaying();
+}
+// Material 3 "wavy" progress: a sine wave up to the position, a flat line after it.
+function wave(el, p, playing) {
+  const W = el.clientWidth || 260, mid = 11, x = Math.max(0, Math.min(1, p)) * W;
+  const phase = playing ? performance.now() / 160 : 0;
+  let d = `M0 ${mid}`;
+  for (let i = 2; i <= x; i += 2) d += ` L${i} ${(mid + 3 * Math.sin(i / 4 - phase)).toFixed(1)}`;
+  return `<svg width="${W}" height="22"><path d="${d}" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+    ${x + 8 < W ? `<line x1="${x + 8}" y1="${mid}" x2="${W}" y2="${mid}" stroke="rgba(255,255,255,0.4)" stroke-width="3" stroke-linecap="round"/>` : ''}
+    <rect x="${Math.max(0, x - 1.5)}" y="3" width="3" height="16" rx="1.5" fill="#fff"/></svg>`;
+}
+function tickNowPlaying() {
+  const s = out.media?.currentSession;
+  if (!s?.title || !np.key) return;
+  const pos = mclock.position(), dur = (s.endTime || 0) - (s.startTime || 0);
+  renderLyrics($('#' + (on.has('lyrics') ? 'lyrics' : 'cover') + ' .lyr'), np.lyr, pos, cfg.lyrics);
+  if (on.has('cover')) {
+    setHTML($('#cover .time'), `${fmtTime(pos)}${dur > 0 ? ' / ' + fmtTime(dur) : ''}`);
+    const seek = $('#cover .seek');
+    if (seek) setHTML(seek, wave(seek, dur > 0 ? pos / dur : 0, s.isPlaying));
+  }
+}
+for (const id of ['lyrics', 'cover']) $('#' + id)?.addEventListener('click', e => {
+  const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
+  if (ctl) return out.media?.[ctl]();
+  const seek = e.target.closest('.seek'), s = out.media?.currentSession;
+  const dur = s ? (s.endTime || 0) - (s.startTime || 0) : 0;
+  if (seek && dur > 0) { const r = seek.getBoundingClientRect(); mclock.seek(((e.clientX - r.left) / r.width) * dur).then(tickNowPlaying); }
+});
+if (on.has('lyrics') || on.has('cover')) setInterval(tickNowPlaying, 100);
+
 // ---------------------------------------------------------------- go
 const card = (id, fn) => on.has(id) && fn();
 function render() {
@@ -243,6 +310,7 @@ function render() {
   card('greet', renderGreeting);
   card('media', renderMedia);
   card('resources', renderResources);
+  if (on.has('lyrics') || on.has('cover')) renderNowPlaying();
 }
 function everySecond() {
   card('clock', renderClock);
@@ -289,7 +357,7 @@ document.documentElement.style.visibility = '';
 // Drag the card by any spot that isn't a control. A move under 4px still counts as a click.
 let drag = null, swallowClick = false;
 document.addEventListener('pointerdown', e => {
-  if (e.button !== 0 || e.target.closest('button, textarea, input, a')) return;
+  if (e.button !== 0 || e.target.closest('button, textarea, input, a, .seek')) return;
   document.body.setPointerCapture(e.pointerId);
   drag = { sx: e.screenX, sy: e.screenY, from: pos, moved: false, raf: 0 };
 });

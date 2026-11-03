@@ -2,8 +2,8 @@
 
 // Rough card heights, only used to stack cards that were never dragged.
 const HEIGHT = { clock: 250, weather: 92, week: 90, greet: 90, media: 92, calendar: 270, todo: 150,
-  notes: 170, timer: 100, worldclock: 140, resources: 130, text: 60 };
-const GAP = 10, WIDTH = 310, TOP = 72, LEFT = 16;
+  notes: 170, timer: 100, worldclock: 140, resources: 130, text: 60, lyrics: 390, cover: 290 };
+const GAP = 10, WIDTH = 428, TOP = 72, LEFT = 16;   // WIDTH: the widest card (lyrics), so columns never overlap
 
 /** Logical position of a card that has no saved spot: stacked in list order, wrapping into columns. */
 export function defaultSlot(widgets, id, screenHeight) {

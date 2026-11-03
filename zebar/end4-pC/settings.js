@@ -22,6 +22,7 @@ const LEAGUES = [['esp.1', 'LaLiga'], ['eng.1', 'Premier League'], ['ita.1', 'Se
   ['tur.1', 'Süper Lig'], ['ned.1', 'Eredivisie'], ['ger.1', 'Bundesliga'], ['mex.1', 'Liga MX'], ['arg.1', 'Liga Profesional'],
   ['bra.1', 'Brasileirão'], ['ksa.1', 'Saudi Pro League'], ['uefa.champions', 'Champions League'], ['uefa.europa', 'Europa League']];
 const DESKTOP_WIDGETS = [['clock', 'Clock'], ['weather', 'Weather'], ['week', 'Week'], ['greet', 'Greeting'], ['media', 'Media'],
+  ['lyrics', 'Lyrics'], ['cover', 'Now playing'],
   ['calendar', 'Calendar'], ['todo', 'To do'], ['notes', 'Notes'], ['timer', 'Timer'], ['worldclock', 'World clock'],
   ['resources', 'Resources'], ['text', 'Custom text']];
 const KEY_PROVIDERS = [['gemini', 'Google Gemini'], ['anthropic', 'Anthropic (Claude)'], ['openai', 'OpenAI'], ['mistral', 'Mistral'],

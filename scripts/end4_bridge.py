@@ -1000,8 +1000,22 @@ def cmd_we_sync():
     out({"started": True})
     last = None
     interval = float(os.environ.get("END4_WE_INTERVAL", "5"))
+    # Closing a wallpaper through WE's CLI doesn't clear its saved one, so WE reopens it when it
+    # starts with Windows and hides the picture end4 set. Close it again for a while after start-up
+    # whenever end4's last choice was a still picture (state.live empty).
+    started, closes, last_close = time.time(), 0, 0.0
     while _parent_alive(ppid):
         follow = config().get("wallpaperEngine", {}).get("follow", True)
+        if (follow and closes < 3 and time.time() - started < 90 and time.time() - last_close > 10
+                and not load_json(ROOT / "state.json", {}).get("live") and we_exe() and we_running()):
+            try:
+                we_control("closeWallpaper")
+                out({"closed": "restored end4's picture"})
+            except (OSError, subprocess.SubprocessError):
+                pass
+            closes, last_close = closes + 1, time.time()
+            time.sleep(interval)
+            continue
         if follow and we_exe() and we_running():
             try:
                 cur = we_current()

@@ -9,7 +9,7 @@ assert.deepEqual(defaultSlot(['clock', 'weather'], 'weather', 1080), { x: 16, y:
 // A card that would run off the bottom starts a new column.
 const all = ['clock', 'weather', 'week', 'greet', 'media', 'calendar', 'todo', 'notes'];
 const notes = defaultSlot(all, 'notes', 1080);
-assert.equal(notes.x, 16 + 310 + 10);
+assert.equal(notes.x, 16 + 428 + 10);
 assert.equal(notes.y, 72 + 150 + 10);   // after todo, the first card of the 2nd column
 
 // Positions on either monitor count; one left behind by an unplugged monitor doesn't.

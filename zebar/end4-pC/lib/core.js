@@ -463,6 +463,35 @@ function parseLrc(text) {
   return lines.length ? { synced: lines } : null;
 }
 
+/**
+ * Shows lyrics in `box` (needs an absolutely placed `.inner` style, see sidebar-left.html): synced
+ * lyrics slide so the current line (`.cur`) stays centred, plain lyrics just scroll.
+ * lyr: undefined = still searching, null = none found.
+ */
+export function renderLyrics(box, lyr, pos, enabled = true) {
+  if (!box) return;
+  if (!lyr) return setHTML(box, enabled ? `<div class="none">${lyr === undefined ? 'Searching lyrics…' : 'No lyrics found'}</div>` : '');
+  if (lyr.plain) return setHTML(box, `<div class="inner scroll" style="position:static;height:100%;overflow:auto">${lyr.plain.map(l => `<div class="l">${esc(l)}</div>`).join('')}</div>`);
+  const idx = currentLyricIndex(lyr.synced, pos);
+  // Build the list once per song and only move the highlight, so the slide can animate
+  // (rebuilding the HTML on every line made it jump).
+  const fresh = box.__lyr !== lyr || !box.querySelector('.inner');
+  if (!fresh && box.__idx === idx) return;
+  if (fresh) {
+    setHTML(box, `<div class="inner">${lyr.synced.map(l => `<div class="l">${esc(l.text) || '♪'}</div>`).join('')}</div>`);
+    box.__lyr = lyr;
+  }
+  const inner = box.firstElementChild;
+  inner.children[box.__idx]?.classList.remove('cur');
+  const cur = inner.children[Math.max(0, idx)];
+  if (idx >= 0) cur?.classList.add('cur');
+  box.__idx = idx;
+  if (!cur) return;
+  if (fresh) inner.style.transition = 'none';   // first placement: no slide from the top
+  inner.style.transform = `translateY(${box.clientHeight / 2 - cur.offsetTop - cur.offsetHeight / 2}px)`;
+  if (fresh) { inner.offsetHeight; inner.style.transition = ''; }   // reflow, then re-enable the slide
+}
+
 export function currentLyricIndex(synced, pos) {
   let i = -1;
   for (let k = 0; k < synced.length && synced[k].t <= pos + 0.25; k++) i = k;

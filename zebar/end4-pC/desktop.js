@@ -1,4 +1,4 @@
-import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime, waveSvg } from './lib/core.js';
+import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow, mediaClock, lyrics, renderLyrics, fmtTime, waveSvg, volumeIcon } from './lib/core.js';
 import * as timer from './lib/timer.js';
 import { defaultSlot, onScreen } from './lib/desk.js';
 
@@ -28,6 +28,7 @@ const providers = zebar.createProviderGroup({
   ip: { type: 'ip', refreshInterval: 6 * 60 * 60 * 1000 },
   host: { type: 'host', refreshInterval: 60 * 60 * 1000 },
   media: { type: 'media' },
+  ...(on.has('cover') && { audio: { type: 'audio' } }),   // the Now playing card's volume slider
   ...(on.has('resources') && {
     cpu: { type: 'cpu', refreshInterval: 3000 },
     memory: { type: 'memory', refreshInterval: 3000 },
@@ -269,7 +270,8 @@ function renderNowPlaying() {
     <div class="body"><div class="row"><div class="art">${art}</div><div class="lyr"></div></div>
     <div class="t ellipsis">${esc(s.title)}</div><small class="ellipsis">${esc(s.artist || '')}</small>
     <div class="mid"><span class="time"></span><div class="ctl-row">${play('')}</div></div>
-    <div class="seekrow"><div class="ctl-row">${btn('previous', 'skip_previous')}</div><div class="seek" title="Click to seek"></div><div class="ctl-row">${btn('next', 'skip_next')}</div></div></div>`);
+    <div class="seekrow"><div class="ctl-row">${btn('previous', 'skip_previous')}</div><div class="seek" title="Click to seek"></div><div class="ctl-row">${btn('next', 'skip_next')}</div></div>
+    <div class="volrow"><button data-act="mute" title="Mute"></button><input type="range" class="vol" min="0" max="100" step="1" aria-label="Volume" /><span class="volval"></span></div></div>`);
   tickNowPlaying();
 }
 function tickNowPlaying() {
@@ -281,11 +283,37 @@ function tickNowPlaying() {
     setHTML($('#cover .time'), `${fmtTime(pos)}${dur > 0 ? ' / ' + fmtTime(dur) : ''}`);
     const seek = $('#cover .seek');
     if (seek) setHTML(seek, waveSvg(seek.clientWidth || 260, dur > 0 ? pos / dur : 0, s.isPlaying));
+    renderVolume();
   }
 }
+// System volume (the same as the right sidebar's slider). Not moved by updates while it's dragged.
+function renderVolume() {
+  const dev = out.audio?.defaultPlaybackDevice, vol = $('#cover .vol');
+  if (!vol) return;
+  $('#cover .volrow').hidden = !dev;
+  if (!dev) return;
+  setHTML($('#cover [data-act="mute"]'), icon(volumeIcon(dev), { fill: true }));
+  if (vol.dragging) return;
+  const v = dev.isMuted ? 0 : Math.round(dev.volume);
+  vol.value = v;
+  vol.style.setProperty('--v', `${v}%`);
+  setHTML($('#cover .volval'), `${v}%`);
+}
+$('#cover')?.addEventListener('input', e => {
+  if (!e.target.matches('.vol')) return;
+  const v = +e.target.value;
+  e.target.style.setProperty('--v', `${v}%`);
+  setHTML($('#cover .volval'), `${v}%`);
+  out.audio?.setVolume(v);
+  if (out.audio?.defaultPlaybackDevice?.isMuted) out.audio.setMute(false);
+});
+$('#cover')?.addEventListener('pointerdown', e => { if (e.target.matches('.vol')) e.target.dragging = true; });
+document.addEventListener('pointerup', () => { const v = $('#cover .vol'); if (v) v.dragging = false; });
 for (const id of ['lyrics', 'cover']) $('#' + id)?.addEventListener('click', e => {
   const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
   if (ctl) return out.media?.[ctl]();
+  const dev = out.audio?.defaultPlaybackDevice;
+  if (e.target.closest('[data-act="mute"]') && dev) return out.audio.setMute(!dev.isMuted);
   const seek = e.target.closest('.seek'), s = out.media?.currentSession;
   const dur = s ? (s.endTime || 0) - (s.startTime || 0) : 0;
   if (seek && dur > 0) { const r = seek.getBoundingClientRect(); mclock.seek(((e.clientX - r.left) / r.width) * dur).then(tickNowPlaying); }

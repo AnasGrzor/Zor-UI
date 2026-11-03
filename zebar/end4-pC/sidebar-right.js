@@ -1,4 +1,4 @@
-import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
+import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor, closeWindow } from './lib/core.js';
 import * as timer from './lib/timer.js';
 
 await openOnTargetMonitor();
@@ -87,15 +87,15 @@ async function toggle(id) {
       sys.nightError = r.ok === false ? 'Not supported here' : '';
       if (r.ok === false) run('toggles', '-Action', 'settings', '-Value', 'nightlight');   // fall back to Windows' own
     });
-    case 'snip': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'snip');
+    case 'snip': closeWindow(); return run('toggles', '-Action', 'snip');
     case 'osk': return run('toggles', '-Action', 'osk');
     case 'power': return exec(async () => { const r = await run('toggles', '-Action', 'powerplan', '-Value', 'next'); if (r.plans) sys.plan = r.plans.find(p => p.active)?.name || null; });
     case 'record': return exec(async () => {
       if (recStarted()) { await bridge('record', 'stop'); localStorage.removeItem('end4-pC.rec'); return; }
       const r = await bridge('record', 'start');
-      if (r.recording) { localStorage.setItem('end4-pC.rec', Math.round(r.started * 1000)); zebar.currentWidget().window.tauri.close(); }
+      if (r.recording) { localStorage.setItem('end4-pC.rec', Math.round(r.started * 1000)); closeWindow(); }
     });
-    case 'colorpick': case 'screentranslate': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', id);
+    case 'colorpick': case 'screentranslate': closeWindow(); return run('toggles', '-Action', id);
   }
 }
 
@@ -333,7 +333,7 @@ $('header').addEventListener('contextmenu', e => {
 });
 $('header').addEventListener('click', e => {
   const c = e.target.closest('[data-cmd]')?.dataset.cmd;
-  if (c === 'settings') { openWidget('settings'); zebar.currentWidget().window.tauri.close(); }
+  if (c === 'settings') { openWidget('settings'); closeWindow(); }
   if (c === 'reload') out.glazewm?.runCommand('wm-reload-config');
   if (c === 'power') $('#power').classList.toggle('open');
 });

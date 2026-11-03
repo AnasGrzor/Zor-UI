@@ -1,4 +1,4 @@
-import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid } from './lib/core.js';
+import { zebar, $, esc, icon, ring, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange, monthGrid, closeWindow } from './lib/core.js';
 import * as timer from './lib/timer.js';
 import { defaultSlot, onScreen } from './lib/desk.js';
 
@@ -6,7 +6,7 @@ import { defaultSlot, onScreen } from './lib/desk.js';
 // anywhere. The "desktop" widget in Zebar's startup list only opens the enabled cards and leaves.
 const widget = zebar.currentWidget();
 const tauri = widget.window.tauri;
-const stop = () => { tauri.close(); return new Promise(() => {}); };
+const stop = () => { closeWindow(); return new Promise(() => {}); };
 const cfg = await config();
 const me = widget.name.replace(/^desk-/, '');
 if (cfg.desktopWidgets === false) await stop();

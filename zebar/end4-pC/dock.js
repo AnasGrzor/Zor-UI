@@ -1,8 +1,8 @@
 // end4-pC for Windows - dock (end4's Dock): pinned apps, then every other app with an open window.
-import { zebar, $, esc, setHTML, config, watchTheme, bridge, prettyApp, reloadOnConfigChange } from './lib/core.js';
+import { zebar, $, esc, setHTML, config, watchTheme, bridge, prettyApp, reloadOnConfigChange, closeWindow } from './lib/core.js';
 
 const cfg = await config();
-if (!cfg.dock.enabled) { zebar.currentWidget().window.tauri.close(); await new Promise(() => {}); }
+if (!cfg.dock.enabled) { closeWindow(); await new Promise(() => {}); }
 reloadOnConfigChange();   // pinning saves config.json, which reloads the dock
 await watchTheme();
 

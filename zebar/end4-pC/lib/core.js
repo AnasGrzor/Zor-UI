@@ -238,16 +238,30 @@ export async function openHere(name, monitor) {
  * copy (`zebar start-widget`), which tells the open one to close and leaves. Also restarts the
  * bar if Zebar was started by a shortcut, which opens only that one widget.
  */
+/**
+ * Closes this widget's window. If Zebar doesn't close it (seen as a hidden 800x600 sidebar copy that
+ * stayed on top and ate clicks), the window shrinks to 1px off-screen and lets clicks through.
+ */
+export function closeWindow() {
+  const t = zebar.currentWidget().window.tauri;
+  t.close().catch(() => {});
+  setTimeout(() => {
+    t.setIgnoreCursorEvents(true).catch(() => {});
+    t.setSize({ type: 'Physical', width: 1, height: 1 }).catch(() => {});
+    t.setPosition({ type: 'Physical', x: -32000, y: -32000 }).catch(() => {});
+  }, 400);
+}
+
 export async function openOnTargetMonitor() {
   document.documentElement.style.visibility = 'hidden';
   const win = zebar.currentWidget();
-  const leave = async () => { win.window.tauri.close(); await new Promise(() => {}); };   // stops this copy's module
+  const leave = async () => { closeWindow(); await new Promise(() => {}); };   // stops this copy's module
   // The press or click that just closed this popup (blur, focus change) must not reopen it.
   if (Date.now() - Number(localStorage.getItem('end4.closedAt.' + win.name) || 0) < 600) await leave();
   const provider = zebar.createProvider({ type: 'glazewm' });
   const wm = provider.output ?? await new Promise(res => {
     provider.onOutput(res);
-    setTimeout(() => res(null), 1500);   // GlazeWM not answering: show every copy
+    setTimeout(() => res(null), 1500);   // GlazeWM not answering: keep the main monitor's copy
   });
   provider.stop?.();
   const hint = JSON.parse(localStorage.getItem('end4.openOn') || 'null');
@@ -255,6 +269,7 @@ export async function openOnTargetMonitor() {
   // Copies on other monitors leave before asking anything, so the copies of one key press
   // (which load up to ~0.5 s apart) can't mistake each other for an open popup.
   if (target && wm?.currentMonitor?.id !== target) await leave();
+  if (!wm && !(target && hint) && (screen.left || screen.top)) await leave();   // Chromium: the main monitor is at 0,0
   // zpack opens popups unfocused so the copies don't steal focus from each other; take it now.
   // Windows refuses Zebar's own setFocus after a shortcut (the key went to GlazeWM), so the bridge
   // does it too, started here so it overlaps the checks below. Without focus, Esc and typing go
@@ -293,7 +308,7 @@ export function popupBehaviour({ onClose } = {}) {
     document.body.classList.add('leaving');
     onClose?.();
     await new Promise(r => setTimeout(r, 160));
-    zebar.currentWidget().window.tauri.close();
+    closeWindow();
   };
   let armed = false, pinned = false;
   setTimeout(() => (armed = true), 500);

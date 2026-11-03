@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>end4-pC desktop widgets</title>
+  <link rel="stylesheet" href="./lib/base.css" />
+  <style>
+    /* Column of end4 desktop widgets, pinned to the desktop (bottom-most). */
+    #col { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
+    .w { background: color-mix(in srgb, var(--surface-container-low) 88%, transparent); border-radius: var(--round-lg); overflow: hidden; }
+
+    /* cookie clock */
+    #clock { background: none; display: grid; place-items: center; height: 250px; }
+    #clock svg { overflow: visible; filter: drop-shadow(0 4px 12px color-mix(in srgb, #000 30%, transparent)); }
+    .cookie { fill: color-mix(in srgb, var(--secondary-container) 92%, transparent); }
+    .dial { fill: var(--on-secondary-container); opacity: 0.22; font-family: var(--font); font-weight: 700; font-size: 62px; text-anchor: middle; dominant-baseline: central; }
+    .hand-h { stroke: var(--on-secondary-container); stroke-width: 13; stroke-linecap: round; }
+    .hand-m { stroke: var(--on-secondary-container); stroke-width: 8; stroke-linecap: round; }
+    .hand-s { stroke: var(--primary); stroke-width: 3; stroke-linecap: round; }
+    .pin { fill: var(--on-secondary-container); }
+    .badge-bg { fill: var(--primary-container); }
+    .badge-tx { fill: var(--on-primary-container); font-family: var(--font); font-weight: 600; font-size: 22px; text-anchor: middle; dominant-baseline: central; }
+
+    /* weather */
+    #weather { display: flex; height: 92px; }
+    #weather .big { width: 92px; display: grid; place-items: center; align-content: center; gap: 2px; background: var(--primary-container); color: var(--on-primary-container); }
+    #weather .big .ms { font-size: 34px; }
+    #weather .big b { font-size: 18px; font-weight: 500; }
+    #weather .info { padding: 12px 14px; display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
+    #weather .info b { font-weight: 500; font-size: 15px; }
+    #weather .info small { font-size: 12px; color: var(--on-surface-variant); text-transform: lowercase; }
+    #weather .info .wind { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--on-surface-variant); margin-top: 4px; }
+    #weather .info .wind .ms { font-size: 14px; }
+
+    /* week calendar */
+    #week { padding: 12px 12px 10px; }
+    #week .chip { height: 26px; padding: 0 12px; background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 500; font-size: 12.5px; }
+    #week .row { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 12px; margin-top: 8px; }
+    #week .row span { height: 26px; display: grid; place-items: center; }
+    #week .dow { color: var(--on-surface-variant); font-size: 11px; }
+    #week .today { background: var(--primary); color: var(--on-primary); border-radius: 50%; width: 26px; margin: 0 auto; font-weight: 600; }
+
+    /* greeting */
+    #greet { display: flex; align-items: center; gap: 12px; padding: 10px; }
+    #greet .av { width: 70px; height: 70px; border-radius: var(--round-md); display: grid; place-items: center; background: var(--tertiary-container); color: var(--on-tertiary-container); font-size: 30px; font-weight: 600; flex: none; }
+    #greet b { display: block; font-size: 15px; font-weight: 600; }
+    #greet span { display: block; font-size: 13px; }
+    #greet small { font-size: 11px; color: var(--on-surface-variant); }
+
+    /* media */
+    #media { display: flex; height: 92px; }
+    #media:empty { display: none; }
+    #media .cover { width: 92px; flex: none; background: linear-gradient(135deg, var(--primary-container), var(--tertiary-container)); display: grid; place-items: center; position: relative; }
+    #media .cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #media .cover .ms { font-size: 34px; color: var(--on-primary-container); opacity: 0.6; }
+    #media .body { flex: 1; min-width: 0; padding: 10px 12px; display: flex; flex-direction: column; }
+    #media .body b { font-weight: 500; font-size: 14px; }
+    #media .body small { font-size: 11.5px; color: var(--on-surface-variant); }
+    #media .ctl { margin-top: auto; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+    #media .ctl button { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; }
+    #media .ctl button:hover { background: var(--hover); }
+    #media .ctl button.pp { width: 38px; height: 38px; background: var(--primary); color: var(--on-primary); border-radius: var(--round-sm); }
+    #media .ctl .ms { font-size: 18px; }
+  </style>
+</head>
+<body>
+  <div id="col">
+    <div class="w" id="clock"></div>
+    <div class="w" id="weather"></div>
+    <div class="w" id="week"></div>
+    <div class="w" id="greet"></div>
+    <div class="w" id="media"></div>
+  </div>
+  <script type="module" src="./desktop.js"></script>
+</body>
+</html>

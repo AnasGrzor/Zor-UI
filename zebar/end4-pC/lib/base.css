@@ -1,0 +1,221 @@
+/* end4-pC for Windows - shared Material 3 styles.
+   Color variables are overwritten live from theme.json (see lib/core.js).
+   Defaults below are end4's own fallback palette from Appearance.qml. */
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@100..900&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block');
+
+/* install.ps1 downloads these into assets/fonts so widgets work offline;
+   the Google Fonts import above is the fallback. */
+@font-face {
+  font-family: 'GSF Local';
+  src: url('../assets/fonts/GoogleSansFlex.ttf') format('truetype');
+  font-weight: 1 1000;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MSR Local';
+  src: url('../assets/fonts/MaterialSymbolsRounded.woff2') format('woff2');
+  font-weight: 100 700;
+  font-display: block;
+}
+
+:root {
+  --background: #161217;
+  --on-background: #eae0e7;
+  --surface: #161217;
+  --surface-container-lowest: #110d12;
+  --surface-container-low: #1f1a1f;
+  --surface-container: #231e23;
+  --surface-container-high: #2d282e;
+  --surface-container-highest: #383339;
+  --on-surface: #eae0e7;
+  --on-surface-variant: #cfc3cd;
+  --outline: #988e97;
+  --outline-variant: #4c444c;
+  --primary: #e5b6f2;
+  --on-primary: #452152;
+  --primary-container: #5d386a;
+  --on-primary-container: #f9d8ff;
+  --secondary: #d5c0d7;
+  --on-secondary: #392c3d;
+  --secondary-container: #534457;
+  --on-secondary-container: #f2dcf3;
+  --tertiary: #f5b7b5;
+  --on-tertiary: #4c2523;
+  --tertiary-container: #663a39;
+  --on-tertiary-container: #ffdad8;
+  --error: #ffb4ab;
+  --on-error: #690005;
+  --inverse-surface: #eae0e7;
+  --inverse-on-surface: #342f34;
+
+  /* end4 Appearance tokens */
+  --round-xs: 8px;
+  --round-sm: 12px;
+  --round-md: 17px;
+  --round-lg: 23px;
+  --round-xl: 30px;
+  --round-full: 9999px;
+  --font: 'GSF Local', 'Google Sans Flex', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'JetBrainsMono Nerd Font', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --ease: cubic-bezier(0.38, 1.21, 0.22, 1);   /* expressiveDefaultSpatial */
+  --ease-fx: cubic-bezier(0.34, 0.8, 0.34, 1); /* expressiveEffects */
+
+  /* end4 layers */
+  --opaque: 100%;   /* 100% - transparency from config.json */
+  --layer0: color-mix(in srgb, var(--background) var(--opaque), transparent);
+  --layer1: var(--surface-container-low);
+  --layer2: var(--surface-container);
+  --layer3: var(--surface-container-high);
+  --layer4: var(--surface-container-highest);
+  --hover: color-mix(in srgb, var(--on-surface) 8%, transparent);
+  --press: color-mix(in srgb, var(--on-surface) 14%, transparent);
+  --shadow: 0 6px 24px color-mix(in srgb, #000 35%, transparent);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: var(--on-surface);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+input, textarea, select { font: inherit; color: inherit; }
+
+/* Material Symbols Rounded, the icon font end4 uses everywhere */
+.ms {
+  font-family: 'MSR Local', 'Material Symbols Rounded';
+  font-weight: 400;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  direction: ltr;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  font-feature-settings: 'liga';
+}
+.ms.fill { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+
+.ring-track { fill: none; stroke: var(--secondary-container); }
+.ring-value { fill: none; stroke: var(--primary); stroke-linecap: round; transition: stroke-dashoffset 0.4s var(--ease-fx); }
+
+/* ---- shared components ---------------------------------------------- */
+.card {
+  background: var(--layer1);
+  border-radius: var(--round-lg);
+  padding: 14px;
+}
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--round-full);
+  transition: background 0.2s var(--ease-fx), border-radius 0.3s var(--ease);
+}
+.icon-btn:hover { background: var(--hover); }
+.icon-btn:active { background: var(--press); border-radius: var(--round-sm); }
+.icon-btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
+.icon-btn.filled { background: var(--primary); color: var(--on-primary); }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--round-full);
+  background: var(--layer2);
+  color: var(--on-surface);
+  font-size: 13px;
+}
+
+/* M3 expressive slider (thick track + handle bar) */
+.slider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  border-radius: var(--round-md);
+  background: var(--secondary-container);
+  overflow: hidden;
+}
+.slider input {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+}
+.slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 4px; height: 44px; }
+.slider .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--primary);
+  border-radius: var(--round-md) 6px 6px var(--round-md);
+  transition: width 0.12s linear;
+}
+.slider .ms {
+  position: relative;
+  z-index: 1;
+  margin-left: 12px;
+  color: var(--on-primary);
+  pointer-events: none;
+}
+.slider .val {
+  position: relative;
+  z-index: 1;
+  margin-left: auto;
+  margin-right: 14px;
+  font-size: 13px;
+  color: var(--on-secondary-container);
+  pointer-events: none;
+}
+
+/* popup enter/leave (sidebars, overview) */
+@keyframes pop-in { from { opacity: 0; transform: translateY(-10px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes slide-in-right { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: none; } }
+@keyframes slide-in-left { from { opacity: 0; transform: translateX(-40px); } to { opacity: 1; transform: none; } }
+body.leaving > * { opacity: 0; transition: opacity 0.15s var(--ease-fx); }
+
+.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--outline-variant) transparent; }
+.muted { color: var(--on-surface-variant); }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* tab bar shared by the sidebars */
+.tabbar { display: flex; gap: 2px; padding: 4px; border-radius: var(--round-full); background: var(--layer1); }
+.tabbar button { flex: 1; height: 38px; border-radius: var(--round-full); display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12.5px; color: var(--on-surface-variant); transition: background 0.2s var(--ease-fx); }
+.tabbar button:hover { background: var(--hover); }
+.tabbar button.sel { background: var(--secondary-container); color: var(--on-secondary-container); }
+.tabbar .ms { font-size: 19px; }
+.field { width: 100%; border: 1px solid var(--outline-variant); background: var(--layer2); color: var(--on-surface); border-radius: var(--round-md); padding: 10px 14px; outline: none; resize: none; }
+.field:focus { border-color: var(--primary); }
+select.field { appearance: none; cursor: pointer; padding-right: 30px; background-image: linear-gradient(45deg, transparent 50%, var(--on-surface-variant) 50%), linear-gradient(135deg, var(--on-surface-variant) 50%, transparent 50%); background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips .chip { cursor: pointer; border: 1px solid transparent; }
+.chips .chip.sel { background: var(--secondary-container); color: var(--on-secondary-container); }
+.spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--secondary-container); border-top-color: var(--primary); animation: spin 0.8s linear infinite; margin: 20px auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.err { background: color-mix(in srgb, var(--error) 18%, transparent); color: var(--on-surface); border-radius: var(--round-md); padding: 10px 12px; font-size: 13px; }

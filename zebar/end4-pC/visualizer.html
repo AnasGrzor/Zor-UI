@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>end4-pC visualizer</title>
+  <link rel="stylesheet" href="./lib/base.css" />
+  <style>
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script type="module">
+    // end4's cava visualizer for the desktop: system audio (WASAPI loopback) from
+    // end4_bridge.py visualizer, drawn as bars with falling peak caps.
+    import { zebar, config, watchTheme, bridgeStream, reloadOnConfigChange } from './lib/core.js';
+    import { drawBars } from './lib/viz.js';
+
+    const cfg = await config();
+    if (!cfg.visualizer.desktop) zebar.currentWidget().close();
+    await watchTheme();
+    reloadOnConfigChange();
+    const win = zebar.currentWidget();
+    win.setZOrder('bottom_most').catch(() => {});
+    win.tauriWindow?.setIgnoreCursorEvents?.(true).catch(() => {});   // clicks go to the desktop
+
+    const canvas = document.getElementById('c');
+    let levels = new Array(cfg.visualizer.bars).fill(0);
+    const peaks = new Array(cfg.visualizer.bars).fill(0);
+    const proc = await bridgeStream('visualizer', [cfg.visualizer.bars], line => {
+      const v = line.trim().split(' ').map(Number);
+      if (v.length > 4) levels = v;
+    }, { raw: true });
+    window.addEventListener('beforeunload', () => proc?.kill());
+
+    (function frame() {
+      drawBars(canvas, levels, peaks, { style: 'desktop' });
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+# end4-pC for Windows - GlazeWM config
+# Keybinds mirror end4 / illogical-impulse on Hyprland. "{{MOD}}" is replaced by
+# install.ps1 (-Mod alt | win). Edit freely; re-run install.ps1 -SkipDeps only
+# if you want to regenerate this file from the template.
+
+general:
+  startup_commands: ['shell-exec zebar']
+  shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F']
+  config_reload_commands: []
+  focus_follows_cursor: false
+  toggle_workspace_on_refocus: true
+  cursor_jump:
+    enabled: true
+    trigger: 'monitor_focus'
+  hide_method: 'cloak'
+  show_all_in_taskbar: false
+
+gaps:
+  scale_with_dpi: true
+  inner_gap: '10px'
+  outer_gap:
+    # The Zebar bar is 44px tall with a 6px margin, so leave room for it.
+    top: '58px'
+    right: '10px'
+    bottom: '10px'
+    left: '10px'
+
+# Border colors below are rewritten by scripts/end4_theme.py on every
+# wallpaper change. Keep the marker lines so it can find this block.
+# >>> end4-pC colors (managed by end4_theme.py)
+window_effects:
+  focused_window:
+    border: { enabled: true, color: '#D0BCFF' }
+    hide_title_bar: { enabled: false }
+    corner_style: { enabled: true, style: 'rounded' }
+    transparency: { enabled: false, opacity: '95%' }
+  other_windows:
+    border: { enabled: true, color: '#49454F' }
+    hide_title_bar: { enabled: false }
+    corner_style: { enabled: true, style: 'rounded' }
+    transparency: { enabled: false, opacity: '92%' }
+# <<< end4-pC colors
+
+window_behavior:
+  initial_state: 'tiling'
+  state_defaults:
+    floating:
+      centered: true
+      shown_on_top: false
+    fullscreen:
+      maximized: false
+      shown_on_top: false
+
+workspaces:
+  - name: '1'
+  - name: '2'
+  - name: '3'
+  - name: '4'
+  - name: '5'
+  - name: '6'
+  - name: '7'
+  - name: '8'
+  - name: '9'
+  - name: '10'
+
+window_rules:
+  - commands: ['ignore']
+    match:
+      # Zebar widgets (bar, sidebars, overview, desktop widgets).
+      - window_process: { equals: 'zebar' }
+      - window_process: { equals: 'Flow.Launcher' }
+      - window_title: { regex: '[Pp]icture.in.[Pp]icture' }
+        window_class: { regex: 'Chrome_WidgetWin_1|MozillaDialogClass' }
+      - window_process: { equals: 'PowerToys' }
+        window_class: { regex: 'HwndWrapper\[PowerToys\.PowerAccent.*?\]' }
+      - window_title: { equals: 'Command Palette' }
+        window_class: { equals: 'WinUIDesktopWin32WindowClass' }
+      - window_process: { equals: 'PowerToys' }
+        window_title: { regex: '.*? - Peek' }
+      - window_process: { equals: 'Lively' }
+        window_class: { regex: 'HwndWrapper' }
+      - window_process: { equals: 'EXCEL' }
+        window_class: { not_regex: 'XLMAIN' }
+      - window_process: { equals: 'WINWORD' }
+        window_class: { not_regex: 'OpusApp' }
+      - window_process: { equals: 'POWERPNT' }
+        window_class: { not_regex: 'PPTFrameClass' }
+  # Small utility windows float, like end4's Hyprland window rules.
+  - commands: ['set-floating --centered']
+    match:
+      - window_process: { equals: 'osk' }
+      - window_title: { regex: '^(Open|Save As|Save|Open File|Select Folder|Browse For Folder)$' }
+      - window_process: { equals: 'SystemSettings' }
+      - window_process: { equals: 'pavucontrol' }
+
+binding_modes:
+  - name: 'resize'
+    keybindings:
+      - commands: ['resize --width -2%']
+        bindings: ['h', 'left']
+      - commands: ['resize --width +2%']
+        bindings: ['l', 'right']
+      - commands: ['resize --height +2%']
+        bindings: ['k', 'up']
+      - commands: ['resize --height -2%']
+        bindings: ['j', 'down']
+      - commands: ['wm-disable-binding-mode --name resize']
+        bindings: ['escape', 'enter']
+
+keybindings:
+  # ---- end4 shell: sidebars, overview, wallpaper -------------------------
+  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name sidebar-left --preset default']
+    bindings: ['{{MOD}}+a']
+  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name sidebar-right --preset default']
+    bindings: ['{{MOD}}+n']
+  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name overview --preset default']
+    bindings: ['{{OVERVIEW}}']
+  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name settings --preset default']
+    bindings: ['{{MOD}}+i']
+  - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1"']
+    bindings: ['{{MOD}}+ctrl+t']
+  - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1" -ToggleMode']
+    bindings: ['{{MOD}}+ctrl+d']
+  # Reload everything (end4: Ctrl+Super+R restarts the shell).
+  - commands: ['shell-exec taskkill /IM zebar.exe /F', 'wm-reload-config', 'shell-exec zebar']
+    bindings: ['{{MOD}}+ctrl+r']
+
+  # ---- apps ---------------------------------------------------------------
+  - commands: ['shell-exec wt']
+    bindings: ['{{MOD}}+enter', '{{MOD}}+t']
+  - commands: ['shell-exec explorer']
+    bindings: ['{{MOD}}+e']
+  - commands: ['shell-exec msedge']
+    bindings: ['{{MOD}}+w']
+  - commands: ['shell-exec code']
+    bindings: ['{{MOD}}+c']
+  - commands: ['shell-exec explorer ms-screenclip:']
+    bindings: ['{{MOD}}+shift+s']
+  - commands: ['shell-exec osk']
+    bindings: ['{{MOD}}+k']
+
+  # ---- windows ------------------------------------------------------------
+  - commands: ['close']
+    bindings: ['{{MOD}}+q']
+  - commands: ['toggle-fullscreen']
+    bindings: ['{{MOD}}+f']
+  - commands: ['toggle-floating --centered']
+    bindings: ['{{MOD}}+shift+space']
+  - commands: ['toggle-tiling']
+    bindings: ['{{MOD}}+shift+t']
+  - commands: ['toggle-minimized']
+    bindings: ['{{MOD}}+m']
+  - commands: ['toggle-tiling-direction']
+    bindings: ['{{MOD}}+v']
+  - commands: ['wm-enable-binding-mode --name resize']
+    bindings: ['{{MOD}}+r']
+  - commands: ['wm-toggle-pause']
+    bindings: ['{{MOD}}+shift+p']
+  - commands: ['wm-redraw']
+    bindings: ['{{MOD}}+shift+w']
+  - commands: ['wm-exit']
+    bindings: ['{{MOD}}+shift+e']
+
+  - commands: ['focus --direction left']
+    bindings: ['{{MOD}}+left']
+  - commands: ['focus --direction right']
+    bindings: ['{{MOD}}+right']
+  - commands: ['focus --direction up']
+    bindings: ['{{MOD}}+up']
+  - commands: ['focus --direction down']
+    bindings: ['{{MOD}}+down']
+  - commands: ['move --direction left']
+    bindings: ['{{MOD}}+shift+left']
+  - commands: ['move --direction right']
+    bindings: ['{{MOD}}+shift+right']
+  - commands: ['move --direction up']
+    bindings: ['{{MOD}}+shift+up']
+  - commands: ['move --direction down']
+    bindings: ['{{MOD}}+shift+down']
+  - commands: ['resize --width -3%']
+    bindings: ['{{MOD}}+oem_minus']
+  - commands: ['resize --width +3%']
+    bindings: ['{{MOD}}+oem_plus']
+
+  # ---- workspaces (end4: Super+N focus, Super+Alt+N move) -----------------
+  - commands: ['focus --workspace 1']
+    bindings: ['{{MOD}}+1']
+  - commands: ['focus --workspace 2']
+    bindings: ['{{MOD}}+2']
+  - commands: ['focus --workspace 3']
+    bindings: ['{{MOD}}+3']
+  - commands: ['focus --workspace 4']
+    bindings: ['{{MOD}}+4']
+  - commands: ['focus --workspace 5']
+    bindings: ['{{MOD}}+5']
+  - commands: ['focus --workspace 6']
+    bindings: ['{{MOD}}+6']
+  - commands: ['focus --workspace 7']
+    bindings: ['{{MOD}}+7']
+  - commands: ['focus --workspace 8']
+    bindings: ['{{MOD}}+8']
+  - commands: ['focus --workspace 9']
+    bindings: ['{{MOD}}+9']
+  - commands: ['focus --workspace 10']
+    bindings: ['{{MOD}}+0']
+  - commands: ['move --workspace 1', 'focus --workspace 1']
+    bindings: ['{{MOD}}+shift+1']
+  - commands: ['move --workspace 2', 'focus --workspace 2']
+    bindings: ['{{MOD}}+shift+2']
+  - commands: ['move --workspace 3', 'focus --workspace 3']
+    bindings: ['{{MOD}}+shift+3']
+  - commands: ['move --workspace 4', 'focus --workspace 4']
+    bindings: ['{{MOD}}+shift+4']
+  - commands: ['move --workspace 5', 'focus --workspace 5']
+    bindings: ['{{MOD}}+shift+5']
+  - commands: ['move --workspace 6', 'focus --workspace 6']
+    bindings: ['{{MOD}}+shift+6']
+  - commands: ['move --workspace 7', 'focus --workspace 7']
+    bindings: ['{{MOD}}+shift+7']
+  - commands: ['move --workspace 8', 'focus --workspace 8']
+    bindings: ['{{MOD}}+shift+8']
+  - commands: ['move --workspace 9', 'focus --workspace 9']
+    bindings: ['{{MOD}}+shift+9']
+  - commands: ['move --workspace 10', 'focus --workspace 10']
+    bindings: ['{{MOD}}+shift+0']
+  - commands: ['focus --prev-active-workspace']
+    bindings: ['{{MOD}}+ctrl+left', '{{MOD}}+page_up']
+  - commands: ['focus --next-active-workspace']
+    bindings: ['{{MOD}}+ctrl+right', '{{MOD}}+page_down']
+  - commands: ['move-workspace --direction left']
+    bindings: ['{{MOD}}+ctrl+shift+left']
+  - commands: ['move-workspace --direction right']
+    bindings: ['{{MOD}}+ctrl+shift+right']

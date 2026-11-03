@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>end4-pC bar</title>
+  <link rel="stylesheet" href="./lib/base.css" />
+  <style>
+    /* end4 "Float" bar style: a floating rounded bar with pill groups. */
+    #bar {
+      position: absolute;
+      inset: 6px 6px auto 6px;
+      height: 44px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 5px;
+      background: var(--layer0);
+      border: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent);
+      border-radius: var(--round-lg);
+      box-shadow: 0 2px 8px color-mix(in srgb, #000 25%, transparent);
+    }
+    .side { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .side.right { justify-content: flex-end; }
+    .center { display: flex; align-items: center; gap: 5px; }
+
+    .group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 34px;
+      padding: 0 10px;
+      border-radius: var(--round-full);
+      background: var(--layer1);
+      white-space: nowrap;
+      transition: background 0.2s var(--ease-fx);
+    }
+    button.group:hover, .group.clickable:hover { background: color-mix(in srgb, var(--layer1), var(--on-surface) 8%); }
+    .group:empty { display: none; }
+
+    /* left: sidebar button + active window */
+    #btn-left { width: 34px; height: 34px; border-radius: var(--round-full); display: grid; place-items: center; color: var(--primary); }
+    #btn-left:hover { background: var(--hover); }
+    #btn-left .ms { font-size: 22px; }
+    .aw { display: flex; flex-direction: column; justify-content: center; min-width: 0; line-height: 1.15; padding-left: 2px; }
+    .aw-app { font-size: 10.5px; color: var(--on-surface-variant); }
+    .aw-title { font-size: 13.5px; max-width: 34vw; }
+
+    /* resources */
+    .res { display: flex; align-items: center; gap: 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .res .ring-wrap { position: relative; width: 24px; height: 24px; }
+    .res .ring-wrap .ms { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; color: var(--on-secondary-container); }
+
+    /* media */
+    #g-media { cursor: pointer; padding-left: 5px; }
+    #g-media .ring-wrap { position: relative; width: 26px; height: 26px; }
+    #g-media .ring-wrap .ms { position: absolute; inset: 0; display: grid; place-items: center; font-size: 16px; }
+    #g-media .title { max-width: 230px; font-size: 13px; }
+
+    /* workspaces */
+    #g-ws { gap: 0; padding: 0 4px; }
+    .ws {
+      width: 26px; height: 26px;
+      display: grid; place-items: center;
+      border-radius: var(--round-full);
+      font-size: 12px;
+      color: var(--on-surface-variant);
+      transition: background 0.25s var(--ease-fx);
+    }
+    .ws:hover { background: var(--hover); }
+    .ws .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--outline); opacity: 0.55; transition: all 0.3s var(--ease); }
+    .ws.occ .dot { width: 8px; height: 8px; background: var(--on-surface-variant); opacity: 1; }
+    .ws.active { background: var(--primary); color: var(--on-primary); font-weight: 600; }
+    .ws.active .dot { display: none; }
+    .ws.lbl:not(.active) { color: var(--on-surface); }
+    .ws.lbl:not(.active):not(.occ) { color: var(--outline); }
+    #bar-viz { width: 60px; height: 22px; }
+    .ws.urgent:not(.active) .dot { background: var(--error); }
+
+    #g-clock { font-size: 13.5px; font-variant-numeric: tabular-nums; cursor: pointer; }
+    #g-utils { padding: 0 3px; gap: 0; }
+    #g-utils button { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
+    #g-utils button:hover { background: var(--hover); }
+    #g-utils .ms { font-size: 17px; }
+    #g-weather { font-size: 13px; gap: 4px; }
+    #g-weather .ms { font-size: 18px; }
+
+    /* right */
+    #g-tray { gap: 2px; padding: 0 6px; }
+    #g-tray img { width: 18px; height: 18px; padding: 3px; box-sizing: content-box; border-radius: 6px; cursor: pointer; }
+    #g-tray img:hover { background: var(--hover); }
+    #g-sys { gap: 8px; padding: 0 12px; }
+    #g-sys .ms { font-size: 18px; }
+    #g-sys .kb { font-size: 12px; color: var(--on-surface-variant); }
+    #g-sys .batt { display: flex; align-items: center; gap: 2px; font-size: 12.5px; }
+    #g-sys .batt.low { color: var(--error); }
+    .paused { background: var(--error); color: var(--on-error); }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <div class="side left">
+      <button id="btn-left" title="Left sidebar"><span class="ms fill">auto_awesome</span></button>
+      <div class="aw"><div class="aw-app ellipsis" id="aw-app"></div><div class="aw-title ellipsis" id="aw-title"></div></div>
+    </div>
+    <div class="center">
+      <div class="group" id="g-res"></div>
+      <div class="group" id="g-media" title="Click: play/pause · Right-click: player · Middle-click: next"></div>
+      <div class="group" id="g-ws"></div>
+      <div class="group" id="g-clock" title="Open calendar"></div>
+      <div class="group" id="g-utils">
+        <button data-act="snip" title="Screen snip"><span class="ms">screenshot_region</span></button>
+        <button data-act="wall" title="Change wallpaper"><span class="ms">wallpaper</span></button>
+        <button data-act="mode" title="Toggle dark mode"><span class="ms" id="mode-icon">dark_mode</span></button>
+      </div>
+      <div class="group" id="g-weather"></div>
+    </div>
+    <div class="side right">
+      <div class="group" id="g-wm"></div>
+      <div class="group" id="g-tray"></div>
+      <button class="group" id="g-sys" title="Quick settings"></button>
+    </div>
+  </div>
+  <script type="module" src="./bar.js"></script>
+</body>
+</html>

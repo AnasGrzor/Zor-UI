@@ -1,0 +1,379 @@
+// end4-pC for Windows - shared helpers for every widget in the pack.
+import * as zebar from 'https://esm.sh/zebar@3.0';
+
+export { zebar };
+
+const DEFAULTS = {
+  scriptsDir: '',
+  userName: '',
+  workspaces: 10,
+  clockFormat: "EEE, dd/MM '•' HH:mm",
+  use24h: true,
+  tempUnit: 'C',
+  showKeyboardLayout: false,
+  lyrics: true,
+  pythonPath: '',
+  bridgePath: '',
+  workspaceLabels: [],
+  alwaysShowNumbers: false,
+  transparency: 0,
+  desktopWidgets: true,
+  syncLockScreen: true,
+  ai: { model: 'gemini-2.5-flash', temperature: 0.5, systemPrompt: '' },
+  translator: { source: 'auto', target: 'en' },
+  booru: { source: 'yandere', allowNsfw: false },
+  football: { leagues: [] },
+  visualizer: { desktop: true, bar: false, bars: 64 },
+  nightLight: { kelvin: 4500 },
+  wallpaperEngine: { follow: true, path: '' },
+};
+
+// ------------------------------------------------------------------ DOM
+export const $ = (sel, root = document) => root.querySelector(sel);
+export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+export const esc = s =>
+  String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+export const icon = (name, { fill = false, cls = '' } = {}) =>
+  `<span class="ms${fill ? ' fill' : ''}${cls ? ' ' + cls : ''}" aria-hidden="true">${name}</span>`;
+
+/** Only touch the DOM when the markup actually changed (keeps hover/press states). */
+export function setHTML(el, html) {
+  if (el && el.__html !== html) {
+    el.innerHTML = html;
+    el.__html = html;
+  }
+}
+
+/** SVG ring used by end4's circular progress indicators. */
+export function ring(value, { size = 26, stroke = 2.5 } = {}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const v = Math.max(0, Math.min(1, value || 0));
+  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
+    <circle class="ring-value" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"
+      stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - v)}" transform="rotate(-90 ${size / 2} ${size / 2})"/>
+  </svg>`;
+}
+
+// ------------------------------------------------------------------ config
+let cfgPromise;
+export function config() {
+  cfgPromise ??= fetch('./config.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(r => (r.ok ? r.json() : {}))
+    .catch(() => ({}))
+    .then(c => {
+      const merged = { ...DEFAULTS, ...c };
+      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine'])
+        merged[k] = { ...DEFAULTS[k], ...(c[k] || {}) };
+      document.documentElement.style.setProperty('--opaque', `${Math.round((1 - (merged.transparency || 0)) * 100)}%`);
+      return merged;
+    });
+  return cfgPromise;
+}
+
+/** Long-lived widgets (bar, desktop, visualizer) reload when config.json changes. */
+export function reloadOnConfigChange() {
+  let first = null;
+  setInterval(async () => {
+    try {
+      const txt = await (await fetch('./config.json?t=' + Date.now(), { cache: 'no-store' })).text();
+      if (first === null) first = txt;
+      else if (txt !== first) location.reload();
+    } catch { /* ignore */ }
+  }, 3000);
+}
+
+// ------------------------------------------------------------------ theme
+const kebab = s => s.replace(/_/g, '-').replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+let lastTheme = '';
+let themeListeners = [];
+
+function applyTheme(t) {
+  const root = document.documentElement;
+  for (const [k, v] of Object.entries(t.colors || {})) root.style.setProperty('--' + kebab(k), v);
+  root.dataset.mode = t.mode || 'dark';
+  themeListeners.forEach(fn => fn(t));
+}
+
+/** Polls theme.json (written by end4_theme.py) so wallpaper changes apply live. */
+let polling = false;
+export async function watchTheme(onChange) {
+  if (onChange) themeListeners.push(onChange);
+  if (polling) {
+    if (onChange && lastTheme) onChange(JSON.parse(lastTheme));
+    return;
+  }
+  polling = true;
+  const tick = async () => {
+    try {
+      const res = await fetch('./theme.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return;
+      const txt = await res.text();
+      if (txt && txt !== lastTheme) {
+        const theme = JSON.parse(txt);  // parse first so a bad file never becomes lastTheme
+        lastTheme = txt;
+        applyTheme(theme);
+      }
+    } catch {
+      /* keep the defaults from base.css */
+    }
+  };
+  await tick();
+  setInterval(tick, 2000);
+}
+
+// ------------------------------------------------------------------ scripts
+/** Runs one of the PowerShell helpers in scriptsDir and returns its JSON line. */
+export async function run(script, ...args) {
+  const c = await config();
+  if (!c.scriptsDir) return { error: 'scriptsDir missing from config.json (run install.ps1)' };
+  try {
+    const out = await zebar.shellExec('powershell', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', `${c.scriptsDir}\\${script}.ps1`, ...args.map(String),
+    ]);
+    const line = String(out.stdout || '').trim().split(/\r?\n/).pop();
+    return line ? JSON.parse(line) : { error: out.stderr };
+  } catch (err) {
+    console.warn('[end4-pC] script failed', script, args, err);
+    return { error: String(err?.message || err) };
+  }
+}
+
+/** Runs a command of scripts/end4_bridge.py (Python) and returns its JSON line. */
+export async function bridge(cmd, ...args) {
+  const c = await config();
+  if (!c.pythonPath || !c.bridgePath) return { error: 'pythonPath/bridgePath missing from config.json (run install.ps1)' };
+  try {
+    const out = await zebar.shellExec(c.pythonPath, ['-X', 'utf8', c.bridgePath, cmd, ...args.map(String)]);
+    const line = String(out.stdout || '').trim().split(/\r?\n/).pop();
+    return line ? JSON.parse(line) : { error: String(out.stderr || 'no output').slice(-400) };
+  } catch (err) {
+    return { error: String(err?.message || err) };
+  }
+}
+
+/** Starts a streaming bridge command; onLine gets each parsed JSON (or raw) line. */
+export async function bridgeStream(cmd, args, onLine, { stdin, raw = false, onExit } = {}) {
+  const c = await config();
+  if (!c.pythonPath || !c.bridgePath) { onLine({ error: 'pythonPath/bridgePath missing from config.json' }); return null; }
+  const proc = await zebar.shellSpawn(c.pythonPath, ['-X', 'utf8', c.bridgePath, cmd, ...args.map(String)]);
+  let pending = '';
+  proc.onStdout(chunk => {
+    pending += chunk;
+    const parts = pending.split(/\r?\n/);
+    pending = parts.pop();
+    for (const p of parts) {
+      if (!p.trim()) continue;
+      if (raw) onLine(p);
+      else { try { onLine(JSON.parse(p)); } catch { /* partial */ } }
+    }
+  });
+  proc.onExit(e => { if (pending.trim()) { try { onLine(raw ? pending : JSON.parse(pending)); } catch {} } onExit?.(e); });
+  if (stdin != null) proc.write(stdin + '\n');
+  return proc;
+}
+
+export const openUrl = url => bridge('open', url);
+
+/** Small Markdown renderer for AI replies (escapes everything first). */
+export function md(src) {
+  const blocks = [];
+  let text = String(src || '').replace(/```(\w*)\n?([\s\S]*?)(```|$)/g, (_, lang, code) => {
+    blocks.push(`<div class="code"><div class="code-head"><span>${esc(lang || 'code')}</span><button class="copy" data-copy="${blocks.length}">${icon('content_copy')}</button></div><pre><code>${esc(code.replace(/\n$/, ''))}</code></pre></div>`);
+    md.raw = md.raw || [];
+    md.raw[blocks.length - 1] = code;
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  text = esc(text);
+  const inline = s => s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a data-url="$2">$1</a>');
+  const out = [];
+  let list = null;
+  for (const line of text.split('\n')) {
+    const h = line.match(/^(#{1,3})\s+(.*)/), li = line.match(/^\s*(?:[-*]|\d+\.)\s+(.*)/), q = line.match(/^&gt;\s?(.*)/);
+    if (!li && list) { out.push(`</${list}>`); list = null; }
+    if (/^\u0000\d+\u0000$/.test(line.trim())) out.push(line.trim());
+    else if (h) out.push(`<h${h[1].length + 2}>${inline(h[2])}</h${h[1].length + 2}>`);
+    else if (li) { const t = /^\s*\d+\./.test(line) ? 'ol' : 'ul'; if (!list) { list = t; out.push(`<${t}>`); } out.push(`<li>${inline(li[1])}</li>`); }
+    else if (q) out.push(`<blockquote>${inline(q[1])}</blockquote>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join('').replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[i]);
+}
+
+export const openWidget = name => zebar.startWidgetPreset(name, 'default').catch(e => console.warn(e));
+
+/** Popups (sidebars, overview) close on Esc or when focus leaves them, like end4. */
+export function popupBehaviour({ onClose } = {}) {
+  let closing = false;
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    document.body.classList.add('leaving');
+    onClose?.();
+    await new Promise(r => setTimeout(r, 160));
+    zebar.currentWidget().close();
+  };
+  let armed = false, pinned = false;
+  setTimeout(() => (armed = true), 500);
+  window.addEventListener('keydown', e => e.key === 'Escape' && close());
+  window.addEventListener('blur', () => armed && !pinned && close());
+  document.addEventListener('mousedown', e => e.target === document.body && !pinned && close());
+  close.togglePin = () => (pinned = !pinned);
+  return close;
+}
+
+// ------------------------------------------------------------------ media
+/** Interpolates the playback position between provider updates. */
+export function mediaClock() {
+  let base = 0, at = performance.now(), playing = false, key = '';
+  return {
+    update(s) {
+      if (!s) { key = ''; return; }
+      const k = s.sessionId + '|' + s.title;
+      if (k !== key || Math.abs(s.position - this.position()) > 1.5 || s.isPlaying !== playing) {
+        base = s.position; at = performance.now();
+      }
+      key = k; playing = s.isPlaying;
+    },
+    position() { return playing ? base + (performance.now() - at) / 1000 : base; },
+  };
+}
+
+export const fmtTime = s => {
+  s = Math.max(0, Math.floor(s || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+/** Album art: Windows media session thumbnail via media-art.ps1. */
+let artKey = '', artUrl = '';
+export async function albumArt(session) {
+  if (!session) return '';
+  const key = `${session.title}|${session.artist}`;
+  if (key === artKey) return artUrl;
+  artKey = key;
+  artUrl = '';
+  const res = await run('media-art');
+  artUrl = res?.ok ? './cover.jpg?t=' + Date.now() : '';
+  return artUrl;
+}
+
+/** Synced lyrics from lrclib.net (same source end4 uses). */
+const lyricCache = new Map();
+export async function lyrics(session) {
+  if (!session?.title) return null;
+  const key = `${session.artist}|${session.title}`;
+  if (lyricCache.has(key)) return lyricCache.get(key);
+  lyricCache.set(key, null);
+  const q = new URLSearchParams({ track_name: session.title, artist_name: session.artist || '' });
+  if (session.albumTitle) q.set('album_name', session.albumTitle);
+  const dur = Math.round((session.endTime || 0) - (session.startTime || 0));
+  if (dur > 0) q.set('duration', dur);
+  try {
+    let r = await fetch('https://lrclib.net/api/get?' + q);
+    let data = r.ok ? await r.json() : null;
+    if (!data?.syncedLyrics) {
+      const s = await fetch('https://lrclib.net/api/search?' + new URLSearchParams({ track_name: session.title, artist_name: session.artist || '' }));
+      const list = s.ok ? await s.json() : [];
+      data = list.find(x => x.syncedLyrics) || list[0] || null;
+    }
+    const parsed = parseLrc(data?.syncedLyrics) || (data?.plainLyrics ? { plain: data.plainLyrics.split('\n') } : null);
+    lyricCache.set(key, parsed);
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function parseLrc(text) {
+  if (!text) return null;
+  const lines = [];
+  for (const raw of text.split('\n')) {
+    const m = raw.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (m) lines.push({ t: +m[1] * 60 + +m[2], text: m[3] });
+  }
+  return lines.length ? { synced: lines } : null;
+}
+
+export function currentLyricIndex(synced, pos) {
+  let i = -1;
+  for (let k = 0; k < synced.length && synced[k].t <= pos + 0.25; k++) i = k;
+  return i;
+}
+
+// ------------------------------------------------------------------ misc
+export const weatherIcon = status => ({
+  clear_day: 'sunny', clear_night: 'clear_night',
+  cloudy_day: 'partly_cloudy_day', cloudy_night: 'partly_cloudy_night',
+  light_rain_day: 'rainy', light_rain_night: 'rainy',
+  heavy_rain_day: 'rainy', heavy_rain_night: 'rainy',
+  snow_day: 'weather_snowy', snow_night: 'weather_snowy',
+  thunder_day: 'thunderstorm', thunder_night: 'thunderstorm',
+})[status] || 'cloud';
+
+export const weatherText = status =>
+  (status || '').replace(/_(day|night)$/, '').replace(/_/g, ' ').replace(/^clear$/, 'clear sky');
+
+export const temp = (w, unit) =>
+  w ? `${Math.round(unit === 'F' ? w.fahrenheitTemp : w.celsiusTemp)}°${unit === 'F' ? 'F' : 'C'}` : '';
+
+export function volumeIcon(dev) {
+  if (!dev) return 'volume_off';
+  if (dev.isMuted || dev.volume === 0) return 'volume_off';
+  return dev.volume < 34 ? 'volume_mute' : dev.volume < 67 ? 'volume_down' : 'volume_up';
+}
+
+export function networkIcon(net) {
+  const t = net?.defaultInterface?.type;
+  if (t === 'ethernet') return 'lan';
+  if (t === 'wifi') {
+    const s = net.defaultGateway?.signalStrength ?? 0;
+    return s >= 80 ? 'signal_wifi_4_bar' : s >= 60 ? 'network_wifi_3_bar' : s >= 40 ? 'network_wifi_2_bar' : s >= 20 ? 'network_wifi_1_bar' : 'signal_wifi_0_bar';
+  }
+  if (t === 'proprietary_virtual') return 'vpn_lock';
+  return 'signal_wifi_off';
+}
+
+export function batteryIcon(b) {
+  if (!b) return '';
+  if (b.isCharging) return 'battery_charging_full';
+  const p = b.chargePercent;
+  return p > 95 ? 'battery_full' : `battery_${Math.max(0, Math.min(6, Math.round(p / 16.6)))}_bar`;
+}
+
+export const prettyApp = name => {
+  if (!name) return '';
+  const n = name.replace(/\.exe$/i, '');
+  const known = { msedge: 'Microsoft Edge', explorer: 'File Explorer', WindowsTerminal: 'Terminal', Code: 'Visual Studio Code', chrome: 'Google Chrome', firefox: 'Firefox', ApplicationFrameHost: 'App' };
+  return known[n] || n.charAt(0).toUpperCase() + n.slice(1);
+};
+
+export const greeting = (d = new Date()) => {
+  const h = d.getHours();
+  return h < 5 ? 'Good Night' : h < 12 ? 'Good Morning' : h < 17 ? 'Good Afternoon' : h < 22 ? 'Good Evening' : 'Good Night';
+};
+
+/** Month grid (Monday first, like end4's calendar). */
+export function monthGrid(date = new Date()) {
+  const y = date.getFullYear(), m = date.getMonth();
+  const first = new Date(y, m, 1);
+  const offset = (first.getDay() + 6) % 7;
+  const days = new Date(y, m + 1, 0).getDate();
+  const prevDays = new Date(y, m, 0).getDate();
+  const cells = [];
+  for (let i = offset - 1; i >= 0; i--) cells.push({ d: prevDays - i, out: true });
+  const now = new Date();
+  for (let d = 1; d <= days; d++) cells.push({ d, today: d === now.getDate() && sameMonth(date, now) });
+  while (cells.length % 7) cells.push({ d: cells.length - offset - days + 1, out: true });
+  return cells;
+}
+const sameMonth = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+
+/** Stable colour slot for an app name (overview tiles). */
+export const hashSlot = (s, n = 3) => [...String(s)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % n;

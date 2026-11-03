@@ -14,16 +14,15 @@
   <script type="module">
     // end4's cava visualizer for the desktop: system audio (WASAPI loopback) from
     // end4_bridge.py visualizer, drawn as bars with falling peak caps.
-    import { zebar, config, watchTheme, bridgeStream, reloadOnConfigChange } from './lib/core.js';
+    import { zebar, config, watchTheme, bridge, bridgeStream, reloadOnConfigChange } from './lib/core.js';
     import { drawBars } from './lib/viz.js';
 
     const cfg = await config();
-    if (!cfg.visualizer.desktop) zebar.currentWidget().close();
+    const win = zebar.currentWidget().window.tauri;   // zpack.json already makes it bottom_most
+    if (!cfg.visualizer.desktop) win.close();
     await watchTheme();
     reloadOnConfigChange();
-    const win = zebar.currentWidget();
-    win.setZOrder('bottom_most').catch(() => {});
-    win.tauriWindow?.setIgnoreCursorEvents?.(true).catch(() => {});   // clicks go to the desktop
+    win.setIgnoreCursorEvents(true).catch(() => bridge('click-through', 'visualizer'));   // clicks go to the desktop
 
     const canvas = document.getElementById('c');
     let levels = new Array(cfg.visualizer.bars).fill(0);

@@ -978,41 +978,40 @@ def cmd_we_sync():
     Started by the bar; only one copy runs even with a bar on every monitor."""
     if not we_exe():
         return out({"skip": "Wallpaper Engine not installed"})
-    lock = ROOT / "we-sync.pid"
-    ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        other = int(lock.read_text())
-        if other != os.getpid() and _parent_alive(other):
-            return out({"skip": "already running"})
-    except (OSError, ValueError):
-        pass
-    lock.write_text(str(os.getpid()))
+    if not _first_instance("we-sync"):
+        return out({"skip": "already running"})
     ppid = _owner_pid()
+    _exit_with_owner(ppid)
     out({"started": True})
     last = None
     interval = float(os.environ.get("END4_WE_INTERVAL", "5"))
-    try:
-        while _parent_alive(ppid):
-            follow = config().get("wallpaperEngine", {}).get("follow", True)
-            if follow and we_exe() and we_running():
-                try:
-                    cur = we_current()
-                except (OSError, subprocess.SubprocessError):
-                    cur = ""
-                if cur and we_key(cur) != last:
-                    st = load_json(ROOT / "state.json", {})
-                    live = str(st.get("live") or "")
-                    if not live.startswith("we:") or we_key(live[3:]) != we_key(cur):   # changed outside end4
-                        res = _we_theme(cur)
-                        out({"changed": cur, "ok": bool(res.get("ok", True))})
-                    last = we_key(cur)
-            time.sleep(interval)
-    finally:
-        try:
-            if lock.read_text() == str(os.getpid()):
-                lock.unlink()
-        except OSError:
-            pass
+    while _parent_alive(ppid):
+        follow = config().get("wallpaperEngine", {}).get("follow", True)
+        if follow and we_exe() and we_running():
+            try:
+                cur = we_current()
+            except (OSError, subprocess.SubprocessError):
+                cur = ""
+            if cur and we_key(cur) != last:
+                st = load_json(ROOT / "state.json", {})
+                live = str(st.get("live") or "")
+                if not live.startswith("we:") or we_key(live[3:]) != we_key(cur):   # changed outside end4
+                    res = _we_theme(cur)
+                    out({"changed": cur, "ok": bool(res.get("ok", True))})
+                last = we_key(cur)
+        time.sleep(interval)
+
+
+def _first_instance(name):
+    """True for the first process to claim `name`. A named mutex is atomic (two bars starting at
+    the same moment can't both win) and Windows releases it when the process exits."""
+    if not IS_WIN:
+        return True
+    import ctypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.restype = ctypes.c_void_p
+    _first_instance.handle = k.CreateMutexW(None, False, f"Local\\end4-pC-{name}")   # kept open until exit
+    return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
 
 
 # ===================================================================== visualizer (cava-style)
@@ -1064,6 +1063,25 @@ def _owner_pid():
     return ppid
 
 
+def _exit_with_owner(pid):
+    """Exits the moment Zebar does. Zebar's children inherit its listening socket (port 6124),
+    so a stream that outlives Zebar even for a few seconds stops the next Zebar (Mod+Ctrl+R)
+    from starting its server, and every widget shows 'refused to connect'."""
+    if not IS_WIN:
+        return
+    import ctypes
+    k = ctypes.windll.kernel32
+    k.OpenProcess.restype = ctypes.c_void_p
+    h = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not h:
+        os._exit(0)
+
+    def wait():
+        k.WaitForSingleObject(ctypes.c_void_p(h), 0xFFFFFFFF)  # INFINITE
+        os._exit(0)
+    threading.Thread(target=wait, daemon=True).start()
+
+
 class Spectrum:
     """FFT -> log-spaced bars with cava-like auto-sensitivity and gravity falloff."""
 
@@ -1102,6 +1120,7 @@ def cmd_visualizer(bars="48"):
     import numpy as np
     bars = max(8, min(256, int(bars)))
     ppid = _owner_pid()
+    _exit_with_owner(ppid)
     spec = Spectrum(bars)
     lock = threading.Lock()
     last_audio = [0.0]
@@ -1158,7 +1177,56 @@ def cmd_visualizer(bars="48"):
 
 
 # ===================================================================== main
+def cmd_click_through(widget):
+    """Lets mouse clicks pass through a widget's window to the desktop. Tauri's setIgnoreCursorEvents
+    sets the same two styles, but Zebar doesn't grant widgets permission to call it."""
+    if not (IS_WIN and re.fullmatch(r"[a-z-]+", widget)):
+        return out({"ok": False})
+    import ctypes
+    u = ctypes.windll.user32
+    u.FindWindowW.restype = ctypes.c_void_p
+    h = ctypes.c_void_p(u.FindWindowW(None, f"Zebar - end4-pC / {widget}"))
+    if not h.value:
+        return out({"ok": False, "error": "window not found"})
+    ex = u.GetWindowLongW(h, -20)                      # GWL_EXSTYLE
+    u.SetWindowLongW(h, -20, ex | 0x80000 | 0x20)      # WS_EX_LAYERED | WS_EX_TRANSPARENT
+    out({"ok": True})
+
+
+def cmd_focus_widget(widget, x="0", y="0"):
+    """Gives a popup keyboard focus (Esc, typing). Windows only lets the process that received the
+    last input take the foreground; a shortcut's key went to GlazeWM, so Zebar's own setFocus is
+    refused. A no-op key event makes this process eligible (the usual workaround). x, y: the
+    popup's screen position, to pick it over a copy on another monitor that is still closing."""
+    if not (IS_WIN and re.fullmatch(r"[a-z-]+", widget)):
+        return out({"ok": False})
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    title, found = f"Zebar - end4-pC / {widget}", []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(h, _):
+        buf = ctypes.create_unicode_buffer(256)
+        u.GetWindowTextW(h, buf, 256)
+        if buf.value == title and u.IsWindowVisible(h):
+            r = wintypes.RECT()
+            u.GetWindowRect(h, ctypes.byref(r))
+            found.append((abs(r.left - int(float(x))) + abs(r.top - int(float(y))), h))
+        return True
+    u.EnumWindows(each, 0)
+    if not found:
+        return out({"ok": False, "error": "window not found"})
+    h = min(found)[1]
+    u.keybd_event(0x87, 0, 0, 0)   # F24 down/up: no app uses it
+    u.keybd_event(0x87, 0, 2, 0)
+    u.SetForegroundWindow(h)
+    out({"ok": u.GetForegroundWindow() == h})
+
+
 COMMANDS = {
+    "focus-widget": cmd_focus_widget,
+    "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,
     "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat,
     "secret-set": cmd_secret_set, "secret-status": cmd_secret_status,

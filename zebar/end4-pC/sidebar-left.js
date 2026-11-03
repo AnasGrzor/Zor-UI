@@ -1,5 +1,5 @@
 import {
-  zebar, $, $$, esc, icon, ring, setHTML, config, watchTheme, popupBehaviour,
+  zebar, $, $$, esc, icon, ring, setHTML, config, watchTheme, popupBehaviour, openOnTargetMonitor,
   mediaClock, fmtTime, albumArt, lyrics, currentLyricIndex,
 } from './lib/core.js';
 import { mountAI } from './lib/tab-ai.js';
@@ -7,6 +7,7 @@ import { mountTranslate } from './lib/tab-translate.js';
 import { mountAnime } from './lib/tab-anime.js';
 import { mountFootball } from './lib/tab-football.js';
 
+await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();
 const popup = popupBehaviour();
@@ -49,7 +50,7 @@ const providers = zebar.createProviderGroup({
   network: { type: 'network', refreshInterval: 2000 },
 });
 let out = providers.outputMap;
-const clock = mediaClock();
+const clock = mediaClock({ resync: 30000 });
 let chosen = null;          // sessionId picked from the chips, else current session
 let art = '', lyr = null, trackKey = '';
 
@@ -124,6 +125,9 @@ $('#player').addEventListener('click', e => {
   const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
   const s = session();
   if (ctl && s) out.media?.[ctl]({ sessionId: s.sessionId });
+  const bar = e.target.closest('.progress .bar');   // click to seek
+  const dur = s ? (s.endTime || 0) - (s.startTime || 0) : 0;
+  if (bar && dur > 0) { const r = bar.getBoundingClientRect(); clock.seek(((e.clientX - r.left) / r.width) * dur).then(tick); tick(); }
   const pick = e.target.closest('[data-session]')?.dataset.session;
   if (pick) { chosen = pick; renderPlayer(); }
 });

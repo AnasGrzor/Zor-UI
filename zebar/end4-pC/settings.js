@@ -9,7 +9,7 @@ const close = popupBehaviour();
 close.togglePin();   // a real window: stays open when the wallpaper picker takes focus; Esc or Close shuts it
 
 const PAGES = [
-  ['quick', 'tune', 'Quick'], ['wallpapers', 'animated_images', 'Wallpapers'], ['presets', 'palette', 'Presets'], ['bar', 'toolbar', 'Bar & desktop'],
+  ['quick', 'tune', 'Quick'], ['keys', 'keyboard', 'Keybinds'], ['wallpapers', 'animated_images', 'Wallpapers'], ['presets', 'palette', 'Presets'], ['bar', 'toolbar', 'Bar & desktop'],
   ['services', 'hub', 'Services'], ['about', 'info', 'About'],
 ];
 const SCHEMES = [
@@ -24,7 +24,8 @@ const LEAGUES = [['esp.1', 'LaLiga'], ['eng.1', 'Premier League'], ['ita.1', 'Se
 const KEY_PROVIDERS = [['gemini', 'Google Gemini'], ['anthropic', 'Anthropic (Claude)'], ['openai', 'OpenAI'], ['mistral', 'Mistral'],
   ['openrouter', 'OpenRouter'], ['wallhaven', 'Wallhaven (for NSFW search)']];
 
-let page = new URLSearchParams(location.search).get('page') || 'quick';
+// The "keybinds" widget (Mod+/) is this same page, opened on the Keybinds tab.
+let page = zebar.currentWidget().name === 'keybinds' ? 'keys' : new URLSearchParams(location.search).get('page') || 'quick';
 let online = null, local = null, keys = null, models = null, busy = '';
 let we = null, weList = null, weQuery = '', weType = 'all';
 const loading = new Set();
@@ -192,19 +193,34 @@ const pages = {
     <div class="card">${sw('lyrics', 'Synced lyrics', 'From lrclib.net, in the left sidebar', 'lyrics')}</div>`;
   },
 
-  about() {
+  keys() {
+    // Mirrors glazewm/config.template.yaml; keep both in sync.
     const m = cfg.modKey === 'lwin' ? 'Win' : 'Alt';
-    const keysList = [[`${m}+A`, 'Left sidebar (home, AI, translator, anime, football)'], [`${m}+N`, 'Right sidebar (toggles, notifications)'],
-      [`${m}+I`, 'Settings'], [cfg.modKey === 'lwin' ? 'Win+Tab' : 'Alt+`', 'Overview'], ['Alt+Space', 'Launcher'],
-      [`${m}+Ctrl+T`, 'Change wallpaper'], [`${m}+Ctrl+D`, 'Dark / light'], [`${m}+Ctrl+R`, 'Restart the bar'],
-      [`${m}+1…0`, 'Workspaces'], [`${m}+Shift+1…0`, 'Move window'], [`${m}+Q`, 'Close window'], [`${m}+F`, 'Fullscreen']];
+    const groups = [
+      ['dashboard', 'Shell', [[`${m}+A`, 'Left sidebar: home, AI, translator, anime, football'], [`${m}+N`, 'Right sidebar: toggles, notifications, calendar'],
+        [`${m}+I`, 'Settings'], [`${m}+/`, 'This keybinds list'], [cfg.modKey === 'lwin' ? 'Win+Tab' : 'Alt+`', 'Overview'], ['Alt+Space', 'Launcher'],
+        [`${m}+Ctrl+T`, 'Pick a wallpaper and regenerate colors'], [`${m}+Ctrl+D`, 'Dark / light'], [`${m}+Ctrl+R`, 'Restart the bar and reload GlazeWM'],
+        ['Ctrl+PgUp / PgDn', 'Switch tabs in a sidebar or here'], ['Esc', 'Close a sidebar or this window']]],
+      ['apps', 'Apps', [[`${m}+Enter / ${m}+T`, 'Terminal'], [`${m}+E`, 'File Explorer'], [`${m}+W`, 'Edge'], [`${m}+C`, 'VS Code'],
+        [`${m}+Shift+S`, 'Screen snip'], [`${m}+K`, 'On-screen keyboard']]],
+      ['view_quilt', 'Windows', [[`${m}+Arrows`, 'Focus the window in that direction'], [`${m}+Shift+Arrows`, 'Move the window in that direction (also to another monitor)'],
+        [`${m}+V`, 'Next window opens beside / below'], [`${m}+R`, 'Resize mode: arrows to resize, Esc or Enter to finish'], [`${m}+- / ${m}+=`, 'Narrower / wider'],
+        [`${m}+Q`, 'Close'], [`${m}+F`, 'Fullscreen'], [`${m}+Shift+Space`, 'Float / tile'], [`${m}+Shift+T`, 'Tile a floating window'], [`${m}+M`, 'Minimize']]],
+      ['grid_view', 'Workspaces', [[`${m}+1…0`, 'Go to workspace 1–10'], [`${m}+Shift+1…0`, 'Send the window to workspace 1–10'],
+        [`${m}+Ctrl+← / →`, 'Previous / next workspace'], [`${m}+PgUp / PgDn`, 'Previous / next workspace'], [`${m}+Ctrl+Shift+← / →`, 'Move the workspace to another monitor']]],
+      ['build', 'GlazeWM', [[`${m}+Shift+P`, 'Pause tiling (press again to resume)'], [`${m}+Shift+W`, 'Redraw all windows'], [`${m}+Shift+E`, 'Quit GlazeWM']]],
+    ];
+    return groups.map(([ic, title, list]) => `<h2>${icon(ic)}${title}</h2>
+    <div class="card"><div class="keys">${list.map(([k, d]) => `<kbd>${k}</kbd><span>${d}</span>`).join('')}</div></div>`).join('')
+      + `<div class="muted" style="margin:12px 4px">Games are left alone by GlazeWM (window rule in %USERPROFILE%\\.glzr\\glazewm\\config.yaml).</div>`;
+  },
+
+  about() {
     return `<h2>${icon('info')}About</h2>
     <div class="card"><div class="row"><div class="lbl"><b style="font-weight:500">end4-pC for Windows</b><small>A port of pctrade's end4-pC (illogical-impulse by end-4) to GlazeWM + Zebar</small></div>
       <button class="chip" data-url="https://github.com/pctrade/end4-pC">${icon('open_in_new')}end4-pC</button></div>
       <div class="row"><div class="lbl">Windows settings</div><button class="chip" data-act="winsettings">${icon('settings')}Open</button></div>
-      <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\end4-pC\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>
-    <h2>${icon('keyboard')}Keybinds</h2>
-    <div class="card"><div class="keys">${keysList.map(([k, d]) => `<kbd>${k}</kbd><span>${d}</span>`).join('')}</div></div>`;
+      <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\end4-pC\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>`;
   },
 };
 

@@ -1,5 +1,5 @@
 import {
-  zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openWidget, mediaClock,
+  zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openHere, mediaClock,
   weatherIcon, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
@@ -134,9 +134,12 @@ render();
 setInterval(() => out.media?.currentSession?.isPlaying && renderMedia(), 1000);
 
 // ---------------------------------------------------------------- events
-$('#btn-left').addEventListener('click', () => openWidget('sidebar-left'));
-$('#g-sys').addEventListener('click', () => openWidget('sidebar-right'));
-$('#g-clock').addEventListener('click', () => openWidget('sidebar-right'));
+const here = name => openHere(name, out.glazewm?.currentMonitor);   // popups open on this bar's monitor
+localStorage.setItem('end4.barAlive', Date.now());
+setInterval(() => localStorage.setItem('end4.barAlive', Date.now()), 2000);
+$('#btn-left').addEventListener('click', () => here('sidebar-left'));
+$('#g-sys').addEventListener('click', () => here('sidebar-right'));
+$('#g-clock').addEventListener('click', () => here('sidebar-right'));
 
 $('#g-ws').addEventListener('click', e => {
   const b = e.target.closest('[data-ws]');
@@ -145,12 +148,12 @@ $('#g-ws').addEventListener('click', e => {
 $('#g-ws').addEventListener('wheel', e => {
   out.glazewm?.runCommand(e.deltaY > 0 ? 'focus --next-active-workspace' : 'focus --prev-active-workspace');
 }, { passive: true });
-$('#g-ws').addEventListener('contextmenu', e => { e.preventDefault(); openWidget('overview'); });
+$('#g-ws').addEventListener('contextmenu', e => { e.preventDefault(); here('overview'); });
 
 const media = $('#g-media');
 media.addEventListener('click', () => out.media?.togglePlayPause());
 media.addEventListener('auxclick', e => e.button === 1 && out.media?.next());
-media.addEventListener('contextmenu', e => { e.preventDefault(); openWidget('sidebar-left'); });
+media.addEventListener('contextmenu', e => { e.preventDefault(); here('sidebar-left'); });
 
 $('#g-utils').addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;

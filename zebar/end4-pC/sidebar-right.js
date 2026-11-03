@@ -1,5 +1,6 @@
-import { zebar, $, $$, esc, icon, setHTML, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget } from './lib/core.js';
+import { zebar, $, $$, esc, icon, setHTML, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
 
+await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();
 popupBehaviour();

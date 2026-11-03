@@ -74,7 +74,7 @@
       "htmlPath": "./sidebar-left.html",
       "zOrder": "top_most",
       "shownInTaskbar": false,
-      "focused": true,
+      "focused": false,
       "resizable": false,
       "transparent": true,
       "includeFiles": [
@@ -117,7 +117,7 @@
           "width": "480px",
           "height": "100%",
           "monitorSelection": {
-            "type": "primary"
+            "type": "all"
           },
           "dockToEdge": {
             "enabled": false,
@@ -132,7 +132,7 @@
       "htmlPath": "./sidebar-right.html",
       "zOrder": "top_most",
       "shownInTaskbar": false,
-      "focused": true,
+      "focused": false,
       "resizable": false,
       "transparent": true,
       "includeFiles": [
@@ -175,7 +175,7 @@
           "width": "480px",
           "height": "100%",
           "monitorSelection": {
-            "type": "primary"
+            "type": "all"
           },
           "dockToEdge": {
             "enabled": false,
@@ -190,7 +190,7 @@
       "htmlPath": "./overview.html",
       "zOrder": "top_most",
       "shownInTaskbar": false,
-      "focused": true,
+      "focused": false,
       "resizable": false,
       "transparent": true,
       "includeFiles": [
@@ -233,7 +233,7 @@
           "width": "82%",
           "height": "74%",
           "monitorSelection": {
-            "type": "primary"
+            "type": "all"
           },
           "dockToEdge": {
             "enabled": false,
@@ -245,6 +245,64 @@
     },
     {
       "name": "settings",
+      "htmlPath": "./settings.html",
+      "zOrder": "top_most",
+      "shownInTaskbar": false,
+      "focused": true,
+      "resizable": false,
+      "transparent": true,
+      "includeFiles": [
+        "*.html",
+        "*.js",
+        "*.css",
+        "*.json",
+        "*.jpg",
+        "lib/**",
+        "assets/**",
+        "we-thumbs/**"
+      ],
+      "caching": {
+        "defaultDuration": 604800,
+        "rules": [
+          {
+            "urlRegex": "^https://([a-z0-9-]+\\.)*(yande\\.re|konachan\\.(net|com)|donmai\\.us|waifu\\.im|wallhaven\\.cc|githubusercontent\\.com|espncdn\\.com)/",
+            "duration": 3600
+          }
+        ]
+      },
+      "privileges": {
+        "shellCommands": [
+          {
+            "program": "powershell",
+            "argsRegex": "^-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {{SCRIPTS_RE}}\\\\(toggles|switchwall|media-art)\\.ps1( -[A-Za-z]+( [A-Za-z0-9#._-]*)?)*$"
+          },
+          {
+            "program": "{{PYTHON}}",
+            "argsRegex": "(?s)^-X utf8 {{SCRIPTS_RE}}\\\\end4_bridge\\.py [a-z-]+( .*)?$"
+          }
+        ]
+      },
+      "presets": [
+        {
+          "name": "default",
+          "anchor": "center",
+          "offsetX": "0px",
+          "offsetY": "0px",
+          "width": "64%",
+          "height": "80%",
+          "monitorSelection": {
+            "type": "primary"
+          },
+          "dockToEdge": {
+            "enabled": false,
+            "edge": null,
+            "windowMargin": "0px"
+          }
+        }
+      ]
+    },
+    {
+      "name": "keybinds",
       "htmlPath": "./settings.html",
       "zOrder": "top_most",
       "shownInTaskbar": false,

@@ -85,6 +85,14 @@ window_rules:
         window_class: { not_regex: 'OpusApp' }
       - window_process: { equals: 'POWERPNT' }
         window_class: { not_regex: 'PPTFrameClass' }
+  # Games manage their own window, monitor and fullscreen; GlazeWM leaves them alone.
+  # Engine window classes catch most Unreal, Unity, Source and SDL games. Games that
+  # hide their class (Call of Duty does) go in the process list: the .exe name without
+  # ".exe". Press Mod+Ctrl+R after editing.
+  - commands: ['ignore']
+    match:
+      - window_class: { regex: '^(UnrealWindow|UnityWndClass|SDL_app|Valve001)$' }
+      - window_process: { regex: '^(cod\d*(-cod)?)$' }
   # Small utility windows float, like end4's Hyprland window rules.
   - commands: ['set-floating --centered']
     match:
@@ -109,20 +117,25 @@ binding_modes:
 
 keybindings:
   # ---- end4 shell: sidebars, overview, wallpaper -------------------------
-  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name sidebar-left --preset default']
+  # Sidebars and overview open on the focused monitor; pressing again closes them
+  # (openOnTargetMonitor in lib/core.js). Placement matches the presets in zpack.json.
+  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name sidebar-left --anchor top_left --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
     bindings: ['{{MOD}}+a']
-  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name sidebar-right --preset default']
+  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name sidebar-right --anchor top_right --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
     bindings: ['{{MOD}}+n']
-  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name overview --preset default']
+  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name overview --anchor center --offset-x 0px --offset-y 0px --width 82% --height 74% --monitor-type all']
     bindings: ['{{OVERVIEW}}']
   - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name settings --preset default']
     bindings: ['{{MOD}}+i']
+  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name keybinds --preset default']
+    bindings: ['{{MOD}}+oem_question']
   - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1"']
     bindings: ['{{MOD}}+ctrl+t']
   - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1" -ToggleMode']
     bindings: ['{{MOD}}+ctrl+d']
-  # Reload everything (end4: Ctrl+Super+R restarts the shell).
-  - commands: ['shell-exec taskkill /IM zebar.exe /F', 'wm-reload-config', 'shell-exec zebar']
+  # Reload everything (end4: Ctrl+Super+R restarts the shell). One sequential command: shell-exec
+  # doesn't wait, so a separate taskkill + zebar raced and could leave no Zebar running.
+  - commands: ['wm-reload-config', 'shell-exec --hide-window powershell -NoProfile -Command "Stop-Process -Name zebar -Force -ErrorAction SilentlyContinue; Wait-Process -Name zebar -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 300; Start-Process zebar"']
     bindings: ['{{MOD}}+ctrl+r']
 
   # ---- apps ---------------------------------------------------------------

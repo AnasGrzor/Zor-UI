@@ -87,6 +87,7 @@ Re-running `install.ps1` updates everything and keeps your `config.json` setting
 | `Mod+A` | Left sidebar: Home (player, lyrics), AI, Translator, Anime, Football |
 | `Mod+N` | Right sidebar: toggles, sliders, notifications, calendar, to-do |
 | `Mod+I` | Settings (colors, presets gallery, API keys, options) |
+| `Mod+/` | Keybinds cheatsheet (also Settings → Keybinds) |
 | ``Alt+` `` (or `Win+Tab`) | Overview |
 | `Alt+Space` | Launcher (Flow Launcher) |
 | `Mod+Ctrl+T` | Pick a wallpaper (image or video) and regenerate colors |

@@ -214,12 +214,78 @@ export function md(src) {
 
 export const openWidget = name => zebar.startWidgetPreset(name, 'default').catch(e => console.warn(e));
 
-/** Popups (sidebars, overview) close on Esc or when focus leaves them, like end4. */
+/**
+ * Bar side of openOnTargetMonitor: open (or close) a popup on this bar's monitor. Starts a fresh
+ * copy with the preset's placement, because Zebar ignores starting a preset that's already open.
+ */
+let zpack;
+export async function openHere(name, monitor) {
+  if (monitor) localStorage.setItem('end4.openOn', JSON.stringify({ monitor: monitor.id, at: Date.now() }));
+  zpack ??= await (await fetch('/zpack.json')).json();
+  const { name: _, ...placement } = zpack.widgets.find(w => w.name === name).presets[0];
+  return zebar.startWidget(name, placement, {}).catch(e => console.warn(e));
+}
+
+/**
+ * Popups (sidebars, overview) open on every monitor at once (zpack "all"), which is as fast as
+ * opening one. Each copy keeps itself only on the target monitor: the bar that was clicked
+ * (openHere), else the monitor GlazeWM has focused. A second shortcut press closes the popup:
+ * GlazeWM swallows the key and Zebar ignores starting an open preset, so shortcuts start a new
+ * copy (`zebar start-widget`), which tells the open one to close and leaves. Also restarts the
+ * bar if Zebar was started by a shortcut, which opens only that one widget.
+ */
+export async function openOnTargetMonitor() {
+  document.documentElement.style.visibility = 'hidden';
+  const win = zebar.currentWidget();
+  const leave = async () => { win.window.tauri.close(); await new Promise(() => {}); };   // stops this copy's module
+  // The press or click that just closed this popup (blur, focus change) must not reopen it.
+  if (Date.now() - Number(localStorage.getItem('end4.closedAt.' + win.name) || 0) < 600) await leave();
+  const provider = zebar.createProvider({ type: 'glazewm' });
+  const wm = provider.output ?? await new Promise(res => {
+    provider.onOutput(res);
+    setTimeout(() => res(null), 1500);   // GlazeWM not answering: show every copy
+  });
+  provider.stop?.();
+  const hint = JSON.parse(localStorage.getItem('end4.openOn') || 'null');
+  const target = hint && Date.now() - hint.at < 3000 ? hint.monitor : wm?.focusedMonitor?.id;
+  // Copies on other monitors leave before asking anything, so the copies of one key press
+  // (which load up to ~0.5 s apart) can't mistake each other for an open popup.
+  if (target && wm?.currentMonitor?.id !== target) await leave();
+  // zpack opens popups unfocused so the copies don't steal focus from each other; take it now.
+  // Windows refuses Zebar's own setFocus after a shortcut (the key went to GlazeWM), so the bridge
+  // does it too, started here so it overlaps the checks below. Without focus, Esc and typing go
+  // to the window underneath. Harmless if this copy turns out to be closing.
+  win.window.tauri.setFocus().catch(() => {});
+  bridge('focus-widget', win.name, Math.round(window.screenX * devicePixelRatio), Math.round(window.screenY * devicePixelRatio));
+  const channel = new BroadcastChannel('end4-popup-' + win.name);
+  const alreadyOpen = await new Promise(res => {
+    channel.onmessage = e => e.data === 'open' && res(true);
+    channel.postMessage('ping');
+    setTimeout(() => res(false), 150);
+  });
+  if (alreadyOpen) { channel.postMessage('close'); await leave(); }
+  // This copy is the one showing: answer later presses, and close on request (Esc path animates).
+  channel.onmessage = e => {
+    if (e.data === 'ping') channel.postMessage('open');
+    if (e.data === 'close') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  };
+  if (Date.now() - Number(localStorage.getItem('end4.barAlive') || 0) > 6000)
+    for (const w of ['bar', 'desktop', 'visualizer']) openWidget(w);   // no duplicates if already open
+  document.documentElement.style.visibility = '';
+}
+
+/**
+ * Popups close on Esc, a click outside, or when another window gets focus, like end4. A popup
+ * opened by a shortcut often never gets keyboard focus (Windows blocks background processes
+ * from taking it), so it gets no blur event either; GlazeWM's focus changes cover that case.
+ */
 export function popupBehaviour({ onClose } = {}) {
   let closing = false;
-  const close = async () => {
+  const close = async (reason = 'esc') => {
     if (closing) return;
     closing = true;
+    localStorage.setItem('end4.closedAt.' + zebar.currentWidget().name, Date.now());
+    console.debug('[end4] popup closed:', reason);
     document.body.classList.add('leaving');
     onClose?.();
     await new Promise(r => setTimeout(r, 160));
@@ -227,28 +293,57 @@ export function popupBehaviour({ onClose } = {}) {
   };
   let armed = false, pinned = false;
   setTimeout(() => (armed = true), 500);
+  const away = () => armed && !pinned && close('focus-moved');
   window.addEventListener('keydown', e => e.key === 'Escape' && close());
-  window.addEventListener('blur', () => armed && !pinned && close());
-  document.addEventListener('mousedown', e => e.target === document.body && !pinned && close());
+  window.addEventListener('blur', () => armed && !pinned && close('blur'));
+  document.addEventListener('mousedown', e => e.target === document.body && !pinned && close('click-outside'));
+  let focused;
+  zebar.createProvider({ type: 'glazewm' }).onOutput(o => {
+    const id = o?.focusedContainer?.id;
+    if (focused !== undefined && id !== focused) away();
+    focused = id;
+  });
   close.togglePin = () => (pinned = !pinned);
   return close;
 }
 
 // ------------------------------------------------------------------ media
 /** Interpolates the playback position between provider updates. */
-export function mediaClock() {
-  let base = 0, at = performance.now(), playing = false, key = '';
-  return {
+// Zebar's position is a snapshot without the time Windows took it (often "0" from minutes ago),
+// so the clock syncs from Windows' timeline (media-art.ps1 -Timeline: position + when it was taken)
+// on track or play/pause changes and every `resync` ms, and interpolates in between.
+export function mediaClock({ resync = 0 } = {}) {
+  let base = 0, at = performance.now(), playing = false, key = '', reported = null, syncing = false, lastSync = 0;
+  const fromTimeline = t => {
+    if (!t?.ok) return;
+    playing = t.playing;
+    base = t.position + (t.playing ? (Date.now() - t.updated) / 1000 : 0);
+    at = performance.now();
+  };
+  const clock = {
     update(s) {
       if (!s) { key = ''; return; }
       const k = s.sessionId + '|' + s.title;
-      if (k !== key || Math.abs(s.position - this.position()) > 1.5 || s.isPlaying !== playing) {
-        base = s.position; at = performance.now();
-      }
-      key = k; playing = s.isPlaying;
+      const now = performance.now();
+      if (k !== key || s.position !== reported) { base = s.position; at = now; }   // Windows published a new timeline
+      else if (s.isPlaying !== playing) { base = clock.position(); at = now; }   // pause/resume where we are
+      const changed = k !== key || s.isPlaying !== playing;
+      key = k; reported = s.position; playing = s.isPlaying;
+      // media-art.ps1 reads Windows' *current* session, so only sync when that's the one shown.
+      if (s.isCurrentSession !== false && (changed || (resync && Date.now() - lastSync > resync))) clock.sync();
+    },
+    async sync() {
+      if (syncing) return;
+      syncing = true; lastSync = Date.now();
+      try { fromTimeline(await run('media-art', '-Timeline')); } finally { syncing = false; }
+    },
+    async seek(seconds) {
+      base = seconds; at = performance.now();   // move the bar at once; Windows confirms below
+      fromTimeline(await run('media-art', '-Seek', Math.max(0, seconds).toFixed(1)));
     },
     position() { return playing ? base + (performance.now() - at) / 1000 : base; },
   };
+  return clock;
 }
 
 export const fmtTime = s => {

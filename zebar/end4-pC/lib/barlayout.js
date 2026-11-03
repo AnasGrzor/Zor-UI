@@ -4,7 +4,8 @@
 // [id, default side, label, icon], in default order. Sides: left, center, right, hidden.
 export const BAR_MODULES = [
   ['launcher', 'left', 'Sidebar button', 'auto_awesome'], ['window', 'left', 'Active window', 'web_asset'],
-  ['resources', 'center', 'CPU & RAM', 'memory'], ['media', 'center', 'Media', 'music_note'],
+  ['resources', 'center', 'CPU & RAM', 'memory'], ['media', 'center', 'Media (hidden while the island shows)', 'music_note'],
+  ['island', 'center', 'Dynamic Island: media, timers, recording, alerts', 'pill'],
   ['workspaces', 'center', 'Workspaces', 'grid_view'], ['clock', 'center', 'Clock, timer & recording', 'schedule'],
   ['utils', 'center', 'Utility buttons', 'build'], ['weather', 'center', 'Weather', 'partly_cloudy_day'],
   ['wm', 'right', 'Tiling status', 'view_quilt'], ['netspeed', 'hidden', 'Network speed', 'swap_vert'],

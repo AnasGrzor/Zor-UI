@@ -14,6 +14,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py ai-chat                 (reads one JSON line on stdin, streams JSON lines)
     end4_bridge.py secret-set <name> [value]   /  secret-status
     end4_bridge.py notifications           /  notifications-dismiss <id...|all>
+    end4_bridge.py notifications-watch     (streams new notifications)
     end4_bridge.py nightlight on|off|status [kelvin]
     end4_bridge.py color-pick              (full-screen picker; copies the hex colour)
     end4_bridge.py mixer [volume <app> <0-100> | mute <app> <0|1>]
@@ -490,11 +491,15 @@ def _toast_text(payload):
     return (texts[0] if texts else ""), "\n".join(texts[1:])
 
 
+def _wpndb():
+    return Path(os.environ.get("END4_WPNDB", Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Notifications" / "wpndatabase.db"))
+
+
 def read_notifications():
     """Reads Windows' notification history (the same database Action Center uses)."""
     import sqlite3
     import tempfile
-    src = Path(os.environ.get("END4_WPNDB", Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Notifications" / "wpndatabase.db"))
+    src = _wpndb()
     if not src.exists():
         return {"error": "Notification history not found", "items": []}
     dismissed = set(load_json(DISMISSED, []))
@@ -528,6 +533,28 @@ def read_notifications():
 
 def cmd_notifications():
     out(read_notifications())
+
+
+def cmd_notifications_watch():
+    """Streams {"new": notification} as notifications arrive, for the bar's Dynamic Island. Re-reads
+    the database only when it (or its write-ahead log) changes. One copy runs for all bars."""
+    if not _first_instance("notif-watch"):
+        return out({"skip": "already running"})
+    ppid = _owner_pid()
+    _exit_with_owner(ppid)
+    db = _wpndb()
+    seen = {n["id"] for n in read_notifications().get("items", [])}
+    out({"started": True})
+    stamp = None
+    while _parent_alive(ppid):
+        now = tuple(f.stat().st_mtime_ns for f in (db, db.with_name(db.name + "-wal")) if f.exists())
+        if now != stamp:
+            stamp = now
+            for n in reversed(read_notifications().get("items", [])):   # oldest first
+                if n["id"] not in seen:
+                    seen.add(n["id"])
+                    out({"new": n})
+        time.sleep(2)
 
 
 def cmd_notifications_dismiss(*ids):
@@ -1604,6 +1631,7 @@ COMMANDS = {
     "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat,
     "secret-set": cmd_secret_set, "secret-status": cmd_secret_status,
     "notifications": cmd_notifications, "notifications-dismiss": cmd_notifications_dismiss,
+    "notifications-watch": cmd_notifications_watch,
     "nightlight": cmd_nightlight, "config-set": cmd_config_set,
     "presets-online": cmd_presets_online, "preset-apply-online": cmd_preset_apply_online,
     "presets-local": cmd_presets_local, "preset-save": cmd_preset_save,

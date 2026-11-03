@@ -1,6 +1,6 @@
 import {
   zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openHere, mediaClock,
-  weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, bridge, monthGrid,
+  weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, bridge, monthGrid, albumArt, greeting,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
 import * as timer from './lib/timer.js';
@@ -13,7 +13,7 @@ reloadOnConfigChange();
 // Modules move into their side in the saved order; hidden ones stay in the page (hidden) so the
 // rendering code doesn't have to care.
 const MODULE_EL = {
-  launcher: ['#btn-left'], window: ['.aw'], resources: ['#g-res'], media: ['#g-media'], workspaces: ['#g-ws'],
+  launcher: ['#btn-left'], window: ['.aw'], resources: ['#g-res'], media: ['#g-media'], island: ['#g-island'], workspaces: ['#g-ws'],
   clock: ['#g-clock', '#g-timer', '#g-rec'], utils: ['#g-utils'], weather: ['#g-weather'], wm: ['#g-wm'],
   netspeed: ['#g-net'], tray: ['#g-tray'], system: ['#g-sys'],
 };
@@ -26,6 +26,8 @@ for (const [id, side] of layout)
     if (!el.hidden) $(SIDE_EL[side]).append(el);
   }
 const netShown = layout.some(m => m[0] === 'netspeed' && m[1] !== 'hidden');
+const islandShown = layout.some(m => m[0] === 'island' && m[1] !== 'hidden');
+if (islandShown) for (const sel of ['#g-media', '#g-timer', '#g-rec']) $(sel).hidden = true;   // the island shows these
 $('#bar').classList.add(cfg.bar.style, 'g-' + cfg.bar.groups);
 for (const b of document.querySelectorAll('#g-utils [data-act]')) b.hidden = !cfg.bar.utils.includes(b.dataset.act);
 await watchTheme(t => setHTML($('#mode-icon'), t.mode === 'dark' ? 'dark_mode' : 'light_mode'));
@@ -81,7 +83,7 @@ function watchAudio() {
       ? { icon: m.isMuted ? 'mic_off' : 'mic', text: m.isMuted ? 'Microphone muted' : 'Microphone on' }
       : { icon: volumeIcon(a), value: a.isMuted ? 0 : a.volume, text: a.isMuted ? 'Muted' : `${Math.round(a.volume)}%` };
     clearTimeout(osdTimer);
-    osdTimer = setTimeout(() => { osd = null; renderMedia(); }, 1800);
+    osdTimer = setTimeout(() => { osd = null; renderMedia(); renderIsland(); }, 1800);
   }
   lastAudio = now;
 }
@@ -185,23 +187,100 @@ $('#g-rec').addEventListener('click', async () => {
   await bridge('record', 'stop');   // opens Explorer on the new file
 });
 
+// The timer chip's content ('' when no timer runs); also used by the island.
+function timerChip() {
+  const timerDone = localStorage.getItem('end4-pC.timerDone'), s = timer.load();
+  if (timerDone) return { done: true, html: `${icon('alarm', { fill: true })}${timerDone === 'focus' ? 'Break time' : 'Focus time'}` };
+  if (s.running) return { html: `${icon(s.phase === 'focus' ? 'timer' : 'coffee')}${timer.clock(timer.left(s, cfg))}` };
+  if (s.sw.running) return { html: `${icon('timer_play')}${timer.clock(timer.swElapsed(s))}` };
+  return { html: '' };
+}
 function renderTimer() {
   const done = timer.tick(cfg);
   if (done) { localStorage.setItem('end4-pC.timerDone', done); run('toggles', '-Action', 'timer-done', '-Value', done); }
-  const timerDone = localStorage.getItem('end4-pC.timerDone');
-  const s = timer.load();
-  let html = '';
-  if (timerDone) html = `${icon('alarm', { fill: true })}${timerDone === 'focus' ? 'Break time' : 'Focus time'}`;
-  else if (s.running) html = `${icon(s.phase === 'focus' ? 'timer' : 'coffee')}${timer.clock(timer.left(s, cfg))}`;
-  else if (s.sw.running) html = `${icon('timer_play')}${timer.clock(timer.swElapsed(s))}`;
-  $('#g-timer').classList.toggle('done', !!timerDone);
-  setHTML($('#g-timer'), html);
+  const t = timerChip();
+  $('#g-timer').classList.toggle('done', !!t.done);
+  setHTML($('#g-timer'), t.html);
 }
 
 const rate = b => (b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB/s` : `${Math.round(b / 1e3)} KB/s`);
 function renderNet() {
   const t = netShown && out.network?.traffic;
   setHTML($('#g-net'), t ? `<span>${icon('arrow_upward')}${rate(t.transmitted.bytes)}</span><span>${icon('arrow_downward')}${rate(t.received.bytes)}</span>` : '');
+}
+
+// ---------------------------------------------------------------- Dynamic Island (end4's DynamicIsland)
+// One pill for the most important thing going on: a new notification or a volume change for a
+// moment, else recording, timer or media (the others as badges beside it; click one to switch),
+// else the time (or weather, when the clock module is on the bar) and status icons. Hovering media
+// shows its controls, and so does a track change, for 3 s.
+let diNotif = null, diNotifTimer, diFocus = '', diHover = false, diTrack = '', diTrackUntil = 0, diArt = '';
+const DI_BADGE = { recording: 'screen_record', timer: 'timer', media: 'music_note' };
+function diProviders() {
+  const s = out.media?.currentSession;
+  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['recording', !!localStorage.getItem('end4-pC.rec')],
+    ['timer', !!timerChip().html], ['media', !!s?.title]].filter(p => p[1]);
+}
+// Sets the HTML and springs the width from the old size to the new one.
+function morph(el, html) {
+  if (el.__html === html) return;
+  const from = el.offsetWidth;
+  el.style.width = '';
+  setHTML(el, html);
+  const to = el.offsetWidth;
+  if (!from || from === to) return;
+  el.style.width = `${from}px`;
+  el.offsetWidth;   // reflow, so the change below animates
+  el.style.width = `${to}px`;
+  clearTimeout(el.__morph);
+  el.__morph = setTimeout(() => (el.style.width = ''), 450);
+}
+function renderIsland() {
+  if (!islandShown) return;
+  const list = diProviders(), win = list.find(p => p[2]);
+  const main = win || list.find(p => p[0] === diFocus) || list[0];
+  const state = main?.[0] || 'idle';
+  const s = out.media?.currentSession;
+  const key = s?.title ? `${s.title}|${s.artist}` : '';
+  if (key !== diTrack) {
+    if (diTrack && key) diTrackUntil = Date.now() + 3000;
+    diTrack = key; diArt = '';
+    if (key) albumArt(s).then(u => { if (diTrack === key) { diArt = u; renderIsland(); } });
+  }
+  const t = timerChip();
+  let html = '', wide = false;
+  if (state === 'notification') {
+    wide = true;
+    html = `${icon('notifications', { fill: true, cls: 'big' })}<span class="di-text ellipsis"><b>${esc(diNotif.app)}</b> · ${esc(diNotif.title || diNotif.body)}</span>`;
+  } else if (state === 'osd') {
+    html = `${icon(osd.icon, { fill: true, cls: 'big' })}${osd.value != null ? `<span class="osd-bar"><span style="width:${Math.round(osd.value)}%"></span></span>` : ''}<span>${osd.text}</span>`;
+  } else if (state === 'recording') {
+    html = `<span class="di-dot"></span>Recording ${timer.clock((Date.now() - Number(localStorage.getItem('end4-pC.rec'))) / 1000)}`;
+  } else if (state === 'timer') {
+    html = t.html;
+  } else if (state === 'media') {
+    wide = diHover || Date.now() < diTrackUntil;
+    const dur = (s.endTime || 0) - (s.startTime || 0);
+    html = `<div class="ring-wrap">${ring(dur > 0 ? clock.position() / dur : 0, { size: 28, stroke: 2.5 })}${diArt ? `<img src="${diArt}" alt="" />` : icon('music_note', { fill: true })}</div>
+      <span class="di-text ellipsis">${esc(wide && s.artist ? `${s.title} • ${s.artist}` : s.title)}</span>
+      ${wide ? `<span class="di-ctl"><button data-ctl="previous">${icon('skip_previous', { fill: true })}</button><button data-ctl="togglePlayPause">${icon(s.isPlaying ? 'pause' : 'play_arrow', { fill: true })}</button><button data-ctl="next">${icon('skip_next', { fill: true })}</button></span>` : ''}`;
+  } else {
+    const a = out.audio, w = out.weather;
+    const onBar = id => layout.some(m => m[0] === id && m[1] !== 'hidden');
+    const status = [a?.defaultRecordingDevice?.isMuted && 'mic_off', a?.defaultPlaybackDevice?.isMuted && 'volume_off',
+      out.network && !out.network.defaultInterface && 'wifi_off'].filter(Boolean);
+    // Whatever the bar doesn't already show: the time, else the weather, else a greeting.
+    html = `${!onBar('clock') ? `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !cfg.use24h })}</span>`
+      : w && !onBar('weather') ? `${icon(weatherIcon(w.status), { cls: 'big' })}<span>${temp(w, cfg.tempUnit)}</span>`
+      : `${icon('waving_hand', { cls: 'big' })}<span>${greeting()}</span>`}
+      ${status.length ? `<span class="di-status">${status.map(i => icon(i)).join('')}</span>` : ''}`;
+  }
+  const badges = win ? [] : list.filter(p => p !== main);
+  const el = $('#g-island');
+  el.dataset.state = state;
+  el.classList.toggle('wide', wide);
+  el.classList.toggle('done', state === 'timer' && !!t.done);
+  morph(el, `<div class="di-main">${html}</div>${badges.map(([id]) => `<button class="di-badge" data-di-focus="${id}" title="Show ${id}">${icon(DI_BADGE[id], { fill: true })}</button>`).join('')}`);
 }
 
 function render() {
@@ -217,12 +296,13 @@ function render() {
   renderWm();
   renderTray();
   renderSystem();
+  renderIsland();
 }
 
 providers.onOutput(render);
 render();
 // Keep the media progress ring moving between provider updates.
-setInterval(() => { out.media?.currentSession?.isPlaying && renderMedia(); renderTimer(); renderRec(); }, 1000);
+setInterval(() => { out.media?.currentSession?.isPlaying && renderMedia(); renderTimer(); renderRec(); renderIsland(); }, 1000);
 renderTimer();
 
 // ---------------------------------------------------------------- events
@@ -317,6 +397,27 @@ $('#g-ws').addEventListener('wheel', e => {
 }, { passive: true });
 $('#g-ws').addEventListener('contextmenu', e => { e.preventDefault(); here('overview'); });
 
+const island = $('#g-island');
+island.addEventListener('mouseenter', () => { diHover = true; renderIsland(); });
+island.addEventListener('mouseleave', () => { diHover = false; renderIsland(); });
+island.addEventListener('click', e => {
+  const focus = e.target.closest('[data-di-focus]')?.dataset.diFocus;
+  if (focus) { diFocus = focus; return renderIsland(); }
+  const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
+  if (ctl) return out.media?.[ctl]();
+  const state = island.dataset.state;
+  if (state === 'media') return out.media?.togglePlayPause();
+  if (state === 'recording') return $('#g-rec').click();   // stops it
+  if (state === 'timer') return $('#g-timer').click();     // opens the timer
+  if (state === 'notification') { diNotif = null; localStorage.setItem('end4-pC.rightTab', 'notif'); renderIsland(); return here('sidebar-right'); }
+  if (state === 'idle') return here('sidebar-right');
+});
+island.addEventListener('contextmenu', e => { e.preventDefault(); here('sidebar-left'); });   // player and lyrics
+island.addEventListener('wheel', e => {   // like the volume icon: scroll for volume
+  const a = out.audio, dev = a?.defaultPlaybackDevice;
+  if (dev) a.setVolume(Math.max(0, Math.min(100, Math.round(dev.volume + (e.deltaY < 0 ? 5 : -5)))));
+}, { passive: true });
+
 const media = $('#g-media');
 media.addEventListener('click', () => out.media?.togglePlayPause());
 media.addEventListener('auxclick', e => e.button === 1 && out.media?.next());
@@ -349,10 +450,11 @@ $('#g-sys').addEventListener('wheel', e => {
 }, { passive: true });
 
 // ---------------------------------------------------------------- optional bar visualizer (end4's bar "Visualizer" module)
-if (cfg.visualizer.bar && !$('#g-media').hidden) {
+const vizAnchor = islandShown ? '#g-island' : '#g-media';
+if (cfg.visualizer.bar && !$(vizAnchor).hidden) {
   const canvas = document.createElement('canvas');
   canvas.id = 'bar-viz';
-  $('#g-media').after(canvas);
+  $(vizAnchor).after(canvas);
   let levels = [];
   const proc = await bridgeStream('visualizer', [20], line => { levels = line.trim().split(' ').map(Number); }, { raw: true });
   window.addEventListener('beforeunload', () => proc?.kill());
@@ -364,4 +466,20 @@ if (cfg.visualizer.bar && !$('#g-media').hidden) {
 if (cfg.wallpaperEngine.follow) {
   const we = await bridgeStream('we-sync', [], () => {});
   window.addEventListener('beforeunload', () => we?.kill());
+}
+
+// ---------------------------------------------------------------- island: new notifications
+// One bar runs the watcher (notifications-watch allows one copy) and passes each new
+// notification to the other bars.
+const notifChan = new BroadcastChannel('end4-notifications');
+function showNotification(n) {
+  diNotif = n;
+  clearTimeout(diNotifTimer);
+  diNotifTimer = setTimeout(() => { diNotif = null; renderIsland(); }, 5000);
+  renderIsland();
+}
+notifChan.onmessage = e => showNotification(e.data);
+if (islandShown) {
+  const watch = await bridgeStream('notifications-watch', [], m => { if (m.new) { showNotification(m.new); notifChan.postMessage(m.new); } });
+  window.addEventListener('beforeunload', () => watch?.kill());
 }

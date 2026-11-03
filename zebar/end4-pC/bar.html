@@ -57,8 +57,8 @@
     #g-media .ring-wrap .ms { position: absolute; inset: 0; display: grid; place-items: center; font-size: 16px; }
     #g-media .title { max-width: 230px; font-size: 13px; }
     #g-media.osd { gap: 8px; padding: 0 12px; background: var(--secondary-container); color: var(--on-secondary-container); }
-    #g-media .osd-bar { width: 110px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--on-secondary-container) 20%, transparent); overflow: hidden; }
-    #g-media .osd-bar span { display: block; height: 100%; border-radius: 3px; background: var(--primary); transition: width 0.15s var(--ease-fx); }
+    .osd-bar { width: 110px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--on-secondary-container) 20%, transparent); overflow: hidden; }
+    .osd-bar span { display: block; height: 100%; border-radius: 3px; background: var(--primary); transition: width 0.15s var(--ease-fx); }
 
     /* workspaces */
     #g-ws { gap: 0; padding: 0 4px; }
@@ -109,6 +109,29 @@
 
     /* Settings > Bar: styles and hidden modules */
     [hidden] { display: none !important; }
+
+    /* Dynamic Island (end4's DynamicIsland): one pill whose width springs between states */
+    #g-island { gap: 6px; padding: 0 5px; overflow: hidden; cursor: pointer; transition: width 0.4s cubic-bezier(0.34, 1.35, 0.64, 1), background 0.3s var(--ease-fx); }
+    #g-island .di-main { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 4px; }
+    #g-island .di-text { max-width: 170px; font-size: 13px; }
+    #g-island.wide .di-text { max-width: 280px; }
+    #g-island .ring-wrap { position: relative; width: 28px; height: 28px; flex: none; }
+    #g-island .ring-wrap img, #g-island .ring-wrap .ms { position: absolute; inset: 4px; width: 20px; height: 20px; border-radius: 50%; object-fit: cover; display: grid; place-items: center; font-size: 14px; }
+    #g-island .di-ctl { display: flex; gap: 2px; }
+    #g-island .di-ctl button { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; }
+    #g-island .di-ctl button:hover { background: var(--hover); }
+    #g-island .di-ctl .ms { font-size: 18px; }
+    #g-island .di-badge { width: 26px; height: 26px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--secondary-container); color: var(--on-secondary-container); }
+    #g-island .di-badge .ms { font-size: 15px; }
+    #g-island .di-status { display: flex; gap: 2px; color: var(--on-surface-variant); }
+    #g-island .di-status .ms { font-size: 16px; }
+    #g-island .ms.big { font-size: 18px; }
+    #g-island[data-state="notification"] { background: var(--secondary-container); color: var(--on-secondary-container); }
+    #g-island[data-state="osd"] { background: var(--secondary-container); color: var(--on-secondary-container); }
+    #g-island[data-state="recording"] { background: var(--error); color: var(--on-error); }
+    #g-island.done { background: var(--primary); color: var(--on-primary); }
+    #g-island .di-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: di-pulse 0.9s ease-in-out infinite alternate; }
+    @keyframes di-pulse { to { opacity: 0.25; } }
     #bar.flat { inset: 0; height: 56px; border-radius: 0; border-width: 0 0 1px; box-shadow: none; padding: 0 10px; }
     #bar.islands { background: none; border: 0; box-shadow: none; }
     #bar.islands .group, #bar.islands #btn-left, #bar.islands .aw {
@@ -129,6 +152,7 @@
     <div class="center">
       <div class="group" id="g-res"></div>
       <div class="group" id="g-media" title="Click: play/pause · Right-click: player · Middle-click: next"></div>
+      <div class="group" id="g-island"></div>
       <div class="group" id="g-ws"></div>
       <div class="group" id="g-clock" title="Open calendar"></div>
       <div class="group" id="g-timer" title="Timer (click to open)"></div>

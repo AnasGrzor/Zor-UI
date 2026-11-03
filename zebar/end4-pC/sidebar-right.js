@@ -74,7 +74,7 @@ async function toggle(id) {
       sys.nightError = r.ok === false ? 'Not supported here' : '';
       if (r.ok === false) run('toggles', '-Action', 'settings', '-Value', 'nightlight');   // fall back to Windows' own
     });
-    case 'snip': zebar.currentWidget().close(); return run('toggles', '-Action', 'snip');
+    case 'snip': zebar.currentWidget().window.tauri.close(); return run('toggles', '-Action', 'snip');
     case 'osk': return run('toggles', '-Action', 'osk');
   }
 }
@@ -221,7 +221,7 @@ $('header').addEventListener('contextmenu', e => {
 });
 $('header').addEventListener('click', e => {
   const c = e.target.closest('[data-cmd]')?.dataset.cmd;
-  if (c === 'settings') { openWidget('settings'); zebar.currentWidget().close(); }
+  if (c === 'settings') { openWidget('settings'); zebar.currentWidget().window.tauri.close(); }
   if (c === 'reload') out.glazewm?.runCommand('wm-reload-config');
   if (c === 'power') $('#power').classList.toggle('open');
 });

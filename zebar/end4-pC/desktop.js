@@ -1,10 +1,9 @@
 import { zebar, $, esc, icon, setHTML, config, watchTheme, albumArt, weatherIcon, weatherText, temp, greeting, reloadOnConfigChange } from './lib/core.js';
 
 const cfg = await config();
-if (cfg.desktopWidgets === false) zebar.currentWidget().close();
+if (cfg.desktopWidgets === false) zebar.currentWidget().window.tauri.close();
 reloadOnConfigChange();
 await watchTheme();
-zebar.currentWidget().setZOrder('bottom_most').catch(() => {});
 
 const providers = zebar.createProviderGroup({
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },

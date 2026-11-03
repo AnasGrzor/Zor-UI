@@ -987,7 +987,7 @@ def cmd_we_sync():
     except (OSError, ValueError):
         pass
     lock.write_text(str(os.getpid()))
-    ppid = os.getppid()
+    ppid = _owner_pid()
     out({"started": True})
     last = None
     interval = float(os.environ.get("END4_WE_INTERVAL", "5"))
@@ -1032,6 +1032,38 @@ def _parent_alive(ppid):
     return alive
 
 
+def _owner_pid():
+    """PID of the process that started this stream (Zebar). On Windows a venv's python.exe
+    is a launcher that runs the real interpreter as its child and outlives Zebar, so watching
+    it would keep streams (and Zebar's inherited port) alive forever. Skip over it."""
+    ppid = os.getppid()
+    if not IS_WIN or sys.prefix == sys.base_prefix:
+        return ppid
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    k = ctypes.windll.kernel32
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    e = PE()
+    e.dwSize = ctypes.sizeof(PE)
+    try:
+        ok = k.Process32FirstW(wintypes.HANDLE(snap), ctypes.byref(e))
+        while ok:
+            if e.th32ProcessID == ppid:
+                return e.th32ParentProcessID if e.szExeFile.lower() in ("python.exe", "pythonw.exe") else ppid
+            ok = k.Process32NextW(wintypes.HANDLE(snap), ctypes.byref(e))
+    finally:
+        k.CloseHandle(wintypes.HANDLE(snap))
+    return ppid
+
+
 class Spectrum:
     """FFT -> log-spaced bars with cava-like auto-sensitivity and gravity falloff."""
 
@@ -1069,7 +1101,7 @@ def cmd_visualizer(bars="48"):
     warnings.filterwarnings("ignore")
     import numpy as np
     bars = max(8, min(256, int(bars)))
-    ppid = os.getppid()
+    ppid = _owner_pid()
     spec = Spectrum(bars)
     lock = threading.Lock()
     last_audio = [0.0]

@@ -159,6 +159,11 @@ export async function bridgeStream(cmd, args, onLine, { stdin, raw = false, onEx
   const c = await config();
   if (!c.pythonPath || !c.bridgePath) { onLine({ error: 'pythonPath/bridgePath missing from config.json' }); return null; }
   const proc = await zebar.shellSpawn(c.pythonPath, ['-X', 'utf8', c.bridgePath, cmd, ...args.map(String)]);
+  // Zebar 3.3's app reads `pid` but its client library sends `processId`, so write()/kill() fail.
+  // Send both keys; Tauri ignores the one a given Zebar build doesn't use.
+  const ipc = (name, extra) => window.__TAURI_INTERNALS__.invoke(name, { pid: proc.processId, processId: proc.processId, ...extra });
+  proc.write = buffer => ipc('shell_write', { buffer });
+  proc.kill = () => ipc('shell_kill');
   let pending = '';
   proc.onStdout(chunk => {
     pending += chunk;
@@ -218,7 +223,7 @@ export function popupBehaviour({ onClose } = {}) {
     document.body.classList.add('leaving');
     onClose?.();
     await new Promise(r => setTimeout(r, 160));
-    zebar.currentWidget().close();
+    zebar.currentWidget().window.tauri.close();
   };
   let armed = false, pinned = false;
   setTimeout(() => (armed = true), 500);

@@ -144,10 +144,11 @@ Write-Text (Join-Path $Pack 'zpack.json') $zpack
 
 $cfgPath = Join-Path $Pack 'config.json'
 $modKey = if ($Mod -eq 'win') { 'lwin' } else { 'alt' }
+# Non-ASCII as char codes: Windows PowerShell 5.1 reads BOM-less scripts as ANSI.
 $cfg = [ordered]@{
   scriptsDir = $Scripts; pythonPath = $venvPy; bridgePath = (Join-Path $Scripts 'end4_bridge.py'); modKey = $modKey
   userName = $(if ($UserName) { $UserName } else { $env:USERNAME }); workspaces = $Workspaces
-  clockFormat = "EEE, dd/MM '•' HH:mm"; tempUnit = 'C'; showKeyboardLayout = $false; lyrics = $true
+  clockFormat = "EEE, dd/MM '$([char]0x2022)' HH:mm"; tempUnit = 'C'; showKeyboardLayout = $false; lyrics = $true
   workspaceLabels = @(); alwaysShowNumbers = $false; transparency = 0; desktopWidgets = $true; syncLockScreen = $true
   ai = [ordered]@{ model = 'gemini-2.5-flash'; temperature = 0.5; systemPrompt = '' }
   translator = [ordered]@{ source = 'auto'; target = 'en' }

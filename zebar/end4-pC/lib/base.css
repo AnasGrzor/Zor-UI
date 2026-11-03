@@ -193,6 +193,7 @@ input, textarea, select { font: inherit; color: inherit; }
   color: var(--on-secondary-container);
   pointer-events: none;
 }
+.slider.high .val { color: var(--on-primary); }
 
 /* popup enter/leave (sidebars, overview) */
 @keyframes pop-in { from { opacity: 0; transform: translateY(-10px) scale(0.98); } to { opacity: 1; transform: none; } }

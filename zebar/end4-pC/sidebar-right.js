@@ -137,6 +137,7 @@ function renderSliders() {
 function paint(el, v) {
   el.querySelector('.fill').style.width = `max(44px, ${v}%)`;
   el.querySelector('.val').textContent = `${Math.round(v)}%`;
+  el.classList.toggle('high', v > 85);   // the number sits on the fill: light text (base.css)
 }
 function debounce(fn, ms) { let t; return v => { clearTimeout(t); t = setTimeout(() => fn(v), ms); }; }
 

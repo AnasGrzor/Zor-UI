@@ -62,16 +62,48 @@
     #media .ctl button:hover { background: var(--hover); }
     #media .ctl button.pp { width: 38px; height: 38px; background: var(--primary); color: var(--on-primary); border-radius: var(--round-sm); }
     #media .ctl .ms { font-size: 18px; }
+
+    /* clock styles: digital, analog, pixel (cookie is above) */
+    .digital { text-align: center; color: var(--on-surface); text-shadow: 0 2px 12px color-mix(in srgb, #000 35%, transparent); }
+    .digital b { display: block; font-size: 84px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -2px; }
+    .digital span { font-size: 16px; font-weight: 500; }
+    #clock.short { height: 150px; }
+    .face { fill: color-mix(in srgb, var(--surface-container) 90%, transparent); }
+    .tick { stroke: var(--on-surface-variant); stroke-linecap: round; }
+    .px-on { fill: var(--primary); }
+    .px-off { fill: var(--on-surface); opacity: 0.08; }
+
+    /* small cards: calendar, to-do, notes, timer, world clock, resources, text */
+    .pad { padding: 12px 14px; }
+    .w h3 { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: var(--on-surface-variant); margin: 0 0 8px; }
+    .w h3 .ms { font-size: 16px; }
+    #calendar .grid { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 12px; row-gap: 2px; }
+    #calendar .grid span { height: 26px; width: 26px; margin: 0 auto; display: grid; place-items: center; border-radius: 50%; }
+    #calendar .dow { color: var(--on-surface-variant); font-size: 11px; }
+    #calendar .out { opacity: 0.35; }
+    #calendar .today { background: var(--primary); color: var(--on-primary); font-weight: 600; }
+    #todo .item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+    #todo .item .ms { font-size: 18px; color: var(--primary); }
+    #todo .item.done span:last-child { text-decoration: line-through; color: var(--on-surface-variant); }
+    #notes textarea { width: 100%; min-height: 110px; resize: vertical; border: 0; outline: none; background: none; color: var(--on-surface); font: 13px/1.45 var(--font); }
+    #timer .row { display: flex; align-items: center; gap: 12px; }
+    #timer .row b { flex: 1; font-size: 34px; font-weight: 500; font-variant-numeric: tabular-nums; }
+    #timer small { color: var(--on-surface-variant); font-size: 12px; }
+    #timer button { width: 44px; height: 44px; border-radius: var(--round-md); display: grid; place-items: center; background: var(--primary); color: var(--on-primary); }
+    #worldclock .tz { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+    #worldclock .tz span { flex: 1; font-size: 13px; }
+    #worldclock .tz small { font-size: 11px; color: var(--on-surface-variant); }
+    #worldclock .tz b { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+    #resources .rings { display: flex; justify-content: space-around; }
+    #resources .r { display: grid; justify-items: center; gap: 4px; font-size: 12px; }
+    #resources .ring-wrap { position: relative; width: 56px; height: 56px; }
+    #resources .ring-wrap b { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; font-weight: 500; }
+    #text { font-size: 20px; font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
-  <div id="col">
-    <div class="w" id="clock"></div>
-    <div class="w" id="weather"></div>
-    <div class="w" id="week"></div>
-    <div class="w" id="greet"></div>
-    <div class="w" id="media"></div>
-  </div>
+  <!-- Cards are added by desktop.js in the order of config.json desktop.widgets. -->
+  <div id="col"></div>
   <script type="module" src="./desktop.js"></script>
 </body>
 </html>

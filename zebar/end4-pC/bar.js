@@ -3,6 +3,7 @@ import {
   weatherIcon, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
+import * as timer from './lib/timer.js';
 
 const cfg = await config();
 reloadOnConfigChange();
@@ -14,7 +15,7 @@ const providers = zebar.createProviderGroup({
   cpu: { type: 'cpu', refreshInterval: 3000 },
   memory: { type: 'memory', refreshInterval: 3000 },
   battery: { type: 'battery', refreshInterval: 15000 },
-  network: { type: 'network', refreshInterval: 5000 },
+  network: { type: 'network', refreshInterval: cfg.showNetSpeed ? 2000 : 5000 },
   audio: { type: 'audio' },
   weather: { type: 'weather', refreshInterval: 30 * 60 * 1000 },
   date: { type: 'date', formatting: cfg.clockFormat, refreshInterval: 1000 },
@@ -115,8 +116,30 @@ function renderSystem() {
   setHTML($('#g-sys'), html);
 }
 
+// Pomodoro / stopwatch chip (end4's Dynamic Island timer). Whichever bar sees a phase end first
+// ends it and shows the toast; the "done" chip is shared so every monitor's bar shows it.
+function renderTimer() {
+  const done = timer.tick(cfg);
+  if (done) { localStorage.setItem('end4-pC.timerDone', done); run('toggles', '-Action', 'timer-done', '-Value', done); }
+  const timerDone = localStorage.getItem('end4-pC.timerDone');
+  const s = timer.load();
+  let html = '';
+  if (timerDone) html = `${icon('alarm', { fill: true })}${timerDone === 'focus' ? 'Break time' : 'Focus time'}`;
+  else if (s.running) html = `${icon(s.phase === 'focus' ? 'timer' : 'coffee')}${timer.clock(timer.left(s, cfg))}`;
+  else if (s.sw.running) html = `${icon('timer_play')}${timer.clock(timer.swElapsed(s))}`;
+  $('#g-timer').classList.toggle('done', !!timerDone);
+  setHTML($('#g-timer'), html);
+}
+
+const rate = b => (b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB/s` : `${Math.round(b / 1e3)} KB/s`);
+function renderNet() {
+  const t = cfg.showNetSpeed && out.network?.traffic;
+  setHTML($('#g-net'), t ? `<span>${icon('arrow_upward')}${rate(t.transmitted.bytes)}</span><span>${icon('arrow_downward')}${rate(t.received.bytes)}</span>` : '');
+}
+
 function render() {
   out = providers.outputMap;
+  renderNet();
   renderActiveWindow();
   renderResources();
   renderMedia();
@@ -131,7 +154,8 @@ function render() {
 providers.onOutput(render);
 render();
 // Keep the media progress ring moving between provider updates.
-setInterval(() => out.media?.currentSession?.isPlaying && renderMedia(), 1000);
+setInterval(() => { out.media?.currentSession?.isPlaying && renderMedia(); renderTimer(); }, 1000);
+renderTimer();
 
 // ---------------------------------------------------------------- events
 const here = name => openHere(name, out.glazewm?.currentMonitor);   // popups open on this bar's monitor
@@ -140,6 +164,12 @@ setInterval(() => localStorage.setItem('end4.barAlive', Date.now()), 2000);
 $('#btn-left').addEventListener('click', () => here('sidebar-left'));
 $('#g-sys').addEventListener('click', () => here('sidebar-right'));
 $('#g-clock').addEventListener('click', () => here('sidebar-right'));
+$('#g-timer').addEventListener('click', () => {
+  localStorage.removeItem('end4-pC.timerDone');
+  localStorage.setItem('end4-pC.rightTab', 'timer');
+  renderTimer();
+  here('sidebar-right');
+});
 
 $('#g-ws').addEventListener('click', e => {
   const b = e.target.closest('[data-ws]');

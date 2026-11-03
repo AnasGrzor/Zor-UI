@@ -85,7 +85,7 @@ Re-running `install.ps1` updates everything and keeps your `config.json` setting
 | Keys | Action |
 |---|---|
 | `Mod+A` | Left sidebar: Home (player, lyrics), AI, Translator, Anime, Football |
-| `Mod+N` | Right sidebar: toggles, sliders, notifications, calendar, to-do |
+| `Mod+N` | Right sidebar: toggles, sliders, notifications, calendar, to-do, pomodoro and stopwatch |
 | `Mod+I` | Settings (colors, presets gallery, API keys, options) |
 | `Mod+/` | Keybinds cheatsheet (also Settings → Keybinds) |
 | ``Alt+` `` (or `Win+Tab`) | Overview |
@@ -116,6 +116,16 @@ safe-rated unless you turn on **Allow NSFW** in Settings → Services.
 
 **Football.** Fixtures for the next week, live scores (refreshed every minute), win/draw/loss
 probabilities and league tables. Click a match for expected goals and corners. Choose leagues in Settings.
+
+**Timer.** The right sidebar's Timer tab has a pomodoro (25/5/15 minutes by default, set in Settings → Bar &
+desktop) and a stopwatch with laps. Both keep running when the sidebar closes. While one runs, the bar shows
+its time. When a pomodoro phase ends, Windows shows a notification and the bar chip turns into a reminder.
+Click the chip to open the timer.
+
+**Desktop widgets.** Settings → Bar & desktop picks the cards shown on the desktop. The choices are clock,
+weather, week, greeting, media, calendar, to-do (the same list as the sidebar), notes, timer, world clock,
+resources and custom text. The clock has four styles: cookie, analog, digital and pixel. The desktop column
+is 740 px tall, so turning on every card cuts off the bottom ones.
 
 **Wallpaper Engine.** Settings → Wallpapers lists everything you've subscribed to on the Workshop, plus
 your own projects. Search by name or tag, filter by type, and click one to set it. end4 takes its colors from

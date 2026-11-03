@@ -21,6 +21,9 @@ const SCHEMES = [
 const LEAGUES = [['esp.1', 'LaLiga'], ['eng.1', 'Premier League'], ['ita.1', 'Serie A'], ['fra.1', 'Ligue 1'], ['por.1', 'Primeira Liga'],
   ['tur.1', 'Süper Lig'], ['ned.1', 'Eredivisie'], ['ger.1', 'Bundesliga'], ['mex.1', 'Liga MX'], ['arg.1', 'Liga Profesional'],
   ['bra.1', 'Brasileirão'], ['ksa.1', 'Saudi Pro League'], ['uefa.champions', 'Champions League'], ['uefa.europa', 'Europa League']];
+const DESKTOP_WIDGETS = [['clock', 'Clock'], ['weather', 'Weather'], ['week', 'Week'], ['greet', 'Greeting'], ['media', 'Media'],
+  ['calendar', 'Calendar'], ['todo', 'To do'], ['notes', 'Notes'], ['timer', 'Timer'], ['worldclock', 'World clock'],
+  ['resources', 'Resources'], ['text', 'Custom text']];
 const KEY_PROVIDERS = [['gemini', 'Google Gemini'], ['anthropic', 'Anthropic (Claude)'], ['openai', 'OpenAI'], ['mistral', 'Mistral'],
   ['openrouter', 'OpenRouter'], ['wallhaven', 'Wallhaven (for NSFW search)']];
 
@@ -153,13 +156,25 @@ const pages = {
       ${seg('tempUnit', [['C', '°C'], ['F', '°F']], 'Temperature', 'thermostat')}
       ${sw('showKeyboardLayout', 'Keyboard layout indicator', '', 'keyboard')}
       ${sw('visualizer.bar', 'Visualizer in the bar', 'Small cava-style bars next to the media', 'graphic_eq')}
+      ${sw('showNetSpeed', 'Network speed', 'Upload and download rate next to the tray', 'swap_vert')}
     </div>
     <h2>${icon('desktop_windows')}Desktop</h2>
     <div class="card">
-      ${sw('desktopWidgets', 'Desktop widgets', 'Clock, weather, calendar, greeting and media', 'widgets')}
+      ${sw('desktopWidgets', 'Desktop widgets', 'Pick which cards show below, top to bottom', 'widgets')}
+      <div class="chips">${DESKTOP_WIDGETS.map(([id, n]) => `<button class="chip${get('desktop.widgets').includes(id) ? ' sel' : ''}" data-dwidget="${id}">${n}</button>`).join('')}</div>
+      ${seg('desktop.clock', [['cookie', 'Cookie'], ['analog', 'Analog'], ['digital', 'Digital'], ['pixel', 'Pixel']], 'Clock style', 'schedule')}
+      ${text('desktop.worldClocks', 'World clock cities', 'Comma separated time zones, e.g. Europe/Paris, Asia/Dubai', 'public')}
+      ${text('desktop.text', 'Custom text', 'Shown by the Custom text card', 'text_fields')}
       ${sw('visualizer.desktop', 'Desktop visualizer', 'Audio bars along the bottom of the screen (cava)', 'equalizer')}
       ${num('visualizer.bars', 'Visualizer bars', 16, 160, 'bar_chart')}
       ${text('userName', 'Your name', 'Shown in the greeting and sidebar', 'person')}
+    </div>
+    <h2>${icon('timer')}Pomodoro</h2>
+    <div class="card">
+      ${num('timer.focus', 'Focus minutes', 1, 180, 'center_focus_strong')}
+      ${num('timer.short', 'Short break minutes', 1, 60, 'coffee')}
+      ${num('timer.long', 'Long break minutes', 1, 120, 'weekend')}
+      ${num('timer.cycles', 'Focus sessions before a long break', 1, 12, 'repeat')}
     </div>`;
   },
 
@@ -291,6 +306,11 @@ document.addEventListener('click', async e => {
   if (d.step) {
     const v = Math.max(+d.min, Math.min(+d.max, (get(d.step) || 0) + +d.d));
     await set(d.step, v); return render();
+  }
+  if (d.dwidget) {
+    const cur = new Set(get('desktop.widgets'));
+    cur.has(d.dwidget) ? cur.delete(d.dwidget) : cur.add(d.dwidget);
+    await set('desktop.widgets', DESKTOP_WIDGETS.map(([id]) => id).filter(id => cur.has(id))); return render();
   }
   if (d.league) {
     const cur = new Set(get('football.leagues') || []);

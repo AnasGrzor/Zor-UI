@@ -127,6 +127,18 @@ try {
     'taskmgr'    { Start-Process taskmgr; Out-Json @{ ok = $true } }
     'actioncenter' { Start-Process 'ms-actioncenter:'; Out-Json @{ ok = $true } }
     'editconfig' { Start-Process notepad (Join-Path $env:USERPROFILE '.glzr\zebar\end4-pC\config.json'); Out-Json @{ ok = $true } }
+    'timer-done' {
+      # Windows toast when a pomodoro phase ends (end4 uses notify-send). Value is the phase that ended.
+      $msg = @{ focus = 'Focus session done. Take a break.'; short = 'Break is over. Back to focus.'; long = 'Long break is over. Back to focus.' }[$Value]
+      if (-not $msg) { throw "unknown phase '$Value'" }
+      [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+      [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+      $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+      $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>Pomodoro</text><text>$msg</text></binding></visual><audio src='ms-winsoundevent:Notification.Reminder'/></toast>")
+      $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'   # PowerShell's registered AUMID
+      [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show((New-Object Windows.UI.Notifications.ToastNotification $xml))
+      Out-Json @{ ok = $true }
+    }
     'lock'       { rundll32.exe user32.dll, LockWorkStation; Out-Json @{ ok = $true } }
     'sleep'      {
       Add-Type -AssemblyName System.Windows.Forms

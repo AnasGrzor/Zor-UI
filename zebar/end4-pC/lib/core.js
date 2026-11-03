@@ -11,6 +11,7 @@ const DEFAULTS = {
   use24h: true,
   tempUnit: 'C',
   showKeyboardLayout: false,
+  showNetSpeed: false,
   lyrics: true,
   pythonPath: '',
   bridgePath: '',
@@ -26,6 +27,8 @@ const DEFAULTS = {
   visualizer: { desktop: true, bar: false, bars: 64 },
   nightLight: { kelvin: 4500 },
   wallpaperEngine: { follow: true, path: '' },
+  timer: { focus: 25, short: 5, long: 15, cycles: 4 },
+  desktop: { widgets: ['clock', 'weather', 'week', 'greet', 'media'], clock: 'cookie', worldClocks: ['Europe/London', 'America/New_York', 'Asia/Tokyo'], text: '' },
 };
 
 // ------------------------------------------------------------------ DOM
@@ -64,7 +67,7 @@ export function config() {
     .catch(() => ({}))
     .then(c => {
       const merged = { ...DEFAULTS, ...c };
-      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine'])
+      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine', 'timer', 'desktop'])
         merged[k] = { ...DEFAULTS[k], ...(c[k] || {}) };
       document.documentElement.style.setProperty('--opaque', `${Math.round((1 - (merged.transparency || 0)) * 100)}%`);
       return merged;

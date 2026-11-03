@@ -84,6 +84,12 @@
     #g-utils .ms { font-size: 17px; }
     #g-weather { font-size: 13px; gap: 4px; }
     #g-weather .ms { font-size: 18px; }
+    #g-timer { font-size: 13px; gap: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
+    #g-timer .ms { font-size: 18px; }
+    #g-timer.done { background: var(--primary); color: var(--on-primary); }
+    #g-net { font-size: 11px; line-height: 1.1; font-variant-numeric: tabular-nums; flex-direction: column; align-items: flex-end; justify-content: center; gap: 0; min-width: 64px; }
+    #g-net span { display: flex; align-items: center; gap: 2px; }
+    #g-net .ms { font-size: 12px; }
 
     /* right */
     #g-tray { gap: 2px; padding: 0 6px; }
@@ -108,6 +114,7 @@
       <div class="group" id="g-media" title="Click: play/pause · Right-click: player · Middle-click: next"></div>
       <div class="group" id="g-ws"></div>
       <div class="group" id="g-clock" title="Open calendar"></div>
+      <div class="group" id="g-timer" title="Timer (click to open)"></div>
       <div class="group" id="g-utils">
         <button data-act="snip" title="Screen snip"><span class="ms">screenshot_region</span></button>
         <button data-act="wall" title="Change wallpaper"><span class="ms">wallpaper</span></button>
@@ -117,6 +124,7 @@
     </div>
     <div class="side right">
       <div class="group" id="g-wm"></div>
+      <div class="group" id="g-net" title="Network speed"></div>
       <div class="group" id="g-tray"></div>
       <button class="group" id="g-sys" title="Quick settings"></button>
     </div>

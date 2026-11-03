@@ -1,4 +1,5 @@
-import { zebar, $, $$, esc, icon, setHTML, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
+import { zebar, $, $$, esc, icon, ring, setHTML, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor } from './lib/core.js';
+import * as timer from './lib/timer.js';
 
 await openOnTargetMonitor();
 const cfg = await config();
@@ -169,12 +170,58 @@ $('#todo-form').addEventListener('submit', e => {
   renderTodos();
 });
 
-$('.tabs').addEventListener('click', e => {
-  const tab = e.target.closest('[data-tab]')?.dataset.tab;
-  if (!tab) return;
+// ---------------------------------------------------------------- timer (pomodoro + stopwatch)
+let timerMode = localStorage.getItem('end4-pC.timerMode') || 'pomo';
+function renderTimer() {
+  const s = timer.load();
+  const modes = `<div class="chips mode">${[['pomo', 'Pomodoro'], ['sw', 'Stopwatch']].map(([m, l]) =>
+    `<button class="chip${m === timerMode ? ' sel' : ''}" data-tmode="${m}">${l}</button>`).join('')}</div>`;
+  if (timerMode === 'pomo') {
+    const left = timer.left(s, cfg);
+    return setHTML($('#page-timer'), `${modes}
+      <div class="dial-wrap">${ring(left / timer.total(s, cfg), { size: 200, stroke: 10 })}
+        <div class="mid"><b>${timer.clock(left)}</b><span>${timer.PHASES[s.phase]} · ${(s.phase === 'focus' ? s.cycle : s.cycle - 1) % (cfg.timer?.cycles || 4) + 1}/${cfg.timer?.cycles || 4}</span></div></div>
+      <div class="t-ctl">
+        <button class="icon-btn tonal" data-t="pomo-reset" title="Reset">${icon('replay')}</button>
+        <button class="icon-btn filled" data-t="pomo-toggle" title="${s.running ? 'Pause' : 'Start'}">${icon(s.running ? 'pause' : 'play_arrow', { fill: true })}</button>
+        <button class="icon-btn tonal" data-t="pomo-skip" title="Skip to next phase">${icon('skip_next')}</button>
+      </div>`);
+  }
+  const e = timer.swElapsed(s);
+  setHTML($('#page-timer'), `${modes}
+    <div class="sw-big">${timer.clock(e)}.${Math.floor((e % 1) * 10)}</div>
+    <div class="t-ctl">
+      <button class="icon-btn tonal" data-t="sw-reset" title="Reset">${icon('replay')}</button>
+      <button class="icon-btn filled" data-t="sw-toggle" title="${s.sw.running ? 'Pause' : 'Start'}">${icon(s.sw.running ? 'pause' : 'play_arrow', { fill: true })}</button>
+      <button class="icon-btn tonal" data-t="sw-lap" title="Lap"${s.sw.running ? '' : ' disabled'}>${icon('flag')}</button>
+    </div>
+    <div class="laps scroll">${s.sw.laps.map((l, i) => `<div><span>Lap ${s.sw.laps.length - i}</span><span>${timer.clock(l)}.${Math.floor((l % 1) * 10)}</span></div>`).join('')}</div>`);
+}
+$('#page-timer').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b?.dataset.tmode) { timerMode = b.dataset.tmode; localStorage.setItem('end4-pC.timerMode', timerMode); }
+  const t = b?.dataset.t;
+  if (t === 'pomo-toggle') timer.pomo.toggle(cfg);
+  if (t === 'pomo-reset') timer.pomo.reset();
+  if (t === 'pomo-skip') timer.pomo.skip(cfg);
+  if (t === 'sw-toggle') timer.sw.toggle();
+  if (t === 'sw-lap') timer.sw.lap();
+  if (t === 'sw-reset') timer.sw.reset();
+  renderTimer();
+});
+setInterval(() => $('#page-timer').classList.contains('sel') && renderTimer(), 100);
+
+function showTab(tab) {
+  if (!$(`.tabs [data-tab="${tab}"]`)) tab = 'notif';
   $$('.tabs button').forEach(b => b.classList.toggle('sel', b.dataset.tab === tab));
   $$('.page').forEach(p => p.classList.toggle('sel', p.id === 'page-' + tab));
+  localStorage.setItem('end4-pC.rightTab', tab);
+}
+$('.tabs').addEventListener('click', e => {
+  const tab = e.target.closest('[data-tab]')?.dataset.tab;
+  if (tab) showTab(tab);
 });
+showTab(localStorage.getItem('end4-pC.rightTab') || 'notif');
 
 // ---------------------------------------------------------------- notifications (Windows' notification history)
 let notifs = [], notifErr = '';
@@ -250,5 +297,6 @@ render();
 watchTheme(t => { sys.darkMode = t.mode === 'dark'; renderToggles(); });
 renderCalendar();
 renderTodos();
+renderTimer();
 loadNotifs();
 setInterval(loadNotifs, 5000);

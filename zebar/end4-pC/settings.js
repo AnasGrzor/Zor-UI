@@ -1,7 +1,7 @@
 // end4-pC for Windows - settings app (end4's Settings window + presets gallery).
 import { zebar, $, $$, esc, icon, config, watchTheme, run, bridge, popupBehaviour, openUrl } from './lib/core.js';
 import { LANGS } from './lib/tab-translate.js';
-import { BAR_MODULES, barLayout, moveModule } from './lib/barlayout.js';
+import { BAR_MODULES, SIDES, barLayout, moveModule, placeModule } from './lib/barlayout.js';
 
 let cfg = await config();
 let theme = {};
@@ -167,15 +167,14 @@ const pages = {
     <div class="card">
       ${seg('bar.style', [['float', 'Float'], ['flat', 'Flat'], ['islands', 'Islands']], 'Bar style', 'style')}
       ${seg('bar.groups', [['filled', 'Filled'], ['outlined', 'Outlined'], ['none', 'None']], 'Group backgrounds', 'rounded_corner')}
-      <div class="muted" style="font-size:12px;margin:6px 0 2px">Where each part goes. The arrows move it left or right within its side.</div>
-      ${barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') }).map(([id, side]) => {
-        const [, , label, ic] = BAR_MODULES.find(m => m[0] === id);
-        return `<div class="row">${icon(ic)}<div class="lbl">${label}</div>
-          <div class="seg">${[['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['hidden', 'Hide']].map(([v, l]) =>
-            `<button class="${side === v ? 'sel' : ''}" data-bm="${id}" data-side="${v}">${l}</button>`).join('')}</div>
-          <button class="icon-btn" data-bm-move="${id}" data-d="-1" title="Move left"${side === 'hidden' ? ' disabled' : ''}>${icon('arrow_back')}</button>
-          <button class="icon-btn" data-bm-move="${id}" data-d="1" title="Move right"${side === 'hidden' ? ' disabled' : ''}>${icon('arrow_forward')}</button></div>`;
-      }).join('')}
+      <div class="muted" style="font-size:12px;margin:6px 0 2px">Drag a part up or down to change its order (top shows first), or into another column.
+        Or Tab to it and use the arrow keys.</div>
+      <div class="bl-cols">${[['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['hidden', 'Hidden']].map(([sd, title]) =>
+        `<div class="bl-col" data-col="${sd}"><h4>${title}</h4>${barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') })
+          .filter(m => m[1] === sd).map(([id]) => {
+            const [, , label, ic] = BAR_MODULES.find(m => m[0] === id);
+            return `<div class="bl-item" draggable="true" tabindex="0" data-bl="${id}"${id === 'media' ? ' title="Hidden while the Dynamic Island shows"' : ''}>${icon('drag_indicator')}${icon(ic)}<span class="ellipsis">${label}</span></div>`;
+          }).join('')}</div>`).join('')}</div>
       <div class="lbl" style="font-size:12px;color:var(--on-surface-variant);margin-top:8px">Utility buttons</div>
       <div class="chips">${[['snip', 'Screen snip'], ['pick', 'Color picker'], ['wall', 'Wallpaper'], ['mode', 'Dark mode']].map(([v, l]) =>
         `<button class="chip${get('bar.utils').includes(v) ? ' sel' : ''}" data-bu="${v}">${l}</button>`).join('')}</div>
@@ -341,12 +340,6 @@ document.addEventListener('click', async e => {
     const v = Math.max(+d.min, Math.min(+d.max, (get(d.step) || 0) + +d.d));
     await set(d.step, v); return render();
   }
-  if (d.bm || d.bmMove) {
-    let l = barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') });
-    if (d.bm) l.find(m => m[0] === d.bm)[1] = d.side;
-    else l = moveModule(l, d.bmMove, +d.d);
-    await set('bar.modules', l); return render();   // the bar reloads when config.json changes
-  }
   if (d.bu) {
     const cur = new Set(get('bar.utils'));
     cur.has(d.bu) ? cur.delete(d.bu) : cur.add(d.bu);
@@ -449,6 +442,59 @@ document.addEventListener('submit', async e => {
     toast(r.ok ? 'Key saved' : r.error || 'Failed');
   }
 });
+// ---------------------------------------------------------------- bar layout: drag and drop
+// Saving config.json reloads the bar, so the new order shows right away.
+let blDrag = null;
+const layoutNow = () => barLayout(get('bar.modules'), { netSpeed: get('showNetSpeed') });
+const blIndex = (col, y) => {   // drop position among the column's other parts
+  const items = [...col.querySelectorAll('.bl-item:not(.dragging)')];
+  const i = items.findIndex(it => { const r = it.getBoundingClientRect(); return y < r.top + r.height / 2; });
+  return i < 0 ? items.length : i;
+};
+const blClear = () => { $('.bl-ph')?.remove(); $$('.bl-col.over, .bl-item.dragging').forEach(x => x.classList.remove('over', 'dragging')); };
+document.addEventListener('dragstart', e => {
+  const it = e.target.closest?.('[data-bl]');
+  if (!it) return;
+  blDrag = it.dataset.bl;
+  it.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', blDrag);
+});
+document.addEventListener('dragover', e => {
+  const col = e.target.closest?.('[data-col]');
+  if (!col || !blDrag) return;
+  e.preventDefault();
+  $$('.bl-col.over').forEach(c => c !== col && c.classList.remove('over'));
+  col.classList.add('over');
+  const items = [...col.querySelectorAll('.bl-item:not(.dragging)')], i = blIndex(col, e.clientY);
+  const ph = $('.bl-ph') || Object.assign(document.createElement('div'), { className: 'bl-ph' });
+  items[i] ? col.insertBefore(ph, items[i]) : col.append(ph);
+});
+document.addEventListener('drop', async e => {
+  const col = e.target.closest?.('[data-col]');
+  if (!col || !blDrag) return;
+  e.preventDefault();
+  const l = placeModule(layoutNow(), blDrag, col.dataset.col, blIndex(col, e.clientY));
+  blDrag = null; blClear();
+  await set('bar.modules', l); render();
+});
+document.addEventListener('dragend', () => { blDrag = null; blClear(); });
+document.addEventListener('keydown', async e => {   // keyboard: up/down reorders, left/right changes column
+  const it = e.target.closest?.('[data-bl]');
+  if (!it || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  e.preventDefault();
+  const id = it.dataset.bl;
+  let l = layoutNow();
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') l = moveModule(l, id, e.key === 'ArrowUp' ? -1 : 1);
+  else {
+    const j = SIDES.indexOf(l.find(m => m[0] === id)[1]) + (e.key === 'ArrowLeft' ? -1 : 1);
+    if (j < 0 || j >= SIDES.length) return;
+    l = placeModule(l, id, SIDES[j], Infinity);
+  }
+  await set('bar.modules', l); render();
+  $(`[data-bl="${id}"]`)?.focus();
+});
+
 window.addEventListener('keydown', e => {
   if (e.ctrlKey && (e.key === 'PageDown' || e.key === 'PageUp')) {
     const i = PAGES.findIndex(p => p[0] === page);

@@ -1,6 +1,6 @@
 // Run: node tests/barlayout.test.mjs
 import assert from 'node:assert/strict';
-import { BAR_MODULES, barLayout, moveModule } from '../zebar/end4-pC/lib/barlayout.js';
+import { BAR_MODULES, barLayout, moveModule, placeModule } from '../zebar/end4-pC/lib/barlayout.js';
 
 // Nothing saved: the defaults, in order.
 assert.deepEqual(barLayout(undefined), BAR_MODULES.map(m => [m[0], m[1]]));
@@ -22,4 +22,13 @@ const first = moveModule(d, 'launcher', -1);
 assert.deepEqual(first, d);
 // The window's left neighbour is the launcher; moving it up swaps them.
 assert.deepEqual(moveModule(d, 'window', -1).slice(0, 2), [['window', 'left'], ['launcher', 'left']]);
+// Drag and drop: to another side at a position, or to the top/bottom of its own side.
+const side = (l, sd) => l.filter(m => m[1] === sd).map(m => m[0]);
+const p1 = placeModule(d, 'tray', 'left', 1);
+assert.deepEqual(side(p1, 'left'), ['launcher', 'tray', 'window']);
+assert.ok(!side(p1, 'right').includes('tray'));
+assert.equal(p1.length, d.length);
+assert.deepEqual(side(placeModule(d, 'weather', 'center', 0), 'center')[0], 'weather');
+assert.deepEqual(side(placeModule(d, 'resources', 'center', 99), 'center').at(-1), 'resources');
+assert.deepEqual(side(placeModule(d, 'media', 'hidden', 0), 'hidden'), ['media', 'netspeed']);
 console.log('barlayout ok');

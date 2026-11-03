@@ -67,6 +67,17 @@
     .preset .pv { position: relative; }
     .preset.current { outline: 2px solid var(--primary); }
     .wetype { position: absolute; left: 8px; top: 8px; height: 22px; padding: 0 8px; font-size: 11px; background: color-mix(in srgb, var(--layer0) 80%, transparent); text-transform: capitalize; }
+    /* bar layout: drag-and-drop columns */
+    .bl-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .bl-col { display: flex; flex-direction: column; gap: 6px; min-height: 140px; padding: 8px; border-radius: var(--round-md); background: var(--layer2); }
+    .bl-col h4 { margin: 0 0 2px 4px; font-size: 12px; font-weight: 500; color: var(--on-surface-variant); }
+    .bl-col.over { outline: 2px dashed var(--primary); outline-offset: -2px; }
+    .bl-item { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 8px 10px 8px 4px; border-radius: var(--round-sm); background: var(--layer3); font-size: 13px; cursor: grab; user-select: none; }
+    .bl-item .ms { font-size: 18px; flex: none; }
+    .bl-item .ms:first-child { color: var(--on-surface-variant); font-size: 16px; }
+    .bl-item:focus-visible { outline: 2px solid var(--primary); }
+    .bl-item.dragging { opacity: 0.35; }
+    .bl-ph { height: 3px; margin: -1px 4px; border-radius: 2px; background: var(--primary); }
     .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
     .keys kbd { font-family: var(--font); background: var(--layer2); border-radius: 6px; padding: 3px 8px; white-space: nowrap; }
     .toast { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--inverse-surface); color: var(--inverse-on-surface); padding: 10px 18px; border-radius: var(--round-full); font-size: 13px; box-shadow: var(--shadow); z-index: 10; animation: pop-in 0.25s var(--ease); }

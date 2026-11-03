@@ -17,7 +17,7 @@ if (widget.name === 'desktop') {
 if (!cfg.desktop.widgets.includes(me)) await stop();   // turned off in Settings
 document.documentElement.style.visibility = 'hidden';  // until it's moved to its spot
 reloadOnConfigChange();
-await watchTheme();
+await watchTheme(() => me.startsWith('image') && $('#' + me) && renderImage());   // a new wallpaper rewrites wallpaper.jpg
 
 const on = new Set([me]);
 $('#col').insertAdjacentHTML('beforeend', `<div class="w" id="${me}"></div>`);
@@ -302,6 +302,33 @@ for (const id of ['lyrics', 'cover']) $('#' + id)?.addEventListener('click', e =
 });
 if (on.has('lyrics') || on.has('cover')) setInterval(tickNowPlaying, 100);
 
+// ---------------------------------------------------------------- image cards (end4's image / sticker widgets)
+// A picture (copied into the pack's images folder, or the wallpaper) clipped to a Material shape.
+function squirclePath(size, n = 4, steps = 160) {
+  const r = size / 2, f = v => Math.sign(v) * Math.abs(v) ** (2 / n);
+  let d = '';
+  for (let i = 0; i <= steps; i++) {
+    const a = (i / steps) * Math.PI * 2;
+    d += `${i ? 'L' : 'M'}${(r + r * f(Math.cos(a))).toFixed(1)},${(r + r * f(Math.sin(a))).toFixed(1)}`;
+  }
+  return d + 'Z';
+}
+function shapeStyle(shape, size) {
+  const r = size / 2, lobes = { cookie: [9, 0.06], flower: [8, 0.12], clover: [4, 0.2] }[shape];
+  if (lobes) return `clip-path:path('${cookiePath(r, r, r, lobes[0], lobes[1], 360)}')`;
+  if (shape === 'squircle') return `clip-path:path('${squirclePath(size)}')`;
+  return `border-radius:${shape === 'circle' ? '50%' : shape === 'square' ? '0' : '32px'}`;
+}
+function renderImage() {
+  const c = { shape: 'cookie', size: 280, file: '', ...cfg.desktop.images?.[me] };
+  const size = Math.max(120, Math.min(800, +c.size || 280));
+  const src = c.file === 'wallpaper.jpg' ? './wallpaper.jpg' : c.file ? `./images/${encodeURIComponent(c.file)}` : '';
+  $('#col').style.width = `${size + 32}px`;
+  $('#' + me).innerHTML = src
+    ? `<div class="shape-wrap"><img class="shape" src="${src}?t=${Date.now()}" draggable="false" alt="" style="width:${size}px;height:${size}px;${shapeStyle(c.shape, size)}" /></div>`
+    : `<div class="np-none">${icon('add_photo_alternate')}Choose a picture in Settings > Bar & desktop</div>`;
+}
+
 // ---------------------------------------------------------------- go
 const card = (id, fn) => on.has(id) && fn();
 function render() {
@@ -328,6 +355,7 @@ render();
 everySecond();
 everyMinute();
 card('notes', renderNotes);
+if (me.startsWith('image')) renderImage();
 card('text', renderText);
 setInterval(everySecond, 1000);
 setInterval(everyMinute, 60000);

@@ -882,6 +882,183 @@
       ]
     },
     {
+      "name": "desk-image1",
+      "htmlPath": "./desktop.html",
+      "zOrder": "bottom_most",
+      "shownInTaskbar": false,
+      "focused": false,
+      "resizable": false,
+      "transparent": true,
+      "includeFiles": [
+        "*.html",
+        "*.js",
+        "*.css",
+        "*.json",
+        "*.jpg",
+        "lib/**",
+        "assets/**",
+        "we-thumbs/**",
+        "images/**"
+      ],
+      "caching": {
+        "defaultDuration": 604800,
+        "rules": [
+          {
+            "urlRegex": "^https://([a-z0-9-]+\\.)*(yande\\.re|konachan\\.(net|com)|donmai\\.us|waifu\\.im|wallhaven\\.cc|githubusercontent\\.com|espncdn\\.com)/",
+            "duration": 3600
+          }
+        ]
+      },
+      "privileges": {
+        "shellCommands": [
+          {
+            "program": "powershell",
+            "argsRegex": "^-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {{SCRIPTS_RE}}\\\\(toggles|switchwall|media-art)\\.ps1( -[A-Za-z]+( [A-Za-z0-9#._-]*)?)*$"
+          },
+          {
+            "program": "{{PYTHON}}",
+            "argsRegex": "(?s)^-X utf8 {{SCRIPTS_RE}}\\\\end4_bridge\\.py [a-z-]+( .*)?$"
+          }
+        ]
+      },
+      "presets": [
+        {
+          "name": "default",
+          "anchor": "top_left",
+          "offsetX": "16px",
+          "offsetY": "72px",
+          "width": "320px",
+          "height": "320px",
+          "monitorSelection": {
+            "type": "primary"
+          },
+          "dockToEdge": {
+            "enabled": false,
+            "edge": null,
+            "windowMargin": "0px"
+          }
+        }
+      ]
+    },
+    {
+      "name": "desk-image2",
+      "htmlPath": "./desktop.html",
+      "zOrder": "bottom_most",
+      "shownInTaskbar": false,
+      "focused": false,
+      "resizable": false,
+      "transparent": true,
+      "includeFiles": [
+        "*.html",
+        "*.js",
+        "*.css",
+        "*.json",
+        "*.jpg",
+        "lib/**",
+        "assets/**",
+        "we-thumbs/**",
+        "images/**"
+      ],
+      "caching": {
+        "defaultDuration": 604800,
+        "rules": [
+          {
+            "urlRegex": "^https://([a-z0-9-]+\\.)*(yande\\.re|konachan\\.(net|com)|donmai\\.us|waifu\\.im|wallhaven\\.cc|githubusercontent\\.com|espncdn\\.com)/",
+            "duration": 3600
+          }
+        ]
+      },
+      "privileges": {
+        "shellCommands": [
+          {
+            "program": "powershell",
+            "argsRegex": "^-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {{SCRIPTS_RE}}\\\\(toggles|switchwall|media-art)\\.ps1( -[A-Za-z]+( [A-Za-z0-9#._-]*)?)*$"
+          },
+          {
+            "program": "{{PYTHON}}",
+            "argsRegex": "(?s)^-X utf8 {{SCRIPTS_RE}}\\\\end4_bridge\\.py [a-z-]+( .*)?$"
+          }
+        ]
+      },
+      "presets": [
+        {
+          "name": "default",
+          "anchor": "top_left",
+          "offsetX": "16px",
+          "offsetY": "72px",
+          "width": "320px",
+          "height": "320px",
+          "monitorSelection": {
+            "type": "primary"
+          },
+          "dockToEdge": {
+            "enabled": false,
+            "edge": null,
+            "windowMargin": "0px"
+          }
+        }
+      ]
+    },
+    {
+      "name": "desk-image3",
+      "htmlPath": "./desktop.html",
+      "zOrder": "bottom_most",
+      "shownInTaskbar": false,
+      "focused": false,
+      "resizable": false,
+      "transparent": true,
+      "includeFiles": [
+        "*.html",
+        "*.js",
+        "*.css",
+        "*.json",
+        "*.jpg",
+        "lib/**",
+        "assets/**",
+        "we-thumbs/**",
+        "images/**"
+      ],
+      "caching": {
+        "defaultDuration": 604800,
+        "rules": [
+          {
+            "urlRegex": "^https://([a-z0-9-]+\\.)*(yande\\.re|konachan\\.(net|com)|donmai\\.us|waifu\\.im|wallhaven\\.cc|githubusercontent\\.com|espncdn\\.com)/",
+            "duration": 3600
+          }
+        ]
+      },
+      "privileges": {
+        "shellCommands": [
+          {
+            "program": "powershell",
+            "argsRegex": "^-NoProfile -NonInteractive -ExecutionPolicy Bypass -File {{SCRIPTS_RE}}\\\\(toggles|switchwall|media-art)\\.ps1( -[A-Za-z]+( [A-Za-z0-9#._-]*)?)*$"
+          },
+          {
+            "program": "{{PYTHON}}",
+            "argsRegex": "(?s)^-X utf8 {{SCRIPTS_RE}}\\\\end4_bridge\\.py [a-z-]+( .*)?$"
+          }
+        ]
+      },
+      "presets": [
+        {
+          "name": "default",
+          "anchor": "top_left",
+          "offsetX": "16px",
+          "offsetY": "72px",
+          "width": "320px",
+          "height": "320px",
+          "monitorSelection": {
+            "type": "primary"
+          },
+          "dockToEdge": {
+            "enabled": false,
+            "edge": null,
+            "windowMargin": "0px"
+          }
+        }
+      ]
+    },
+    {
       "name": "desk-calendar",
       "htmlPath": "./desktop.html",
       "zOrder": "bottom_most",

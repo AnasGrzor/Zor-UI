@@ -148,6 +148,13 @@
     #cover .seek { flex: 1; height: 22px; cursor: pointer; }
     #cover .seek svg { display: block; width: 100%; height: 22px; overflow: visible; }
     #cover .ctl-row button:hover { background: rgba(255,255,255,0.15); }
+
+    /* image cards: no card background, just the shaped picture (with a shadow that follows the shape) */
+    body[data-card^="image"] #col { padding: 14px; }
+    body[data-card^="image"] .w { background: none; overflow: visible; }
+    body[data-card^="image"] .np-none { background: color-mix(in srgb, var(--surface-container-low) 88%, transparent); border-radius: var(--round-lg); }
+    .shape-wrap { filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.4)); }
+    .shape { display: block; object-fit: cover; }
   </style>
 </head>
 <body>

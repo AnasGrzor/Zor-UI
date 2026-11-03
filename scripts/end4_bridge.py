@@ -19,6 +19,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py mixer [volume <app> <0-100> | mute <app> <0|1>]
     end4_bridge.py record start|stop|status  (primary monitor, saved in Videos/Recordings)
     end4_bridge.py app-icons <process names...>  /  launch <pinned app name>
+    end4_bridge.py pick-image image1|image2|image3   (file dialog; copies the picture into the pack)
     end4_bridge.py screen-translate        (full-screen: drag over text, OCR + translate)
     end4_bridge.py config-set <key> <json>
     end4_bridge.py presets-online          /  preset-apply-online <name>
@@ -1288,6 +1289,40 @@ def cmd_mixer(action="list", app="", value=""):
                    "muted": bool(ss[0].SimpleAudioVolume.GetMute())} for name, ss in sorted(groups.items(), key=lambda g: g[0].lower())]})
 
 
+# ===================================================================== image cards (end4's image / sticker widgets)
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def cmd_pick_image(slot):
+    """Asks for a picture and copies it into the pack's images folder (widgets can only show files
+    inside the pack). Prints {"file": name} for config desktop.images.<slot>.file."""
+    if not re.fullmatch(r"image[1-3]", slot):
+        return out({"error": "bad slot"})
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)   # in front of Settings
+    pics = Path.home() / "Pictures"
+    path = filedialog.askopenfilename(parent=root, title="Choose a picture", initialdir=str(pics if pics.is_dir() else Path.home()),
+                                      filetypes=[("Pictures", " ".join("*" + e for e in sorted(IMAGE_EXT)))])
+    root.destroy()
+    if not path:
+        return out({"cancelled": True})
+    src = Path(path)
+    if src.suffix.lower() not in IMAGE_EXT:
+        return out({"error": "Pick a PNG, JPG, WebP, GIF or BMP picture"})
+    if src.stat().st_size > 50_000_000:
+        return out({"error": "That picture is over 50 MB"})
+    folder = PACK / "images"
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob(f"{slot}-*"):
+        old.unlink(missing_ok=True)
+    name = f"{slot}-{int(time.time())}{src.suffix.lower()}"   # new name each time, so the card doesn't show a cached copy
+    shutil.copyfile(src, folder / name)
+    out({"file": name})
+
+
 # ===================================================================== dock (end4's Dock)
 def _dock_pinned():
     return [p for p in config().get("dock", {}).get("pinned", []) if isinstance(p, dict) and p.get("name") and p.get("path")]
@@ -1561,7 +1596,7 @@ COMMANDS = {
     "color-pick": cmd_color_pick,
     "mixer": cmd_mixer,
     "record": cmd_record,
-    "app-icons": cmd_app_icons, "launch": cmd_launch,
+    "app-icons": cmd_app_icons, "launch": cmd_launch, "pick-image": cmd_pick_image,
     "screen-translate": cmd_screen_translate,
     "focus-widget": cmd_focus_widget,
     "click-through": cmd_click_through,

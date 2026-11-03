@@ -22,13 +22,17 @@ const LEAGUES = [['esp.1', 'LaLiga'], ['eng.1', 'Premier League'], ['ita.1', 'Se
   ['tur.1', 'Süper Lig'], ['ned.1', 'Eredivisie'], ['ger.1', 'Bundesliga'], ['mex.1', 'Liga MX'], ['arg.1', 'Liga Profesional'],
   ['bra.1', 'Brasileirão'], ['ksa.1', 'Saudi Pro League'], ['uefa.champions', 'Champions League'], ['uefa.europa', 'Europa League']];
 const DESKTOP_WIDGETS = [['clock', 'Clock'], ['weather', 'Weather'], ['week', 'Week'], ['greet', 'Greeting'], ['media', 'Media'],
-  ['lyrics', 'Lyrics'], ['cover', 'Now playing'],
+  ['lyrics', 'Lyrics'], ['cover', 'Now playing'], ['image1', 'Image 1'], ['image2', 'Image 2'], ['image3', 'Image 3'],
   ['calendar', 'Calendar'], ['todo', 'To do'], ['notes', 'Notes'], ['timer', 'Timer'], ['worldclock', 'World clock'],
   ['resources', 'Resources'], ['text', 'Custom text']];
+const IMAGE_SHAPES = [['cookie', 'Cookie'], ['flower', 'Flower'], ['clover', 'Clover'], ['squircle', 'Squircle'], ['circle', 'Circle'], ['rounded', 'Rounded'], ['square', 'Square']];
 const KEY_PROVIDERS = [['gemini', 'Google Gemini'], ['anthropic', 'Anthropic (Claude)'], ['openai', 'OpenAI'], ['mistral', 'Mistral'],
   ['openrouter', 'OpenRouter'], ['wallhaven', 'Wallhaven (for NSFW search)']];
 
 // The "keybinds" widget (Mod+/) is this same page, opened on the Keybinds tab.
+// Image card options are saved one at a time, so fill in the defaults the cards use (desktop.js).
+for (const id of ['image1', 'image2', 'image3'])
+  cfg.desktop.images = { ...cfg.desktop.images, [id]: { shape: 'cookie', size: 280, file: '', ...cfg.desktop.images?.[id] } };
 let page = zebar.currentWidget().name === 'keybinds' ? 'keys' : new URLSearchParams(location.search).get('page') || 'quick';
 let online = null, local = null, keys = null, models = null, busy = '';
 let we = null, weList = null, weQuery = '', weType = 'all';
@@ -172,6 +176,15 @@ const pages = {
       ${num('visualizer.bars', 'Visualizer bars', 16, 160, 'bar_chart')}
       ${text('userName', 'Your name', 'Shown in the greeting and sidebar', 'person')}
     </div>
+    <h2>${icon('image')}Image cards</h2>
+    <div class="card">${['image1', 'image2', 'image3'].map((id, i) => `
+      <div class="row">${icon('image')}<div class="lbl">Image ${i + 1}<small>${esc(get(`desktop.images.${id}.file`) === 'wallpaper.jpg' ? 'Your wallpaper' : get(`desktop.images.${id}.file`) ? 'Picture chosen' : 'No picture yet')}</small></div>
+        <select class="field" data-select="desktop.images.${id}.shape" style="max-width:130px;height:40px">${IMAGE_SHAPES.map(([v, l]) =>
+          `<option value="${v}"${get(`desktop.images.${id}.shape`) === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+        <button class="chip" data-pick-image="${id}">${icon('folder_open')}Choose</button>
+        <button class="chip" data-wall-image="${id}">${icon('wallpaper')}Wallpaper</button></div>
+      ${slider(`desktop.images.${id}.size`, `Image ${i + 1} size`, 120, 800, 10, v => `${v}px`, 'aspect_ratio')}`).join('')}
+      <div class="muted" style="font-size:12px">Turn a card on with the Image chips above.</div></div>
     <h2>${icon('timer')}Pomodoro</h2>
     <div class="card">
       ${num('timer.focus', 'Focus minutes', 1, 180, 'center_focus_strong')}
@@ -311,6 +324,12 @@ document.addEventListener('click', async e => {
     const v = Math.max(+d.min, Math.min(+d.max, (get(d.step) || 0) + +d.d));
     await set(d.step, v); return render();
   }
+  if (d.pickImage) {
+    const r = await bridge('pick-image', d.pickImage);
+    if (r.file) { await set(`desktop.images.${d.pickImage}.file`, r.file); render(); }
+    return r.error && toast(r.error);
+  }
+  if (d.wallImage) { await set(`desktop.images.${d.wallImage}.file`, 'wallpaper.jpg'); return render(); }
   if (d.dwidget) {
     const cur = new Set(get('desktop.widgets'));
     cur.has(d.dwidget) ? cur.delete(d.dwidget) : cur.add(d.dwidget);

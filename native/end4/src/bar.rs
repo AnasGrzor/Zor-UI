@@ -435,8 +435,10 @@ impl Bar {
                         None => ("Desktop".into(), self.monitor(cx).and_then(|m| m.workspaces.iter().find(|w| w.displayed)).map_or("Windows".into(), |w| format!("Workspace {}", w.display))),
                     };
                     let max = c.w * cx.cfg.get("bar.titleWidth").as_f64().unwrap_or(34.0) as f32 / 100.0; // .aw-title max-width: 34vw
-                    let pad = if cx.cfg.str("bar.style") == "islands" { (14.0, 14.0) } else { (2.0, 0.0) }; // #bar.islands .aw
-                    out.push(Pill { kind: Kind::Aw, ..group(WINDOW, vec![El::Col(vec![(app, txt(10.5, 400), muted), (title, txt(13.5, 400), fg)], max)], pad, 0.0) });
+                    let pad = if cx.cfg.str("bar.style") == "islands" { (16.0, 16.0) } else { (6.0, 6.0) };
+                    // one line, like the clock pill: "App • Title"
+                    let text = if title == app { app } else { format!("{app} • {title}") };
+                    out.push(Pill { kind: Kind::Aw, ..group(WINDOW, vec![El::Txt(text, txt(13.5, 400), fg, max)], pad, 0.0) });
                 }
                 "resources" => {
                     let ring = |v: f32, icon| El::Ring { size: 24.0, value: v, icon, isize: 13.0, fill: false, color: t.c("onSecondaryContainer"), art: None };
@@ -608,7 +610,7 @@ impl View for Bar {
             let Some(pi) = sides[si].iter().position(|p| p.id == WINDOW) else { continue };
             let p = &mut sides[si][pi];
             let Some(w) = fit(&widths[si], pi, 6.0, room, p.pad.0 + p.pad.1 + 40.0) else { continue };
-            if let Some(El::Col(_, max)) = p.els.first_mut() { *max = w - p.pad.0 - p.pad.1; }
+            if let Some(El::Col(_, max) | El::Txt(_, _, _, max)) = p.els.first_mut() { *max = w - p.pad.0 - p.pad.1; }
             widths[si][pi] = pill_w(c.g, p);
         }
         let total = |i: usize, gap: f32| sum(&widths[i], gap);

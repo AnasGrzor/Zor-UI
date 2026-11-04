@@ -350,7 +350,9 @@ impl App {
 
     /// Opens the popup `name` natively when config "native" has it (else Zebar's copy); open again closes it.
     pub fn open(&mut self, name: &str, mon: Option<(i32, i32)>, at: Option<(i32, i32)>) {
-        if !self.cx.native(name) { proc::zebar_widget(name); return; }
+        // "keybinds" is the Settings window on its Keybinds page
+        let is_settings = name == "settings" || name == "keybinds";
+        if !self.cx.native(if is_settings { "settings" } else { name }) { proc::zebar_widget(name); return; }
         if self.pops.iter().any(|p| p.name == name) { self.close(name); return; }
         // the click or key that just closed it (focus loss) must not reopen it
         let closed: f64 = hub::get(&format!("end4.closedAt.{name}")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -362,7 +364,7 @@ impl App {
         let s = dpi_scale(rect);
         let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s);
         let Some(view) = popup::make(name, area) else { return };
-        let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if name == "settings" { Z::Normal } else { Z::Top }, false) else { return };
+        let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
         w.update(&self.g, &self.cx, true);
         let px = w.size_px();
@@ -372,7 +374,7 @@ impl App {
         w.focus();
         w.view.input(Input::Focus(true), &mut self.cx);
         w.update(&self.g, &self.cx, true);
-        self.pops.push(Pop { name: name.into(), win: w, mon: rect, at, armed_at: hub::now_ms(), pinned: name == "settings", px });
+        self.pops.push(Pop { name: name.into(), win: w, mon: rect, at, armed_at: hub::now_ms(), pinned: is_settings, px });
         self.frames();
     }
 

@@ -8,7 +8,7 @@ use crate::{
 use windows::Win32::Foundation::RECT;
 
 /// Names `App::open` / `end4.exe --open` handle natively when config "native" has them.
-pub const NAMES: [&str; 5] = ["island-panel", "overview", "sidebar-left", "sidebar-right", "settings"];
+pub const NAMES: [&str; 6] = ["island-panel", "overview", "sidebar-left", "sidebar-right", "settings", "keybinds"];
 
 /// An open popup.
 pub struct Pop {
@@ -33,6 +33,7 @@ pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
         "sidebar-left" => Box::new(SidebarLeft::new(area)),
         "sidebar-right" => Box::new(SidebarRight::new(area)),
         "settings" => Box::new(Settings::new(area)),
+        "keybinds" => Box::new(Settings::new(area).on_page("keys")),
         _ => return None,
     })
 }
@@ -42,7 +43,7 @@ pub fn area(name: &str, w: f32, h: f32) -> (f32, f32) {
     match name {
         "sidebar-left" | "sidebar-right" => (480.0, (h - 56.0).max(200.0)),
         "overview" => ((w * 0.82).round(), (h * 0.74).round()),
-        "settings" => ((w * 0.64).round(), (h * 0.8).round()),
+        "settings" | "keybinds" => ((w * 0.64).round(), (h * 0.8).round()),
         "island-panel" => (424.0, 560.0),
         _ => (400.0, 300.0),
     }

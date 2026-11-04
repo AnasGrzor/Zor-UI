@@ -216,7 +216,7 @@ $secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Objec
 $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
 if (Test-Path $native) {   # the keys open the native popups (end4.exe --open falls back to Zebar when a part isn't native)
-  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack end4-pC --widget-name (sidebar-left|sidebar-right|overview|settings) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --open ' + $m.Groups[1].Value })
+  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack end4-pC --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --open ' + $m.Groups[1].Value })
   # wallpaper / mode / game mode keys run the Rust ports (end4.exe falls back to the script for anything not ported)
   $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --script ' + $m.Groups[1].Value })
 }

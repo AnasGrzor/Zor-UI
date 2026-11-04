@@ -123,6 +123,12 @@ impl Settings {
         s
     }
 
+    /// Opens on the page `key` (Mod+/ opens "keys").
+    pub fn on_page(mut self, key: &str) -> Settings {
+        if let Some(i) = PAGES.iter().position(|p| p.0 == key) { self.page = i; }
+        self
+    }
+
     fn demo(&mut self) {
         self.online = Load::Ready(json!({ "presets": [{ "name": "Sakura_Night", "author": "someone" }, { "name": "Forest", "author": "" }, { "name": "Neon_City", "author": "pc" }] }));
         self.local = Load::Ready(vec![json!({ "id": "a", "name": "Work", "scheme": "tonal-spot", "mode": "dark", "wallpaper": "C:\\w\\mountain.jpg", "from": "local" }),

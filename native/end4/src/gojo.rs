@@ -196,7 +196,7 @@ pub struct Gojo {
 }
 
 impl Gojo {
-    fn new() -> Gojo {
+    pub(crate) fn new() -> Gojo {
         let seed = unsafe { GetTickCount() } as u64 | 1;
         let mut g = Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
@@ -231,14 +231,16 @@ impl Gojo {
         }
         if let Some(l) = notice(&self.around, &now) { self.queued = Some(l); }
         self.around = now;
-        if self.t < self.quiet || self.talking() || self.mode == Mode::Sleep { return; }
+        if self.t < self.quiet || self.talking() { return; }
         let Some(line) = self.queued.take() else { return };
+        // a change worth a line wakes him: nothing is sadder than missing a good song asleep
+        if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
         self.quiet = self.t + 20.0 + self.rand() * 15.0;
         self.say(&line, 4.0);
     }
 
     /// One simulation step: pointer, buttons, behaviour, then moves the window to his feet.
-    fn step(&mut self, s: f32) {
+    fn step(&mut self, s: f32, ctx: &Ctx) {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
@@ -302,7 +304,8 @@ impl Gojo {
                 if self.y >= line { self.y = line; self.mode = Mode::Stand; self.wait = 2.0; self.hop = Some(self.t); self.say("Perfect landing.", 2.0); }
             }
             Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say("Hm? Oh, you're back.", 3.0); },
-            _ if idle_s > 180.0 => { self.mode = Mode::Sleep; self.bubble = None; self.queued = None; }
+            // he only sleeps when nothing is playing: a video is company, and his bubble stays up
+            _ if idle_s > 180.0 && !ctx.media.as_ref().is_some_and(|m| m.playing) => { self.mode = Mode::Sleep; self.queued = None; }
             Mode::Walk => {
                 let d = self.to - self.x;
                 self.dir = d.signum();
@@ -525,7 +528,7 @@ impl View for Gojo {
     }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
-        self.step(c.scale);
+        self.step(c.scale, cx);
         self.react(cx);
         if self.hidden { return; }
         let t = self.t;

@@ -458,7 +458,9 @@ impl<'a> Canvas<'a> {
             KEPT.with(|k| *k.borrow_mut() = Some((key.to_vec(), pm)));
         }
         KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().as_ref(), &mut self.surf) {
-            px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref());
+            // a backdrop goes on a fresh (cleared) canvas, so a plain copy equals source-over and skips the blend pipeline
+            if self.clip.is_none() && px.data_mut().len() == pm.data().len() { px.data_mut().copy_from_slice(pm.data()); }
+            else { px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref()); }
         });
     }
 
@@ -562,7 +564,16 @@ impl<'a> Canvas<'a> {
         let (pw, ph) = self.size_px();
         let ts = self.ts();
         let m = match &self.clip {
-            Some(old) => { let mut m = old.clone(); m.intersect_path(&p, FillRule::Winding, true, ts); Some(m) }
+            Some(old) => Mask::new(pw, ph).map(|mut m| {
+                // the new path alone, then times the old clip, only inside the path's bounds (intersect_path walks the whole mask)
+                m.fill_path(&p, FillRule::Winding, true, ts);
+                let b = p.bounds();
+                let (x0, x1) = (((b.left() * self.scale).floor() as i32 - 1).max(0) as usize, ((b.right() * self.scale).ceil() as i32 + 1).clamp(0, pw as i32) as usize);
+                let (y0, y1) = ((((b.top() + self.dy) * self.scale).floor() as i32 - 1).max(0) as usize, (((b.bottom() + self.dy) * self.scale).ceil() as i32 + 1).clamp(0, ph as i32) as usize);
+                let (o, d) = (old.data(), m.data_mut());
+                for y in y0..y1.max(y0) { for i in y * pw as usize + x0..y * pw as usize + x1.max(x0) { d[i] = (d[i] as u32 * o[i] as u32 / 255) as u8; } }
+                m
+            }),
             None => Mask::new(pw, ph).map(|mut m| { m.fill_path(&p, FillRule::Winding, true, ts); m }),
         };
         let old = std::mem::replace(&mut self.clip, m);
@@ -571,6 +582,29 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn clip_round(&mut self, r: R, radius: f32, draw: impl FnOnce(&mut Self)) { self.clip(round_rect(r, radius), draw) }
+
+    /// A square-cornered clip that costs almost nothing: draws unclipped, then puts back what was outside `r`
+    /// (a mask clip slows every fill and glyph in the closure). Falls back to a mask inside another clip.
+    pub fn scissor(&mut self, r: R, draw: impl FnOnce(&mut Self)) {
+        let (pw, ph) = self.size_px();
+        let (pw, ph) = (pw as usize, ph as usize);
+        let Surface::Pix(px) = &mut self.surf else { return draw(self) };
+        if self.clip.is_some() { return self.clip_round(r, 0.0, draw); }
+        let (x0, x1) = (((r.x * self.scale).floor().max(0.0) as usize).min(pw), ((r.x + r.w) * self.scale).ceil().max(0.0) as usize);
+        let (y0, y1) = (((r.y * self.scale).floor().max(0.0) as usize).min(ph), ((r.y + r.h) * self.scale).ceil().max(0.0) as usize);
+        let (x1, y1) = (x1.clamp(x0, pw), y1.clamp(y0, ph));
+        let before = px.data_mut().to_vec();
+        draw(self);
+        let Surface::Pix(px) = &mut self.surf else { return };
+        let d = px.data_mut();
+        d[..y0 * pw * 4].copy_from_slice(&before[..y0 * pw * 4]);
+        d[y1 * pw * 4..].copy_from_slice(&before[y1 * pw * 4..]);
+        for y in y0..y1 {
+            let row = y * pw * 4;
+            d[row..row + x0 * 4].copy_from_slice(&before[row..row + x0 * 4]);
+            d[row + x1 * 4..row + pw * 4].copy_from_slice(&before[row + x1 * 4..row + pw * 4]);
+        }
+    }
 
     /// A picture decoded at its drawn size (Gfx::load_image), top-left at `r`.
     pub fn image(&mut self, img: &Pixmap, r: R, opacity: f32) {

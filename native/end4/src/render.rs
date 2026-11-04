@@ -52,6 +52,11 @@ pub fn run(args: &[String]) {
     {
         let Some(mut c) = Canvas::new(&g, &mut px, pw, ph, scale, 0) else { return };
         view.paint(&mut c, &cx);
+        if std::env::var("END4_BENCH").is_ok() { // TEMP
+            let t = std::time::Instant::now();
+            for _ in 0..20 { view.paint(&mut c, &cx); }
+            eprintln!("{part} paint avg {:?}", t.elapsed() / 20);
+        }
     }
     // premultiplied BGRA over a flat backdrop -> opaque BGRA
     for p in px.chunks_exact_mut(4) {

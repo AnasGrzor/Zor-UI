@@ -180,7 +180,7 @@ impl Scroll {
     pub fn region(&mut self, c: &mut Canvas, cx: &Ctx, r: R, content_h: f32, body: impl FnOnce(&mut Canvas, f32)) {
         self.clamp(content_h, r.h);
         let top = r.y - self.y;
-        c.clip_round(r, 0.0, |c| body(c, top));
+        c.scissor(r, |c| body(c, top));
         if content_h > r.h {
             let th = (r.h * r.h / content_h).max(24.0);
             let ty = r.y + self.y / (content_h - r.h) * (r.h - th);

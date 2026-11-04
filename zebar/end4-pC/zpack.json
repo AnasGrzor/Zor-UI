@@ -362,7 +362,7 @@
     {
       "name": "settings",
       "htmlPath": "./settings.html",
-      "zOrder": "top_most",
+      "zOrder": "normal",
       "shownInTaskbar": false,
       "focused": true,
       "resizable": false,
@@ -420,7 +420,7 @@
     {
       "name": "keybinds",
       "htmlPath": "./settings.html",
-      "zOrder": "top_most",
+      "zOrder": "normal",
       "shownInTaskbar": false,
       "focused": true,
       "resizable": false,

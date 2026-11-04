@@ -1,7 +1,49 @@
 // end4-pC for Windows - settings app (end4's Settings window + presets gallery).
-import { zebar, $, $$, esc, icon, config, watchTheme, run, bridge, popupBehaviour, openUrl } from './lib/core.js';
+import { zebar, $, $$, esc, icon, config, watchTheme, run, bridge, popupBehaviour, openUrl, closeWindow } from './lib/core.js';
 import { LANGS } from './lib/tab-translate.js';
 import { BAR_MODULES, SIDES, barLayout, moveModule, placeModule } from './lib/barlayout.js';
+
+// One window at a time. Shortcuts and the sidebar start a new copy (Zebar ignores starting an open
+// preset, so an open window behind others couldn't be raised); a new copy that finds one open asks
+// it to come to the front and leaves.
+const me = zebar.currentWidget();
+const channel = new BroadcastChannel('end4-window-' + me.name);
+document.documentElement.style.visibility = 'hidden';
+const alreadyOpen = await new Promise(res => {
+  channel.onmessage = e => e.data === 'open' && res(true);
+  channel.postMessage('ping');
+  setTimeout(() => res(false), 150);
+});
+if (alreadyOpen) { channel.postMessage('front'); closeWindow(); await new Promise(() => {}); }   // stops this copy's module
+document.documentElement.style.visibility = '';
+channel.onmessage = e => {
+  if (e.data === 'ping') channel.postMessage('open');
+  // After the leaving copy is gone, so focus-widget can't pick it (same title, same spot).
+  if (e.data === 'front') setTimeout(() => {
+    me.window.tauri.setFocus().catch(() => {});
+    bridge('focus-widget', me.name, Math.round(window.screenX * devicePixelRatio), Math.round(window.screenY * devicePixelRatio));
+  }, 500);
+};
+// Drag the window by the navigation rail's empty space or the window's edge. Zebar doesn't allow
+// Tauri's startDragging, so this moves the window itself. Screen coordinates stay put while it moves.
+// shortcut: a drag across monitors with different scaling may jump, until Zebar allows startDragging.
+let move = null, to = null, moving = false;
+document.addEventListener('pointerdown', e => {
+  if (e.button || !(e.target.id === 'win' || e.target.closest('#nav')) || e.target.closest('button, input, a')) return;
+  e.target.setPointerCapture(e.pointerId);   // keeps the moves coming when the cursor outruns the window
+  move = { x: window.screenX - e.screenX, y: window.screenY - e.screenY };
+});
+document.addEventListener('pointermove', async e => {
+  if (!move) return;
+  const r = devicePixelRatio;
+  to = { type: 'Physical', x: Math.round((move.x + e.screenX) * r), y: Math.round((move.y + e.screenY) * r) };
+  if (moving) return;   // one setPosition at a time; the loop picks up the latest spot
+  moving = true;
+  while (to) { const p = to; to = null; await me.window.tauri.setPosition(p).catch(() => {}); }
+  moving = false;
+});
+document.addEventListener('pointerup', () => (move = null));
+document.addEventListener('pointercancel', () => (move = null));
 
 let cfg = await config();
 let theme = {};

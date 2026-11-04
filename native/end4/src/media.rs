@@ -2,7 +2,7 @@
 //! default audio devices' volume. Each runs on its own COM thread and reports through `on`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{mpsc, Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -37,6 +37,9 @@ pub struct Media {
     pub duration: f64,
     pub position: f64,
     pub at: f64,
+    /// Windows' last timeline snapshot: (position, unix ms it was taken). It only refreshes on play,
+    /// pause or seek, so `anchor` carries our own clock forward between refreshes.
+    pub(crate) snap: (f64, f64),
     /// Thumbnail file bytes; decoded on the UI thread.
     pub art: Option<Arc<Vec<u8>>>,
 }
@@ -65,16 +68,35 @@ pub fn seek(id: &str, secs: f64) { send(Msg::Seek(id.into(), secs)); }
 /// DateTime (100 ns since 1601) to unix ms.
 fn unix_ms(t: i64) -> f64 { (t - 116_444_736_000_000_000) as f64 / 10_000.0 }
 
+/// When a timeline snapshot was taken, if that stamp is usable (some players report 1601, or nothing).
+fn clock(raw_at: f64, now: f64) -> f64 {
+    if raw_at > 0.0 && raw_at <= now + 60_000.0 && raw_at >= now - 86_400_000.0 { raw_at } else { now }
+}
+
+/// Where a session's playback is now, and the anchor that keeps it moving: (position, unix ms).
+/// Windows reports the timeline as a snapshot plus when it was taken, and refreshes it only on play,
+/// pause or seek — Edge and Chrome can leave it minutes old. So a refreshed snapshot starts a new
+/// anchor (`Media::now` extrapolates from it), an unchanged one keeps the anchor we already have, and
+/// a playback change the snapshot didn't follow (browsers often skip one) freezes or resumes the
+/// video where it actually is instead of jumping back to a stale position.
+fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f64, f64) {
+    let secs = |ms: f64| (ms / 1000.0).max(0.0);
+    match prev {
+        Some(p) if p.snap == raw && p.playing == playing => (p.position, p.at),
+        Some(p) if p.snap == raw => (p.position + if p.playing { secs(now - p.at) } else { 0.0 }, now),
+        _ => (raw.0, if playing { clock(raw.1, now) } else { now }),
+    }
+}
+
 type ArtCache = HashMap<String, (String, Option<Arc<Vec<u8>>>)>;
 
-fn read(s: &Session, arts: &mut ArtCache, current: bool) -> Option<Media> {
-    let id = s.SourceAppUserModelId().ok()?.to_string();
+fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<&Media>, now: f64) -> Option<Media> {
     let props = s.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
     let title = props.Title().ok()?.to_string();
     if title.is_empty() { return None; }
     let artist = props.Artist().map(|a| a.to_string()).unwrap_or_default();
     let key = format!("{title}|{artist}");
-    let e = arts.entry(id.clone()).or_default();
+    let e = arts.entry(id.to_string()).or_default();
     if e.0 != key {
         e.0 = key;
         e.1 = (|| {
@@ -92,14 +114,15 @@ fn read(s: &Session, arts: &mut ArtCache, current: bool) -> Option<Media> {
     let ctl = info.Controls().ok();
     let tl = s.GetTimelineProperties().ok()?;
     let secs = |t: windows::Foundation::TimeSpan| t.Duration as f64 / 1e7;
+    let raw = (secs(tl.Position().ok()?), unix_ms(tl.LastUpdatedTime().ok()?.UniversalTime));
+    let (position, at) = anchor(raw, playing, prev, now);
     Some(Media {
-        id, title, artist, playing, current,
+        id: id.to_string(), title, artist, playing, current,
         album: props.AlbumTitle().map(|a| a.to_string()).unwrap_or_default(),
         can_prev: ctl.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(true),
         can_next: ctl.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(true),
         duration: (secs(tl.EndTime().ok()?) - secs(tl.StartTime().ok()?)).max(0.0),
-        position: secs(tl.Position().ok()?),
-        at: unix_ms(tl.LastUpdatedTime().ok()?.UniversalTime),
+        position, at, snap: raw,
         art: e.1.clone(),
     })
 }
@@ -123,24 +146,30 @@ pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
         let Ok(mgr) = Manager::RequestAsync().and_then(|a| a.get()) else { return };
         let _ = mgr.CurrentSessionChanged(&TypedEventHandler::new(ping(&tx)));
         let _ = mgr.SessionsChanged(&TypedEventHandler::new(ping(&tx)));
-        let (mut known, mut arts, mut last) = (Vec::<Session>::new(), ArtCache::new(), None::<(Option<Media>, Vec<Media>)>);
+        let (mut known, mut arts, mut last, mut prev) =
+            (HashSet::<String>::new(), ArtCache::new(), None::<(Option<Media>, Vec<Media>)>, HashMap::<String, Media>::new());
         loop {
+            let at = crate::hub::now_ms();
             let cur = mgr.GetCurrentSession().ok();
+            // Windows hands out a fresh session object on every call, so object identity can't say which
+            // one is current: compare the app id it reports instead.
+            let cur_id = cur.as_ref().and_then(|s| s.SourceAppUserModelId().ok()).map(|h| h.to_string());
             let all: Vec<Session> = mgr.GetSessions().map(|l| l.into_iter().collect()).unwrap_or_default();
-            for s in &all {
-                if !known.contains(s) {
+            let ids: Vec<String> = all.iter().map(|s| s.SourceAppUserModelId().ok().map(|h| h.to_string()).unwrap_or_default()).collect();
+            for (s, id) in all.iter().zip(&ids) {
+                if !id.is_empty() && known.insert(id.clone()) {
                     let _ = s.MediaPropertiesChanged(&TypedEventHandler::new(ping(&tx)));
                     let _ = s.PlaybackInfoChanged(&TypedEventHandler::new(ping(&tx)));
                     let _ = s.TimelinePropertiesChanged(&TypedEventHandler::new(ping(&tx)));
-                    known.push(s.clone());
                 }
             }
-            known.retain(|k| all.contains(k));
-            let list: Vec<Media> = all.iter().filter_map(|s| read(s, &mut arts, cur.as_ref() == Some(s))).collect();
+            let list: Vec<Media> = all.iter().zip(&ids)
+                .filter_map(|(s, id)| read(s, &mut arts, id, cur_id.as_deref() == Some(id.as_str()), prev.get(id.as_str()), at)).collect();
             arts.retain(|id, _| list.iter().any(|m| &m.id == id));
-            let now = (list.iter().find(|m| m.current).cloned(), list);
-            if last.as_ref() != Some(&now) { on(now.0.clone(), now.1.clone()); last = Some(now); }
-            match rx.recv_timeout(Duration::from_secs(5)) {
+            let view = (list.iter().find(|m| m.current).cloned(), list);
+            if last.as_ref() != Some(&view) { on(view.0.clone(), view.1.clone()); last = Some(view.clone()); }
+            prev = view.1.iter().map(|m| (m.id.clone(), m.clone())).collect();
+            match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Msg::Control(id, c)) => {
                     if let Some(s) = id.and_then(|id| by_id(&all, &id)).or(cur.as_ref()) {
                         let _ = match c { "next" => s.TrySkipNextAsync(), "previous" => s.TrySkipPreviousAsync(), "play" => s.TryPlayAsync(), "pause" => s.TryPauseAsync(), _ => s.TryTogglePlayPauseAsync() }.and_then(|a| a.get());
@@ -237,4 +266,43 @@ pub fn start_audio(on: impl Fn(Audio) + Send + 'static) {
             for (_, v) in out.iter().chain(mic.iter()) { let _ = v.UnregisterControlChangeNotify(&cb); }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(position: f64, at: f64, snap: (f64, f64)) -> Media {
+        Media { id: "MSEdge".into(), title: "Video".into(), playing: true, current: true, duration: 100.0, position, at, snap, ..Default::default() }
+    }
+
+    #[test]
+    fn anchors_the_timeline() {
+        let now = 10_000.0;
+        // a fresh snapshot starts the anchor where Windows took it
+        assert_eq!(anchor((30.0, now - 2000.0), true, None, now), (30.0, now - 2000.0));
+        // the same snapshot later keeps the anchor, so `now()` extrapolates instead of jumping
+        let p = at(30.0, now - 2000.0, (30.0, now - 2000.0));
+        assert_eq!(anchor((30.0, now - 2000.0), true, Some(&p), now + 5000.0), (30.0, now - 2000.0));
+        // pausing with a snapshot that didn't follow freezes where the video actually was
+        let (frozen, stamped) = anchor((30.0, now - 2000.0), false, Some(&p), now);
+        assert_eq!((frozen, stamped), (32.0, now));
+        // ... and resuming carries on from there
+        let paused = Media { playing: false, position: frozen, at: stamped, snap: p.snap, ..at(0.0, 0.0, (0.0, 0.0)) };
+        assert_eq!(anchor((30.0, now - 2000.0), true, Some(&paused), now + 3000.0), (32.0, now + 3000.0));
+        // a seek is a new snapshot: trust it
+        assert_eq!(anchor((62.0, now + 3000.0), true, Some(&paused), now + 3000.0), (62.0, now + 3000.0));
+        // a snapshot without a usable stamp anchors to our clock instead of 1601
+        assert_eq!(anchor((5.0, 0.0), true, None, now), (5.0, now));
+    }
+
+    #[test]
+    fn progress_follows_the_anchor() {
+        let t0 = crate::hub::now_ms() - 4000.0;
+        let m = at(30.0, t0, (30.0, t0));
+        assert!((m.now() - 34.0).abs() < 0.5, "{} s", m.now());
+        assert!((m.progress() - 0.34).abs() < 0.01);
+        // never past the end of the track
+        assert_eq!(at(99.0, crate::hub::now_ms() - 60_000.0, (99.0, 0.0)).now(), 100.0);
+    }
 }

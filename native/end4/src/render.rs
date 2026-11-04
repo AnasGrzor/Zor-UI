@@ -63,7 +63,7 @@ pub fn run(args: &[String]) {
 /// What a typical session looks like, so media views have something to draw.
 fn sample(cx: &mut Ctx) {
     let m = Media { id: "Spotify.exe".into(), title: "Sample Song".into(), artist: "Sample Artist".into(), album: "Sample Album".into(), playing: true,
-        can_prev: true, can_next: true, current: true, duration: 214.0, position: 73.0, at: crate::hub::now_ms(), art: None };
+        can_prev: true, can_next: true, current: true, duration: 214.0, position: 73.0, at: crate::hub::now_ms(), snap: (73.0, 0.0), art: None };
     cx.media = Some(m.clone());
     cx.sessions = vec![m];
     cx.audio = Some(Audio { volume: 62.0, muted: false, mic_muted: Some(false), mic_volume: Some(80.0) });

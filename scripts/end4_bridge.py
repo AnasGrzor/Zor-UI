@@ -955,6 +955,13 @@ def _find_project(ident):
     return None
 
 
+def _monitor_count():
+    if not IS_WIN:
+        return 1
+    import ctypes
+    return max(1, ctypes.windll.user32.GetSystemMetrics(80))   # SM_CMONITORS
+
+
 def cmd_we_apply(ident, monitor=""):
     target = _find_project(ident)
     if not target:
@@ -962,10 +969,10 @@ def cmd_we_apply(ident, monitor=""):
     try:
         if not ensure_we_running():
             return out({"ok": False, "error": "Wallpaper Engine didn't start"})
-        args = ["openWallpaper", "-file", str(target)]
-        if str(monitor).isdigit():
-            args += ["-monitor", monitor]
-        we_control(*args)
+        # Without -monitor, Wallpaper Engine sets only one monitor; end4 has one wallpaper for all.
+        monitors = [monitor] if str(monitor).isdigit() else range(_monitor_count())
+        for m in monitors:
+            we_control("openWallpaper", "-file", str(target), "-monitor", m)
     except (OSError, subprocess.SubprocessError) as e:
         return out({"ok": False, "error": str(e)})
     out({"ok": True, "theme": _we_theme(target)})

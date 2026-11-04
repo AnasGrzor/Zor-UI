@@ -81,7 +81,7 @@ pub fn start(cfg: Arc<Config>, sh: Sh, alive: Arc<AtomicBool>) {
         let p = parse_plan(&proc::run(&c, "toggles", &["-Action", "powerplan"]));
         { let mut g = lock(&s); g.plan = p; g.plan_loaded = true; }
         repaint();
-        let st = proc::run(&c, "toggles", &["-Action", "status"]);
+        let st = proc::run(&c, "toggles", &["-Action", "status", "-Monitor", "active"]);
         {
             let mut g = lock(&s);
             if st["error"].is_null() {

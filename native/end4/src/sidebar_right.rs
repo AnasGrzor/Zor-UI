@@ -230,7 +230,7 @@ impl SidebarRight {
             41 => { if let Some(a) = cx.audio.as_mut() { a.mic_volume = Some(v); } media::set_mic_volume(v); }
             42 => if let Some(cfg) = self.cfg.clone() {
                 lock(&self.sh).brightness = Some(v);
-                self.debounce("brightness", 120, move || { proc::run(&cfg, "toggles", &["-Action", "brightness", "-Value", &v.to_string()]); });
+                self.debounce("brightness", 120, move || { proc::run(&cfg, "toggles", &["-Action", "brightness", "-Value", &v.to_string(), "-Monitor", "active"]); });
             },
             i if (ID_MIX_SLIDER..ID_MIX_SLIDER + 100).contains(&i) => {
                 let Some(cfg) = self.cfg.clone() else { return };

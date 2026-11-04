@@ -9,7 +9,8 @@
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Action,
-  [string]$Value = ''
+  [string]$Value = '',
+  [string]$Monitor = ''   # accepted and ignored: only the Rust port sets brightness per monitor
 )
 
 $ErrorActionPreference = 'Stop'

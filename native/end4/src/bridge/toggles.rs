@@ -12,7 +12,8 @@ use windows::{
     Win32::{
         Devices::Display::{DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR},
         Foundation::{BOOL, HANDLE, LPARAM, RECT},
-        Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
+        Graphics::Gdi::{EnumDisplayMonitors, MonitorFromWindow, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST},
+        UI::WindowsAndMessaging::GetForegroundWindow,
     },
     Devices::Radios::{Radio, RadioKind, RadioState},
     UI::Notifications::{ToastNotification, ToastNotificationManager},
@@ -32,13 +33,14 @@ use windows::{
 
 /// toggles.ps1 with its PowerShell-style arguments ("-Action", "wifi", "-Value", ...). None: not ported.
 pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
-    let (action, value) = parse_args(args);
+    let (action, value, monitor) = parse_args(args);
     let action = action?;
+    let mon = if monitor.eq_ignore_ascii_case("active") { active_monitor() } else { None };
     let ok = || Some(json!({ "ok": true }));
     match action.to_lowercase().as_str() {
         "status" => Some(json!({
             "wifi": radio_state(RadioKind::WiFi), "bluetooth": radio_state(RadioKind::Bluetooth),
-            "caffeine": caffeine_on(), "darkMode": dark_mode(), "brightness": brightness(),
+            "caffeine": caffeine_on(), "darkMode": dark_mode(), "brightness": brightness(mon),
         })),
         "wifi" => Some(json!({ "wifi": set_radio(RadioKind::WiFi, &value) })),
         "bluetooth" => Some(json!({ "bluetooth": set_radio(RadioKind::Bluetooth, &value) })),
@@ -78,7 +80,7 @@ pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
         "shutdown" => { let _ = hidden("shutdown.exe").args(["/s", "/t", "0"]).spawn(); ok() }
         "brightness" => {
             let pct: i32 = match value.trim().parse() { Ok(p) => p, Err(_) => return Some(json!({ "error": format!("Cannot convert value \"{value}\" to type \"System.Int32\".") })) };
-            Some(match set_brightness(pct.clamp(1, 100)) { Ok(p) => json!({ "brightness": p }), Err(e) => json!({ "error": e }) })
+            Some(match set_brightness(mon, pct.clamp(1, 100)) { Ok(p) => json!({ "brightness": p }), Err(e) => json!({ "error": e }) })
         }
         "gamemode" => Some(json!({ "gamemode": game_mode() })),
         "timer-done" => Some(timer_done(&value)),
@@ -88,18 +90,19 @@ pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
     }
 }
 
-/// `-Action X -Value Y` (names case-insensitive, `-Name:value` too) -> (action, value).
-fn parse_args(args: &[&str]) -> (Option<String>, String) {
-    let (mut action, mut value) = (None, String::new());
+/// `-Action X -Value Y [-Monitor active]` (names case-insensitive, `-Name:value` too) -> (action, value, monitor).
+/// `-Monitor active` limits brightness to the monitor the foreground window is on.
+fn parse_args(args: &[&str]) -> (Option<String>, String, String) {
+    let (mut action, mut value, mut monitor) = (None, String::new(), String::new());
     let mut i = 0;
     while i < args.len() {
         let Some(rest) = args[i].strip_prefix('-') else { i += 1; continue };
         let (name, inline) = match rest.split_once(':') { Some((n, v)) => (n, Some(v.to_string())), None => (rest, None) };
         let val = match inline { Some(v) => Some(v), None => { i += 1; args.get(i).map(|s| s.to_string()) } };
-        match name.to_lowercase().as_str() { "action" => action = val, "value" => value = val.unwrap_or_default(), _ => {} }
+        match name.to_lowercase().as_str() { "action" => action = val, "value" => value = val.unwrap_or_default(), "monitor" => monitor = val.unwrap_or_default(), _ => {} }
         i += 1;
     }
-    (action, value)
+    (action, value, monitor)
 }
 
 fn find_radio(kind: RadioKind) -> Option<Radio> {
@@ -178,8 +181,15 @@ fn dark_mode() -> bool {
     r.is_ok() && v == 0
 }
 
-/// First monitor's WMI brightness (laptop panels); null when WMI has none.
-fn brightness() -> Value {
+/// Brightness of the monitor `mon` (DDC/CI), else the laptop panel (WMI); with no `mon`, the panel
+/// first, then the first DDC/CI monitor. Null when nothing reports one.
+fn brightness(mon: Option<HMONITOR>) -> Value {
+    let b = if mon.is_some() { ddc_brightness(mon).or_else(wmi_brightness) } else { wmi_brightness().or_else(|| ddc_brightness(None)) };
+    b.map_or(Value::Null, |b| json!(b))
+}
+
+/// First WMI panel's brightness (laptops).
+fn wmi_brightness() -> Option<u8> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let go = || -> Option<u8> {
@@ -195,55 +205,67 @@ fn brightness() -> Value {
             o.Get(w!("CurrentBrightness"), 0, &mut v, None, None).ok()?;
             u32::try_from(&v).ok().map(|b| b as u8)
         };
-        go().or_else(ddc_brightness).map_or(Value::Null, |b| json!(b))
+        go()
     }
 }
 
-/// Runs `f` on the physical-monitor handle of every display (DDC/CI: external monitors, which WMI can't reach).
-fn ddc_each(mut f: impl FnMut(HANDLE)) {
+/// The monitor the foreground window is on: the sidebar has focus while its slider is used.
+fn active_monitor() -> Option<HMONITOR> {
+    let m = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) };
+    (!m.is_invalid()).then_some(m)
+}
+
+/// Runs `f` on the physical-monitor handle of `only` (every display when None) over DDC/CI: external
+/// monitors, which WMI can't reach.
+fn ddc_each(only: Option<HMONITOR>, mut f: impl FnMut(HANDLE)) {
+    struct Each<'a> { only: Option<HMONITOR>, f: &'a mut dyn FnMut(HANDLE) }
     unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
-        let f = &mut *(data.0 as *mut &mut dyn FnMut(HANDLE));
+        let e = &mut *(data.0 as *mut Each);
+        if e.only.is_some_and(|o| o != m) { return BOOL(1); }
         let mut n = 0u32;
         if GetNumberOfPhysicalMonitorsFromHMONITOR(m, &mut n).is_ok() && n > 0 {
             let mut a = vec![PHYSICAL_MONITOR::default(); n as usize];
             if GetPhysicalMonitorsFromHMONITOR(m, &mut a).is_ok() {
-                for p in &a { f({ p.hPhysicalMonitor }); }
+                for p in &a { let h = p.hPhysicalMonitor; // packed struct: copy the field, don't borrow it
+                    (e.f)(h); }
                 let _ = DestroyPhysicalMonitors(&a);
             }
         }
         BOOL(1)
     }
-    let mut f: &mut dyn FnMut(HANDLE) = &mut f;
-    unsafe { let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut f as *mut _ as isize)); }
+    let mut e = Each { only, f: &mut f };
+    unsafe { let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut e as *mut Each as isize)); }
 }
 
 /// A monitor's raw brightness range <-> percent.
 fn raw_to_pct(raw: u32, min: u32, max: u32) -> u32 { if max <= min { 0 } else { (raw.saturating_sub(min) * 100 + (max - min) / 2) / (max - min) } }
 fn pct_to_raw(pct: u32, min: u32, max: u32) -> u32 { min + ((max - min) * pct + 50) / 100 }
 
-/// First DDC/CI monitor that reports a brightness, as a percentage.
-fn ddc_brightness() -> Option<u8> {
+/// First DDC/CI monitor (of `only`) that reports a brightness, as a percentage.
+fn ddc_brightness(only: Option<HMONITOR>) -> Option<u8> {
     let mut found = None;
-    ddc_each(|h| unsafe {
+    ddc_each(only, |h| unsafe {
         let (mut min, mut cur, mut max) = (0u32, 0u32, 0u32);
         if found.is_none() && GetMonitorBrightness(h, &mut min, &mut cur, &mut max) != 0 { found = Some(raw_to_pct(cur, min, max) as u8); }
     });
     found
 }
 
-/// Sets every DDC/CI monitor that accepts it; how many did.
-fn set_ddc_brightness(pct: i32) -> usize {
+/// Sets `only` (every monitor when None) over DDC/CI; how many accepted it.
+fn set_ddc_brightness(only: Option<HMONITOR>, pct: i32) -> usize {
     let mut done = 0;
-    ddc_each(|h| unsafe {
+    ddc_each(only, |h| unsafe {
         let (mut min, mut cur, mut max) = (0u32, 0u32, 0u32);
         if GetMonitorBrightness(h, &mut min, &mut cur, &mut max) != 0 && SetMonitorBrightness(h, pct_to_raw(pct as u32, min, max)) != 0 { done += 1; }
     });
     done
 }
 
-/// Laptop panel through WMI, else every external monitor through DDC/CI; the percentage set.
-fn set_brightness(pct: i32) -> Result<i32, String> {
-    set_wmi_brightness(pct).or_else(|e| if set_ddc_brightness(pct) > 0 { Ok(pct) } else { Err(e) })
+/// With `mon`: that monitor over DDC/CI, else the laptop panel. Without: the panel, else every DDC/CI monitor.
+/// The percentage set.
+fn set_brightness(mon: Option<HMONITOR>, pct: i32) -> Result<i32, String> {
+    if mon.is_some() && set_ddc_brightness(mon, pct) > 0 { return Ok(pct); }
+    set_wmi_brightness(pct).or_else(|e| if mon.is_none() && set_ddc_brightness(None, pct) > 0 { Ok(pct) } else { Err(e) })
 }
 
 /// WmiSetBrightness on the first panel with brightness control (laptops); the percentage set.
@@ -408,8 +430,8 @@ mod tests {
 
     #[test]
     fn args() {
-        assert_eq!(parse_args(&["-action", "wifi", "-VALUE", "on"]), (Some("wifi".into()), "on".into()));
-        assert_eq!(parse_args(&["-Action:status"]), (Some("status".into()), String::new()));
+        assert_eq!(parse_args(&["-action", "wifi", "-VALUE", "on"]), (Some("wifi".into()), "on".into(), String::new()));
+        assert_eq!(parse_args(&["-Action:status", "-Monitor", "active"]), (Some("status".into()), String::new(), "active".into()));
         assert_eq!(parse_args(&[]).0, None);
     }
 

@@ -99,10 +99,10 @@ fn timer_act(cx: &Ctx, act: &str, sw: bool) {
         ("reset", false) => t = json!({ "phase": "focus", "cycle": 0, "running": false, "endsAt": 0, "left": null, "sw": t["sw"].clone() }),
         ("toggle", true) => sw_toggle(&mut t, now),
         ("reset", true) => t["sw"] = json!({ "running": false, "start": 0, "acc": 0, "laps": [] }),
-        ("next", _) => { hub::set("end4-pC.timerDone", None); let l = hub::left(&t, &cx.cfg); pomo_toggle(&mut t, l, now) }
+        ("next", _) => { hub::set("zor-ui.timerDone", None); let l = hub::left(&t, &cx.cfg); pomo_toggle(&mut t, l, now) }
         _ => return,
     }
-    hub::set("end4-pC.timer", Some(t.to_string()));
+    hub::set("zor-ui.timer", Some(t.to_string()));
 }
 
 /// `st` plus `secs` (calendar arithmetic through FILETIME, like util::add_days).
@@ -125,9 +125,9 @@ impl Island {
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let lyr = cx.cfg.bool("lyrics") && dp(cx, "lyrics");
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if lyr { 10.0 + LYR_H } else { 0.0 })); }
-        if dp(cx, "recording") && hub::get("end4-pC.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
+        if dp(cx, "recording") && hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
         let t = hub::timer();
-        let done = hub::get("end4-pC.timerDone").is_some_and(|d| !d.is_empty());
+        let done = hub::get("zor-ui.timerDone").is_some_and(|d| !d.is_empty());
         if dp(cx, "timer") && (done || t["running"].as_bool() == Some(true) || t["sw"]["running"].as_bool() == Some(true)) { v.push((Sec::Timer, 16.0 + 10.0 + 44.0)); }
         if dp(cx, "clock") && v.is_empty() { v.push((Sec::Idle, 72.0)); }
         if dp(cx, "agents") {
@@ -238,7 +238,7 @@ impl Island {
 
     fn rec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
-        let since = hub::get("end4-pC.rec").and_then(|r| r.parse::<f64>().ok()).unwrap_or(0.0);
+        let since = hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).unwrap_or(0.0);
         let pulse = 0.25 + 0.75 * (0.5 + 0.5 * (hub::now_ms() / 900.0 * std::f64::consts::PI).cos()) as f32;
         c.circle(x + 5.0, y + 28.0, 5.0, alpha(t.c("error"), pulse));
         c.text(&hub::clock((hub::now_ms() - since) / 1000.0), R::new(x + 18.0, y, 220.0, 44.0), txt(44.0, 500), t.c("error"), Align::Left);
@@ -248,7 +248,7 @@ impl Island {
 
     fn timer(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
-        let (tm, done) = (hub::timer(), hub::get("end4-pC.timerDone").unwrap_or_default());
+        let (tm, done) = (hub::timer(), hub::get("zor-ui.timerDone").unwrap_or_default());
         let running = tm["running"].as_bool() == Some(true);
         let sw = done.is_empty() && !running && tm["sw"]["running"].as_bool() == Some(true);
         let phase = tm["phase"].as_str().unwrap_or("focus");
@@ -415,7 +415,7 @@ impl View for Island {
                 PLAY => media::control_of(&id, "togglePlayPause"),
                 NEXT => media::control_of(&id, "next"),
                 REC_STOP => {
-                    hub::set("end4-pC.rec", None);
+                    hub::set("zor-ui.rec", None);
                     let cfg = Config(cx.cfg.0.clone());
                     std::thread::spawn(move || { crate::proc::bridge(&cfg, "record", &["stop"]); });
                     cx.actions.push(Action::Close("island-panel".into()));
@@ -428,7 +428,7 @@ impl View for Island {
                     std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &["all"]); });
                 }
                 i if i >= NOTIF => {
-                    hub::set("end4-pC.rightTab", Some("notif".into()));
+                    hub::set("zor-ui.rightTab", Some("notif".into()));
                     cx.actions.push(Action::open("sidebar-right"));
                     cx.actions.push(Action::Close("island-panel".into()));
                 }

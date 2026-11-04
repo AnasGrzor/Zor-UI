@@ -1,4 +1,4 @@
-"""end4-pC for Windows - AI agent status for the Dynamic Island.
+"""Zor UI - AI agent status for the Dynamic Island.
 
 Any coding agent reports to end4 by piping JSON into this script; the island shows when one
 needs you (a permission prompt, a question) and the panel under it shows usage limits.
@@ -16,7 +16,7 @@ Understood input, whatever the agent or model:
   * end4's own: {"session": "id", "state": "waiting|working|done|ended", "message": "...",
                  "usage": {"<window>": {"used_percentage": 0-100, "resets_at": epoch seconds}}}
 
-Writes %LOCALAPPDATA%\\end4-pC\\agents\\<agent>\\<session>.json (and usage.json); the bridge's
+Writes %LOCALAPPDATA%\\zor-ui\\agents\\<agent>\\<session>.json (and usage.json); the bridge's
 agents / agents-watch commands read them. One file per session, so parallel hooks never race.
 Standard library only, because hooks run on every tool call.
 """
@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(os.environ.get("END4_ROOT") or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "end4-pC")
+ROOT = Path(os.environ.get("END4_ROOT") or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "zor-ui")
 AGENTS = ROOT / "agents"
 
 WAITING = {"PermissionRequest", "Elicitation"}

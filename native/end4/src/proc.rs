@@ -90,14 +90,14 @@ pub fn zebar_widget(name: &str) {
     let Some(p) = zpack["widgets"].as_array().and_then(|w| w.iter().find(|w| w["name"] == name)).map(|w| &w["presets"][0]) else { return };
     let s = |k: &str| p[k].as_str().unwrap_or("").to_string();
     let mt = p["monitorSelection"]["type"].as_str().unwrap_or("primary").to_string();
-    let _ = cmd("zebar").args(["start-widget", "--pack", "end4-pC", "--widget-name", name, "--anchor", &s("anchor"),
+    let _ = cmd("zebar").args(["start-widget", "--pack", "zor-ui", "--widget-name", name, "--anchor", &s("anchor"),
         "--offset-x", &s("offsetX"), "--offset-y", &s("offsetY"), "--width", &s("width"), "--height", &s("height"), "--monitor-type", &mt])
         .stdout(Stdio::null()).spawn();
 }
 
 /// zebar.startWidgetPreset(name, 'default').
 pub fn zebar_preset(name: &str) {
-    let _ = cmd("zebar").args(["start-widget-preset", "--pack", "end4-pC", "--widget-name", name, "--preset", "default"]).stdout(Stdio::null()).spawn();
+    let _ = cmd("zebar").args(["start-widget-preset", "--pack", "zor-ui", "--widget-name", name, "--preset", "default"]).stdout(Stdio::null()).spawn();
 }
 
 

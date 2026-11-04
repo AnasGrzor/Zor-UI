@@ -98,7 +98,7 @@ impl SidebarRight {
     fn start(&mut self, cx: &Ctx) {
         if self.started { return; }
         self.started = true;
-        self.tab = hub::get("end4-pC.rightTab").and_then(|t| TABS.iter().position(|x| *x == t)).unwrap_or(0);
+        self.tab = hub::get("zor-ui.rightTab").and_then(|t| TABS.iter().position(|x| *x == t)).unwrap_or(0);
         self.sw_mode = cx.state.v["timerMode"].as_str() == Some("sw");
         if self.render {
             // --render can't click: END4_SR="timer,sw,mixer,power" shows those states
@@ -160,10 +160,10 @@ impl SidebarRight {
             "record" => {
                 let recording = rec_started() > 0.0;
                 self.exec(id, move |cfg, _| {
-                    if recording { proc::bridge(cfg, "record", &["stop"]); hub::set("end4-pC.rec", None); return; }
+                    if recording { proc::bridge(cfg, "record", &["stop"]); hub::set("zor-ui.rec", None); return; }
                     let r = proc::bridge(cfg, "record", &["start"]);
                     if r["recording"].as_bool() == Some(true) {
-                        hub::set("end4-pC.rec", Some(((r["started"].as_f64().unwrap_or(0.0) * 1000.0).round() as i64).to_string()));
+                        hub::set("zor-ui.rec", Some(((r["started"].as_f64().unwrap_or(0.0) * 1000.0).round() as i64).to_string()));
                         crate::app::post(Box::new(|cx| Self::close(cx)));
                     }
                 });
@@ -214,7 +214,7 @@ impl SidebarRight {
                     repaint();
                 });
             }
-            i if (ID_TAB..ID_TAB + 4).contains(&i) => { self.tab = (i - ID_TAB) as usize; hub::set("end4-pC.rightTab", Some(TABS[self.tab].into())); }
+            i if (ID_TAB..ID_TAB + 4).contains(&i) => { self.tab = (i - ID_TAB) as usize; hub::set("zor-ui.rightTab", Some(TABS[self.tab].into())); }
             _ => self.page_click(id, cx),
         }
     }
@@ -357,7 +357,7 @@ impl SidebarRight {
     }
 }
 
-fn rec_started() -> f64 { hub::get("end4-pC.rec").and_then(|t| t.parse().ok()).unwrap_or(0.0) }
+fn rec_started() -> f64 { hub::get("zor-ui.rec").and_then(|t| t.parse().ok()).unwrap_or(0.0) }
 
 /// What `--render` shows: a plausible session without running the helpers.
 fn sample() -> Shared {

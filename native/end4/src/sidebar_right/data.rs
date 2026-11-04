@@ -313,13 +313,13 @@ pub fn sw_text(sec: f64) -> String { format!("{}.{}", hub::clock(sec), ((sec % 1
 pub fn edit_timer(f: impl FnOnce(&mut Value)) {
     let mut t = hub::timer();
     f(&mut t);
-    hub::set("end4-pC.timer", Some(t.to_string()));
+    hub::set("zor-ui.timer", Some(t.to_string()));
 }
 
 // ------------------------------------------------------------------ to-do
 
-pub fn todos() -> Vec<Value> { hub::get_json("end4-pC.todo").as_array().cloned().unwrap_or_default() }
-pub fn save_todos(t: &[Value]) { hub::set("end4-pC.todo", Some(Value::Array(t.to_vec()).to_string())); }
+pub fn todos() -> Vec<Value> { hub::get_json("zor-ui.todo").as_array().cloned().unwrap_or_default() }
+pub fn save_todos(t: &[Value]) { hub::set("zor-ui.todo", Some(Value::Array(t.to_vec()).to_string())); }
 
 #[cfg(test)]
 mod tests {

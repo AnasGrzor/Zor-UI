@@ -1,4 +1,4 @@
-// end4-pC for Windows - picks the right lrclib search result for what's playing.
+// Zor UI - picks the right lrclib search result for what's playing.
 // No imports, so tests/lyricpick.test.mjs can run it in Node.
 
 const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();

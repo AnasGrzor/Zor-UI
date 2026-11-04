@@ -1,4 +1,4 @@
-// end4-pC for Windows - where desktop cards go (each card is its own window, see desktop.js).
+// Zor UI - where desktop cards go (each card is its own window, see desktop.js).
 
 // Rough card heights, only used to stack cards that were never dragged.
 const HEIGHT = { clock: 250, weather: 92, week: 90, greet: 90, media: 92, calendar: 270, todo: 150,

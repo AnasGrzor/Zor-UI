@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-end4-pC for Windows - Material You theme generator.
+Zor UI - Material You theme generator.
 
 Generates a Material 3 color scheme from a wallpaper (or a hex color) and
 applies it to every part of the Windows setup:
 
-  * Zebar widgets      -> ~/.glzr/zebar/end4-pC/theme.json (widgets poll it)
+  * Zebar widgets      -> ~/.glzr/zebar/zor-ui/theme.json (widgets poll it)
   * GlazeWM borders    -> ~/.glzr/glazewm/config.yaml (marked block) + reload
-  * Flow Launcher      -> %APPDATA%/FlowLauncher/Themes/end4-pC.xaml
-  * Windows Terminal   -> fragment with an "end4-pC" color scheme
+  * Flow Launcher      -> %APPDATA%/FlowLauncher/Themes/zor-ui.xaml
+  * Windows Terminal   -> fragment with an "zor-ui" color scheme
 
 Color math is adapted from end4-pC's scripts/colors/generate_colors_material.py
 (GPL-3.0, (c) end-4 / pctrade) so the palettes match the Linux shell exactly.
@@ -151,7 +151,7 @@ def write_zebar(pack_dir, payload):
     os.replace(tmp, pack_dir / "theme.json")
 
 
-BEGIN, END = "# >>> end4-pC colors (managed by end4_theme.py)", "# <<< end4-pC colors"
+BEGIN, END = "# >>> zor-ui colors (managed by end4_theme.py)", "# <<< zor-ui colors"
 
 
 def write_glazewm(cfg, c):
@@ -193,19 +193,19 @@ def write_flow(template, themes_dir, c, dark):
         "COLORSCHEME": "Dark" if dark else "Light",
     }.items():
         out = out.replace("{{" + k + "}}", v)
-    (themes_dir / "end4-pC.xaml").write_text(out, encoding="utf-8")
+    (themes_dir / "zor-ui.xaml").write_text(out, encoding="utf-8")
     return True
 
 
 def write_terminal(frag_dir, c, t):
     frag_dir.mkdir(parents=True, exist_ok=True)
     names = ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"]
-    scheme = {"name": "end4-pC", "background": c["surface"], "foreground": c["onSurface"],
+    scheme = {"name": "zor-ui", "background": c["surface"], "foreground": c["onSurface"],
               "cursorColor": c["primary"], "selectionBackground": c["secondaryContainer"]}
     for i, n in enumerate(names):
         scheme[n] = t[f"term{i}"]
         scheme["bright" + n.capitalize()] = t[f"term{i + 8}"]
-    (frag_dir / "end4-pC.json").write_text(json.dumps({"schemes": [scheme]}, indent=2))
+    (frag_dir / "zor-ui.json").write_text(json.dumps({"schemes": [scheme]}, indent=2))
 
 
 def reload_glazewm():
@@ -229,12 +229,12 @@ def main():
     src.add_argument("--color", help="seed color, e.g. #6750A4")
     ap.add_argument("--mode", choices=["dark", "light"], help="default: last used, else dark")
     ap.add_argument("--scheme", choices=["auto", *SCHEMES], help="default: last used, else auto")
-    ap.add_argument("--state", default=str(LOCALAPPDATA / "end4-pC" / "state.json"))
-    ap.add_argument("--pack-dir", default=str(HOME / ".glzr" / "zebar" / "end4-pC"))
+    ap.add_argument("--state", default=str(LOCALAPPDATA / "zor-ui" / "state.json"))
+    ap.add_argument("--pack-dir", default=str(HOME / ".glzr" / "zebar" / "zor-ui"))
     ap.add_argument("--glazewm-config", default=str(HOME / ".glzr" / "glazewm" / "config.yaml"))
     ap.add_argument("--flow-themes", default=str(APPDATA / "FlowLauncher" / "Themes"))
     ap.add_argument("--terminal-fragments", default=str(
-        LOCALAPPDATA / "Microsoft" / "Windows Terminal" / "Fragments" / "end4-pC"))
+        LOCALAPPDATA / "Microsoft" / "Windows Terminal" / "Fragments" / "zor-ui"))
     ap.add_argument("--no-reload", action="store_true", help="don't ask GlazeWM to reload")
     ap.add_argument("--live", help="video used as a live wallpaper (--image is a frame from it)")
     ap.add_argument("--thumb-from", help=argparse.SUPPRESS)
@@ -263,7 +263,7 @@ def main():
     if image:
         write_thumbnail(Path(args.pack_dir), args.thumb_from or image)
     glaze_ok = write_glazewm(Path(args.glazewm_config), colors)
-    flow_ok = write_flow(HERE.parent / "flowlauncher" / "end4-pC.xaml.template", Path(args.flow_themes), colors, mode == "dark")
+    flow_ok = write_flow(HERE.parent / "flowlauncher" / "zor-ui.xaml.template", Path(args.flow_themes), colors, mode == "dark")
     write_terminal(Path(args.terminal_fragments), colors, term)
 
     state.update({"mode": mode, "scheme": scheme, "image": image if image else None,

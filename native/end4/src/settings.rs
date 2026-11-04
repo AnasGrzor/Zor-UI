@@ -82,6 +82,7 @@ pub struct Settings {
     we: Load<Value>,
     we_list: Load<Vec<Value>>,
     keys: Load<Value>,
+    mons: Load<Vec<String>>,
     models: Load<Vec<(String, String)>>,
     we_type: String,
     imgs: HashMap<String, Option<tiny_skia::Pixmap>>,
@@ -116,7 +117,7 @@ impl Settings {
         let mut s = Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""), native: [false; 3],
             over: HashMap::new(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, sl: None, drag_val: None, toast: None,
-            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle,
+            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(),
         };
         if std::env::var("END4_RENDER_DEMO").is_ok() { s.demo(); }
@@ -227,6 +228,15 @@ impl Settings {
                     store::bridge(cx, &self.inbox, "we-list", vec![], |s, r| s.we_list = Load::Ready(r["items"].as_array().cloned().unwrap_or_default()));
                 }
             }
+            "quick" => if matches!(self.mons, Load::Idle) {
+                self.mons = Load::Loading;
+                store::script(cx, &self.inbox, "toggles", vec!["-Action".into(), "monitors".into()], |s, r| {
+                    let list = r["monitors"].as_array().cloned().unwrap_or_default();
+                    // pinned in `over` (far-future stamp) so the sliders show the hardware value
+                    for m in &list { s.over.insert(format!("monitor.{}", m["i"]), (m["brightness"].clone(), 1e18)); }
+                    s.mons = Load::Ready(list.iter().map(|m| format!("{}|{}", m["i"], m["name"].as_str().unwrap_or(""))).collect());
+                });
+            },
             "services" => {
                 if matches!(self.keys, Load::Idle) {
                     self.keys = Load::Loading;
@@ -479,6 +489,7 @@ impl View for Settings {
 
     fn frame_ms(&self) -> u32 {
         if self.rendering { 0 }
+        else if self.scroll.moving() { 16 }
         else if self.toast.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
         else if self.focus.is_some() && self.active { 500 }
         else { 0 }
@@ -512,6 +523,7 @@ impl View for Settings {
         (self.content_h, self.view_h) = (ch, r.h);
         let mut acts = nav_acts;
         let mut sc = std::mem::take(&mut self.scroll);
+        sc.ease();
         sc.region(c, cx, r, ch, |c, top| {
             let mut pen = Pen::new(c, cx, r.x, top, r.w - 6.0, r.y, r.y + r.h);
             pen.cards = cards;
@@ -539,7 +551,7 @@ impl View for Settings {
             Input::Hover(_) => {}
             Input::Wheel(_, d) => match &mut self.menu {
                 Some(m) => { let (ch, vh) = menu_dims(m, self.area.1); m.scroll.wheel(d, ch, vh); }
-                None => self.scroll.wheel(d, self.content_h, self.view_h),
+                None => self.scroll.glide(d, self.content_h, self.view_h),
             },
             Input::Click(id, Btn::Left) => {
                 if id == MENU_BG { self.menu = None; }
@@ -578,7 +590,10 @@ impl View for Settings {
             }
             Input::Drag(_, _, _, Phase::End) => {
                 if let Some((path, sl, _)) = self.sl.take() {
-                    if let Some((_, v)) = self.drag_val.take() {
+                    if let (Some((_, v)), Some(i)) = (self.drag_val.take(), path.strip_prefix("monitor.")) {
+                        self.over.insert(path.clone(), (json!(v), 1e18));
+                        store::script(cx, &self.inbox, "toggles", ["-Action", "brightness", "-Value", &(v as i64).to_string(), "-Monitor", i].map(String::from).to_vec(), |_, _| {});
+                    } else if let Some((_, v)) = self.drag_val.take() {
                         self.set(&path, num_json(v));
                         if path == "nightLight.kelvin" && !self.rendering {
                             let (cfg, k) = (store::bcfg(cx), (v as i64).to_string());

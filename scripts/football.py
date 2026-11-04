@@ -12,8 +12,8 @@ from urllib.request import Request, urlopen
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0 Safari/537.36"
 SITE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 CORE = "https://sports.core.api.espn.com/v2/sports/soccer/leagues"
-# end4-pC for Windows: cache under %LOCALAPPDATA% instead of ~/.cache/quickshell.
-CACHE = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.cache"), "end4-pC", "cache", "football")
+# Zor UI: cache under %LOCALAPPDATA% instead of ~/.cache/quickshell.
+CACHE = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.cache"), "zor-ui", "cache", "football")
 
 LEAGUES = [
     {"id": "esp.1", "name": "LaLiga", "country": "ES", "goals": 1.30, "domestic": True},

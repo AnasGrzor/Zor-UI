@@ -184,7 +184,7 @@ function renderCalendar() {
 }
 
 // Shares the right sidebar's to-do list (same localStorage key).
-const TODO_KEY = 'end4-pC.todo';
+const TODO_KEY = 'zor-ui.todo';
 const todos = () => { try { return JSON.parse(localStorage.getItem(TODO_KEY)) || []; } catch { return []; } };
 function renderTodo() {
   const list = todos();
@@ -204,8 +204,8 @@ $('#todo')?.addEventListener('click', e => {
 function renderNotes() {   // rendered once: re-rendering would drop the caret while typing
   setHTML($('#notes'), `<div class="pad"><h3>${icon('sticky_note_2')}Notes</h3><textarea placeholder="Write something" spellcheck="false"></textarea></div>`);
   const ta = $('#notes textarea');
-  ta.value = localStorage.getItem('end4-pC.notes') || '';
-  ta.addEventListener('input', () => localStorage.setItem('end4-pC.notes', ta.value));
+  ta.value = localStorage.getItem('zor-ui.notes') || '';
+  ta.addEventListener('input', () => localStorage.setItem('zor-ui.notes', ta.value));
 }
 
 function renderTimer() {
@@ -419,7 +419,7 @@ setInterval(everyMinute, 60000);
 
 // ---------------------------------------------------------------- size, place and drag
 const ipc = (cmd, args = {}) => window.__TAURI_INTERNALS__.invoke('plugin:window|' + cmd, { label: tauri.label, ...args });
-const POS_KEY = 'end4-pC.deskPos';
+const POS_KEY = 'zor-ui.deskPos';
 const saved = () => { try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch { return {}; } };
 
 // The window follows the card's size (cards grow and shrink: to-do items, media on/off).

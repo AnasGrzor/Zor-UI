@@ -270,14 +270,14 @@ fn pill_w(g: &Gfx, p: &Pill) -> f32 {
 impl Bar {
     /// timerChip() in bar.js: (done, icon, text); None when no timer runs.
     fn timer_chip(cx: &Ctx) -> Option<(bool, &'static str, String)> {
-        if let Some(d) = hub::get("end4-pC.timerDone") { return Some((true, "alarm", if d == "focus" { "Break time".into() } else { "Focus time".into() })); }
+        if let Some(d) = hub::get("zor-ui.timerDone") { return Some((true, "alarm", if d == "focus" { "Break time".into() } else { "Focus time".into() })); }
         let t = hub::timer();
         if t["running"].as_bool() == Some(true) { return Some((false, if t["phase"] == "focus" { "timer" } else { "coffee" }, hub::clock(hub::left(&t, &cx.cfg)))); }
         if t["sw"]["running"].as_bool() == Some(true) { return Some((false, "timer_play", hub::clock(hub::sw_elapsed(&t)))); }
         None
     }
 
-    fn rec_started() -> f64 { hub::get("end4-pC.rec").and_then(|v| v.parse().ok()).unwrap_or(0.0) }
+    fn rec_started() -> f64 { hub::get("zor-ui.rec").and_then(|v| v.parse().ok()).unwrap_or(0.0) }
 
     /// diProviders() in bar.js: what the island could show, most important first; .2 = wins outright.
     fn island_list(cx: &Ctx) -> Vec<(&'static str, bool)> {
@@ -700,12 +700,12 @@ impl Bar {
             (LAUNCHER, Btn::Left) => self.open_here(cx, "sidebar-left"),
             (SYS | CLOCK, Btn::Left) => self.open_here(cx, "sidebar-right"),
             (TIMER, Btn::Left) => {
-                hub::set("end4-pC.timerDone", None);
-                hub::set("end4-pC.rightTab", Some("timer".into()));
+                hub::set("zor-ui.timerDone", None);
+                hub::set("zor-ui.rightTab", Some("timer".into()));
                 self.open_here(cx, "sidebar-right");
             }
             (REC, Btn::Left) => {
-                hub::set("end4-pC.rec", None);
+                hub::set("zor-ui.rec", None);
                 let cfg = crate::conf::Config(cx.cfg.0.clone());
                 std::thread::spawn(move || { proc::bridge(&cfg, "record", &["stop"]); }); // opens Explorer on the new file
             }

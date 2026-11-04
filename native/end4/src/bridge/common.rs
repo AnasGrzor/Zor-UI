@@ -6,7 +6,7 @@ use std::{os::windows::process::CommandExt, path::{Path, PathBuf}, process::Comm
 
 pub const NO_WINDOW: u32 = 0x0800_0000;
 
-/// %LOCALAPPDATA%\end4-pC (ROOT in end4_bridge.py): state.json, secrets, caches.
+/// %LOCALAPPDATA%\zor-ui (ROOT in end4_bridge.py): state.json, secrets, caches.
 pub fn root() -> PathBuf { crate::conf::data_dir() }
 /// The Zebar pack folder: config.json, theme.json, wallpaper.jpg.
 pub fn pack() -> PathBuf { crate::conf::pack_dir() }
@@ -41,7 +41,7 @@ pub fn hidden(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// GET through curl.exe (this process has no TLS stack): body bytes on a 2xx, else None.
 pub fn get_bytes(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Option<Vec<u8>> {
     let mut c = hidden("curl.exe");
-    c.args(["-s", "-f", "-L", "--max-time", &timeout_s.to_string(), "-A", "end4-pC"]);
+    c.args(["-s", "-f", "-L", "--max-time", &timeout_s.to_string(), "-A", "zor-ui"]);
     for (k, v) in headers { c.args(["-H", &format!("{k}: {v}")]); }
     let out = c.arg(url).output().ok()?;
     out.status.success().then_some(out.stdout)

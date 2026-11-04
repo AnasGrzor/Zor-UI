@@ -1,4 +1,4 @@
-// end4-pC for Windows - which bar modules show, on which side, in what order (Settings > Bar).
+// Zor UI - which bar modules show, on which side, in what order (Settings > Bar).
 // No imports, so tests/barlayout.test.mjs can run it in Node.
 
 // [id, default side, label, icon], in default order. Sides: left, center, right, hidden.

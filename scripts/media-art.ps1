@@ -1,5 +1,5 @@
 <#
-  end4-pC for Windows - album art, playback position and seeking for the current media session.
+  Zor UI - album art, playback position and seeking for the current media session.
 
   Zebar's media provider has no artwork, and its position is a stale snapshot without the time
   Windows took it, so the widgets call this. It asks Windows' media session manager (the same
@@ -12,7 +12,7 @@
 param([string]$Out = '', [switch]$Timeline, [string]$Seek = '')
 
 $ErrorActionPreference = 'Stop'
-if (-not $Out) { $Out = Join-Path $env:USERPROFILE '.glzr\zebar\end4-pC\cover.jpg' }
+if (-not $Out) { $Out = Join-Path $env:USERPROFILE '.glzr\zebar\zor-ui\cover.jpg' }
 
 function Out-Json($obj) { $obj | ConvertTo-Json -Compress }
 

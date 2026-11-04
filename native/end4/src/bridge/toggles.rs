@@ -35,13 +35,23 @@ use windows::{
 pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
     let (action, value, monitor) = parse_args(args);
     let action = action?;
-    let mon = if monitor.eq_ignore_ascii_case("active") { active_monitor() } else { None };
+    // "active", or a 0-based index into `monitors`
+    let mon = if monitor.eq_ignore_ascii_case("active") { active_monitor() } else { monitor.trim().parse::<usize>().ok().and_then(|i| hmonitors().get(i).copied()) };
     let ok = || Some(json!({ "ok": true }));
     match action.to_lowercase().as_str() {
         "status" => Some(json!({
             "wifi": radio_state(RadioKind::WiFi), "bluetooth": radio_state(RadioKind::Bluetooth),
             "caffeine": caffeine_on(), "darkMode": dark_mode(), "brightness": brightness(mon),
         })),
+        "monitors" => {
+            // Every monitor with a brightness: DDC/CI ones, and the laptop panel (WMI) on the first one without DDC.
+            let mut panel = wmi_brightness();
+            let list: Vec<Value> = hmonitors().into_iter().enumerate().filter_map(|(i, m)| {
+                let b = ddc_brightness(Some(m)).or_else(|| panel.take())?;
+                Some(json!({ "name": format!("Display {}", i + 1), "i": i, "brightness": b }))
+            }).collect();
+            Some(json!({ "monitors": list }))
+        }
         "wifi" => Some(json!({ "wifi": set_radio(RadioKind::WiFi, &value) })),
         "bluetooth" => Some(json!({ "bluetooth": set_radio(RadioKind::Bluetooth, &value) })),
         "caffeine" => Some(json!({ "caffeine": switch_caffeine() })),
@@ -70,7 +80,7 @@ pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
         "actioncenter" => { shell("ms-actioncenter:", ""); ok() }
         "editconfig" => {
             let p = std::env::var("USERPROFILE").unwrap_or_default();
-            shell("notepad", &format!("\"{p}\\.glzr\\zebar\\end4-pC\\config.json\""));
+            shell("notepad", &format!("\"{p}\\.glzr\\zebar\\zor-ui\\config.json\""));
             ok()
         }
         "lock" => { let _ = hidden("rundll32.exe").args(["user32.dll,", "LockWorkStation"]).spawn(); ok() }
@@ -209,6 +219,17 @@ fn wmi_brightness() -> Option<u8> {
     }
 }
 
+/// Every monitor, in the order EnumDisplayMonitors gives them.
+fn hmonitors() -> Vec<HMONITOR> {
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+        (*(data.0 as *mut Vec<HMONITOR>)).push(m);
+        BOOL(1)
+    }
+    let mut v: Vec<HMONITOR> = vec![];
+    unsafe { let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut v as *mut _ as isize)); }
+    v
+}
+
 /// The monitor the foreground window is on: the sidebar has focus while its slider is used.
 fn active_monitor() -> Option<HMONITOR> {
     let m = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) };
@@ -320,7 +341,7 @@ fn kill(pid: u32) {
 /// again to bring them back. "On" = neither the shell (it holds the single-instance mutex) nor Zebar
 /// runs, so no state file can go stale. GlazeWM keeps running so the key still works. Returns the new state.
 fn game_mode() -> bool {
-    let shell_up = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("end4-pC-native")).map(|h| { let _ = CloseHandle(h); }).is_ok() };
+    let shell_up = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("zor-ui-native")).map(|h| { let _ = CloseHandle(h); }).is_ok() };
     let stopping = shell_up || !pids(&["zebar.exe"]).is_empty();
     let we = super::we::we_running();
     if stopping {

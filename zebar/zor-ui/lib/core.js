@@ -1,4 +1,4 @@
-// end4-pC for Windows - shared helpers for every widget in the pack.
+// Zor UI - shared helpers for every widget in the pack.
 import * as zebar from 'https://esm.sh/zebar@3.0';
 import { pickLyrics, plainText } from './lyricpick.js';
 
@@ -95,7 +95,7 @@ export function config() {
 // these keys are mirrored to it over a WebSocket (hub.rs, same list), which pushes every change
 // back: the timer, recording, agents, and where a popup should open. (A WebSocket, because Zebar's
 // request caching doesn't pass fetch() to 127.0.0.1:6133 through.)
-const SHARED = ['end4-pC.timer', 'end4-pC.rec', 'end4-pC.timerDone', 'end4.agents', 'end4.openOn', 'end4.islandAt', 'end4-pC.rightTab', 'end4-pC.todo', 'end4-pC.notes',
+const SHARED = ['zor-ui.timer', 'zor-ui.rec', 'zor-ui.timerDone', 'end4.agents', 'end4.openOn', 'end4.islandAt', 'zor-ui.rightTab', 'zor-ui.todo', 'zor-ui.notes',
   'end4.closedAt.island-panel', 'end4.closedAt.overview', 'end4.closedAt.sidebar-left', 'end4.closedAt.sidebar-right', 'end4.closedAt.settings'];   // hub.rs KEYS, same list
 const lsSet = Storage.prototype.setItem, lsRemove = Storage.prototype.removeItem;
 /** Resolves once the shared keys are in localStorage (at once when the bar isn't native). */
@@ -184,7 +184,7 @@ export async function run(script, ...args) {
     const line = String(out.stdout || '').trim().split(/\r?\n/).pop();
     return line ? JSON.parse(line) : { error: out.stderr };
   } catch (err) {
-    console.warn('[end4-pC] script failed', script, args, err);
+    console.warn('[zor-ui] script failed', script, args, err);
     return { error: String(err?.message || err) };
   }
 }

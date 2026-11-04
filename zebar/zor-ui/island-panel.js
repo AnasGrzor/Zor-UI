@@ -1,4 +1,4 @@
-// end4-pC for Windows - the Dynamic Island, expanded (opened by clicking the island in the bar).
+// Zor UI - the Dynamic Island, expanded (opened by clicking the island in the bar).
 // Shows everything going on: the song (with progress, controls and lyrics), a timer, a recording;
 // or, when nothing is, the time, date and weather. The latest notifications are at the bottom.
 import {
@@ -36,7 +36,7 @@ const ago = t => {
 // wave and the lyric highlight are updated in place (tick) so the lyrics can slide.
 function sections() {
   const s = out.media?.currentSession, t = timer.load();
-  const rec = Number(localStorage.getItem('end4-pC.rec')) || 0, done = localStorage.getItem('end4-pC.timerDone');
+  const rec = Number(localStorage.getItem('zor-ui.rec')) || 0, done = localStorage.getItem('zor-ui.timerDone');
   const parts = [];
   if (dp.media && s?.title) {
     const key = `${s.title}|${s.artist}`;
@@ -105,7 +105,7 @@ function tick() {
     setHTML($('.seek'), waveSvg($('.seek').clientWidth || 260, dur > 0 ? pos / dur : 0, s.isPlaying));
     renderLyrics($('.lyr'), np.lyr, pos, showLyrics);
   }
-  if ($('#rec')) setHTML($('#rec'), timer.clock((Date.now() - Number(localStorage.getItem('end4-pC.rec'))) / 1000));
+  if ($('#rec')) setHTML($('#rec'), timer.clock((Date.now() - Number(localStorage.getItem('zor-ui.rec'))) / 1000));
   if ($('#timer')) setHTML($('#timer'), timer.clock(!t.running && t.sw.running ? timer.swElapsed(t) : timer.left(t, cfg)));
   if ($('#clock')) setHTML($('#clock'), new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !cfg.use24h }));
 }
@@ -129,14 +129,14 @@ $('#panel').addEventListener('click', async e => {
   const dur = s ? (s.endTime || 0) - (s.startTime || 0) : 0;
   if (seek && dur > 0) { const r = seek.getBoundingClientRect(); return mclock.seek(((e.clientX - r.left) / r.width) * dur).then(tick); }
   const act = e.target.closest('[data-act]')?.dataset.act;
-  if (act === 'rec-stop') { localStorage.removeItem('end4-pC.rec'); bridge('record', 'stop'); return close(); }
+  if (act === 'rec-stop') { localStorage.removeItem('zor-ui.rec'); bridge('record', 'stop'); return close(); }
   if (act === 'pomo-toggle') timer.pomo.toggle(cfg);
   if (act === 'pomo-reset') timer.pomo.reset();
   if (act === 'sw-toggle') timer.sw.toggle();
   if (act === 'sw-reset') timer.sw.reset();
-  if (act === 'timer-next') { localStorage.removeItem('end4-pC.timerDone'); timer.pomo.toggle(cfg); }
+  if (act === 'timer-next') { localStorage.removeItem('zor-ui.timerDone'); timer.pomo.toggle(cfg); }
   if (act === 'notifs-clear') { notifs = []; bridge('notifications-dismiss', 'all'); return render(); }
-  if (act === 'notifs') { localStorage.setItem('end4-pC.rightTab', 'notif'); openWidget('sidebar-right'); return close(); }
+  if (act === 'notifs') { localStorage.setItem('zor-ui.rightTab', 'notif'); openWidget('sidebar-right'); return close(); }
   render();
 });
 

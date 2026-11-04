@@ -1,6 +1,6 @@
 // Run: node tests/desk.test.mjs
 import assert from 'node:assert/strict';
-import { defaultSlot, onScreen } from '../zebar/end4-pC/lib/desk.js';
+import { defaultSlot, onScreen } from '../zebar/zor-ui/lib/desk.js';
 
 // Cards stack top to bottom in list order under the bar.
 assert.deepEqual(defaultSlot(['clock', 'weather'], 'clock', 1080), { x: 16, y: 72 });

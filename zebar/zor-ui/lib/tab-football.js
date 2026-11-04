@@ -1,4 +1,4 @@
-// Football tab (end4-pC's Football page): fixtures, live scores, win/draw/loss
+// Football tab (zor-ui's Football page): fixtures, live scores, win/draw/loss
 // probabilities and league tables, from end4's own scripts/football.py (ESPN data).
 import { $, esc, icon, bridge, config } from './core.js';
 

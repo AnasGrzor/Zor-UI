@@ -1,5 +1,5 @@
 <#
-  end4-pC for Windows - quick toggle backend for the Zebar sidebars.
+  Zor UI - quick toggle backend for the Zebar sidebars.
 
   Every action prints one line of JSON so the widgets can read the result.
   Runs under Windows PowerShell 5.1 (powershell.exe), which ships with Windows
@@ -14,7 +14,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$StateDir = Join-Path $env:LOCALAPPDATA 'end4-pC'
+$StateDir = Join-Path $env:LOCALAPPDATA 'zor-ui'
 $CaffeinePid = Join-Path $StateDir 'caffeine.pid'
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
@@ -200,7 +200,7 @@ try {
     }
     'taskmgr'    { Start-Process taskmgr; Out-Json @{ ok = $true } }
     'actioncenter' { Start-Process 'ms-actioncenter:'; Out-Json @{ ok = $true } }
-    'editconfig' { Start-Process notepad (Join-Path $env:USERPROFILE '.glzr\zebar\end4-pC\config.json'); Out-Json @{ ok = $true } }
+    'editconfig' { Start-Process notepad (Join-Path $env:USERPROFILE '.glzr\zebar\zor-ui\config.json'); Out-Json @{ ok = $true } }
     'timer-done' {
       # Windows toast when a pomodoro phase ends (end4 uses notify-send). Value is the phase that ended.
       $msg = @{ focus = 'Focus session done. Take a break.'; short = 'Break is over. Back to focus.'; long = 'Long break is over. Back to focus.' }[$Value]

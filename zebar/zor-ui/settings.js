@@ -1,4 +1,4 @@
-// end4-pC for Windows - settings app (end4's Settings window + presets gallery).
+// Zor UI - settings app (end4's Settings window + presets gallery).
 import { zebar, $, $$, esc, icon, config, watchTheme, run, bridge, popupBehaviour, openUrl, closeWindow } from './lib/core.js';
 import { LANGS } from './lib/tab-translate.js';
 import { BAR_MODULES, SIDES, barLayout, moveModule, placeModule } from './lib/barlayout.js';
@@ -384,10 +384,10 @@ const pages = {
 
   about() {
     return `<h2>${icon('info')}About</h2>
-    <div class="card"><div class="row"><div class="lbl"><b style="font-weight:500">end4-pC for Windows</b><small>A port of pctrade's end4-pC (illogical-impulse by end-4) to GlazeWM + Zebar</small></div>
-      <button class="chip" data-url="https://github.com/pctrade/end4-pC">${icon('open_in_new')}end4-pC</button></div>
+    <div class="card"><div class="row"><div class="lbl"><b style="font-weight:500">Zor UI</b><small>A port of pctrade's zor-ui (illogical-impulse by end-4) to GlazeWM + Zebar</small></div>
+      <button class="chip" data-url="https://github.com/pctrade/end4-pC">${icon('open_in_new')}Upstream: end4-pC</button></div>
       <div class="row"><div class="lbl">Windows settings</div><button class="chip" data-act="winsettings">${icon('settings')}Open</button></div>
-      <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\end4-pC\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>`;
+      <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>`;
   },
 };
 
@@ -486,7 +486,7 @@ document.addEventListener('click', async e => {
     return render();
   }
   if (d.act === 'reset-desk') {
-    localStorage.removeItem('end4-pC.deskPos');
+    localStorage.removeItem('zor-ui.deskPos');
     await set('desktop.layoutReset', Date.now());   // config change reloads every card, now without a saved spot
     return toast('Layout reset');
   }

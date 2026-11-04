@@ -1,4 +1,4 @@
-//! end4-pC native shell. Replaces the Zebar widget pack part by part; config.json "native" lists the
+//! zor-ui native shell. Replaces the Zebar widget pack part by part; config.json "native" lists the
 //! parts it has taken over. `end4.exe --all` runs every ported part regardless (for testing next to Zebar).
 #![windows_subsystem = "windows"]
 
@@ -13,6 +13,8 @@ mod glaze;
 mod gojo;
 mod hub;
 mod island;
+mod cast;
+mod claude_usage;
 mod lyrics;
 mod media;
 mod overview;
@@ -65,7 +67,7 @@ fn main() {
         }
         if let Some(i) = arg("--render") { return render::run(&args[i + 1..]); }
         // one copy only: a second start (login + manual) would stack duplicate widgets
-        let _single = CreateMutexW(None, true, w!("end4-pC-native"));
+        let _single = CreateMutexW(None, true, w!("zor-ui-native"));
         if GetLastError() == ERROR_ALREADY_EXISTS { return; }
         if app::App::start(arg("--all").is_some()).is_err() { return; }
         let mut msg = MSG::default();

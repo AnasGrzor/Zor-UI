@@ -423,6 +423,11 @@ impl Settings {
                 self.text_ph(p, &format!("buddies.{k}.name"), "Name", "What their partner calls them", "badge", "Character's own name");
                 self.seg(p, &format!("buddies.{k}.chatty"), &chatty, "Talks", "chat");
                 self.sw(p, &format!("buddies.{k}.walk"), "Walks around", "Off: they stay where they are and only sit or stand", "directions_walk");
+                for (f, label, ic) in [("hair", "Hair color", "brush"), ("shirt", "Shirt color", "checkroom"), ("pants", "Pants color", "styler"), ("eyes", "Eye color", "visibility")] {
+                    self.text_ph(p, &format!("buddies.{k}.{f}"), label, "Hex like #D6303A. Empty keeps the character's own", ic, "Character's own");
+                }
+                let bun = vec![(json!(""), "Character's own".to_string()), (json!("yes"), "Yes".to_string()), (json!("no"), "No".to_string())];
+                self.pick(p, &format!("buddies.{k}.bun"), bun, "Bun", "Hair tied up on top", "face_3", 190.0);
             });
         }
         p.h2("favorite", "Partners", "");

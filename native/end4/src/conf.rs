@@ -32,8 +32,8 @@ fn defaults() -> Value {
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie",
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
         "buddies": { "pair": true,
-            "a": { "character": "gojo", "name": "", "chatty": "normal", "walk": true },
-            "b": { "on": false, "character": "geto", "name": "", "chatty": "normal", "walk": true } },
+            "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
+            "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
         "native": {}
     }"#).expect("defaults are valid JSON")
 }

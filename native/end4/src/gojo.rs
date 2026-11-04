@@ -256,7 +256,7 @@ pub struct Gojo {
     scale: f32,
     /// 0 or 1: which window and which "buddies" config slot ("a" or "b") this is.
     slot: usize,
-    cast: &'static Cast,
+    cast: Cast,
     /// Empty: the cast's own name.
     name: String,
     walk: bool,
@@ -279,7 +279,7 @@ impl Gojo {
             purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false,
             mon: RECT::default(), scale: 1.0,
-            slot, cast: &cast::CASTS[slot.min(cast::CASTS.len() - 1)], name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
+            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
         };
         g
     }
@@ -287,7 +287,9 @@ impl Gojo {
     /// Reads this buddy's settings from config (once a second, so Settings changes show at once).
     fn tune(&mut self, cx: &Ctx) {
         let k = ["a", "b"][self.slot];
-        self.cast = cast::get(cx.cfg.str(&format!("buddies.{k}.character")));
+        self.cast = cast::get(cx.cfg.str(&format!("buddies.{k}.character"))).clone();
+        let s = |f: &str| cx.cfg.str(&format!("buddies.{k}.{f}")).to_string();
+        self.cast.dress(&s("hair"), &s("shirt"), &s("pants"), &s("eyes"), &s("bun"));
         self.name = cx.cfg.str(&format!("buddies.{k}.name")).trim().to_string();
         self.walk = cx.cfg.get(&format!("buddies.{k}.walk")).as_bool().unwrap_or(true);
         self.chatty = match cx.cfg.str(&format!("buddies.{k}.chatty")) { "quiet" => 0.0, "chatty" => 2.0, _ => 1.0 };
@@ -580,11 +582,11 @@ const SHOE: Color = 0xFF09090D;
 const MOUTH: Color = 0xFF9A5050;
 
 /// What the drawing needs from the state for one frame.
-struct Look { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, c: &'static Cast }
+struct Look<'c> { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, c: &'c Cast }
 
 /// The chibi, feet at the pose origin, y up is negative. Colours are replaced by `over` in the
 /// shadow pass.
-fn figure(k: &mut Ink, l: &Look) {
+fn figure(k: &mut Ink, l: &Look<'_>) {
     // legs and shoes
     let (hip, u) = if l.sit { (0.0, 10.0) } else { (-10.0, 0.0) };
     for side in [-1.0f32, 1.0] {
@@ -709,7 +711,7 @@ impl View for Gojo {
         let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
         let look = Look {
             walk, sit: self.sitting(), swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
-            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, c: self.cast,
+            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, c: &self.cast,
         };
 
         if self.infinity > t {

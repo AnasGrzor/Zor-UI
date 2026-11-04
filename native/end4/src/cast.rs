@@ -1,8 +1,9 @@
 //! The buddies you can pick in Settings > Buddies: how each one is coloured and what they say.
 //! gojo.rs draws all of them with one chibi figure; a cast only changes its palette, hair and lines.
 
-use crate::gfx::Color;
+use crate::{conf, gfx::Color};
 
+#[derive(Clone)]
 pub struct Cast {
     pub id: &'static str,
     pub label: &'static str,
@@ -95,6 +96,24 @@ pub const CASTS: [Cast; 3] = [
 /// The cast with this id; Gojo for anything unknown.
 pub fn get(id: &str) -> &'static Cast { CASTS.iter().find(|c| c.id == id).unwrap_or(&CASTS[0]) }
 
+/// Each channel scaled by `f`; above 1.0 it brightens, but only up to white.
+fn shade(c: Color, f: f32) -> Color {
+    let ch = |s: u32| ((((c >> s) & 0xFF) as f32 * f).min(255.0)) as u32;
+    (c & 0xFF00_0000) | ch(16) << 16 | ch(8) << 8 | ch(0)
+}
+
+impl Cast {
+    /// Applies the colours typed in Settings > Buddies ("#RRGGBB"). Empty or invalid keeps the character's own.
+    /// The shadow and highlight shades follow the colour chosen; `bun` is "yes", "no", or anything else to keep.
+    pub fn dress(&mut self, hair: &str, shirt: &str, pants: &str, eye: &str, bun: &str) {
+        if let Some(c) = conf::parse_hex(hair.trim()) { self.hair = c; self.hair_sh = shade(c, 0.7); }
+        if let Some(c) = conf::parse_hex(shirt.trim()) { self.coat = c; self.coat_hi = shade(c, 1.2); }
+        if let Some(c) = conf::parse_hex(pants.trim()) { self.pants = c; }
+        if let Some(c) = conf::parse_hex(eye.trim()) { self.eye = c; self.eye_d = shade(c, 0.6); }
+        match bun { "yes" => self.bun = true, "no" => self.bun = false, _ => {} }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +126,15 @@ mod tests {
             assert!(c.blindfold || !c.right.is_empty(), "{} needs right-click lines without Infinity", c.id);
             assert!(c.to.iter().all(|l| l.contains("{p}")), "{} should name the partner", c.id);
         }
+    }
+
+    #[test]
+    fn dress_overrides_only_valid_colours() {
+        let mut c = get("yuji").clone();
+        c.dress("#102030", "nope", "", "#FFFFFF", "yes");
+        assert_eq!(c.hair, 0xFF10_2030);
+        assert_eq!(c.coat, get("yuji").coat, "an invalid colour keeps the original");
+        assert_eq!(c.eye_d, 0xFF99_9999);
+        assert!(c.bun);
     }
 }

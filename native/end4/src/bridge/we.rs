@@ -20,6 +20,7 @@ use windows::{
             Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
             Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ},
         },
+        System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
         UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS},
     },
 };
@@ -119,21 +120,24 @@ fn we_exe() -> Option<PathBuf> {
 }
 
 /// Is a Wallpaper Engine process alive?
-pub(super) fn we_running() -> bool {
+pub(super) fn we_running() -> bool { !we_pids().is_empty() }
+
+/// Process ids of every running Wallpaper Engine (wallpaper64.exe / wallpaper32.exe).
+fn we_pids() -> Vec<u32> {
+    let mut pids = vec![];
     unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return pids };
         let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
         let mut ok = Process32FirstW(snap, &mut e).is_ok();
-        let mut found = false;
-        while ok && !found {
+        while ok {
             let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
             let name = String::from_utf16_lossy(&e.szExeFile[..n]).to_lowercase();
-            found = name == "wallpaper64.exe" || name == "wallpaper32.exe";
+            if name == "wallpaper64.exe" || name == "wallpaper32.exe" { pids.push(e.th32ProcessID); }
             ok = Process32NextW(snap, &mut e).is_ok();
         }
         let _ = windows::Win32::Foundation::CloseHandle(snap);
-        found
     }
+    pids
 }
 
 /// Runs `cmd` for at most `secs`, capturing stdout; kills it on timeout (Python's subprocess timeout).
@@ -352,6 +356,9 @@ fn we_theme(cfg: &Config, target: &Path) -> Value {
     err("No preview or video to take colors from")
 }
 
+/// Monitor indexes WE addresses, one per screen (a control command without -monitor touches only one).
+fn monitors() -> Vec<String> { (0..unsafe { GetSystemMetrics(SM_CMONITORS) }.max(1)).map(|m| m.to_string()).collect() }
+
 /// A project.json path or a project id (its folder name, made safe) -> its project.json.
 fn find_project(ident: &str) -> Option<PathBuf> {
     if Path::new(ident).exists() { return Some(PathBuf::from(ident)); }
@@ -369,7 +376,7 @@ fn we_apply(cfg: &Config, ident: &str, monitor: &str) -> Value {
     let monitors: Vec<String> = if !monitor.is_empty() && monitor.bytes().all(|b| b.is_ascii_digit()) {
         vec![monitor.to_string()]
     } else {
-        (0..unsafe { GetSystemMetrics(SM_CMONITORS) }.max(1)).map(|m| m.to_string()).collect()
+        monitors()
     };
     for m in monitors {
         if let Err(e) = we_control(&["openWallpaper", "-file", &target.to_string_lossy(), "-monitor", &m], 20) { return err(e); }
@@ -377,8 +384,21 @@ fn we_apply(cfg: &Config, ident: &str, monitor: &str) -> Value {
     json!({ "ok": true, "theme": we_theme(cfg, &target) })
 }
 
+/// Stops Wallpaper Engine. `-control closeWallpaper` exits 0 but leaves the scene drawn over the
+/// desktop on current builds, so the process is ended; we_apply starts it again when needed.
+fn close_all() -> bool {
+    we_pids().into_iter().fold(true, |ok, pid| unsafe {
+        let done = OpenProcess(PROCESS_TERMINATE, false, pid).is_ok_and(|h| {
+            let r = TerminateProcess(h, 1).is_ok();
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+            r
+        });
+        ok && done
+    })
+}
+
 fn we_close() {
-    if we_exe().is_some() && we_running() { let _ = we_control(&["closeWallpaper"], 20); }
+    if we_exe().is_some() && we_running() { close_all(); }
 }
 
 /// Same wallpaper -> same key, whether WE reports project.json, scene.pkg or the folder.
@@ -463,7 +483,7 @@ fn we_sync(cfg: &Config, out: &Sink) {
         let follow = follow().as_bool().unwrap_or(true);
         let since_close = last_close.map_or(Duration::MAX, |t| t.elapsed());
         if close_due(follow, closes, started.elapsed(), since_close, &state()) && we_exe().is_some() && we_running() {
-            if we_control(&["closeWallpaper"], 20).is_ok() && !out.emit(&json!({ "closed": "restored end4's picture" })) { return; }
+            if close_all() && !out.emit(&json!({ "closed": "restored end4's picture" })) { return; }
             (closes, last_close) = (closes + 1, Some(Instant::now()));
             if !nap(interval, out) { return; }
             continue;

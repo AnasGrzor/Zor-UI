@@ -184,7 +184,7 @@ if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add 
 if (Test-Path $native) {   # every native part not yet listed is on; the user's own choices stay
   $nat = [ordered]@{}
   if ($cfg.Contains('native') -and $cfg['native']) { foreach ($q in $cfg['native'].PSObject.Properties) { $nat[$q.Name] = $q.Value } }
-  foreach ($k in 'desktop', 'bar', 'visualizer', 'dock', 'island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings') { if (-not $nat.Contains($k)) { $nat[$k] = $true } }
+  foreach ($k in 'desktop', 'bar', 'visualizer', 'dock', 'island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings', 'theme') { if (-not $nat.Contains($k)) { $nat[$k] = $true } }
   $cfg['native'] = $nat
 }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
@@ -217,6 +217,8 @@ $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Rep
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
 if (Test-Path $native) {   # the keys open the native popups (end4.exe --open falls back to Zebar when a part isn't native)
   $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack end4-pC --widget-name (sidebar-left|sidebar-right|overview|settings) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --open ' + $m.Groups[1].Value })
+  # wallpaper / mode / game mode keys run the Rust ports (end4.exe falls back to the script for anything not ported)
+  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --script ' + $m.Groups[1].Value })
 }
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"

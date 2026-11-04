@@ -3,6 +3,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod bridge;
 mod bar;
 mod conf;
 mod desk;
@@ -59,6 +60,9 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Some(i) = arg("--open") { return open_running(args.get(i + 1).map_or("", String::as_str)); }
+        for kind in ["--bridge", "--script"] {
+            if let Some(i) = arg(kind) { std::process::exit(bridge::cli(kind, &args[i + 1..])); }
+        }
         if let Some(i) = arg("--render") { return render::run(&args[i + 1..]); }
         // one copy only: a second start (login + manual) would stack duplicate widgets
         let _single = CreateMutexW(None, true, w!("end4-pC-native"));

@@ -219,7 +219,7 @@ pub fn sync(app: &mut App) {
     }
     for m in spec {
         let rect = RECT { left: m[0], top: m[1], right: m[2], bottom: m[3] };
-        let Ok(mut w) = Win::new(Box::new(Dock::new((m[0], m[3], m[2] - m[0]))), "end4-pC / dock", m[0], m[3] - 1, Z::Top, false) else { continue };
+        let Ok(mut w) = Win::new(Box::new(Dock::new((m[0], m[3], m[2] - m[0]))), "Zor UI / dock", m[0], m[3] - 1, Z::Top, false) else { continue };
         w.update(&app.g, &app.cx, true);
         w.move_to(m[0], m[3] - (H * w.scale()).round() as i32);
         w.show();

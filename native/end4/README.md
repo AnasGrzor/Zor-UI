@@ -1,6 +1,6 @@
-# end4 (native widgets)
+# Zor UI native shell (`end4.exe`)
 
-The end4-pC widgets drawn by one small Windows process instead of a Zebar browser window per widget.
+The Zor UI widgets (formerly end4-pC) drawn by one small Windows process instead of a Zebar browser window per widget.
 The bar on two monitors plus four desktop cards take about 32 MB working set (9 MB private) here;
 the same widgets in Zebar used about 1 GB.
 
@@ -16,16 +16,26 @@ It reads the same files as the Zebar pack (`~/.glzr/zebar/end4-pC/config.json`, 
 | Desktop cards | `"desktop": true` | clock (all 4 styles), weather, week, greeting, calendar, world clock, resources, text, image 1-3 |
 | Bar | `"bar": true` | every module (layout, styles and groups from Settings > Bar), Dynamic Island, hover popups, tray |
 | Gojo | `"gojo": true` | native only (`gojo.rs`): a small Gojo on the bar. He walks, sits on the bar's edge and sleeps after 3 idle minutes. Hover lifts his blindfold, click makes him talk, double-click fires Hollow Purple, and right-click turns on Infinity, which keeps the pointer 60 px away for 10 s. Drag him to move him. He hides behind full-screen apps. He also comments on new tracks, the volume, the battery, the network, the weather, notifications and a busy CPU. |
-| Island panel | `"island-panel": true` | shared plumbing only (a titled placeholder) |
-| Overview | `"overview": true` | shared plumbing only |
-| Left / right sidebar | `"sidebar-left"`, `"sidebar-right"` | shared plumbing only |
-| Settings | `"settings": true` | shared plumbing only |
-| Dock, visualizer | `"dock"`, `"visualizer"` | not started |
+| Island panel | `"island-panel": true` | media, timer, notifications, agents, recording |
+| Overview | `"overview": true` | windows, workspaces, clipboard history |
+| Left / right sidebar | `"sidebar-left"`, `"sidebar-right"` | left: home, AI chat, translator, anime, football. Right: toggles, sliders, mixer, notifications, calendar, to-do, timer |
+| Settings | `"settings": true` | every page, including the wallpaper and preset galleries |
+| Dock, visualizer | `"dock"`, `"visualizer"` | both (each also has its own on/off switch in Settings) |
+| Theme | `"theme": true` | wallpaper and color changes run in Rust (`src/bridge/theme.rs`); false uses `switchwall.ps1` |
 
-Still in Zebar: everything marked placeholder or not started, and the media / lyrics / cover / to-do / notes /
-timer cards. A part whose key is false (or missing) stays in Zebar; the bar and GlazeWM's keys open it with
-`zebar start-widget`, like before. `desktop.js` keeps the list of native cards in `NATIVE`; update both when a
-card is ported. Each Zebar widget closes itself at start when its part is native.
+Zebar is now only a fallback: every part above is native. A part whose key is false (or missing) is drawn by
+Zebar instead, and the bar and GlazeWM's keys open it with `zebar start-widget`, like before. `desktop.js` keeps
+the list of native cards in `NATIVE`; update both when a card is ported.
+
+## Helper commands (`src/bridge`)
+
+The Python and PowerShell helpers are ported module by module: `sys` (config, night light, mixer, dock icons),
+`web` (secrets, translate, booru, AI chat, presets), `football`, `notify` (toasts, agents), `we` (Wallpaper
+Engine), `media` (visualizer, recorder, file picker), `toggles` (toggles.ps1) and `theme` (switchwall.ps1 and the
+Material You colors). Each command prints the same JSON as the script. One that is not ported yet (the color picker,
+the screen translator, brightness and game mode, and the yande.re and danbooru sources, whose TLS handshake `curl.exe`
+fails on some networks) runs the script. `end4.exe --bridge <command>` and `end4.exe --script <toggles|switchwall>`
+run a command from a terminal; `END4_PYTHON_BRIDGE=1` forces the scripts.
 
 ## Opening popups
 

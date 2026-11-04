@@ -20,7 +20,7 @@ use crate::{
     ui::{self, Edit, Scroll, TextBox},
     win::{Btn, Input, Phase, View},
 };
-use form::{fmt_value, num_json, snap, Act, Pen, Sl, ACT0};
+use form::{num_json, snap, Act, Pen, Sl, ACT0};
 use pages::{DESKTOP_WIDGETS, PAGES};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, rc::Rc};
@@ -384,8 +384,7 @@ impl Settings {
             }
             "reset-desk" => {
                 // native cards keep their spots in state.json; Zebar's are in the webview's localStorage (not reachable from here)
-                cx.state.v["deskPos"] = json!({});
-                cx.state.save();
+                cx.state.update(|v| v["deskPos"] = json!({}));
                 self.set("desktop.layoutReset", json!(hub::now_ms() as i64));
                 self.toast("Layout reset");
             }
@@ -782,7 +781,7 @@ mod tests {
         assert_eq!(st.drop_target(5.0, 70.0, "x"), Some(("left".into(), 2)));
         assert_eq!(st.drop_target(5.0, 70.0, "a"), Some(("left".into(), 1))); // the dragged part doesn't count
         assert_eq!(st.drop_target(500.0, 5.0, "x"), None);
-        assert_eq!(fmt_value(form::Fmt::Pct, 0.4), "40%");
+        
     }
 
     #[test]

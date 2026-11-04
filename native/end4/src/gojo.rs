@@ -139,7 +139,7 @@ pub fn sync(app: &mut App) {
     let at = app.wins.iter().position(|w| w.hwnd.0 as isize == HWND_.load(Ordering::Relaxed));
     match (want, at) {
         (true, None) => {
-            let Ok(mut w) = Win::new(Box::new(Gojo::new()), "end4-pC / gojo", -32000, -32000, Z::Top, false) else { return };
+            let Ok(mut w) = Win::new(Box::new(Gojo::new()), "Zor UI / gojo", -32000, -32000, Z::Top, false) else { return };
             HWND_.store(w.hwnd.0 as isize, Ordering::Relaxed);
             w.update(&app.g, &app.cx, true);
             w.show();
@@ -534,7 +534,9 @@ impl View for Gojo {
         let t = self.t;
         let hop = self.hop.map_or(0.0, |h0| { let p = (t - h0) / 0.45; if p >= 1.0 { -1.0 } else { 4.0 * p * (1.0 - p) * 7.0 } });
         if hop < 0.0 { self.hop = None; }
-        let walk = (self.mode == Mode::Walk).then_some(t * 11.0);
+        // The gait follows the ground he covers, not the clock: his legs never skate, and at walking
+        // speed they swing about once a second instead of running away from his 28 px/s crawl.
+        let walk = (self.mode == Mode::Walk).then_some(self.x * 0.22);
         let bob = walk.map_or(0.0, |w| (w * 2.0).cos().abs() * 0.8);
         let held = self.mode == Mode::Held;
         let rot = if held { (t * 4.0).sin() * 0.18 } else if self.mode == Mode::Sleep { 0.07 } else { 0.0 };

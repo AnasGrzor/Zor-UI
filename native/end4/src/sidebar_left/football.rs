@@ -205,9 +205,9 @@ impl Football {
     fn items(&self, c: &Canvas) -> Vec<Item> {
         let mut out = vec![];
         if self.table_view {
-            for (gi, (name, rows)) in self.table.iter().flat_map(|t| t.1.iter().enumerate().map(|(i, g)| (i, g))).map(|(i, g)| (i, g)).map(|(i, g)| (i, (&g.0, &g.1))).map(|(i, (n, r))| (i, (n.clone(), r))) {
-                let _ = r_len(rows);
-                if self.table.as_ref().is_some_and(|t| t.1.len() > 1) { out.push(Item::Group(name.clone())); }
+            let Some((_, groups)) = &self.table else { return out };
+            for (gi, (name, rows)) in groups.iter().enumerate() {
+                if groups.len() > 1 { out.push(Item::Group(name.clone())); }
                 out.push(Item::Head);
                 out.extend((0..rows.len()).map(|ri| Item::Line(gi, ri)));
             }
@@ -239,8 +239,6 @@ impl Football {
         c.text(&t.name, text, txt(13.0, 400), cx.theme.c("onSurface"), if away { Align::Right } else { Align::Left });
     }
 }
-
-fn r_len<T>(v: &[T]) -> usize { v.len() }
 
 impl Tab for Football {
     fn show(&mut self, cx: &Ctx) {
@@ -307,10 +305,9 @@ impl Tab for Football {
         let mut y_at = 0.0;
         let mut calls: Vec<(Item, f32)> = vec![];
         for (it, h) in items.into_iter().zip(&heights) { calls.push((it, y_at)); y_at += h; }
-        let this = self as *mut Football;
-        self.scroll.region(c, cx, view, content, |c, top| {
-            // SAFETY: the region closure runs inside this call; `scroll` is not touched again by it.
-            let me = unsafe { &mut *this };
+        let mut scroll = std::mem::take(&mut self.scroll);
+        let me = &mut *self;
+        scroll.region(c, cx, view, content, |c, top| {
             for (it, y) in &calls {
                 let y = top + y;
                 if y + 80.0 < view.y - 100.0 || y > view.y + view.h { continue; }
@@ -324,6 +321,7 @@ impl Tab for Football {
                 }
             }
         });
+        self.scroll = scroll;
     }
 
     fn input(&mut self, ev: &Input, cx: &mut Ctx, _hover: u32) {

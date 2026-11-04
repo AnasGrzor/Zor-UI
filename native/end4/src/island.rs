@@ -35,7 +35,7 @@ enum Sec { Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
     asked: bool,
-    art: Option<(String, Pixmap)>,
+    art: Option<((std::sync::Arc<Vec<u8>>, u32), Pixmap)>,
     /// Lyrics slide: current offset, and the track it belongs to (a new track jumps instead of sliding).
     ly: f32,
     ly_key: String,
@@ -156,10 +156,10 @@ impl Island {
     }
 
     fn art(&mut self, g: &Gfx, m: &media::Media, px: u32) -> Option<Pixmap> {
-        let key = format!("{}|{}|{px}", m.title, m.artist);
-        if self.art.as_ref().map(|a| &a.0) != Some(&key) {
-            let img = g.load_image_bytes(m.art.as_ref()?, px, px)?;
-            self.art = Some((key, img));
+        let b = m.art.as_ref()?;
+        // holding the Arc keeps its address from being reused by the next cover
+        if !self.art.as_ref().is_some_and(|a| std::sync::Arc::ptr_eq(&a.0 .0, b) && a.0 .1 == px) {
+            self.art = Some(((b.clone(), px), g.load_image_bytes(b, px, px)?));
         }
         self.art.as_ref().map(|a| a.1.clone())
     }

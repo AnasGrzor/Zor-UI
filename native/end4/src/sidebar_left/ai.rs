@@ -1,31 +1,17 @@
-//! AI tab (tab-ai.js): streaming chat with Gemini, Claude, OpenAI, Mistral, OpenRouter or local Ollama
-//! models through the bridge's `ai-chat`, a model picker grouped by provider, the `/key /model /prompt
-//! /temp /clear` commands, and a history that survives a restart (data_dir/ai.json).
-//! API keys stay in the bridge (DPAPI-encrypted); the webview never saw them either.
+//! AI tab (tab-ai.js): streaming chat through the bridge `ai-chat` command (the conversation goes in as one JSON
+//! line on stdin), model picker, `/key` `/model` `/prompt` `/temp` `/clear` commands, Markdown replies.
+//! The history lives in %LOCALAPPDATA%\end4-pC\ai-history.json (the Zebar tab keeps its own in localStorage).
 
 use super::{call, config_set, dots, md, sync, wake, Inbox, Tab};
 use crate::{
     app::Ctx,
-    conf::Config,
-    gfx::{alpha, ico, txt, Align, Canvas, Font, R},
-    hub,
-    proc::{self, Stream},
-    settings::store::open_url,
+    conf, gfx::{alpha, ico, txt, Align, Canvas, Gfx, R},
+    hub, proc, util,
     ui::{self, Edit, IconKind, Scroll, TextBox},
-    util,
     win::{Input, Phase},
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
-const MODEL: u32 = 501;
-const CLEAR: u32 = 502;
-const SEND: u32 = 503;
-const INPUT: u32 = 504;
-const MSGS: u32 = 505;
-const MENU: u32 = 506;
-const ITEM0: u32 = 520;
-const GAP: f32 = 10.0;
 const PROVIDERS: [&str; 5] = ["gemini", "anthropic", "openai", "mistral", "openrouter"];
 const HELP: [(&str, &str); 5] = [
     ("/key <provider> <key>", "Save an API key (gemini, anthropic, openai, mistral, openrouter). Without a key it removes it."),
@@ -34,533 +20,439 @@ const HELP: [(&str, &str); 5] = [
     ("/temp <0-2>", "Set the temperature."),
     ("/clear", "Clear the conversation."),
 ];
+const MODEL: u32 = 201;
+const CLEAR: u32 = 202;
+const SEND: u32 = 203;
+const TEXT: u32 = 204;
+const VIEW: u32 = 205;
+const MENU: u32 = 206;
+const MENU0: u32 = 220;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Role { User, Assistant, Note }
+#[derive(Clone, Debug, PartialEq)]
+pub struct Msg { pub role: String, pub content: String, pub model: String, pub error: bool }
 
-impl Role {
-    fn key(self) -> &'static str { match self { Role::User => "user", Role::Assistant => "assistant", Role::Note => "note" } }
-    fn wire(self) -> &'static str { if self == Role::User { "user" } else { "assistant" } }
-}
-
-struct Msg { role: Role, content: String, model: String, error: bool }
-
+#[derive(Clone)]
 struct Model { id: String, name: String, provider: String }
 
-/// What the bridge's threads hand back to the tab.
-enum Ev {
-    Models(Value),
-    Delta(u32, Value),
-    End(u32),
-    Key(String, bool, Value),
-}
+enum Ev { Delta(u32, String), Err(u32, String), Exit(u32), Models(Value), Note(String) }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Kind { Note, User, Bot }
-
-/// One laid-out message: where it sits in the list, how wide it is, and its Markdown (assistant only).
-struct Line { kind: Kind, y: f32, w: f32, h: f32, laid: Option<md::Laid> }
+/// A message laid out for the current width.
+enum Lay { Note { w: f32, h: f32 }, User { w: f32, h: f32 }, Asst { laid: md::Laid, w: f32, h: f32 } }
+impl Lay { fn size(&self) -> (f32, f32) { match self { Lay::Note { w, h } | Lay::User { w, h } | Lay::Asst { w, h, .. } => (*w, *h) } }}
 
 pub struct Ai {
-    models: Vec<Model>,
-    keys: HashMap<String, bool>,
-    model: String,
-    temp: f64,
-    system: String,
     history: Vec<Msg>,
+    models: Vec<Model>,
+    keys: Value,
+    model: String,
+    temperature: f64,
+    system: String,
     input: TextBox,
-    busy: bool,
-    stream: Option<Stream>,
-    /// Bumped for every send and every stop: answers from an older stream are ignored.
-    gen: u32,
+    stream: Option<proc::Stream>,
+    sid: u32,
     inbox: Inbox<Ev>,
-    menu: bool,
-    /// The model id of each row drawn in the open menu ("" for a provider header).
-    menu_rows: Vec<String>,
-    menu_scroll: Scroll,
-    menu_dims: (f32, f32),
     scroll: Scroll,
-    dims: (f32, f32),
-    sink: md::Sink,
-    copied: Option<u32>,
-    copied_at: f64,
-    /// Follow the newest message (cleared when you scroll up).
     stick: bool,
+    menu: bool,
+    menu_scroll: Scroll,
+    dims: (f32, f32),
+    menu_dims: (f32, f32),
+    lays: Vec<Option<(usize, bool, u32, Lay)>>,
+    sink: md::Sink,
+    copied: Option<(u32, f64)>,
     ready: bool,
 }
 
-/// `s` shortened with an ellipsis until it measures no wider than `w`.
-fn fit(c: &Canvas, s: &str, f: Font, w: f32) -> String {
-    if c.g.measure(s, f).0 <= w { return s.to_string(); }
-    let mut out = String::new();
-    for ch in s.chars() {
-        out.push(ch);
-        if c.g.measure(&format!("{out}\u{2026}"), f).0 > w { out.pop(); break; }
-    }
-    format!("{out}\u{2026}")
+/// The stdin line for `ai-chat`: the last 30 finished user / assistant turns (`history` without the reply being written).
+pub fn payload(model: &str, history: &[Msg], system: &str, temperature: f64) -> String {
+    let turns: Vec<Value> = history.iter().filter(|m| (m.role == "user" || m.role == "assistant") && !m.error).map(|m| json!({ "role": m.role, "content": m.content })).collect();
+    let skip = turns.len().saturating_sub(30);
+    json!({ "model": model, "messages": turns[skip..], "system": system, "temperature": temperature }).to_string()
 }
+
+fn file() -> std::path::PathBuf { conf::data_dir().join("ai-history.json") }
+
+fn load_history() -> Vec<Msg> {
+    let v: Value = std::fs::read_to_string(file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    v.as_array().into_iter().flatten().map(|m| Msg {
+        role: m["role"].as_str().unwrap_or("note").into(), content: m["content"].as_str().unwrap_or("").into(),
+        model: m["model"].as_str().unwrap_or("").into(), error: m["error"].as_bool().unwrap_or(false),
+    }).collect()
+}
+
+fn capitalize(s: &str) -> String { let mut c = s.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }
 
 impl Ai {
     pub fn new() -> Ai {
-        Ai {
-            models: vec![], keys: HashMap::new(), model: "gemini-2.5-flash".into(), temp: 0.5, system: String::new(),
-            history: vec![], input: TextBox::new(true), busy: false, stream: None, gen: 0, inbox: Inbox::new(),
-            menu: false, menu_rows: vec![], menu_scroll: Scroll::default(), menu_dims: (0.0, 0.0),
-            scroll: Scroll::default(), dims: (0.0, 0.0), sink: md::Sink::default(), copied: None, copied_at: 0.0,
-            stick: true, ready: false,
+        let mut input = TextBox::new(true);
+        input.enter_submits = true;
+        Ai { history: vec![], models: vec![], keys: Value::Null, model: String::new(), temperature: 0.5, system: String::new(), input, stream: None, sid: 0, inbox: Inbox::new(),
+            scroll: Scroll::default(), stick: true, menu: false, menu_scroll: Scroll::default(), dims: (0.0, 0.0), menu_dims: (0.0, 0.0), lays: vec![], sink: Default::default(), copied: None, ready: false }
+    }
+
+    fn save(&self) {
+        if sync() { return; }
+        let keep = self.history.len().saturating_sub(100);
+        let v: Vec<Value> = self.history[keep..].iter().map(|m| json!({ "role": m.role, "content": m.content, "model": m.model, "error": m.error })).collect();
+        let _ = std::fs::write(file(), Value::from(v).to_string());
+    }
+
+    fn info(&self) -> Model { self.models.iter().find(|m| m.id == self.model).cloned().unwrap_or(Model { id: self.model.clone(), name: self.model.clone(), provider: "?".into() }) }
+
+    fn note(&mut self, t: &str) {
+        self.history.push(Msg { role: "note".into(), content: t.into(), model: String::new(), error: false });
+        self.save();
+        self.stick = true;
+    }
+
+    fn busy(&self) -> bool { self.stream.is_some() }
+
+    fn pick_model(&mut self, id: &str, cx: &Ctx) {
+        self.model = id.into();
+        config_set(cx, "ai.model", Value::from(id));
+        self.menu = false;
+        let n = self.info().name;
+        self.note(&format!("Model: {n}"));
+    }
+
+    fn send(&mut self, text: &str, cx: &Ctx) {
+        self.history.push(Msg { role: "user".into(), content: text.into(), model: String::new(), error: false });
+        let convo = payload(&self.model, &self.history, &self.system, self.temperature);
+        self.history.push(Msg { role: "assistant".into(), content: String::new(), model: self.info().name, error: false });
+        self.stick = true;
+        self.sid += 1;
+        let (id, ib, ib2) = (self.sid, self.inbox.clone(), self.inbox.clone());
+        let cfg = conf::Config(cx.cfg.0.clone());
+        self.stream = proc::stream_stdin(&cfg, "ai-chat", &[], &convo, move |line| {
+            let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+            if let Some(d) = v["delta"].as_str() { ib.push(Ev::Delta(id, d.into())); wake(); }
+            if let Some(e) = v["error"].as_str() { ib.push(Ev::Err(id, e.into())); wake(); }
+        }, move || { ib2.push(Ev::Exit(id)); wake(); });
+        if self.stream.is_none() {
+            if let Some(m) = self.history.last_mut() { m.content = "Couldn't start the bridge (check pythonPath / bridgePath in config.json).".into(); m.error = true; }
         }
     }
 
-    /// Where the conversation is kept between runs (state.json's neighbour).
-    fn path() -> std::path::PathBuf { crate::conf::data_dir().join("ai.json") }
-
-    /// localStorage.setItem('end4-pC.ai.history'): the last 100 messages.
-    fn save(&self) {
-        let start = self.history.len().saturating_sub(100);
-        let v: Vec<Value> = self.history[start..].iter()
-            .map(|m| json!({ "role": m.role.key(), "content": m.content, "model": m.model, "error": m.error })).collect();
-        let _ = std::fs::write(Self::path(), json!({ "history": v }).to_string());
+    fn command(&mut self, line: &str, cx: &Ctx) {
+        let mut parts = line[1..].split_whitespace();
+        let cmd = parts.next().unwrap_or("");
+        let rest: Vec<&str> = parts.collect();
+        let arg = rest.join(" ");
+        match cmd {
+            "clear" => { self.history.clear(); self.save(); }
+            "help" => self.note(&HELP.iter().map(|h| format!("{} \u{2014} {}", h.0, h.1)).collect::<Vec<_>>().join("\n")),
+            "key" => {
+                let prov = rest.first().copied().unwrap_or("");
+                if !PROVIDERS.contains(&prov) && prov != "wallhaven" { return self.note(&format!("Usage: /key <{}> <key>", PROVIDERS.join("|"))); }
+                let key = rest[1..].join("");
+                let (ib, p, set) = (self.inbox.clone(), prov.to_string(), !key.is_empty());
+                call(cx, "secret-set", vec![prov.into(), key], move |v| {
+                    ib.push(Ev::Note(match v["error"].as_str() {
+                        Some(e) => format!("Couldn't save key: {e}"),
+                        None if set => format!("Saved the {p} key (encrypted for your Windows account)."),
+                        None => format!("Removed the {p} key."),
+                    }));
+                });
+                self.keys[prov] = Value::Bool(set);
+            }
+            "model" => {
+                let l = arg.to_lowercase();
+                match self.models.iter().find(|m| m.id == arg).or_else(|| self.models.iter().find(|m| m.name.to_lowercase().contains(&l))).cloned() {
+                    Some(m) => self.pick_model(&m.id, cx),
+                    None => { let ids = self.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(", "); self.note(&format!("No model matching \"{arg}\". Available: {ids}")) }
+                }
+            }
+            "prompt" => { self.system = arg.clone(); config_set(cx, "ai.systemPrompt", Value::from(arg.clone())); self.note(if arg.is_empty() { "System prompt reset." } else { "System prompt set." }); }
+            "temp" => match arg.parse::<f64>() {
+                Ok(t) if (0.0..=2.0).contains(&t) => { self.temperature = t; config_set(cx, "ai.temperature", json!(t)); self.note(&format!("Temperature set to {t}.")); }
+                _ => self.note("Temperature must be between 0 and 2."),
+            },
+            _ => self.note(&format!("Unknown command /{cmd}. Type /help.")),
+        }
     }
 
-    fn load(&mut self) {
-        let Some(v) = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
-        self.history = v["history"].as_array().into_iter().flatten().filter_map(|m| Some(Msg {
-            role: match m["role"].as_str()? { "user" => Role::User, "assistant" => Role::Assistant, _ => Role::Note },
-            content: m["content"].as_str()?.to_string(),
-            model: m["model"].as_str().unwrap_or("").to_string(),
-            error: m["error"].as_bool().unwrap_or(false),
-        })).collect();
-    }
-
-    fn model_name(&self) -> String { self.models.iter().find(|m| m.id == self.model).map_or_else(|| self.model.clone(), |m| m.name.clone()) }
-
-    fn note(&mut self, s: String) {
-        self.history.push(Msg { role: Role::Note, content: s, model: String::new(), error: false });
-        self.stick = true;
-        self.save();
-    }
-
-    /// bridge('ai-models'): the models the bridge offers and which providers have a key.
-    fn load_models(&mut self, cx: &Ctx) {
-        if sync() { return; }
-        let inbox = self.inbox.clone();
-        call(cx, "ai-models", vec![], move |v| inbox.push(Ev::Models(v)));
+    fn submit(&mut self, cx: &Ctx) {
+        if self.busy() { self.stream = None; return; } // stop: killing the child ends the stream (Exit finishes the reply)
+        let t = self.input.text.trim().to_string();
+        if t.is_empty() { return; }
+        self.input.set("");
+        if t.starts_with('/') { self.command(&t, cx) } else { self.send(&t, cx) }
     }
 
     fn drain(&mut self) {
         for ev in self.inbox.take() {
             match ev {
-                Ev::Models(v) => {
-                    self.models = v["models"].as_array().into_iter().flatten().filter_map(|m| {
-                        let id = m["id"].as_str()?.to_string();
-                        let name = m["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(id.as_str()).to_string();
-                        Some(Model { id, name, provider: m["provider"].as_str().unwrap_or("custom").to_string() })
-                    }).collect();
-                    self.keys = v["keys"].as_object().into_iter().flatten().map(|(k, b)| (k.clone(), b.as_bool().unwrap_or(false))).collect();
-                }
-                Ev::Delta(gen, v) => {
-                    if gen != self.gen || !self.busy { continue; }
-                    let Some(reply) = self.history.last_mut() else { continue };
-                    if let Some(d) = v["delta"].as_str() { reply.content.push_str(d); }
-                    if let Some(e) = v["error"].as_str() {
-                        if !reply.content.is_empty() { reply.content.push_str("\n\n"); }
-                        reply.content.push_str(e);
-                        reply.error = true;
-                    }
-                }
-                Ev::End(gen) => {
-                    if gen != self.gen { continue; }
-                    self.busy = false;
+                Ev::Delta(id, d) if id == self.sid => if let Some(m) = self.history.last_mut() { m.content += &d; },
+                Ev::Err(id, e) if id == self.sid => if let Some(m) = self.history.last_mut() { if !m.content.is_empty() { m.content += "\n\n"; } m.content += &e; m.error = true; },
+                Ev::Exit(id) if id == self.sid => {
                     self.stream = None;
-                    if let Some(reply) = self.history.last_mut() {
-                        if reply.content.is_empty() { reply.content = "No response.".into(); reply.error = true; }
-                    }
-                    self.stick = true;
+                    if let Some(m) = self.history.last_mut() { if m.content.is_empty() { m.content = "No response.".into(); m.error = true; } }
                     self.save();
                 }
-                Ev::Key(prov, keyed, v) => {
-                    self.keys.insert(prov.clone(), keyed);
-                    let line = if let Some(e) = v["error"].as_str() {
-                        format!("Couldn't save key: {e}")
-                    } else if keyed {
-                        format!("Saved the {prov} key (encrypted for your Windows account).")
-                    } else {
-                        format!("Removed the {prov} key.")
-                    };
-                    self.note(line);
+                Ev::Models(v) => {
+                    self.models = v["models"].as_array().into_iter().flatten().map(|m| Model { id: m["id"].as_str().unwrap_or("").into(), name: m["name"].as_str().unwrap_or("").into(), provider: m["provider"].as_str().unwrap_or("").into() }).collect();
+                    self.keys = v["keys"].clone();
                 }
+                Ev::Note(t) => self.note(&t),
+                _ => {}
             }
         }
     }
 
-    /// The last 30 real turns: no notes, no failed replies, and not the reply being written.
-    fn convo(&self) -> Vec<Value> {
-        let end = self.history.len().saturating_sub(1);
-        let v: Vec<Value> = self.history[..end].iter().filter(|m| m.role != Role::Note && !m.error)
-            .map(|m| json!({ "role": m.role.wire(), "content": m.content })).collect();
-        v[v.len().saturating_sub(30)..].to_vec()
-    }
-
-    fn stop(&mut self) {
-        self.gen += 1; // whatever the killed process already wrote is stale now
-        self.busy = false;
-        self.stream = None;
-        if let Some(reply) = self.history.last_mut() {
-            if reply.content.is_empty() { reply.content = "Stopped.".into(); }
-        }
-        self.save();
-    }
-
-    fn submit(&mut self, cx: &Ctx) {
-        let text = self.input.text.trim().to_string();
-        if text.is_empty() { return; }
-        self.input.set("");
-        self.stick = true;
-        if text.starts_with('/') { return self.command(&text, cx); }
-        let name = self.model_name();
-        self.history.push(Msg { role: Role::User, content: text, model: String::new(), error: false });
-        self.history.push(Msg { role: Role::Assistant, content: String::new(), model: name, error: false });
-        self.gen += 1;
-        let gen = self.gen;
-        let body = json!({ "model": self.model, "messages": self.convo(), "system": self.system, "temperature": self.temp }).to_string();
-        self.busy = true;
-        self.save();
-        let (lines, done) = (self.inbox.clone(), self.inbox.clone());
-        let cfg = Config(cx.cfg.0.clone());
-        self.stream = proc::stream_stdin(&cfg, "ai-chat", &[], &body,
-            move |line| if let Ok(v) = serde_json::from_str::<Value>(line) { lines.push(Ev::Delta(gen, v)); wake(); },
-            move || { done.push(Ev::End(gen)); wake(); });
-        if self.stream.is_none() {
-            self.busy = false;
-            self.note("The bridge didn't start: check pythonPath and bridgePath in config.json.".into());
-        }
-    }
-
-    fn command(&mut self, line: &str, cx: &Ctx) {
-        let mut words = line[1..].split_whitespace();
-        let cmd = words.next().unwrap_or("").to_lowercase();
-        let rest: Vec<&str> = words.collect();
-        let arg = rest.join(" ");
-        match cmd.as_str() {
-            "clear" => { self.history.clear(); self.save(); }
-            "help" => self.note(HELP.iter().map(|(c, d)| format!("{c} \u{2014} {d}")).collect::<Vec<_>>().join("\n")),
-            "key" => {
-                let prov = rest.first().copied().unwrap_or("");
-                if !PROVIDERS.contains(&prov) { return self.note(format!("Usage: /key <{}> <key>", PROVIDERS.join("|"))); }
-                let key = rest.iter().skip(1).copied().collect::<String>();
-                let keyed = !key.is_empty();
-                let (inbox, prov) = (self.inbox.clone(), prov.to_string());
-                call(cx, "secret-set", vec![prov.clone(), key], move |v| inbox.push(Ev::Key(prov, keyed, v)));
+    fn lay(&mut self, g: &Gfx, i: usize, vw: f32) {
+        let maxw = ((vw - 4.0) * 0.92).floor();
+        let inner = maxw - 28.0;
+        let m = &self.history[i];
+        let tag = (m.content.len(), m.error, maxw as u32);
+        if self.lays.len() < self.history.len() { self.lays.resize_with(self.history.len(), || None); }
+        if self.lays[i].as_ref().is_some_and(|l| (l.0, l.1, l.2) == tag) { return; }
+        let l = match m.role.as_str() {
+            "note" => { let w = (g.measure(&m.content, txt(11.5, 400)).0.ceil() + 26.0).min(vw - 4.0); Lay::Note { w, h: g.measure_wrapped(&m.content, txt(11.5, 400), w - 24.0) + 10.0 } }
+            "user" => { let tw = (g.measure(&m.content, txt(13.5, 400)).0.ceil() + 2.0).min(inner); Lay::User { w: tw + 28.0, h: g.measure_wrapped(&m.content, txt(13.5, 400), tw) + 20.0 } }
+            _ => {
+                let laid = md::layout(g, &m.content, inner);
+                let who = g.measure(&m.model, txt(11.0, 400)).0 + 18.0;
+                let w = (laid.w.ceil().max(who) + 28.0).max(60.0);
+                let h = 20.0 + 18.0 + laid.h.max(if m.content.is_empty() { 20.0 } else { 0.0 });
+                Lay::Asst { laid, w, h }
             }
-            "model" => {
-                let q = arg.to_lowercase();
-                let hit = self.models.iter().find(|m| m.id == arg)
-                    .or_else(|| self.models.iter().find(|m| m.name.to_lowercase().contains(&q)))
-                    .map(|m| m.id.clone());
-                match hit {
-                    Some(id) => self.pick(&id, cx),
-                    None => {
-                        let ids = self.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(", ");
-                        self.note(format!("No model matching \"{arg}\". Available: {ids}"));
-                    }
-                }
-            }
-            "prompt" => {
-                self.system = arg.clone();
-                config_set(cx, "ai.systemPrompt", json!(arg));
-                self.note(if arg.is_empty() { "System prompt reset.".into() } else { "System prompt set.".into() });
-            }
-            "temp" => match arg.parse::<f64>() {
-                Ok(t) if (0.0..=2.0).contains(&t) => {
-                    self.temp = t;
-                    config_set(cx, "ai.temperature", json!(t));
-                    self.note(format!("Temperature set to {t}."));
-                }
-                _ => self.note("Temperature must be between 0 and 2.".into()),
-            },
-            _ => self.note(format!("Unknown command /{cmd}. Type /help.")),
-        }
+        };
+        self.lays[i] = Some((tag.0, tag.1, tag.2, l));
     }
+}
 
-    fn pick(&mut self, id: &str, cx: &Ctx) {
-        self.model = id.to_string();
-        config_set(cx, "ai.model", json!(id));
-        self.menu = false;
-        self.note(format!("Model: {}", self.model_name()));
-    }
-
-    fn pill(c: &mut Canvas, cx: &Ctx, head: R, label: &str) {
-        let t = &cx.theme;
-        let f = txt(13.0, 400);
-        let lw = c.g.measure(label, f).0.ceil();
-        let pill = R::new(head.x, head.y, (14.0 + 24.0 + lw + 26.0).min(head.w - 44.0), 32.0);
-        c.rect(pill, 16.0, t.c("secondaryContainer"));
-        if c.hit(pill, MODEL) { c.rect(pill, 16.0, alpha(t.c("onSurface"), 0.08)); }
-        c.icon("neurology", R::new(pill.x + 12.0, pill.y, 18.0, 32.0), ico(18.0, false), t.c("onSecondaryContainer"));
-        c.text(label, R::new(pill.x + 34.0, pill.y, (pill.w - 58.0).max(0.0), 32.0), f, t.c("onSecondaryContainer"), Align::Left);
-        c.icon("expand_more", R::new(pill.x + pill.w - 24.0, pill.y, 18.0, 32.0), ico(18.0, false), t.c("onSecondaryContainer"));
-    }
-
-    fn empty_state(c: &mut Canvas, cx: &Ctx, msgs: R, model: &str) {
-        let t = &cx.theme;
-        let w = (msgs.w - 60.0).max(60.0);
-        c.icon("neurology", R::new(msgs.x, msgs.y + 8.0, msgs.w, 56.0), ico(48.0, false), t.c("primary"));
-        c.text("Large language models", R::new(msgs.x, msgs.y + 70.0, msgs.w, 24.0), txt(17.0, 500), t.c("onSurface"), Align::Center);
-        let hint = format!("Chat with {model}. Type /key gemini YOUR_KEY to add a key, or run Ollama for local models.");
-        let hh = c.g.measure_wrapped(&hint, txt(12.5, 400), w);
-        c.para(&hint, R::new(msgs.x + 30.0, msgs.y + 96.0, w, hh + 4.0), txt(12.5, 400), t.c("onSurfaceVariant"), Align::Center);
-        let mut y = msgs.y + 104.0 + hh;
-        for (cmd, d) in HELP {
-            if y + 30.0 > msgs.y + msgs.h { break; }
-            c.text(cmd, R::new(msgs.x + 6.0, y, msgs.w - 12.0, 15.0), txt(11.5, 400), t.c("primary"), Align::Left);
-            c.text(d, R::new(msgs.x + 6.0, y + 15.0, msgs.w - 12.0, 14.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Left);
-            y += 32.0;
-        }
-    }
+/// A bubble of `col`; the corner next to the speaker is squarer (a patch of radius 6, opaque colours only).
+fn bubble(c: &mut Canvas, r: R, col: u32, tail_right: bool) {
+    c.rect(r, 23.0, col);
+    let patch = if tail_right { R::new(r.x + r.w - 23.0, r.y + r.h - 23.0, 23.0, 23.0) } else { R::new(r.x, r.y + r.h - 23.0, 23.0, 23.0) };
+    c.rect(patch, 6.0, col);
 }
 
 impl Tab for Ai {
     fn show(&mut self, cx: &Ctx) {
         if self.ready { return; }
         self.ready = true;
-        self.model = Some(cx.cfg.str("ai.model")).filter(|s| !s.is_empty()).unwrap_or("gemini-2.5-flash").to_string();
-        self.temp = cx.cfg.get("ai.temperature").as_f64().unwrap_or(0.5);
-        self.system = cx.cfg.str("ai.systemPrompt").to_string();
-        self.load();
-        if std::env::var_os("END4_RENDER_DEMO").is_some() {
-            self.models = vec![
-                Model { id: "gemini-2.5-flash".into(), name: "Gemini 2.5 Flash".into(), provider: "gemini".into() },
-                Model { id: "gpt-4o-mini".into(), name: "GPT-4o mini".into(), provider: "openai".into() },
-            ];
-            self.keys.insert("gemini".into(), true);
-            if self.history.is_empty() {
-                self.history.push(Msg { role: Role::User, content: "What's a good way to start a Rust project?".into(), model: String::new(), error: false });
-                self.history.push(Msg { role: Role::Assistant, content: "Use **cargo**:\n\n```sh\ncargo new app\n```\n\nThen `cargo run`.".into(), model: "Gemini 2.5 Flash".into(), error: false });
-            }
-            return;
+        self.model = cx.cfg.str("ai.model").into();
+        self.system = cx.cfg.str("ai.systemPrompt").into();
+        self.temperature = cx.cfg.get("ai.temperature").as_f64().unwrap_or(0.5);
+        self.history = load_history();
+        if sync() && std::env::var_os("END4_RENDER_DEMO").is_some() && self.history.is_empty() {
+            let m = |role: &str, content: &str, error: bool| Msg { role: role.into(), content: content.into(), model: "Gemini 2.5 Flash".into(), error };
+            self.history = vec![m("user", "How do I read a file in Rust?", false), m("assistant", "# Reading files\nUse **std::fs** for small files:\n\n- `read_to_string` gives a `String`\n- `read` gives bytes\n1. open it\n2. read it\n\n```rust\nlet text = std::fs::read_to_string(\"a.txt\")?;\nprintln!(\"{text}\");\n```\n> Handle the `Result`, see [the docs](https://doc.rust-lang.org/std/fs/).", false),
+                m("note", "Model: Gemini 2.5 Flash", false), m("assistant", "No API key for gemini. Type /key gemini YOUR_KEY", true)];
         }
-        self.load_models(cx);
+        let ib = self.inbox.clone();
+        call(cx, "ai-models", vec![], move |v| ib.push(Ev::Models(v)));
     }
 
-    fn frame_ms(&self) -> u32 { if self.busy { 100 } else { 500 } }
+    fn frame_ms(&self) -> u32 { if self.busy() { 100 } else { 500 } }
     fn captures_esc(&self) -> bool { self.menu }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx, r: R) {
         self.drain();
         let t = &cx.theme;
-        let f = txt(13.5, 400);
-        let tw = (r.w - 68.0).max(40.0);
-        let th = if self.input.text.is_empty() { 20.0 } else { c.g.measure_wrapped(&self.input.text, f, tw).max(20.0) };
-        let input_h = (th + 22.0).clamp(44.0, 150.0);
-        let head = R::new(r.x, r.y, r.w, 36.0);
-        let input = R::new(r.x, r.y + r.h - input_h, r.w, input_h);
-        let msgs = R::new(r.x, r.y + 36.0 + GAP, r.w, (input.y - GAP - r.y - 36.0 - GAP).max(60.0));
+        // header: model chip + clear
+        let name = self.info().name;
+        let nw = c.g.measure(&name, txt(13.0, 400)).0.ceil();
+        let cw = (14.0 + 18.0 + 6.0 + nw + 6.0 + 18.0 + 14.0).min(r.w * 0.75);
+        let chip = R::new(r.x, r.y + 2.0, cw, 32.0);
+        c.rect(chip, 16.0, t.c("secondaryContainer"));
+        if c.hit(chip, MODEL) { c.rect(chip, 16.0, alpha(t.c("onSecondaryContainer"), 0.08)); }
+        let fg = t.c("onSecondaryContainer");
+        c.icon("neurology", R::new(chip.x + 14.0, chip.y, 18.0, 32.0), ico(18.0, false), fg);
+        c.text(&name, R::new(chip.x + 38.0, chip.y, cw - 38.0 - 38.0, 32.0), txt(13.0, 400), fg, Align::Left);
+        c.icon("expand_more", R::new(chip.x + cw - 32.0, chip.y, 18.0, 32.0), ico(18.0, false), fg);
+        ui::icon_btn(c, cx, R::new(r.x + r.w - 36.0, r.y, 36.0, 36.0), CLEAR, "delete_sweep", IconKind::Plain, 22.0, false);
 
-        let label = fit(c, &self.model_name(), f, (r.w - 130.0).max(40.0));
-        Self::pill(c, cx, head, &label);
-        ui::icon_btn(c, cx, R::new(head.x + head.w - 36.0, head.y - 2.0, 36.0, 36.0), CLEAR, "delete_sweep", IconKind::Plain, 20.0, false);
+        // input bar
+        let tw = r.w - 16.0 - 6.0 - 36.0 - 6.0;
+        let th = c.g.measure_wrapped(if self.input.text.is_empty() { "x" } else { &self.input.text }, txt(13.5, 400), tw).clamp(17.0, 160.0);
+        let bar_h = (th + 18.0).max(36.0) + 12.0;
+        let bar = R::new(r.x, r.y + r.h - bar_h, r.w, bar_h);
+        c.rect(bar, 30.0, t.c("surfaceContainer"));
+        c.hit(bar, TEXT);
+        self.input.draw(c, cx, R::new(bar.x + 16.0, bar.y + 6.0 + 9.0, tw, bar_h - 12.0 - 18.0), txt(13.5, 400), "Message the model\u{2026}  (/ for commands)", !self.menu);
+        let sb = R::new(bar.x + bar.w - 6.0 - 36.0, bar.y + bar.h - 6.0 - 36.0, 36.0, 36.0);
+        if self.busy() {
+            c.rect(sb, 18.0, t.c("error"));
+            if c.hit(sb, SEND) { c.rect(sb, 18.0, alpha(t.c("onError"), 0.1)); }
+            c.icon("stop", sb, ico(24.0, false), t.c("onError"));
+        } else { ui::icon_btn(c, cx, sb, SEND, "arrow_upward", IconKind::Filled, 24.0, false); }
 
-        // the messages, laid out top to bottom
-        let bw = msgs.w * 0.92;
-        let mut lines: Vec<Line> = Vec::new();
-        let mut y = 0.0f32;
-        for m in &self.history {
-            match m.role {
-                Role::Note => {
-                    let h = c.g.measure_wrapped(&m.content, txt(11.5, 400), (bw - 40.0).max(40.0)) + 10.0;
-                    lines.push(Line { kind: Kind::Note, y, w: bw, h, laid: None });
-                    y += h + GAP;
-                }
-                Role::User => {
-                    let w = (c.g.measure(&m.content, f).0 + 30.0).min(bw);
-                    let h = c.g.measure_wrapped(&m.content, f, (w - 30.0).max(20.0)) + 22.0;
-                    lines.push(Line { kind: Kind::User, y, w, h, laid: None });
-                    y += h + GAP;
-                }
-                Role::Assistant => {
-                    let laid = md::layout(&c.g, &m.content, (bw - 30.0).max(60.0));
-                    let h = laid.h + 46.0;
-                    lines.push(Line { kind: Kind::Bot, y, w: bw, h, laid: Some(laid) });
-                    y += h + GAP;
-                }
-            }
-        }
-        let content = y.max(1.0);
-        self.dims = (content, msgs.h);
-        if self.stick { self.scroll.y = (content - msgs.h).max(0.0); }
-
-        if self.history.is_empty() {
-            Self::empty_state(c, cx, msgs, &self.model_name());
-        } else {
-            let mut sink = std::mem::take(&mut self.sink);
-            let copied = self.copied.filter(|_| hub::now_ms() - self.copied_at < 1200.0);
-            let (view, busy) = ((msgs.y, msgs.y + msgs.h), self.busy);
-            {
-                let Ai { scroll, history, .. } = self;
-                scroll.region(c, cx, msgs, content, |c, top| {
-                    for (i, it) in lines.iter().enumerate() {
-                        if top + it.y + it.h < view.0 || top + it.y > view.1 { continue; }
-                        let m = &history[i];
-                        match it.kind {
-                            Kind::Note => {
-                                let w = (it.w - 8.0).min(c.g.measure(&m.content, txt(11.5, 400)).0 + 26.0);
-                                let rr = R::new(msgs.x + (msgs.w - w) / 2.0, top + it.y, w, it.h);
-                                c.rect(rr, it.h / 2.0, t.c("surfaceContainerLow"));
-                                c.para(&m.content, R::new(rr.x + 13.0, rr.y + 5.0, rr.w - 26.0, rr.h - 10.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Center);
-                            }
-                            Kind::User => {
-                                let rr = R::new(msgs.x + msgs.w - it.w, top + it.y, it.w, it.h);
-                                c.rect(rr, 17.0, t.c("secondaryContainer"));
-                                c.para(&m.content, R::new(rr.x + 15.0, rr.y + 11.0, rr.w - 30.0, rr.h - 22.0), f, t.c("onSecondaryContainer"), Align::Left);
-                            }
-                            Kind::Bot => {
-                                let rr = R::new(msgs.x, top + it.y, it.w, it.h);
-                                c.rect(rr, 17.0, if m.error { alpha(t.c("error"), 0.16) } else { t.c("surfaceContainerLow") });
-                                c.icon("neurology", R::new(rr.x + 15.0, rr.y + 12.0, 14.0, 14.0), ico(14.0, false), t.c("primary"));
-                                c.text(&m.model, R::new(rr.x + 33.0, rr.y + 10.0, rr.w - 48.0, 16.0), txt(11.0, 400), t.c("primary"), Align::Left);
-                                if m.content.is_empty() {
-                                    if busy { dots(c, cx, rr.x + rr.w / 2.0, rr.y + rr.h / 2.0 + 8.0); }
-                                } else if let Some(l) = &it.laid {
-                                    md::draw(c, cx, l, rr.x + 15.0, rr.y + 34.0, &mut sink, view, copied);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            self.sink = sink;
-        }
-
-        // the model menu, over the messages
-        if self.menu {
-            let mr = R::new(msgs.x, msgs.y, msgs.w, msgs.h);
-            c.shadow(4.0, 16.0, 0.35, |c, col| if let Some(col) = col { c.rect(mr, 17.0, col) });
-            c.rect(mr, 17.0, t.c("surfaceContainerHigh"));
-            c.hit(mr, MENU);
-            let inner = R::new(mr.x + 6.0, mr.y + 6.0, mr.w - 12.0, mr.h - 12.0);
-            let mut rows: Vec<(bool, String, String, String)> = Vec::new();
-            let mut providers: Vec<&str> = Vec::new();
-            for m in &self.models { if !providers.contains(&m.provider.as_str()) { providers.push(&m.provider); } }
-            for p in providers {
-                let status = if p == "ollama" { String::new() }
-                    else if self.keys.get(p).copied().unwrap_or(false) { " \u{00b7} key set".into() }
-                    else { " \u{00b7} no key".into() };
-                rows.push((true, format!("{p}{status}"), String::new(), String::new()));
-                for m in self.models.iter().filter(|m| m.provider == p) {
-                    rows.push((false, m.name.clone(), m.id.clone(), m.id.clone()));
-                }
-            }
-            let total: f32 = rows.iter().map(|r| if r.0 { 28.0 } else { 44.0 }).sum();
-            self.menu_dims = (total, inner.h);
-            if rows.is_empty() {
-                c.text("Loading models\u{2026}", R::new(inner.x + 8.0, inner.y, inner.w, 40.0), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Left);
-            }
-            let cur = self.model.clone();
-            let menu_scroll = &mut self.menu_scroll;
-            menu_scroll.region(c, cx, inner, total.max(1.0), |c, top| {
-                let mut y = top;
-                for (i, (header, text, sub, id)) in rows.iter().enumerate() {
-                    let h = if *header { 28.0 } else { 44.0 };
-                    if y + h < inner.y || y > inner.y + inner.h { y += h; continue; }
-                    let rr = R::new(inner.x, y, inner.w - 6.0, h);
-                    if *header {
-                        c.text(text, R::new(rr.x + 8.0, rr.y, rr.w - 12.0, h), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
-                    } else {
-                        if *id == cur { c.rect(rr, 12.0, t.c("secondaryContainer")); }
-                        if c.hit(rr, ITEM0 + i as u32) && *id != cur { c.rect(rr, 12.0, alpha(t.c("onSurface"), 0.08)); }
-                        c.text(text, R::new(rr.x + 12.0, rr.y + 6.0, rr.w - 24.0, 18.0), txt(13.0, 400), t.c("onSurface"), Align::Left);
-                        c.text(sub, R::new(rr.x + 12.0, rr.y + 23.0, rr.w - 24.0, 16.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Left);
-                    }
-                    y += h;
+        // messages
+        let view = R::new(r.x, r.y + 46.0, r.w, (bar.y - 10.0 - (r.y + 46.0)).max(40.0));
+        c.hit(view, VIEW);
+        let n = self.history.len();
+        for i in 0..n { self.lay(c.g, i, view.w); }
+        let mut sink = md::Sink::default();
+        let copied = self.copied.filter(|x| hub::now_ms() - x.1 < 1200.0).map(|x| x.0);
+        let busy = self.busy();
+        let mut sc = std::mem::take(&mut self.scroll);
+        if self.stick { sc.y = f32::MAX; }
+        if n == 0 {
+            let mut ops = vec![];
+            let mut links = vec![];
+            let model = self.info().name;
+            let spans = [md::Span::Text(format!("Chat with {model}. Type ")), md::Span::Code("/key gemini YOUR_KEY".into()), md::Span::Text(" to add a key, or run Ollama for local models.".into())];
+            let (ph, _) = md::flow(c.g, &spans, 0.0, 0.0, view.w - 28.0, 13.5, 400, md::Col::Muted, true, &mut ops, &mut links);
+            let desc_h: Vec<f32> = HELP.iter().map(|h| c.g.measure_wrapped(h.1, txt(12.0, 400), view.w - 20.0)).collect();
+            let content = 48.0 + 6.0 + 24.0 + 8.0 + ph + 12.0 + desc_h.iter().map(|h| 8.0 + 17.0 + 2.0 + h + 8.0 + 6.0).sum::<f32>();
+            self.dims = (content, view.h);
+            sc.region(c, cx, view, content, |c, top| {
+                let mut y = top.max(view.y + (view.h - content).max(0.0) / 2.0 * 0.0) + (view.h - content).max(0.0) / 2.0;
+                c.icon("neurology", R::new(view.x, y, view.w, 48.0), ico(48.0, false), t.c("primary"));
+                y += 54.0;
+                c.text("Large language models", R::new(view.x, y, view.w, 24.0), txt(17.0, 500), t.c("onSurface"), Align::Center);
+                y += 32.0;
+                let laid = md::Laid { w: view.w, h: ph, ops, links };
+                md::draw(c, cx, &laid, view.x + 14.0, y, &mut sink, (view.y, view.y + view.h), None);
+                y += ph + 12.0;
+                for (h, dh) in HELP.iter().zip(&desc_h) {
+                    let card = R::new(view.x, y, view.w, 8.0 + 17.0 + 2.0 + dh + 8.0);
+                    ui::card(c, cx, card, 12.0);
+                    c.text(h.0, R::new(card.x + 10.0, card.y + 8.0, card.w - 20.0, 17.0), txt(12.0, 500), t.c("onSurface"), Align::Left);
+                    c.para(h.1, R::new(card.x + 10.0, card.y + 27.0, card.w - 20.0, *dh), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Left);
+                    y += card.h + 6.0;
                 }
             });
-            self.menu_rows = rows.iter().map(|r| r.3.clone()).collect();
+        } else {
+            let sizes: Vec<(f32, f32)> = self.lays.iter().take(n).map(|l| l.as_ref().map_or((0.0, 0.0), |l| l.3.size())).collect();
+            let content = sizes.iter().map(|s| s.1 + 10.0).sum::<f32>() + 4.0 - 10.0;
+            self.dims = (content, view.h);
+            let (hist, lays) = (&self.history, &self.lays);
+            sc.region(c, cx, view, content, |c, top| {
+                let mut y = top + 2.0;
+                for (i, (w, h)) in sizes.iter().enumerate() {
+                    let Some((_, _, _, lay)) = &lays[i] else { continue };
+                    let m = &hist[i];
+                    if y + h >= view.y && y <= view.y + view.h {
+                        match lay {
+                            Lay::Note { .. } => {
+                                let b = R::new(view.x + (view.w - w) / 2.0, y, *w, *h);
+                                c.rect(b, h / 2.0, t.c("surfaceContainerLow"));
+                                c.para(&m.content, R::new(b.x + 12.0, b.y + 5.0, b.w - 24.0, b.h - 10.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Center);
+                            }
+                            Lay::User { .. } => {
+                                let b = R::new(view.x + view.w - 2.0 - w, y, *w, *h);
+                                bubble(c, b, t.c("secondaryContainer"), true);
+                                c.para(&m.content, R::new(b.x + 14.0, b.y + 10.0, b.w - 28.0, b.h - 20.0), txt(13.5, 400), t.c("onSecondaryContainer"), Align::Left);
+                            }
+                            Lay::Asst { laid, .. } => {
+                                let b = R::new(view.x + 2.0, y, *w, *h);
+                                if m.error { c.rect(b, 23.0, t.c("surfaceContainerLow")); c.rect(b, 23.0, alpha(t.c("error"), 0.16)); } else { bubble(c, b, t.c("surfaceContainerLow"), false); }
+                                c.icon("neurology", R::new(b.x + 14.0, b.y + 10.0, 14.0, 14.0), ico(14.0, false), t.c("primary"));
+                                c.text(&m.model, R::new(b.x + 32.0, b.y + 10.0, b.w - 46.0, 14.0), txt(11.0, 400), t.c("primary"), Align::Left);
+                                if m.content.is_empty() && busy { dots(c, cx, b.x + 14.0 + 16.0, b.y + 38.0 + 10.0); }
+                                md::draw(c, cx, laid, b.x + 14.0, b.y + 38.0, &mut sink, (view.y, view.y + view.h), copied);
+                            }
+                        }
+                    } else if let Lay::Asst { laid, .. } = lay {
+                        // off-screen: still number its links and code blocks so hit ids stay in step
+                        md::draw(c, cx, laid, 0.0, y, &mut sink, (-1.0e9, -1.0e9), None);
+                    }
+                    y += h + 10.0;
+                }
+            });
         }
+        self.scroll = sc;
+        self.sink = sink;
 
-        // the composer
-        c.rect(input, 22.0, t.c("surfaceContainer"));
-        c.hit(input, INPUT);
-        self.input.draw(c, cx, R::new(input.x + 16.0, input.y + 11.0, tw, input_h - 22.0), f, "Message the model\u{2026}  (/ for commands)", !self.menu);
-        ui::icon_btn(c, cx, R::new(input.x + input.w - 44.0, input.y + (input_h - 36.0) / 2.0, 36.0, 36.0), SEND,
-            if self.busy { "stop" } else { "arrow_upward" }, IconKind::Filled, 20.0, false);
+        // model menu, on top
+        if self.menu {
+            let mut groups: Vec<(String, Vec<usize>)> = vec![];
+            for (i, m) in self.models.iter().enumerate() {
+                match groups.iter_mut().find(|g| g.0 == m.provider) { Some(g) => g.1.push(i), None => groups.push((m.provider.clone(), vec![i])) }
+            }
+            let content: f32 = if groups.is_empty() { 40.0 } else { groups.iter().map(|g| 28.0 + g.1.len() as f32 * 46.0).sum() };
+            let mr = R::new(r.x, r.y + 42.0, r.w, (content + 12.0).min(c.h * 0.55));
+            c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(mr, 23.0, col) });
+            c.rect(mr, 23.0, t.c("surfaceContainerHigh"));
+            c.hit(mr, MENU);
+            let inner = R::new(mr.x + 6.0, mr.y + 6.0, mr.w - 12.0, mr.h - 12.0);
+            self.menu_dims = (content, inner.h);
+            let (models, keys, cur) = (&self.models, &self.keys, &self.model);
+            self.menu_scroll.region(c, cx, inner, content, |c, top| {
+                if groups.is_empty() { c.text("Loading models\u{2026}", R::new(inner.x + 12.0, top, inner.w, 40.0), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left); }
+                let mut y = top;
+                for (p, idxs) in &groups {
+                    let head = format!("{}", capitalize(p));
+                    c.text(&head, R::new(inner.x + 12.0, y + 10.0, 200.0, 16.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
+                    if p != "ollama" {
+                        let ok = keys[p.as_str()].as_bool().unwrap_or(false);
+                        let hw = c.g.measure(&head, txt(11.5, 400)).0;
+                        c.text(if ok { " \u{00B7} key set" } else { " \u{00B7} no key" }, R::new(inner.x + 12.0 + hw, y + 10.0, 120.0, 16.0), txt(11.5, 400), if ok { t.c("primary") } else { t.c("error") }, Align::Left);
+                    }
+                    y += 28.0;
+                    for &i in idxs {
+                        let m = &models[i];
+                        let b = R::new(inner.x, y, inner.w - 6.0, 46.0);
+                        if y + 46.0 >= inner.y && y <= inner.y + inner.h {
+                            let sel = &m.id == cur;
+                            if sel { c.rect(b, 17.0, t.c("secondaryContainer")); }
+                            if c.hit(b, MENU0 + i as u32) && !sel { c.rect(b, 17.0, alpha(t.c("onSurface"), 0.08)); }
+                            c.text(&m.name, R::new(b.x + 12.0, b.y + 6.0, b.w - 24.0, 18.0), txt(13.5, 400), t.c("onSurface"), Align::Left);
+                            c.text(&m.id, R::new(b.x + 12.0, b.y + 25.0, b.w - 24.0, 14.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Left);
+                        }
+                        y += 46.0;
+                    }
+                }
+            });
+        }
     }
 
     fn input(&mut self, ev: &Input, cx: &mut Ctx, _hover: u32) {
-        let mut submit = false;
         match ev {
-            Input::Click(MODEL, _) => {
-                self.menu = !self.menu;
-                self.menu_scroll.y = 0.0;
-                if self.menu && self.models.is_empty() { self.load_models(cx); }
-            }
+            Input::Click(MODEL, _) => { self.menu = !self.menu; self.menu_scroll.y = 0.0; }
             Input::Click(CLEAR, _) => { self.history.clear(); self.save(); }
-            Input::Click(SEND, _) => if self.busy { self.stop(); } else { submit = true; },
-            Input::Click(id, _) if (ITEM0..ITEM0 + 64).contains(id) => {
-                if let Some(m) = self.menu_rows.get((*id - ITEM0) as usize).filter(|s| !s.is_empty()).cloned() { self.pick(&m, cx); }
-            }
-            Input::Click(id, _) if *id >= md::LINK0 && *id < md::COPY0 => {
-                if let Some(u) = self.sink.links.get((*id - md::LINK0) as usize).cloned() { open_url(&u); }
-            }
-            Input::Click(id, _) if *id >= md::COPY0 && *id < md::COPY0 + 400 => {
-                if let Some(s) = self.sink.copies.get((*id - md::COPY0) as usize) {
-                    util::clipboard_set(s);
-                    self.copied = Some(*id);
-                    self.copied_at = hub::now_ms();
-                }
-            }
+            Input::Click(SEND, _) => self.submit(cx),
             Input::Click(MENU, _) => {}
-            Input::Click(..) if self.menu => self.menu = false,
-            Input::Drag(INPUT, x, y, Phase::Start) => { self.menu = false; self.input.press(*x, *y); }
-            Input::Key { vk: 0x1B, .. } => self.menu = false,
-            Input::Key { vk, ctrl, shift, alt } if !self.menu => {
-                if self.input.key(*vk, *ctrl, *shift, *alt) == Edit::Submit { submit = true; }
+            Input::Click(id, _) if (MENU0..MENU0 + 400).contains(id) => {
+                if let Some(m) = self.models.get((*id - MENU0) as usize).cloned() { self.pick_model(&m.id, cx); }
             }
-            Input::Char(ch) if !self.menu => { self.input.ch(*ch); },
+            Input::Click(id, _) if (md::LINK0..md::LINK0 + 5000).contains(id) => {
+                if let Some(u) = self.sink.links.get((*id - md::LINK0) as usize).cloned() { call(cx, "open", vec![u], |_| {}); }
+            }
+            Input::Click(id, _) if (md::COPY0..md::COPY0 + 5000).contains(id) => {
+                if let Some(code) = self.sink.copies.get((*id - md::COPY0) as usize) { util::clipboard_set(code); self.copied = Some((*id, hub::now_ms())); }
+            }
+            Input::Click(..) if self.menu => self.menu = false,
+            Input::Drag(TEXT, x, y, Phase::Start) => { self.menu = false; self.input.press(*x, *y); }
+            Input::Key { vk: 0x1B, .. } => self.menu = false,
+            Input::Key { vk, ctrl, shift, alt } => if self.input.key(*vk, *ctrl, *shift, *alt) == Edit::Submit { self.submit(cx); },
+            Input::Char(ch) => { self.input.ch(*ch); }
+            Input::Wheel(..) if self.menu => if let Input::Wheel(_, d) = ev { self.menu_scroll.wheel(*d, self.menu_dims.0, self.menu_dims.1) },
             Input::Wheel(_, d) => {
-                if self.menu {
-                    self.menu_scroll.wheel(*d, self.menu_dims.0, self.menu_dims.1);
-                } else {
-                    self.scroll.wheel(*d, self.dims.0, self.dims.1);
-                    self.stick = self.scroll.y >= (self.dims.0 - self.dims.1).max(0.0) - 1.0;
-                }
+                self.stick = false;
+                self.scroll.wheel(*d, self.dims.0, self.dims.1);
+                self.stick = self.scroll.y >= self.dims.0 - self.dims.1 - 1.0;
             }
             _ => {}
         }
-        if submit { self.submit(cx); }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn msg(role: Role, content: &str) -> Msg { Msg { role, content: content.into(), model: String::new(), error: false } }
+    fn m(role: &str, content: &str, error: bool) -> Msg { Msg { role: role.into(), content: content.into(), model: String::new(), error } }
 
     #[test]
-    fn the_conversation_leaves_out_notes_errors_and_the_open_reply() {
-        let mut a = Ai::new();
-        a.history = vec![
-            msg(Role::User, "hi"),
-            msg(Role::Note, "Model: x"),
-            msg(Role::Assistant, "hello"),
-            Msg { error: true, ..msg(Role::Assistant, "boom") },
-            msg(Role::User, "again"),
-            msg(Role::Assistant, ""),
-        ];
-        let c = a.convo();
-        assert_eq!(c.len(), 3);
-        assert_eq!(c[0]["role"], "user");
-        assert_eq!(c[1]["content"], "hello");
-        assert_eq!(c[2]["content"], "again");
+    fn chat_payload() {
+        let h = vec![m("user", "hi", false), m("assistant", "boom", true), m("note", "n", false), m("assistant", "hello", false), m("user", "again", false)];
+        let v: Value = serde_json::from_str(&payload("gemini-2.5-flash", &h, "be brief", 0.7)).unwrap();
+        assert_eq!(v["model"], "gemini-2.5-flash");
+        assert_eq!(v["system"], "be brief");
+        assert_eq!(v["temperature"], 0.7);
+        let roles: Vec<&str> = v["messages"].as_array().unwrap().iter().map(|x| x["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "user"]); // no errors, no notes
+        assert_eq!(v["messages"][1]["content"], "hello");
     }
 
     #[test]
-    fn only_the_last_thirty_turns_are_sent() {
-        let mut a = Ai::new();
-        for i in 0..40 { a.history.push(msg(if i % 2 == 0 { Role::User } else { Role::Assistant }, "x")); }
-        a.history.push(msg(Role::Assistant, "")); // the reply being written
-        assert_eq!(a.convo().len(), 30);
-        a.history.clear();
-        assert!(a.convo().is_empty());
+    fn payload_keeps_last_30() {
+        let h: Vec<Msg> = (0..45).map(|i| m(if i % 2 == 0 { "user" } else { "assistant" }, &i.to_string(), false)).collect();
+        let v: Value = serde_json::from_str(&payload("x", &h, "", 0.5)).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 30);
+        assert_eq!(v["messages"][0]["content"], "15");
     }
 }

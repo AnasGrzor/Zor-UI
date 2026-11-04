@@ -115,7 +115,7 @@ pub struct Bar {
     di_track: String,
     di_track_until: f64,
     di_scroll_at: f64,
-    art: Option<(String, Pixmap)>,
+    art: Option<((std::sync::Arc<Vec<u8>>, u32), Pixmap)>,
     tray_px: HashMap<String, (usize, Pixmap)>,
     pills: Vec<(u32, R)>,
     hover: u32,
@@ -155,11 +155,11 @@ impl Bar {
     }
 
     fn art(&mut self, g: &Gfx, cx: &Ctx, px: u32) -> Option<Pixmap> {
-        let m = cx.media.as_ref()?;
-        let key = format!("{}|{}|{px}", m.title, m.artist);
-        if self.art.as_ref().map(|a| &a.0) != Some(&key) {
-            let img = m.art.as_ref().and_then(|b| g.load_image_bytes(b, px, px))?;
-            self.art = Some((key, img));
+        // keyed on the bytes, not the title: Windows can publish a track's cover after its title
+        let b = cx.media.as_ref()?.art.as_ref()?;
+        // holding the Arc keeps its address from being reused by the next cover
+        if !self.art.as_ref().is_some_and(|a| std::sync::Arc::ptr_eq(&a.0 .0, b) && a.0 .1 == px) {
+            self.art = Some(((b.clone(), px), g.load_image_bytes(b, px, px)?));
         }
         self.art.as_ref().map(|a| a.1.clone())
     }

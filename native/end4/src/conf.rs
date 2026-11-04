@@ -43,6 +43,7 @@ fn merge(base: &mut Value, over: Value) {
     }
 }
 
+#[derive(Clone)]
 pub struct Config(pub Value);
 
 impl Config {
@@ -51,6 +52,8 @@ impl Config {
         if let Ok(file @ Value::Object(_)) = serde_json::from_str::<Value>(text) { merge(&mut v, file); }
         Config(v)
     }
+    /// config.json as it is on disk now (many callers hold a copy with only the script paths).
+    pub fn load() -> Config { Config::parse(&fs::read_to_string(pack_dir().join("config.json")).unwrap_or_default()) }
     pub fn get(&self, path: &str) -> &Value {
         path.split('.').try_fold(&self.0, |v, k| v.get(k)).unwrap_or(&Value::Null)
     }
@@ -120,7 +123,11 @@ impl State {
         let v = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
         State { path, v }
     }
-    pub fn save(&self) {
+    /// Applies `f` to the file as it is now and writes it back. The theme scripts write this file too
+    /// (live wallpaper, image, mode), so saving the copy read at start-up would erase their keys.
+    pub fn update(&mut self, f: impl FnOnce(&mut Value)) {
+        self.v = State::load(self.path.clone()).v;
+        f(&mut self.v);
         // write then rename, so a crash mid-write never leaves half a file
         let tmp = self.path.with_extension("tmp");
         if fs::write(&tmp, self.v.to_string()).is_ok() { let _ = fs::rename(&tmp, &self.path); }
@@ -138,6 +145,18 @@ pub fn data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn state_update_keeps_keys_written_since_load() {
+        let path = std::env::temp_dir().join(format!("end4-state-test-{}.json", std::process::id()));
+        fs::write(&path, r#"{"deskPos": {}}"#).unwrap();
+        let mut s = State::load(path.clone());
+        fs::write(&path, r#"{"deskPos": {}, "live": "we:x"}"#).unwrap(); // the theme script, after start-up
+        s.update(|v| v["leftTab"] = json!("ai"));
+        let disk: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(disk["live"], "we:x");
+        assert_eq!(disk["leftTab"], "ai");
+    }
     #[test]
     fn config_merges_sections() {
         let c = Config::parse(r#"{"use24h": false, "desktop": {"clock": "digital"}, "island": {"panel": {"media": false}}}"#);

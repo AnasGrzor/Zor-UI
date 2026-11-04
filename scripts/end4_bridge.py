@@ -29,6 +29,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py video-frame <video> <out.png>
     end4_bridge.py we-status / we-list / we-apply <id|path> [monitor] / we-close
     end4_bridge.py we-sync                 (streams; re-themes when Wallpaper Engine changes wallpaper)
+    end4_bridge.py agents / agents-watch   AI agents' state and usage, from end4_agent.py (watch streams)
 
 Every command prints exactly one JSON line unless it says it streams.
 Parts of the logic follow end4-pC's services (GPL-3.0, (c) end-4 / pctrade).
@@ -205,7 +206,8 @@ def sync_zebar_startup(cfg):
     path = PACK.parent / "settings.json"
     s = load_json(path, {})
     keep = [c for c in s.get("startupConfigs", []) if c.get("pack") != "end4-pC"]
-    mine = [{"pack": "end4-pC", "widget": "bar", "preset": "default"}]
+    native = cfg.get("native", {})  # parts native/end4 draws instead of Zebar
+    mine = [] if native.get("bar") else [{"pack": "end4-pC", "widget": "bar", "preset": "default"}]
     if cfg.get("desktopWidgets", True):
         mine.append({"pack": "end4-pC", "widget": "desktop", "preset": "default"})
     if cfg.get("visualizer", {}).get("desktop", True):
@@ -555,6 +557,71 @@ def cmd_notifications_watch():
                     seen.add(n["id"])
                     out({"new": n})
         time.sleep(2)
+
+
+# ===================================================================== AI agents (end4_agent.py writes, the island reads)
+AGENTS_DIR = ROOT / "agents"
+AGENT_LABELS = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini", "opencode": "OpenCode", "cursor": "Cursor"}
+
+
+def agents_summary():
+    """One entry per agent: the session that needs you (if any), what's running, and usage windows."""
+    now, res = time.time(), []
+    if not AGENTS_DIR.is_dir():
+        return res
+    for d in sorted(p for p in AGENTS_DIR.iterdir() if p.is_dir()):
+        sessions = []
+        for f in d.glob("*.json"):
+            if f.name == "usage.json":
+                continue
+            s = load_json(f, {})
+            age = now - float(s.get("at") or 0)
+            if age > 12 * 3600:   # the agent quit without a SessionEnd
+                f.unlink(missing_ok=True)
+                continue
+            if s.get("state") == "working" and age > 15 * 60:
+                s["state"] = "done"   # crashed or killed mid-turn: don't show it working forever
+            sessions.append(s)
+        u = load_json(d / "usage.json", {})
+        windows = {k: v for k, v in (u.get("windows") or {}).items() if not v.get("resets_at") or float(v["resets_at"]) > now}
+        if not sessions and not windows:
+            continue
+        waiting = sorted((s for s in sessions if s.get("state") == "waiting"), key=lambda s: -float(s.get("at") or 0))
+        working = [s for s in sessions if s.get("state") == "working"]
+        res.append({"id": d.name, "label": AGENT_LABELS.get(d.name, d.name.title()),
+                    "state": "waiting" if waiting else "working" if working else "idle",
+                    "message": waiting[0].get("message", "") if waiting else "",
+                    "cwd": (waiting or working or [{}])[0].get("cwd", ""),
+                    "waiting": len(waiting), "working": len(working),
+                    "usage": windows, "model": u.get("model", ""), "usageAt": u.get("at")})
+    return res
+
+
+def cmd_agents():
+    out({"agents": agents_summary()})
+
+
+def cmd_agents_watch():
+    """Streams {"agents": [...]} whenever an agent reports (and every 30 s, for resets and stale
+    sessions). One copy runs for all bars; the bar shares it through localStorage."""
+    if not _first_instance("agents-watch"):
+        return out({"skip": "already running"})
+    ppid = _owner_pid()
+    _exit_with_owner(ppid)
+    stamp, last, sent = None, None, 0.0
+    while _parent_alive(ppid):
+        try:
+            now = tuple(sorted((e.path, e.stat().st_mtime_ns) for d in os.scandir(AGENTS_DIR) if d.is_dir()
+                               for e in os.scandir(d.path) if e.name.endswith(".json")))
+        except OSError:
+            now = ()
+        if now != stamp or time.time() - sent > 30:
+            stamp, sent = now, time.time()
+            cur = agents_summary()
+            if cur != last:
+                last = cur
+                out({"agents": cur})
+        time.sleep(0.5)
 
 
 def cmd_notifications_dismiss(*ids):
@@ -955,6 +1022,13 @@ def _find_project(ident):
     return None
 
 
+def _monitor_count():
+    if not IS_WIN:
+        return 1
+    import ctypes
+    return max(1, ctypes.windll.user32.GetSystemMetrics(80))   # SM_CMONITORS
+
+
 def cmd_we_apply(ident, monitor=""):
     target = _find_project(ident)
     if not target:
@@ -962,10 +1036,10 @@ def cmd_we_apply(ident, monitor=""):
     try:
         if not ensure_we_running():
             return out({"ok": False, "error": "Wallpaper Engine didn't start"})
-        args = ["openWallpaper", "-file", str(target)]
-        if str(monitor).isdigit():
-            args += ["-monitor", monitor]
-        we_control(*args)
+        # Without -monitor, Wallpaper Engine sets only one monitor; end4 has one wallpaper for all.
+        monitors = [monitor] if str(monitor).isdigit() else range(_monitor_count())
+        for m in monitors:
+            we_control("openWallpaper", "-file", str(target), "-monitor", m)
     except (OSError, subprocess.SubprocessError) as e:
         return out({"ok": False, "error": str(e)})
     out({"ok": True, "theme": _we_theme(target)})
@@ -1016,6 +1090,12 @@ def we_current():
     return line if line and Path(line).exists() else ""
 
 
+def _still_chosen(st):
+    """end4's last wallpaper was a still picture or a colour. A state with neither (missing or wiped)
+    says nothing, and must not close a Wallpaper Engine wallpaper the user is watching."""
+    return not st.get("live") and bool(st.get("image") or st.get("color"))
+
+
 def cmd_we_sync():
     """Streams: re-themes end4 whenever Wallpaper Engine's wallpaper changes (its UI, playlists...).
     Started by the bar; only one copy runs even with a bar on every monitor."""
@@ -1030,12 +1110,12 @@ def cmd_we_sync():
     interval = float(os.environ.get("END4_WE_INTERVAL", "5"))
     # Closing a wallpaper through WE's CLI doesn't clear its saved one, so WE reopens it when it
     # starts with Windows and hides the picture end4 set. Close it again for a while after start-up
-    # whenever end4's last choice was a still picture (state.live empty).
+    # whenever end4's last choice was a still picture (state has an image or colour and no live).
     started, closes, last_close = time.time(), 0, 0.0
     while _parent_alive(ppid):
         follow = config().get("wallpaperEngine", {}).get("follow", True)
         if (follow and closes < 3 and time.time() - started < 90 and time.time() - last_close > 10
-                and not load_json(ROOT / "state.json", {}).get("live") and we_exe() and we_running()):
+                and _still_chosen(load_json(ROOT / "state.json", {})) and we_exe() and we_running()):
             try:
                 we_control("closeWallpaper")
                 out({"closed": "restored end4's picture"})
@@ -1283,6 +1363,15 @@ def cmd_focus_widget(widget, x="0", y="0"):
     out({"ok": u.GetForegroundWindow() == h})
 
 
+def cmd_native_open(name):
+    """Opens a popup in native/end4 (`end4.exe --open <name>`): it toggles the popup, and starts Zebar's copy if end4 isn't running."""
+    exe = ROOT / "end4.exe"
+    if not (re.fullmatch(r"[a-z-]+", name) and exe.exists()):
+        return out({"ok": False})
+    subprocess.Popen([str(exe), "--open", name], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    out({"ok": True})
+
+
 # ===================================================================== volume mixer (end4's VolumeDialog)
 def _mixer_groups():
     """Audio sessions grouped by app (Discord, browsers... run several), without end4's own Python."""
@@ -1322,8 +1411,8 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 def cmd_pick_image(slot):
     """Asks for a picture and copies it into the pack's images folder (widgets can only show files
-    inside the pack). Prints {"file": name} for config desktop.images.<slot>.file."""
-    if not re.fullmatch(r"image[1-3]", slot):
+    inside the pack). Prints {"file": name} for config desktop.images.<slot>.file (greet: desktop.greet.file)."""
+    if not re.fullmatch(r"image[1-3]|greet", slot):
         return out({"error": "bad slot"})
     import tkinter as tk
     from tkinter import filedialog
@@ -1625,13 +1714,14 @@ COMMANDS = {
     "record": cmd_record,
     "app-icons": cmd_app_icons, "launch": cmd_launch, "pick-image": cmd_pick_image,
     "screen-translate": cmd_screen_translate,
-    "focus-widget": cmd_focus_widget,
+    "focus-widget": cmd_focus_widget, "native-open": cmd_native_open,
     "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,
     "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat,
     "secret-set": cmd_secret_set, "secret-status": cmd_secret_status,
     "notifications": cmd_notifications, "notifications-dismiss": cmd_notifications_dismiss,
     "notifications-watch": cmd_notifications_watch,
+    "agents": cmd_agents, "agents-watch": cmd_agents_watch,
     "nightlight": cmd_nightlight, "config-set": cmd_config_set,
     "presets-online": cmd_presets_online, "preset-apply-online": cmd_preset_apply_online,
     "presets-local": cmd_presets_local, "preset-save": cmd_preset_save,

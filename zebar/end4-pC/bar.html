@@ -113,8 +113,8 @@
     /* Dynamic Island (end4's DynamicIsland): one pill whose width springs between states */
     #g-island { gap: 6px; padding: 0 5px; overflow: hidden; cursor: pointer; transition: width 0.4s cubic-bezier(0.34, 1.35, 0.64, 1), background 0.3s var(--ease-fx); }
     #g-island .di-main { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 4px; }
-    #g-island .di-text { max-width: 170px; font-size: 13px; }
-    #g-island.wide .di-text { max-width: 280px; }
+    #g-island .di-text { max-width: var(--di-text, 170px); font-size: 13px; }
+    #g-island.wide .di-text { max-width: var(--di-wide, 280px); }
     #g-island .ring-wrap { position: relative; width: 28px; height: 28px; flex: none; }
     #g-island .ring-wrap img, #g-island .ring-wrap .ms { position: absolute; inset: 4px; width: 20px; height: 20px; border-radius: 50%; object-fit: cover; display: grid; place-items: center; font-size: 14px; }
     #g-island .di-ctl { display: flex; gap: 2px; }
@@ -130,6 +130,7 @@
     #g-island[data-state="osd"] { background: var(--secondary-container); color: var(--on-secondary-container); }
     #g-island[data-state="recording"] { background: var(--error); color: var(--on-error); }
     #g-island.done { background: var(--primary); color: var(--on-primary); }
+    #g-island.ask { background: var(--tertiary-container); color: var(--on-tertiary-container); }
     #g-island .di-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: di-pulse 0.9s ease-in-out infinite alternate; }
     @keyframes di-pulse { to { opacity: 0.25; } }
     #bar.flat { inset: 0; height: 56px; border-radius: 0; border-width: 0 0 1px; box-shadow: none; padding: 0 10px; }

@@ -5,8 +5,8 @@
 
 general:
   # Flow Launcher (Alt+Space) starts here: its own "start on login" setting is off by default.
-  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
-  shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F']
+  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
+  shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F', 'shell-exec taskkill /IM end4.exe /F']
   config_reload_commands: []
   focus_follows_cursor: false
   # Off: pressing the key (or dot) of the workspace you're on must not jump elsewhere.
@@ -82,6 +82,7 @@ window_rules:
     match:
       # Zebar widgets (bar, sidebars, overview, desktop widgets).
       - window_process: { equals: 'zebar' }
+      - window_process: { equals: 'end4' }   # native/end4 widgets
       - window_process: { equals: 'Flow.Launcher' }
       - window_title: { regex: '[Pp]icture.in.[Pp]icture' }
         window_class: { regex: 'Chrome_WidgetWin_1|MozillaDialogClass' }
@@ -139,9 +140,9 @@ keybindings:
     bindings: ['{{MOD}}+n']
   - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name overview --anchor center --offset-x 0px --offset-y 0px --width 82% --height 74% --monitor-type all']
     bindings: ['{{OVERVIEW}}']
-  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name settings --preset default']
+  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name settings --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
     bindings: ['{{MOD}}+i']
-  - commands: ['shell-exec zebar start-widget-preset --pack end4-pC --widget-name keybinds --preset default']
+  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name keybinds --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
     bindings: ['{{MOD}}+oem_question']
   - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1"']
     bindings: ['{{MOD}}+ctrl+t']

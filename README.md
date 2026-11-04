@@ -1,6 +1,6 @@
-# end4-pC for Windows
+# Zor UI
 
-A Windows port of [end4-pC](https://github.com/pctrade/end4-pC), pctrade's fork of
+Zor UI (formerly "end4-pC for Windows") is a Windows port of [end4-pC](https://github.com/pctrade/end4-pC), pctrade's fork of
 [illogical-impulse](https://github.com/end-4/dots-hyprland). It recreates the look and
 workflow on Windows 10/11: a Material You bar, sidebars with AI chat, a translator, anime,
 football and notifications, an overview, a settings app with the community presets gallery,
@@ -50,7 +50,7 @@ the same design with Windows tools:
 
 ## Install
 
-Run this in PowerShell from the folder you unzipped:
+The step-by-step guide, with requirements, Rust setup and troubleshooting, is in [docs/INSTALL.md](docs/INSTALL.md). In short, run this in PowerShell from the folder you unzipped:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1

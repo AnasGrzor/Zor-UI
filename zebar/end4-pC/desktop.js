@@ -9,12 +9,15 @@ const tauri = widget.window.tauri;
 const stop = () => { closeWindow(); return new Promise(() => {}); };
 const cfg = await config();
 const me = widget.name.replace(/^desk-/, '');
+// Cards the native app (native/end4, desk.rs PORTED) draws once config.json has "native": {"desktop": true}.
+const NATIVE = ['clock', 'weather', 'week', 'greet', 'calendar', 'worldclock', 'resources', 'text', 'image1', 'image2', 'image3', 'media', 'lyrics', 'cover', 'todo', 'notes', 'timer'];
+const mine = id => !(cfg.native?.desktop && NATIVE.includes(id));
 if (cfg.desktopWidgets === false) await stop();
 if (widget.name === 'desktop') {
-  for (const id of cfg.desktop.widgets) await zebar.startWidgetPreset('desk-' + id, 'default').catch(e => console.warn(e));
+  for (const id of cfg.desktop.widgets.filter(mine)) await zebar.startWidgetPreset('desk-' + id, 'default').catch(e => console.warn(e));
   await stop();
 }
-if (!cfg.desktop.widgets.includes(me)) await stop();   // turned off in Settings
+if (!cfg.desktop.widgets.includes(me) || !mine(me)) await stop();   // turned off in Settings, or drawn natively
 document.documentElement.style.visibility = 'hidden';  // until it's moved to its spot
 reloadOnConfigChange();
 await watchTheme(() => me.startsWith('image') && $('#' + me) && renderImage());   // a new wallpaper rewrites wallpaper.jpg
@@ -134,11 +137,17 @@ function renderWeek() {
 
 function renderGreeting() {
   const name = cfg.userName || out.host?.hostname || 'there';
+  const g = { text: '', sub: '', date: true, file: '', shape: '', ...cfg.desktop.greet };
   const now = new Date();
-  setHTML($('#greet'), `
-    <div class="av">${esc(name.charAt(0).toUpperCase())}</div>
-    <div><b>Hi, ${esc(name)}!</b><span>${greeting(now)}</span>
-    <small>Today • ${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })}</small></div>`);
+  const fill = t => esc(t.replaceAll('{name}', name));
+  const size = 70;
+  // Default shape keeps the CSS rounded square; the others are the image cards' Material shapes.
+  const av = g.file
+    ? `<img class="av" src="./images/${encodeURIComponent(g.file)}" draggable="false" alt="" style="object-fit:cover;${g.shape ? shapeStyle(g.shape, size) : ''}" />`
+    : `<div class="av"${g.shape ? ` style="border-radius:0;${shapeStyle(g.shape, size)}"` : ''}>${esc(name.charAt(0).toUpperCase())}</div>`;
+  setHTML($('#greet'), `${av}
+    <div><b>${fill(g.text || 'Hi, {name}!')}</b><span>${g.sub ? fill(g.sub) : greeting(now)}</span>
+    ${g.date ? `<small>Today • ${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })}</small>` : ''}</div>`);
 }
 
 let art = '', artKey = '';

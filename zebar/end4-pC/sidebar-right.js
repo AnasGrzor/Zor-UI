@@ -1,6 +1,7 @@
-import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openOnTargetMonitor, closeWindow } from './lib/core.js';
+import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openHere, openOnTargetMonitor, closeWindow } from './lib/core.js';
 import * as timer from './lib/timer.js';
 
+if ((await config()).native?.['sidebar-right']) { zebar.currentWidget().window.tauri.close().catch(() => {}); await new Promise(() => {}); }   // drawn by native/end4 instead
 await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();
@@ -334,7 +335,7 @@ $('header').addEventListener('contextmenu', e => {
 });
 $('header').addEventListener('click', e => {
   const c = e.target.closest('[data-cmd]')?.dataset.cmd;
-  if (c === 'settings') { openWidget('settings'); closeWindow(); }
+  if (c === 'settings') { openHere('settings'); closeWindow(); }   // a new copy raises an open one (settings.js)
   if (c === 'reload') out.glazewm?.runCommand('wm-reload-config');
   if (c === 'power') $('#power').classList.toggle('open');
 });

@@ -143,6 +143,20 @@ $scriptsRe = (ConvertTo-RustRegex $Scripts).Replace('\', '\\')   # JSON-escape t
 $zpack = [IO.File]::ReadAllText((Join-Path $Repo 'zebar\end4-pC\zpack.json')).Replace('{{SCRIPTS_RE}}', $scriptsRe).Replace('{{PYTHON}}', $venvPy.Replace('\', '\\'))
 Write-Text (Join-Path $Pack 'zpack.json') $zpack
 
+# Native widgets (native/end4): one small process instead of a browser window per widget. Built
+# when Rust is installed; config "native" tells Zebar which parts it now draws.
+$native = Join-Path $Root 'end4.exe'
+$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+if ($cargo) {
+  Step 'Building the native widgets (native\end4)'
+  Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\end4\Cargo.toml') 2>&1 | Out-Null }
+  $built = Join-Path $Repo 'native\end4\target\release\end4.exe'
+  if (Test-Path $built) {
+    Get-Process end4 -ErrorAction SilentlyContinue | Stop-Process -Force
+    Copy-Item -Force $built $native
+  } else { Write-Warning 'The native widgets failed to build; Zebar draws everything.' }
+} else { Info 'Rust not found (rustup.rs): Zebar draws every widget.' }
+
 $cfgPath = Join-Path $Pack 'config.json'
 $modKey = if ($Mod -eq 'win') { 'lwin' } else { 'alt' }
 # Non-ASCII as char codes: Windows PowerShell 5.1 reads BOM-less scripts as ANSI.
@@ -166,6 +180,12 @@ if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add 
     if ($paths -contains $p.Name -or ($p.Name -eq 'userName' -and $UserName)) { continue }
     $cfg[$p.Name] = $p.Value
   }
+}
+if (Test-Path $native) {   # every native part not yet listed is on; the user's own choices stay
+  $nat = [ordered]@{}
+  if ($cfg.Contains('native') -and $cfg['native']) { foreach ($q in $cfg['native'].PSObject.Properties) { $nat[$q.Name] = $q.Value } }
+  foreach ($k in 'desktop', 'bar', 'visualizer', 'dock', 'island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings', 'theme') { if (-not $nat.Contains($k)) { $nat[$k] = $true } }
+  $cfg['native'] = $nat
 }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
 
@@ -195,6 +215,11 @@ $mainIdx = [Math]::Max(0, [array]::IndexOf($screens, ($screens | Where-Object Pr
 $secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Object { $_ -ne $mainIdx })[0] } else { 1 }
 $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
+if (Test-Path $native) {   # the keys open the native popups (end4.exe --open falls back to Zebar when a part isn't native)
+  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack end4-pC --widget-name (sidebar-left|sidebar-right|overview|settings) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --open ' + $m.Groups[1].Value })
+  # wallpaper / mode / game mode keys run the Rust ports (end4.exe falls back to the script for anything not ported)
+  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --script ' + $m.Groups[1].Value })
+}
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"
 
@@ -232,6 +257,12 @@ if ($we -and $we.installed) {
   Info '  live wallpapers use it, and end4 re-themes when you change wallpaper there (Settings > Wallpapers).'
 }
 
+# ------------------------------------------------------------------ 6c. AI agents -> Dynamic Island
+# Hooks (and Claude Code's status line, for usage limits) report to end4_agent.py. Other agents can
+# pipe the same JSON into it; see the top of scripts\end4_agent.py.
+Info 'AI agents (Claude Code, Codex): adding end4 hooks'
+Invoke-Native { & $venvPy -X utf8 (Join-Path $Scripts 'end4_agent.py') --install 2>&1 | ForEach-Object { Info "  $_" } }
+
 # ------------------------------------------------------------------ 7. taskbar
 if ($HideTaskbar) {
   Step 'Turning on taskbar auto-hide'
@@ -265,6 +296,7 @@ if (-not $glaze) {
   # GlazeWM's startup_commands only run when GlazeWM starts, so start Flow Launcher now if needed.
   $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
   if ((Test-Path $flow) -and -not (Get-Process Flow.Launcher -ErrorAction SilentlyContinue)) { Start-Process $flow }
+  if ((Test-Path $native) -and -not (Get-Process end4 -ErrorAction SilentlyContinue)) { Start-Process $native }
 }
 
 $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }

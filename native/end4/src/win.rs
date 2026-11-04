@@ -197,7 +197,9 @@ impl Win {
     /// True when the view has been due for a frame (`View::frame_ms`) since it last painted. One
     /// animation mustn't drag every other window down to its rate.
     pub fn due(&self, now: std::time::Instant, ms: u32) -> bool {
-        now.duration_since(self.painted) >= std::time::Duration::from_millis(ms as u64)
+        // Windows timers tick every ~15.6 ms, so a 33 ms timer fires at ~31 ms: without slack every
+        // other tick is skipped and a 30 fps animation (Gojo's walk) runs at 15 fps.
+        now.duration_since(self.painted) >= std::time::Duration::from_millis((ms - ms / 4) as u64)
     }
 
     /// Repaints if the view's picture could have changed (data version, time key, hover, DPI).

@@ -76,14 +76,22 @@ fn clock(raw_at: f64, now: f64) -> f64 {
 /// Where a session's playback is now, and the anchor that keeps it moving: (position, unix ms).
 /// Windows reports the timeline as a snapshot plus when it was taken, and refreshes it only on play,
 /// pause or seek — Edge and Chrome can leave it minutes old. So a refreshed snapshot starts a new
-/// anchor (`Media::now` extrapolates from it), an unchanged one keeps the anchor we already have, and
+/// anchor (`Media::now` extrapolates from it) unless it agrees with our own clock, an unchanged one
+/// keeps the anchor we already have, and
 /// a playback change the snapshot didn't follow (browsers often skip one) freezes or resumes the
 /// video where it actually is instead of jumping back to a stale position.
 fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f64, f64) {
     let secs = |ms: f64| (ms / 1000.0).max(0.0);
+    let played = |p: &Media| if p.playing { secs(now - p.at) } else { 0.0 };
     match prev {
         Some(p) if p.snap == raw && p.playing == playing => (p.position, p.at),
-        Some(p) if p.snap == raw => (p.position + if p.playing { secs(now - p.at) } else { 0.0 }, now),
+        Some(p) if p.snap == raw => (p.position + played(p), now),
+        // Windows ticked its snapshot. It samples playback lazily, so following it blindly drags the
+        // bar back about a second on every poll: only follow a snapshot that disagrees with our own
+        // clock (a seek or a restart), and otherwise keep gliding from where we already are.
+        Some(p) if (raw.0 - (p.position + played(p))).abs() <= 2.0 => {
+            if playing && p.playing { (p.position, p.at) } else { (p.position + played(p), now) }
+        }
         _ => (raw.0, if playing { clock(raw.1, now) } else { now }),
     }
 }
@@ -304,5 +312,17 @@ mod tests {
         assert!((m.progress() - 0.34).abs() < 0.01);
         // never past the end of the track
         assert_eq!(at(99.0, crate::hub::now_ms() - 60_000.0, (99.0, 0.0)).now(), 100.0);
+    }
+
+    #[test]
+    fn a_snapshot_that_agrees_does_not_drag_the_bar_back() {
+        let now = 20_000.0;
+        let p = at(30.0, now - 4000.0, (30.0, now - 4000.0));
+        // Windows ticked its snapshot but says 33.4 s while we're at 34: keep gliding, no jump
+        assert_eq!(anchor((33.4, now), true, Some(&p), now), (30.0, now - 4000.0));
+        // pausing on an agreeing snapshot freezes where the video actually is, not where Windows lagged
+        assert_eq!(anchor((33.4, now), false, Some(&p), now), (34.0, now));
+        // a seek is a disagreement worth following
+        assert_eq!(anchor((52.0, now), true, Some(&p), now), (52.0, now));
     }
 }

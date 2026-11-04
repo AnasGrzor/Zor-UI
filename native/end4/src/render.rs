@@ -1,6 +1,6 @@
 //! `end4.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
 //! theme and sample media, and writes a PNG, so drawing code can be checked without windows.
-//! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", or a popup name.
+//! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", "gojo", or a popup name.
 //! w, h are CSS px (default: the view's own size, or the popup preset on a 1920x1080 screen); scale defaults to 1.
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
     desk::Card,
     dock::Dock,
     gfx::{Canvas, Gfx},
+    gojo,
     media::{Audio, Media},
     popup,
     viz::Viz,
@@ -42,6 +43,7 @@ pub fn run(args: &[String]) {
         "bar" => Box::new(Bar::new(mon)),
         "dock" => Box::new(Dock::new(mon)),
         "visualizer" => Box::new(Viz::new(mon)),
+        "gojo" => Box::new(gojo::Gojo::new()),
         p => popup::make(p, area).unwrap_or_else(|| Box::new(Card::new(p))),
     };
     let (w, h) = if num(2).is_some() && num(3).is_some() { area } else { view.size(&g, &cx, scale) };

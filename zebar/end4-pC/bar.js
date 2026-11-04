@@ -1,6 +1,7 @@
 import {
   zebar, $, esc, icon, ring, setHTML, config, watchTheme, run, openHere, mediaClock,
   weatherIcon, weatherText, temp, volumeIcon, networkIcon, batteryIcon, prettyApp, reloadOnConfigChange, bridgeStream, bridge, monthGrid, albumArt, greeting,
+  closeWindow,
 } from './lib/core.js';
 import { drawBars } from './lib/viz.js';
 import * as timer from './lib/timer.js';
@@ -8,6 +9,7 @@ import { barLayout } from './lib/barlayout.js';
 
 const cfg = await config();
 reloadOnConfigChange();
+if (cfg.native?.bar) { closeWindow(); await new Promise(() => {}); }   // native/end4 draws the bar
 
 // ---------------------------------------------------------------- layout (Settings > Bar)
 // Modules move into their side in the saved order; hidden ones stay in the page (hidden) so the
@@ -27,8 +29,10 @@ for (const [id, side] of layout)
   }
 const netShown = layout.some(m => m[0] === 'netspeed' && m[1] !== 'hidden');
 const islandShown = layout.some(m => m[0] === 'island' && m[1] !== 'hidden');
-if (islandShown) for (const sel of ['#g-media', '#g-timer', '#g-rec']) $(sel).hidden = true;   // the island shows these
+// The island shows these; any it's set not to show stay on the bar.
+if (islandShown) for (const [sel, k] of [['#g-media', 'media'], ['#g-timer', 'timer'], ['#g-rec', 'recording']]) $(sel).hidden = cfg.island[k];
 $('#bar').classList.add(cfg.bar.style, 'g-' + cfg.bar.groups);
+$('#aw-title').style.maxWidth = `${cfg.bar.titleWidth}vw`;   // Settings > Bar > Window title width
 for (const b of document.querySelectorAll('#g-utils [data-act]')) b.hidden = !cfg.bar.utils.includes(b.dataset.act);
 await watchTheme(t => setHTML($('#mode-icon'), t.mode === 'dark' ? 'dark_mode' : 'light_mode'));
 
@@ -78,12 +82,13 @@ function watchAudio() {
   const a = out.audio?.defaultPlaybackDevice, m = out.audio?.defaultRecordingDevice;
   if (!a) return;
   const now = `${Math.round(a.volume)}|${a.isMuted}|${!!m?.isMuted}`;
-  if (lastAudio !== null && now !== lastAudio) {
-    osd = lastAudio.split('|')[2] !== String(!!m?.isMuted)
+  const mic = lastAudio !== null && lastAudio.split('|')[2] !== String(!!m?.isMuted);
+  if (lastAudio !== null && now !== lastAudio && (!islandShown || (mic ? cfg.island.mic : cfg.island.volume))) {
+    osd = mic
       ? { icon: m.isMuted ? 'mic_off' : 'mic', text: m.isMuted ? 'Microphone muted' : 'Microphone on' }
       : { icon: volumeIcon(a), value: a.isMuted ? 0 : a.volume, text: a.isMuted ? 'Muted' : `${Math.round(a.volume)}%` };
     clearTimeout(osdTimer);
-    osdTimer = setTimeout(() => { osd = null; renderMedia(); renderIsland(); }, 1800);
+    osdTimer = setTimeout(() => { osd = null; renderMedia(); renderIsland(); }, (islandShown ? cfg.island.osdSeconds : 1.8) * 1000);
   }
   lastAudio = now;
 }
@@ -219,13 +224,15 @@ const DI_BADGE = { recording: 'screen_record', timer: 'timer', media: 'music_not
 // AI agents (scripts/end4_agent.py -> bridge agents-watch). One bar runs the watcher and shares the
 // list through localStorage, which the other bars and the island panel read.
 let agents = JSON.parse(localStorage.getItem('end4.agents') || '[]');
+const di = cfg.island;   // what shows, for how long, and what clicks do (Settings > Dynamic Island)
 function diProviders() {
   const s = out.media?.currentSession;
-  const asks = agents.some(a => a.state === 'waiting');
+  const asks = di.agents && agents.some(a => a.state === 'waiting');
   // An agent waiting for you comes before everything but a new notification; one at work only
   // takes the island when nothing else does.
-  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['agent', asks], ['recording', !!localStorage.getItem('end4-pC.rec')],
-    ['timer', !!timerChip().html], ['media', !!s?.title], ['agent', !asks && agents.some(a => a.state === 'working')]].filter(p => p[1]);
+  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['agent', asks], ['recording', di.recording && !!localStorage.getItem('end4-pC.rec')],
+    ['timer', di.timer && !!timerChip().html], ['media', di.media && !!s?.title],
+    ['agent', di.agents && di.agentWorking && !asks && agents.some(a => a.state === 'working')]].filter(p => p[1]);
 }
 // Sets the HTML and springs the width from the old size to the new one.
 function morph(el, html) {
@@ -249,7 +256,7 @@ function renderIsland() {
   const s = out.media?.currentSession;
   const key = s?.title ? `${s.title}|${s.artist}` : '';
   if (key !== diTrack) {
-    if (diTrack && key) diTrackUntil = Date.now() + 3000;
+    if (diTrack && key) diTrackUntil = Date.now() + di.trackSeconds * 1000;
     diTrack = key; diArt = '';
     if (key) albumArt(s).then(u => { if (diTrack === key) { diArt = u; renderIsland(); } });
   }
@@ -273,25 +280,34 @@ function renderIsland() {
   } else if (state === 'timer') {
     html = t.html;
   } else if (state === 'media') {
-    wide = diHover || Date.now() < diTrackUntil;
+    wide = (di.controls && diHover) || Date.now() < diTrackUntil;
     const dur = (s.endTime || 0) - (s.startTime || 0);
-    html = `<div class="ring-wrap">${ring(dur > 0 ? clock.position() / dur : 0, { size: 28, stroke: 2.5 })}${diArt ? `<img src="${diArt}" alt="" />` : icon('music_note', { fill: true })}</div>
+    const art = di.art && diArt ? `<img src="${diArt}" alt="" />` : icon('music_note', { fill: true });
+    html = `<div class="ring-wrap">${di.progress ? ring(dur > 0 ? clock.position() / dur : 0, { size: 28, stroke: 2.5 }) : ''}${art}</div>
       <span class="di-text ellipsis">${esc(wide && s.artist ? `${s.title} • ${s.artist}` : s.title)}</span>
-      ${wide ? `<span class="di-ctl"><button data-ctl="previous">${icon('skip_previous', { fill: true })}</button><button data-ctl="togglePlayPause">${icon(s.isPlaying ? 'pause' : 'play_arrow', { fill: true })}</button><button data-ctl="next">${icon('skip_next', { fill: true })}</button></span>` : ''}`;
+      ${wide && di.controls ? `<span class="di-ctl"><button data-ctl="previous">${icon('skip_previous', { fill: true })}</button><button data-ctl="togglePlayPause">${icon(s.isPlaying ? 'pause' : 'play_arrow', { fill: true })}</button><button data-ctl="next">${icon('skip_next', { fill: true })}</button></span>` : ''}`;
   } else {
     const a = out.audio, w = out.weather;
     const onBar = id => layout.some(m => m[0] === id && m[1] !== 'hidden');
-    const status = [a?.defaultRecordingDevice?.isMuted && 'mic_off', a?.defaultPlaybackDevice?.isMuted && 'volume_off',
-      out.network && !out.network.defaultInterface && 'wifi_off'].filter(Boolean);
-    // Whatever the bar doesn't already show: the time, else the weather, else a greeting.
-    html = `${!onBar('clock') ? `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !cfg.use24h })}</span>`
-      : w && !onBar('weather') ? `${icon(weatherIcon(w.status), { cls: 'big' })}<span>${temp(w, cfg.tempUnit)}</span>`
-      : `${icon('waving_hand', { cls: 'big' })}<span>${greeting()}</span>`}
-      ${status.length ? `<span class="di-status">${status.map(i => icon(i)).join('')}</span>` : ''}`;
+    const status = di.status ? [a?.defaultRecordingDevice?.isMuted && 'mic_off', a?.defaultPlaybackDevice?.isMuted && 'volume_off',
+      out.network && !out.network.defaultInterface && 'wifi_off'].filter(Boolean) : [];
+    const IDLE = {
+      time: () => `<span>${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !cfg.use24h })}</span>`,
+      date: () => `${icon('calendar_today', { cls: 'big' })}<span>${new Date().toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>`,
+      weather: () => (w ? `${icon(weatherIcon(w.status), { cls: 'big' })}<span>${temp(w, cfg.tempUnit)}</span>` : ''),
+      greeting: () => `${icon('waving_hand', { cls: 'big' })}<span>${greeting()}</span>`,
+      none: () => '',
+    };
+    // Auto: whatever the bar doesn't already show: the time, else the weather, else a greeting.
+    const pick = di.idle !== 'auto' ? di.idle : !onBar('clock') ? 'time' : w && !onBar('weather') ? 'weather' : 'greeting';
+    html = `${(IDLE[pick] || IDLE.greeting)()}${status.length ? `<span class="di-status">${status.map(i => icon(i)).join('')}</span>` : ''}`;
   }
-  const badges = win ? [] : list.filter(p => p !== main);
+  const badges = win || !di.badges ? [] : list.filter(p => p !== main);
   const el = $('#g-island');
+  el.hidden = !html.trim() && !badges.length;   // idle set to Nothing, and nothing going on
   el.dataset.state = state;
+  el.style.setProperty('--di-text', `${di.textWidth}px`);
+  el.style.setProperty('--di-wide', `${di.wideWidth}px`);
   el.classList.toggle('wide', wide);
   el.classList.toggle('done', state === 'timer' && !!t.done);
   el.classList.toggle('ask', state === 'agent' && wide);
@@ -420,8 +436,13 @@ island.addEventListener('click', e => {
   if (focus) { diFocus = focus; return renderIsland(); }
   const ctl = e.target.closest('[data-ctl]')?.dataset.ctl;
   if (ctl) return out.media?.[ctl]();
-  openIslandPanel();
+  islandAction(di.click);
 });
+function islandAction(act) {
+  if (act === 'panel') return openIslandPanel();
+  if (act === 'play') return out.media?.togglePlayPause();
+  if (['sidebar-left', 'sidebar-right', 'overview'].includes(act)) here(act);
+}
 // Click: the island expands into a panel under it (island-panel.html). The click that closed the
 // panel (it closes when it loses focus) mustn't open it again.
 async function openIslandPanel() {
@@ -433,10 +454,16 @@ async function openIslandPanel() {
   localStorage.setItem('end4.islandAt', JSON.stringify({ x: p.x + (r.left + r.width / 2) * dpr, y: p.y + (r.bottom + 2) * dpr }));
   zebar.startWidgetPreset('island-panel', 'default').catch(e => console.warn(e));
 }
-island.addEventListener('contextmenu', e => { e.preventDefault(); here('sidebar-left'); });   // player and lyrics
-island.addEventListener('wheel', e => {   // like the volume icon: scroll for volume
-  const a = out.audio, dev = a?.defaultPlaybackDevice;
-  if (dev) a.setVolume(Math.max(0, Math.min(100, Math.round(dev.volume + (e.deltaY < 0 ? 5 : -5)))));
+island.addEventListener('contextmenu', e => { e.preventDefault(); islandAction(di.rightClick); });
+let diScrollAt = 0;
+island.addEventListener('wheel', e => {
+  if (di.scroll === 'volume') {   // like the volume icon
+    const a = out.audio, dev = a?.defaultPlaybackDevice;
+    if (dev) a.setVolume(Math.max(0, Math.min(100, Math.round(dev.volume + (e.deltaY < 0 ? 5 : -5)))));
+  } else if (di.scroll === 'track' && Date.now() - diScrollAt > 500) {   // one track per flick, not per wheel tick
+    diScrollAt = Date.now();
+    out.media?.[e.deltaY < 0 ? 'previous' : 'next']();
+  }
 }, { passive: true });
 
 const media = $('#g-media');
@@ -506,9 +533,10 @@ if (islandShown) {
 // notification to the other bars.
 const notifChan = new BroadcastChannel('end4-notifications');
 function showNotification(n) {
+  if (!di.notifications) return;
   diNotif = n;
   clearTimeout(diNotifTimer);
-  diNotifTimer = setTimeout(() => { diNotif = null; renderIsland(); }, 5000);
+  diNotifTimer = setTimeout(() => { diNotif = null; renderIsland(); }, di.notifySeconds * 1000);
   renderIsland();
 }
 notifChan.onmessage = e => showNotification(e.data);

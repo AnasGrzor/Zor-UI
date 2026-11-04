@@ -6,6 +6,7 @@ import { mountTranslate } from './lib/tab-translate.js';
 import { mountAnime } from './lib/tab-anime.js';
 import { mountFootball } from './lib/tab-football.js';
 
+if ((await config()).native?.['sidebar-left']) { zebar.currentWidget().window.tauri.close().catch(() => {}); await new Promise(() => {}); }   // drawn by native/end4 instead
 await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();

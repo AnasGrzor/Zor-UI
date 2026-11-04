@@ -1,6 +1,7 @@
 import { zebar, $, $$, esc, icon, ring, setHTML, prettyApp, config, watchTheme, run, bridge, popupBehaviour, monthGrid, openWidget, openHere, openOnTargetMonitor, closeWindow } from './lib/core.js';
 import * as timer from './lib/timer.js';
 
+if ((await config()).native?.['sidebar-right']) { zebar.currentWidget().window.tauri.close().catch(() => {}); await new Promise(() => {}); }   // drawn by native/end4 instead
 await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();

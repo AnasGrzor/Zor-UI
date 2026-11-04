@@ -9,12 +9,15 @@ const tauri = widget.window.tauri;
 const stop = () => { closeWindow(); return new Promise(() => {}); };
 const cfg = await config();
 const me = widget.name.replace(/^desk-/, '');
+// Cards the native app (native/end4, desk.rs PORTED) draws once config.json has "native": {"desktop": true}.
+const NATIVE = ['clock', 'weather', 'week', 'greet', 'calendar', 'worldclock', 'resources', 'text', 'image1', 'image2', 'image3', 'media', 'lyrics', 'cover', 'todo', 'notes', 'timer'];
+const mine = id => !(cfg.native?.desktop && NATIVE.includes(id));
 if (cfg.desktopWidgets === false) await stop();
 if (widget.name === 'desktop') {
-  for (const id of cfg.desktop.widgets) await zebar.startWidgetPreset('desk-' + id, 'default').catch(e => console.warn(e));
+  for (const id of cfg.desktop.widgets.filter(mine)) await zebar.startWidgetPreset('desk-' + id, 'default').catch(e => console.warn(e));
   await stop();
 }
-if (!cfg.desktop.widgets.includes(me)) await stop();   // turned off in Settings
+if (!cfg.desktop.widgets.includes(me) || !mine(me)) await stop();   // turned off in Settings, or drawn natively
 document.documentElement.style.visibility = 'hidden';  // until it's moved to its spot
 reloadOnConfigChange();
 await watchTheme(() => me.startsWith('image') && $('#' + me) && renderImage());   // a new wallpaper rewrites wallpaper.jpg

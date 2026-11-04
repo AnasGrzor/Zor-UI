@@ -2,7 +2,7 @@
 import { zebar, $, esc, setHTML, config, watchTheme, bridge, prettyApp, reloadOnConfigChange, closeWindow } from './lib/core.js';
 
 const cfg = await config();
-if (!cfg.dock.enabled) { closeWindow(); await new Promise(() => {}); }
+if (cfg.native?.dock || !cfg.dock.enabled) { closeWindow(); await new Promise(() => {}); }
 reloadOnConfigChange();   // pinning saves config.json, which reloads the dock
 await watchTheme();
 

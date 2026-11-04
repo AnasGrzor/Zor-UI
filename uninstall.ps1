@@ -19,7 +19,7 @@ $bridge = Join-Path $env:LOCALAPPDATA 'end4-pC\scripts\end4_bridge.py'
 if ((Test-Path $py) -and (Test-Path $bridge)) { & $py -X utf8 $bridge nightlight off 2>$null | Out-Null }
 $lively = Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Livelycu.exe'
 if (Test-Path $lively) { & $lively closewp --monitor -1 2>$null | Out-Null }
-Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process zebar, end4 -ErrorAction SilentlyContinue | Stop-Process -Force
 $pid0 = Join-Path $env:LOCALAPPDATA 'end4-pC\caffeine.pid'
 if (Test-Path $pid0) { Stop-Process -Id (Get-Content $pid0) -Force -ErrorAction SilentlyContinue }
 

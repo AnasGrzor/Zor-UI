@@ -12,18 +12,17 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
-use windows::Win32::{
-    Foundation::{HWND, RECT},
-    UI::{Shell::*, WindowsAndMessaging::*},
-};
+use windows::Win32::{Foundation::POINT, UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::GetCursorPos}};
 
 const H: f32 = 64.0; // zpack preset height
 const ITEM: f32 = 44.0;
 const ICON: f32 = 30.0;
-/// The docks' (window handle, monitor rect) so a config or monitor change can remove their app bars and rebuild.
+/// The docks' (window handle, monitor rect) so a config change can close them.
 static CUR: Mutex<Vec<(isize, [i32; 4])>> = Mutex::new(Vec::new());
 
 /// One dock button: an app and its windows.
@@ -72,11 +71,25 @@ pub struct Dock {
     /// Group names by hit id (filled by paint).
     slots: Vec<String>,
     wins: Vec<GWin>,
+    /// Auto-hide: the dock is drawn only while the pointer is at the bottom edge (or on the dock, plus a short grace).
+    up: Cell<bool>,
+    last_hit: Cell<Option<Instant>>,
 }
 
 impl Dock {
     /// `mon`: the monitor's x, y and width in physical px, like `Bar::new`.
-    pub fn new(mon: (i32, i32, i32)) -> Dock { Dock { mon, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![] } }
+    pub fn new(mon: (i32, i32, i32)) -> Dock { Dock { mon, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![], up: Cell::new(false), last_hit: Cell::new(None) } }
+
+    /// Updates `up` from the pointer: reveal at the monitor's bottom 2 px, stay up while over the dock.
+    fn track(&self) -> bool {
+        let mut p = POINT::default();
+        let zone = if self.up.get() { (H * unsafe { GetDpiForSystem() } as f32 / 96.0) as i32 + 4 } else { 2 };
+        let hit = unsafe { GetCursorPos(&mut p) }.is_ok() && p.x >= self.mon.0 && p.x < self.mon.0 + self.mon.2 && p.y >= self.mon.1 - zone;
+        if hit { self.last_hit.set(Some(Instant::now())); }
+        let up = hit || self.last_hit.get().is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+        self.up.set(up);
+        up
+    }
 
     fn pinned(cx: &Ctx) -> Vec<String> {
         cx.cfg.get("dock.pinned").as_array().map(|a| a.iter().filter_map(|p| p["name"].as_str().map(String::from)).collect()).unwrap_or_default()
@@ -117,9 +130,14 @@ impl Dock {
 impl View for Dock {
     fn size(&self, _: &Gfx, _: &Ctx, scale: f32) -> (f32, f32) { (self.mon.2 as f32 / scale, H) }
 
+    fn key(&self, _: &Ctx) -> String { self.track().to_string() }
+
+    /// Polls the pointer for the reveal.
+    fn frame_ms(&self) -> u32 { 50 }
+
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         #[cfg(debug_assertions)]
-        if std::env::var_os("END4_SAMPLE").is_some() { // `--render` has no GlazeWM: made-up windows
+        if std::env::var_os("END4_SAMPLE").is_some() { self.up.set(true); // `--render` has no GlazeWM: made-up windows
             let w = |id: &str, p: &str, f: bool| GWin { id: id.into(), process: p.into(), focus: f, ..Default::default() };
             self.wins = vec![w("1", "msedge", false), w("2", "Code", true), w("3", "Code", false), w("4", "WindowsTerminal", false)];
         }
@@ -127,7 +145,7 @@ impl View for Dock {
         let list = self.items(cx);
         self.want_icons(cx, &list.iter().map(|g| g.name.clone()).collect::<Vec<_>>());
         self.slots = list.iter().map(|g| g.name.clone()).collect();
-        if list.is_empty() { return; } // #dock:empty { display: none }
+        if list.is_empty() || !self.up.get() { return; } // #dock:empty { display: none }, and hidden until the pointer reaches the edge
         let sep = list.iter().position(|g| !g.pinned).filter(|&i| i > 0);
         let w = list.len() as f32 * ITEM + (list.len() as f32 - 1.0) * 4.0 + if sep.is_some() { 5.0 + 4.0 } else { 0.0 } + 12.0 + 2.0;
         let pill = R::new(((c.w - w) / 2.0).round(), H - 4.0 - (ITEM + 14.0), w, ITEM + 14.0);
@@ -167,7 +185,7 @@ impl View for Dock {
         let Some(g) = list.iter().find(|g| g.name == name) else { return };
         match btn {
             Btn::Left => match next_window(&g.wins) {
-                Some(w) => glaze::command_on(w, "focus"),
+                Some(w) => glaze::command(&format!("focus --container-id {w}")),
                 None => {
                     let cfg = Config(cx.cfg.0.clone());
                     std::thread::spawn(move || { proc::bridge(&cfg, "launch", &[&name]); });
@@ -184,29 +202,8 @@ impl View for Dock {
     }
 }
 
-/// SHAppBarMessage at the bottom edge (Win::dock_top only does the top): reserves `h` physical px of `mon`.
-fn dock_bottom(hwnd: HWND, mon: RECT, h: i32) {
-    unsafe {
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & !(WS_EX_TOOLWINDOW.0 as isize); // Explorer skips tool windows in its layout
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
-        let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uCallbackMessage: crate::win::WM_APPBAR, uEdge: ABE_BOTTOM,
-            rc: RECT { left: mon.left, top: mon.bottom - h, right: mon.right, bottom: mon.bottom }, ..Default::default() };
-        SHAppBarMessage(ABM_NEW, &mut d);
-        SHAppBarMessage(ABM_QUERYPOS, &mut d);
-        d.rc.top = d.rc.bottom - h;
-        SHAppBarMessage(ABM_SETPOS, &mut d);
-    }
-}
-
-fn remove_appbar(h: isize) {
-    unsafe {
-        let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: HWND(h as *mut _), ..Default::default() };
-        SHAppBarMessage(ABM_REMOVE, &mut d);
-    }
-}
-
 /// Opens / closes the docks to match config.json (called where `desk::sync` is).
-/// shortcut: docks aren't rebuilt on a monitor change (restart), and they need a native bar's GlazeWM feed to list windows.
+/// shortcut: they need a native bar's GlazeWM feed to list windows.
 pub fn sync(app: &mut App) {
     let want = app.cx.native("dock") && app.cx.cfg.bool("dock.enabled");
     let (mons, _) = crate::util::monitors();
@@ -214,19 +211,14 @@ pub fn sync(app: &mut App) {
     let mut cur = CUR.lock().unwrap_or_else(|e| e.into_inner());
     if !cur.is_empty() && cur.iter().map(|c| c.1).collect::<Vec<_>>() == spec { return; }
     for (h, _) in cur.drain(..) {
-        remove_appbar(h);
         app.wins.retain(|w| w.hwnd.0 as isize != h);
     }
     for m in spec {
-        let rect = RECT { left: m[0], top: m[1], right: m[2], bottom: m[3] };
         let Ok(mut w) = Win::new(Box::new(Dock::new((m[0], m[3], m[2] - m[0]))), "Zor UI / dock", m[0], m[3] - 1, Z::Top, false) else { continue };
         w.update(&app.g, &app.cx, true);
         w.move_to(m[0], m[3] - (H * w.scale()).round() as i32);
         w.show();
-        let h = (H * w.scale()).round() as i32;
-        dock_bottom(w.hwnd, rect, h); // after show: the shell ignores app bars that aren't visible yet
-        w.move_to(m[0], m[3] - h);
-        w.pin();
+        w.pin(); // floats over the windows: no app bar, so nothing is reserved
         cur.push((w.hwnd.0 as isize, m));
         app.wins.push(w);
     }

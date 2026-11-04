@@ -9,6 +9,11 @@ use windows::{
     core::{w, BSTR, HSTRING, PCWSTR, VARIANT},
     ApplicationModel::DataTransfer::{Clipboard, SetHistoryItemAsContentStatus, StandardDataFormats},
     Data::Xml::Dom::XmlDocument,
+    Win32::{
+        Devices::Display::{DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR},
+        Foundation::{BOOL, HANDLE, LPARAM, RECT},
+        Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
+    },
     Devices::Radios::{Radio, RadioKind, RadioState},
     UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
@@ -190,12 +195,59 @@ fn brightness() -> Value {
             o.Get(w!("CurrentBrightness"), 0, &mut v, None, None).ok()?;
             u32::try_from(&v).ok().map(|b| b as u8)
         };
-        go().map_or(Value::Null, |b| json!(b))
+        go().or_else(ddc_brightness).map_or(Value::Null, |b| json!(b))
     }
 }
 
-/// WmiSetBrightness on the first panel with brightness control (laptops); the percentage set.
+/// Runs `f` on the physical-monitor handle of every display (DDC/CI: external monitors, which WMI can't reach).
+fn ddc_each(mut f: impl FnMut(HANDLE)) {
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+        let f = &mut *(data.0 as *mut &mut dyn FnMut(HANDLE));
+        let mut n = 0u32;
+        if GetNumberOfPhysicalMonitorsFromHMONITOR(m, &mut n).is_ok() && n > 0 {
+            let mut a = vec![PHYSICAL_MONITOR::default(); n as usize];
+            if GetPhysicalMonitorsFromHMONITOR(m, &mut a).is_ok() {
+                for p in &a { f({ p.hPhysicalMonitor }); }
+                let _ = DestroyPhysicalMonitors(&a);
+            }
+        }
+        BOOL(1)
+    }
+    let mut f: &mut dyn FnMut(HANDLE) = &mut f;
+    unsafe { let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut f as *mut _ as isize)); }
+}
+
+/// A monitor's raw brightness range <-> percent.
+fn raw_to_pct(raw: u32, min: u32, max: u32) -> u32 { if max <= min { 0 } else { (raw.saturating_sub(min) * 100 + (max - min) / 2) / (max - min) } }
+fn pct_to_raw(pct: u32, min: u32, max: u32) -> u32 { min + ((max - min) * pct + 50) / 100 }
+
+/// First DDC/CI monitor that reports a brightness, as a percentage.
+fn ddc_brightness() -> Option<u8> {
+    let mut found = None;
+    ddc_each(|h| unsafe {
+        let (mut min, mut cur, mut max) = (0u32, 0u32, 0u32);
+        if found.is_none() && GetMonitorBrightness(h, &mut min, &mut cur, &mut max) != 0 { found = Some(raw_to_pct(cur, min, max) as u8); }
+    });
+    found
+}
+
+/// Sets every DDC/CI monitor that accepts it; how many did.
+fn set_ddc_brightness(pct: i32) -> usize {
+    let mut done = 0;
+    ddc_each(|h| unsafe {
+        let (mut min, mut cur, mut max) = (0u32, 0u32, 0u32);
+        if GetMonitorBrightness(h, &mut min, &mut cur, &mut max) != 0 && SetMonitorBrightness(h, pct_to_raw(pct as u32, min, max)) != 0 { done += 1; }
+    });
+    done
+}
+
+/// Laptop panel through WMI, else every external monitor through DDC/CI; the percentage set.
 fn set_brightness(pct: i32) -> Result<i32, String> {
+    set_wmi_brightness(pct).or_else(|e| if set_ddc_brightness(pct) > 0 { Ok(pct) } else { Err(e) })
+}
+
+/// WmiSetBrightness on the first panel with brightness control (laptops); the percentage set.
+fn set_wmi_brightness(pct: i32) -> Result<i32, String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let loc: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).map_err(msg)?;
@@ -368,6 +420,13 @@ mod tests {
         let l = "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance (x))";
         assert_eq!(parse_plan(l).map(|p| (p.1, p.2)), Some(("High performance (x)".into(), false)));
         assert_eq!(parse_plan("Existing Power Schemes (* Active)"), None);
+    }
+
+    #[test]
+    fn ddc_range() {
+        assert_eq!((raw_to_pct(75, 0, 100), pct_to_raw(75, 0, 100)), (75, 75));
+        assert_eq!((raw_to_pct(50, 0, 255), pct_to_raw(100, 0, 255), pct_to_raw(1, 10, 110)), (20, 255, 11));
+        assert_eq!(raw_to_pct(5, 7, 7), 0);
     }
 
     #[test]

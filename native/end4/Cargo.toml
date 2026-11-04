@@ -57,6 +57,7 @@ windows = { version = "0.58", features = [
   "Devices_Radios",
   "ApplicationModel_DataTransfer",
   "UI_Notifications",
+  "Win32_Devices_Display",
   "Data_Xml_Dom",
 ] }
 

@@ -74,6 +74,7 @@ const KEY_PROVIDERS = [['gemini', 'Google Gemini'], ['anthropic', 'Anthropic (Cl
 
 // The "keybinds" widget (Mod+/) is this same page, opened on the Keybinds tab.
 // Image card options are saved one at a time, so fill in the defaults the cards use (desktop.js).
+cfg.desktop.greet = { text: '', sub: '', date: true, file: '', shape: '', ...cfg.desktop.greet };
 for (const id of ['image1', 'image2', 'image3'])
   cfg.desktop.images = { ...cfg.desktop.images, [id]: { shape: 'cookie', size: 280, file: '', ...cfg.desktop.images?.[id] } };
 let page = zebar.currentWidget().name === 'keybinds' ? 'keys' : new URLSearchParams(location.search).get('page') || 'quick';
@@ -244,6 +245,17 @@ const pages = {
         <button class="chip${get('desktop.widgets').includes(id) ? ' sel' : ''}" data-dwidget="${id}" title="Show or hide this card">${icon(get('desktop.widgets').includes(id) ? 'visibility' : 'visibility_off')}${get('desktop.widgets').includes(id) ? 'On' : 'Off'}</button></div>
       ${slider(`desktop.images.${id}.size`, `Image ${i + 1} size`, 120, 800, 10, v => `${v}px`, 'aspect_ratio')}`).join('')}
       <div class="muted" style="font-size:12px">Choosing a picture turns its card on. On/Off shows or hides the card.</div></div>
+    <h2>${icon('waving_hand')}Greeting card</h2>
+    <div class="card">
+      ${text('desktop.greet.text', 'Greeting', 'Empty for "Hi, {name}!". {name} is your name', 'title')}
+      ${text('desktop.greet.sub', 'Second line', 'Empty for Good Morning / Afternoon / Evening. {name} works here too', 'short_text')}
+      ${sw('desktop.greet.date', 'Date line', 'Today • weekday, day and month', 'today')}
+      <div class="row">${icon('account_circle')}<div class="lbl">Avatar<small>${get('desktop.greet.file') ? 'Picture chosen' : 'Your initial'}</small></div>
+        <select class="field" data-select="desktop.greet.shape" style="max-width:130px;height:40px">${[['', 'Default'], ...IMAGE_SHAPES].map(([v, l]) =>
+          `<option value="${v}"${(get('desktop.greet.shape') || '') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+        <button class="chip" data-pick-image="greet">${icon('folder_open')}Choose</button>
+        ${get('desktop.greet.file') ? `<button class="chip" data-act="greet-initial">${icon('close')}Use initial</button>` : ''}</div>
+    </div>
     <h2>${icon('timer')}Pomodoro</h2>
     <div class="card">
       ${num('timer.focus', 'Focus minutes', 1, 180, 'center_focus_strong')}
@@ -397,7 +409,7 @@ document.addEventListener('click', async e => {
   }
   if (d.pickImage) {
     const r = await bridge('pick-image', d.pickImage);
-    if (r.file) { await set(`desktop.images.${d.pickImage}.file`, r.file); await showCard(d.pickImage); render(); }
+    if (r.file) { await set(d.pickImage === 'greet' ? 'desktop.greet.file' : `desktop.images.${d.pickImage}.file`, r.file); await showCard(d.pickImage); render(); }
     return r.error && toast(r.error);
   }
   if (d.wallImage) { await set(`desktop.images.${d.wallImage}.file`, 'wallpaper.jpg'); await showCard(d.wallImage); return render(); }
@@ -437,6 +449,7 @@ document.addEventListener('click', async e => {
     busy = ''; we = null; render();
     return toast(r.ok ? 'Wallpaper set' : r.error || 'Failed');
   }
+  if (d.act === 'greet-initial') { await set('desktop.greet.file', ''); return render(); }
   if (d.act === 'we-close') { await bridge('we-close'); we = null; return render(); }
   if (d.deleteLocal) { await bridge('preset-delete', d.deleteLocal); local = null; return render(); }
   if (d.clearKey) { await bridge('secret-set', d.clearKey); keys = null; return render(); }

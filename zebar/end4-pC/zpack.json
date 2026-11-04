@@ -723,7 +723,8 @@
         "*.jpg",
         "lib/**",
         "assets/**",
-        "we-thumbs/**"
+        "we-thumbs/**",
+        "images/**"
       ],
       "caching": {
         "defaultDuration": 604800,

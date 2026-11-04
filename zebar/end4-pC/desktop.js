@@ -134,11 +134,17 @@ function renderWeek() {
 
 function renderGreeting() {
   const name = cfg.userName || out.host?.hostname || 'there';
+  const g = { text: '', sub: '', date: true, file: '', shape: '', ...cfg.desktop.greet };
   const now = new Date();
-  setHTML($('#greet'), `
-    <div class="av">${esc(name.charAt(0).toUpperCase())}</div>
-    <div><b>Hi, ${esc(name)}!</b><span>${greeting(now)}</span>
-    <small>Today • ${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })}</small></div>`);
+  const fill = t => esc(t.replaceAll('{name}', name));
+  const size = 70;
+  // Default shape keeps the CSS rounded square; the others are the image cards' Material shapes.
+  const av = g.file
+    ? `<img class="av" src="./images/${encodeURIComponent(g.file)}" draggable="false" alt="" style="object-fit:cover;${g.shape ? shapeStyle(g.shape, size) : ''}" />`
+    : `<div class="av"${g.shape ? ` style="border-radius:0;${shapeStyle(g.shape, size)}"` : ''}>${esc(name.charAt(0).toUpperCase())}</div>`;
+  setHTML($('#greet'), `${av}
+    <div><b>${fill(g.text || 'Hi, {name}!')}</b><span>${g.sub ? fill(g.sub) : greeting(now)}</span>
+    ${g.date ? `<small>Today • ${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })}</small>` : ''}</div>`);
 }
 
 let art = '', artKey = '';

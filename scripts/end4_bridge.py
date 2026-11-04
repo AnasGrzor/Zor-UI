@@ -1329,8 +1329,8 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 def cmd_pick_image(slot):
     """Asks for a picture and copies it into the pack's images folder (widgets can only show files
-    inside the pack). Prints {"file": name} for config desktop.images.<slot>.file."""
-    if not re.fullmatch(r"image[1-3]", slot):
+    inside the pack). Prints {"file": name} for config desktop.images.<slot>.file (greet: desktop.greet.file)."""
+    if not re.fullmatch(r"image[1-3]|greet", slot):
         return out({"error": "bad slot"})
     import tkinter as tk
     from tkinter import filedialog

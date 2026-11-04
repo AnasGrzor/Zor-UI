@@ -30,7 +30,17 @@ const DEFAULTS = {
   wallpaperEngine: { follow: true, path: '' },
   timer: { focus: 25, short: 5, long: 15, cycles: 4 },
   dock: { enabled: false, pinned: [] },
-  bar: { style: 'float', groups: 'filled', modules: null, utils: ['snip', 'pick', 'wall', 'mode'] },   // modules: lib/barlayout.js
+  bar: { style: 'float', groups: 'filled', modules: null, utils: ['snip', 'pick', 'wall', 'mode'], titleWidth: 34 },   // modules: lib/barlayout.js; titleWidth: % of the screen
+  font: { family: '', size: 1, weight: 0 },   // Settings > Appearance; size and weight (added to each text weight) only change the native bar and cards
+  // Dynamic Island (bar.js) and its panel (island-panel.js); Settings > Dynamic Island.
+  island: {
+    notifications: true, notifySeconds: 5, volume: true, mic: true, osdSeconds: 2,
+    agents: true, agentWorking: true, recording: true, timer: true,
+    media: true, art: true, progress: true, controls: true, trackSeconds: 3,
+    idle: 'auto', status: true, badges: true, textWidth: 170, wideWidth: 280,
+    click: 'panel', rightClick: 'sidebar-left', scroll: 'volume',
+    panel: { media: true, lyrics: true, recording: true, timer: true, clock: true, agents: true, notifications: true, notifCount: 3 },
+  },
   desktop: { widgets: ['clock', 'weather', 'week', 'greet', 'media'], clock: 'cookie', worldClocks: ['Europe/London', 'America/New_York', 'Asia/Tokyo'], text: '' },
 };
 
@@ -70,13 +80,45 @@ export function config() {
     .catch(() => ({}))
     .then(c => {
       const merged = { ...DEFAULTS, ...c };
-      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine', 'timer', 'desktop', 'dock', 'bar'])
+      for (const k of ['ai', 'translator', 'booru', 'football', 'visualizer', 'nightLight', 'wallpaperEngine', 'timer', 'desktop', 'dock', 'bar', 'island', 'font'])
         merged[k] = { ...DEFAULTS[k], ...(c[k] || {}) };
+      merged.island.panel = { ...DEFAULTS.island.panel, ...(c.island?.panel || {}) };
       document.documentElement.style.setProperty('--opaque', `${Math.round((1 - (merged.transparency || 0)) * 100)}%`);
+      if (merged.font.family) document.documentElement.style.setProperty('--font', `${JSON.stringify(merged.font.family)}, 'GSF Local', 'Google Sans Flex', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif`);
       return merged;
     });
   return cfgPromise;
 }
+
+// ------------------------------------------------------------------ shared with the native bar
+// With config "native": {"bar": true} the bar is native/end4, which can't read localStorage, so
+// these keys are mirrored to it over a WebSocket (hub.rs, same list), which pushes every change
+// back: the timer, recording, agents, and where a popup should open. (A WebSocket, because Zebar's
+// request caching doesn't pass fetch() to 127.0.0.1:6133 through.)
+const SHARED = ['end4-pC.timer', 'end4-pC.rec', 'end4-pC.timerDone', 'end4.agents', 'end4.openOn', 'end4.islandAt', 'end4-pC.rightTab', 'end4-pC.todo', 'end4-pC.notes',
+  'end4.closedAt.island-panel', 'end4.closedAt.overview', 'end4.closedAt.sidebar-left', 'end4.closedAt.sidebar-right', 'end4.closedAt.settings'];   // hub.rs KEYS, same list
+const lsSet = Storage.prototype.setItem, lsRemove = Storage.prototype.removeItem;
+/** Resolves once the shared keys are in localStorage (at once when the bar isn't native). */
+export const shared = config().then(c => Object.values(c.native || {}).some(Boolean) && new Promise(ready => {
+  let ws = null;
+  const connect = () => {
+    ws = new WebSocket('ws://127.0.0.1:6133/state');
+    ws.onmessage = e => {
+      const s = JSON.parse(e.data);
+      for (const k of SHARED) {
+        const v = s[k] ?? null;
+        if (localStorage.getItem(k) !== v) v === null ? lsRemove.call(localStorage, k) : lsSet.call(localStorage, k, v);
+      }
+      ready();
+    };
+    ws.onclose = () => { ready(); setTimeout(connect, 2000); };   // native app restarting
+  };
+  connect();
+  setTimeout(ready, 400);
+  const push = (k, v) => ws?.readyState === 1 && ws.send(JSON.stringify({ [k]: v }));
+  Storage.prototype.setItem = function (k, v) { lsSet.call(this, k, v); if (this === localStorage && SHARED.includes(k)) push(k, String(v)); };
+  Storage.prototype.removeItem = function (k) { lsRemove.call(this, k); if (this === localStorage && SHARED.includes(k)) push(k, null); };
+}));
 
 /** Long-lived widgets (bar, desktop, visualizer) reload when config.json changes. */
 export function reloadOnConfigChange() {
@@ -218,7 +260,11 @@ export function md(src) {
   return out.join('').replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[i]);
 }
 
-export const openWidget = name => zebar.startWidgetPreset(name, 'default').catch(e => console.warn(e));
+/** Popups native/end4 draws when config "native" has them; it opens them itself (`end4.exe --open`, via the bridge). */
+const NATIVE_POPUPS = ['island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings'];
+const nativeOpen = async name => NATIVE_POPUPS.includes(name) && (await config()).native?.[name] && (await bridge('native-open', name), true);
+
+export const openWidget = async name => (await nativeOpen(name)) || zebar.startWidgetPreset(name, 'default').catch(e => console.warn(e));
 
 /**
  * Bar side of openOnTargetMonitor: open (or close) a popup on this bar's monitor. Starts a fresh
@@ -226,6 +272,7 @@ export const openWidget = name => zebar.startWidgetPreset(name, 'default').catch
  */
 let zpack;
 export async function openHere(name, monitor) {
+  if (await nativeOpen(name)) return;
   if (monitor) localStorage.setItem('end4.openOn', JSON.stringify({ monitor: monitor.id, at: Date.now() }));
   zpack ??= await (await fetch('/zpack.json')).json();
   const { name: _, ...placement } = zpack.widgets.find(w => w.name === name).presets[0];
@@ -258,6 +305,7 @@ export async function openOnTargetMonitor() {
   document.documentElement.style.visibility = 'hidden';
   const win = zebar.currentWidget();
   const leave = async () => { closeWindow(); await new Promise(() => {}); };   // stops this copy's module
+  await Promise.race([shared, new Promise(r => setTimeout(r, 400))]);   // the native bar's openOn hint
   // The press or click that just closed this popup (blur, focus change) must not reopen it.
   if (Date.now() - Number(localStorage.getItem('end4.closedAt.' + win.name) || 0) < 600) await leave();
   const provider = zebar.createProvider({ type: 'glazewm' });
@@ -290,7 +338,8 @@ export async function openOnTargetMonitor() {
     if (e.data === 'ping') channel.postMessage('open');
     if (e.data === 'close') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
   };
-  if (Date.now() - Number(localStorage.getItem('end4.barAlive') || 0) > 6000)
+  // shortcut: with a native bar, Zebar started by a shortcut doesn't reopen the visualizer / non-native cards
+  if (!(await config()).native?.bar && Date.now() - Number(localStorage.getItem('end4.barAlive') || 0) > 6000)
     for (const w of ['bar', 'desktop', 'visualizer']) openWidget(w);   // no duplicates if already open
   document.documentElement.style.visibility = '';
 }

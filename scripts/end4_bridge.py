@@ -206,7 +206,8 @@ def sync_zebar_startup(cfg):
     path = PACK.parent / "settings.json"
     s = load_json(path, {})
     keep = [c for c in s.get("startupConfigs", []) if c.get("pack") != "end4-pC"]
-    mine = [{"pack": "end4-pC", "widget": "bar", "preset": "default"}]
+    native = cfg.get("native", {})  # parts native/end4 draws instead of Zebar
+    mine = [] if native.get("bar") else [{"pack": "end4-pC", "widget": "bar", "preset": "default"}]
     if cfg.get("desktopWidgets", True):
         mine.append({"pack": "end4-pC", "widget": "desktop", "preset": "default"})
     if cfg.get("visualizer", {}).get("desktop", True):
@@ -1356,6 +1357,15 @@ def cmd_focus_widget(widget, x="0", y="0"):
     out({"ok": u.GetForegroundWindow() == h})
 
 
+def cmd_native_open(name):
+    """Opens a popup in native/end4 (`end4.exe --open <name>`): it toggles the popup, and starts Zebar's copy if end4 isn't running."""
+    exe = ROOT / "end4.exe"
+    if not (re.fullmatch(r"[a-z-]+", name) and exe.exists()):
+        return out({"ok": False})
+    subprocess.Popen([str(exe), "--open", name], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    out({"ok": True})
+
+
 # ===================================================================== volume mixer (end4's VolumeDialog)
 def _mixer_groups():
     """Audio sessions grouped by app (Discord, browsers... run several), without end4's own Python."""
@@ -1698,7 +1708,7 @@ COMMANDS = {
     "record": cmd_record,
     "app-icons": cmd_app_icons, "launch": cmd_launch, "pick-image": cmd_pick_image,
     "screen-translate": cmd_screen_translate,
-    "focus-widget": cmd_focus_widget,
+    "focus-widget": cmd_focus_widget, "native-open": cmd_native_open,
     "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,
     "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat,

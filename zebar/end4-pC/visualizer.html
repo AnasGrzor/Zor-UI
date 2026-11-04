@@ -19,7 +19,7 @@
 
     const cfg = await config();
     const win = zebar.currentWidget().window.tauri;   // zpack.json already makes it bottom_most
-    if (!cfg.visualizer.desktop) win.close();
+    if (!cfg.visualizer.desktop || cfg.native?.visualizer) { win.close(); await new Promise(() => {}); }
     await watchTheme();
     reloadOnConfigChange();
     win.setIgnoreCursorEvents(true).catch(() => bridge('click-through', 'visualizer'));   // clicks go to the desktop

@@ -6,6 +6,7 @@ import { BAR_MODULES, SIDES, barLayout, moveModule, placeModule } from './lib/ba
 // One window at a time. Shortcuts and the sidebar start a new copy (Zebar ignores starting an open
 // preset, so an open window behind others couldn't be raised); a new copy that finds one open asks
 // it to come to the front and leaves.
+if ((await config()).native?.settings) { closeWindow(); await new Promise(() => {}); }   // drawn by native/end4 instead
 const me = zebar.currentWidget();
 const channel = new BroadcastChannel('end4-window-' + me.name);
 document.documentElement.style.visibility = 'hidden';
@@ -52,7 +53,7 @@ const close = popupBehaviour();
 close.togglePin();   // a real window: stays open when the wallpaper picker takes focus; Esc or Close shuts it
 
 const PAGES = [
-  ['quick', 'tune', 'Quick'], ['keys', 'keyboard', 'Keybinds'], ['wallpapers', 'animated_images', 'Wallpapers'], ['presets', 'palette', 'Presets'], ['bar', 'toolbar', 'Bar & desktop'],
+  ['quick', 'tune', 'Quick'], ['keys', 'keyboard', 'Keybinds'], ['wallpapers', 'animated_images', 'Wallpapers'], ['presets', 'palette', 'Presets'], ['bar', 'toolbar', 'Bar & desktop'], ['island', 'pill', 'Dynamic Island'],
   ['services', 'hub', 'Services'], ['about', 'info', 'About'],
 ];
 const SCHEMES = [
@@ -112,8 +113,66 @@ const slider = (path, label, min, max, step, fmt, ic = '') => `<div class="row">
   <input type="range" min="${min}" max="${max}" step="${step}" value="${get(path)}" data-range="${path}" style="width:220px;accent-color:var(--primary)" />
   <span class="muted" style="width:56px;text-align:right" data-range-val="${path}">${fmt(get(path))}</span></div>`;
 
+const pick = (path, opts, label, sub = '', ic = '') => `<div class="row">${ic ? icon(ic) : ''}<div class="lbl">${label}${sub ? `<small>${sub}</small>` : ''}</div>
+  <select class="field" data-select="${path}" style="max-width:190px;height:40px">${opts.map(([v, l]) =>
+    `<option value="${v}"${get(path) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`;
+const weightText = v => (+v === 0 ? 'Normal' : v > 0 ? `+${v}` : `${v}`);
+const FONTS = ['Google Sans Flex', 'Segoe UI Variable Text', 'Segoe UI', 'Inter', 'Roboto', 'Rubik', 'Nunito', 'Poppins',
+  'JetBrains Mono', 'Cascadia Code', 'Consolas', 'Arial', 'Verdana', 'Georgia'];
+const ISLAND_ACTIONS = [['panel', 'Expand the island'], ['sidebar-left', 'Left sidebar'], ['sidebar-right', 'Right sidebar'],
+  ['overview', 'Overview'], ['play', 'Play / pause'], ['none', 'Nothing']];
+
 // ---------------------------------------------------------------- pages
 const pages = {
+  island() {
+    return `<h2>${icon('pill')}What the island shows</h2>
+    <div class="card">
+      <div class="muted" style="font-size:12px">The island picks the most important of these. Move it or hide it in Bar & desktop > Bar layout. Anything turned off here shows on the bar as usual.</div>
+      ${sw('island.notifications', 'New notifications', 'The app and title, for a few seconds', 'notifications')}
+      ${num('island.notifySeconds', 'Notification seconds', 1, 30, 'timer')}
+      ${sw('island.volume', 'Volume changes', 'The new level, with a bar', 'volume_up')}
+      ${sw('island.mic', 'Microphone mute', 'When the mic is muted or turned back on', 'mic')}
+      ${num('island.osdSeconds', 'Volume and mic seconds', 1, 10, 'timer')}
+      ${sw('island.agents', 'AI agents that need you', 'A permission prompt or a question from Claude, Codex or any agent reporting to end4', 'smart_toy')}
+      ${sw('island.agentWorking', 'AI agents at work', 'The agent and its 5-hour usage, when nothing else is showing', 'pending')}
+      ${sw('island.recording', 'Screen recording', 'A red pill with the recording time', 'screen_record')}
+      ${sw('island.timer', 'Timer and stopwatch', 'Pomodoro countdown or stopwatch', 'timer')}
+      ${sw('island.media', 'Now playing', 'The song, with its cover and progress', 'music_note')}
+    </div>
+    <h2>${icon('music_note')}Now playing</h2>
+    <div class="card">
+      ${sw('island.art', 'Album art', 'Otherwise a music note', 'image')}
+      ${sw('island.progress', 'Progress ring', 'Around the cover', 'progress_activity')}
+      ${sw('island.controls', 'Controls on hover', 'Previous, play / pause and next, with the artist', 'play_pause')}
+      ${num('island.trackSeconds', 'Expand on a new song (seconds)', 0, 15, 'expand')}
+    </div>
+    <h2>${icon('bedtime')}When nothing's going on</h2>
+    <div class="card">
+      ${seg('island.idle', [['auto', 'Auto'], ['time', 'Time'], ['date', 'Date'], ['weather', 'Weather'], ['greeting', 'Greeting'], ['none', 'Nothing']], 'Show', 'pill')}
+      <div class="muted" style="font-size:12px">Auto shows whatever the bar doesn't: the time, else the weather, else a greeting. Nothing hides the island until something happens.</div>
+      ${sw('island.status', 'Status icons', 'Muted speaker or mic, no network', 'wifi_off')}
+    </div>
+    <h2>${icon('touch_app')}Look and actions</h2>
+    <div class="card">
+      ${sw('island.badges', 'Badges for the rest', 'Small icons for what else is going on; click one to show it', 'more_horiz')}
+      ${slider('island.textWidth', 'Text width', 80, 400, 10, v => `${v}px`, 'width')}
+      ${slider('island.wideWidth', 'Expanded text width', 160, 600, 10, v => `${v}px`, 'width_wide')}
+      ${pick('island.click', ISLAND_ACTIONS, 'Click', '', 'left_click')}
+      ${pick('island.rightClick', ISLAND_ACTIONS, 'Right-click', '', 'right_click')}
+      ${pick('island.scroll', [['volume', 'Volume'], ['track', 'Previous / next song'], ['none', 'Nothing']], 'Scroll', '', 'swipe_vertical')}
+    </div>
+    <h2>${icon('expand_content')}Expanded island</h2>
+    <div class="card">
+      ${sw('island.panel.media', 'Now playing', 'Cover, progress and controls', 'music_note')}
+      ${sw('island.panel.lyrics', 'Lyrics', 'Under the song, when lyrics are on (Quick)', 'lyrics')}
+      ${sw('island.panel.recording', 'Screen recording', 'Time and a stop button', 'screen_record')}
+      ${sw('island.panel.timer', 'Timer and stopwatch', 'Pause, resume and reset', 'timer')}
+      ${sw('island.panel.clock', 'Clock and weather', 'When nothing else is going on', 'schedule')}
+      ${sw('island.panel.agents', 'AI agents', 'What each needs, and its usage limits', 'smart_toy')}
+      ${sw('island.panel.notifications', 'Notifications', 'The latest ones, with Clear all', 'notifications')}
+      ${num('island.panel.notifCount', 'Notifications shown', 1, 10, 'format_list_numbered')}
+    </div>`;
+  },
   quick() {
     const mode = theme.mode || 'dark', scheme = theme.scheme || 'auto';
     return `<h2>${icon('wallpaper')}Wallpaper & colors</h2>
@@ -140,6 +199,11 @@ const pages = {
     </div>
     <div class="card">
       ${slider('transparency', 'Bar & panel transparency', 0, 0.6, 0.02, v => `${Math.round(v * 100)}%`, 'opacity')}
+      <div class="row">${icon('font_download')}<div class="lbl">Font<small>Any installed font, by its name. Empty: Google Sans Flex</small></div>
+        <input class="field" style="max-width:300px" list="font-list" placeholder="Google Sans Flex" value="${esc(get('font.family') || '')}" data-text="font.family" />
+        <datalist id="font-list">${FONTS.map(f => `<option value="${esc(f)}">`).join('')}</datalist></div>
+      ${slider('font.size', 'Bar & desktop text size', 0.8, 1.3, 0.05, v => `${Math.round(v * 100)}%`, 'format_size')}
+      ${slider('font.weight', 'Bar & desktop font thickness', -300, 300, 50, weightText, 'format_bold')}
       ${slider('nightLight.kelvin', 'Night light warmth', 2500, 6000, 100, v => `${v}K`, 'nightlight')}
       ${sw('syncLockScreen', 'Use the wallpaper on the lock screen', 'Windows may block this on managed PCs', 'lock')}
     </div>`;
@@ -210,6 +274,7 @@ const pages = {
     <div class="card">
       ${seg('bar.style', [['float', 'Float'], ['flat', 'Flat'], ['islands', 'Islands']], 'Bar style', 'style')}
       ${seg('bar.groups', [['filled', 'Filled'], ['outlined', 'Outlined'], ['none', 'None']], 'Group backgrounds', 'rounded_corner')}
+      ${slider('bar.titleWidth', 'Window title width', 10, 40, 1, v => `${v}%`, 'width')}
       <div class="muted" style="font-size:12px;margin:6px 0 2px">Drag a part up or down to change its order (top shows first), or into another column.
         Or Tab to it and use the arrow keys.</div>
       <div class="bl-cols">${[['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['hidden', 'Hidden']].map(([sd, title]) =>
@@ -461,6 +526,7 @@ document.addEventListener('change', async e => {
   if (d.text) {
     const v = d.list ? t.value.split(',').map(s => s.trim()).filter(Boolean) : t.value;
     await set(d.text, v); toast('Saved');
+    if (d.text === 'font.family') document.documentElement.style.setProperty('--font', `${JSON.stringify(v || 'GSF Local')}, 'GSF Local', 'Segoe UI', sans-serif`);
   }
   if (d.num) {
     const v = Math.max(+d.min, Math.min(+d.max, parseInt(t.value, 10) || +d.min));
@@ -483,7 +549,8 @@ document.addEventListener('input', e => {
   if (d.range) {
     const span = document.querySelector(`[data-range-val="${d.range}"]`);
     const v = +e.target.value;
-    if (span) span.textContent = d.range === 'transparency' ? `${Math.round(v * 100)}%` : d.range === 'nightLight.kelvin' ? `${v}K` : v.toFixed(1);
+    if (span) span.textContent = d.range === 'transparency' || d.range === 'font.size' ? `${Math.round(v * 100)}%` : d.range === 'nightLight.kelvin' ? `${v}K`
+      : d.range === 'bar.titleWidth' ? `${v}%` : d.range === 'font.weight' ? weightText(v) : v.toFixed(1);
     if (d.range === 'transparency') document.documentElement.style.setProperty('--opaque', `${Math.round((1 - v) * 100)}%`);
   }
 });

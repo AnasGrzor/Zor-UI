@@ -1,5 +1,6 @@
 import { zebar, $, $$, esc, icon, setHTML, config, watchTheme, popupBehaviour, prettyApp, hashSlot, openOnTargetMonitor, run } from './lib/core.js';
 
+if ((await config()).native?.['overview']) { zebar.currentWidget().window.tauri.close().catch(() => {}); await new Promise(() => {}); }   // drawn by native/end4 instead
 await openOnTargetMonitor();
 const cfg = await config();
 await watchTheme();

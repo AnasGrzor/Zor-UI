@@ -15,7 +15,7 @@ It reads the same files as the Zebar pack (`~/.glzr/zebar/end4-pC/config.json`, 
 |---|---|---|
 | Desktop cards | `"desktop": true` | clock (all 4 styles), weather, week, greeting, calendar, world clock, resources, text, image 1-3 |
 | Bar | `"bar": true` | every module (layout, styles and groups from Settings > Bar), Dynamic Island, hover popups, tray |
-| Gojo | `"gojo": true` | native only (`gojo.rs`): a small Gojo on the bar. He walks, sits on the bar's edge and sleeps after 3 idle minutes. Hover lifts his blindfold, click makes him talk, double-click fires Hollow Purple, and right-click turns on Infinity, which keeps the pointer 60 px away for 10 s. Drag him to move him. He hides behind full-screen apps. |
+| Gojo | `"gojo": true` | native only (`gojo.rs`): a small Gojo on the bar. He walks, sits on the bar's edge and sleeps after 3 idle minutes. Hover lifts his blindfold, click makes him talk, double-click fires Hollow Purple, and right-click turns on Infinity, which keeps the pointer 60 px away for 10 s. Drag him to move him. He hides behind full-screen apps. He also comments on new tracks, the volume, the battery, the network, the weather, notifications and a busy CPU. |
 | Island panel | `"island-panel": true` | shared plumbing only (a titled placeholder) |
 | Overview | `"overview": true` | shared plumbing only |
 | Left / right sidebar | `"sidebar-left"`, `"sidebar-right"` | shared plumbing only |

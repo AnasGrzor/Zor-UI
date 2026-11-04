@@ -3,10 +3,13 @@
 //! Hover: he lifts the blindfold. Click: he talks. Double-click: Hollow Purple. Right-click: Infinity
 //! (for 10 s the pointer can't reach him). Drag him anywhere; let go and he falls back onto the bar,
 //! or teleports back if you dropped him below it.
+//! He also watches the desktop and comments on what happens: a new track, the volume, the battery, the
+//! network, the weather, notifications, a busy CPU.
 //! Turned on by config.json "native": {"gojo": true}. Drawn from shapes, no image files.
 
 use crate::{
     app::{App, Ctx},
+    bar::pretty_app,
     desk::greeting,
     gfx::{alpha, polygon, txt, Align, Canvas, Color, Gfx, R},
     util,
@@ -47,6 +50,88 @@ const CLICK: &[&str] = &[
 ];
 const PEEK: &[&str] = &["Oh? You wanted to see my eyes?", "Six Eyes: watching your tabs.", "Don't stare too long. You'll fall for me."];
 const CHAT: &[&str] = &["Hmm~ I'm bored.", "Got any sweets?", "This bar's a nice place to hang out.", "Need help? Just click me."];
+
+/// One look at the desktop around him: the bar's data sources, reduced to what he comments on.
+#[derive(Clone, Default, PartialEq)]
+struct Around {
+    /// The current media session's title and artist.
+    track: String,
+    playing: bool,
+    /// None until the audio thread has answered once.
+    volume: Option<u8>,
+    muted: Option<bool>,
+    battery: Option<u8>,
+    charging: Option<bool>,
+    online: bool,
+    /// Weather status ("clear_day", "light_rain_night", ...), "" while unknown.
+    weather: &'static str,
+    /// The last notification's app and text.
+    note: String,
+    busy: bool,
+}
+
+impl Around {
+    fn of(cx: &Ctx) -> Around {
+        let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
+        Around {
+            track: m.map(|m| format!("{}\t{}", m.title, m.artist)).unwrap_or_default(),
+            playing: m.is_some_and(|m| m.playing),
+            volume: cx.audio.map(|a| a.volume.clamp(0.0, 100.0).round() as u8),
+            muted: cx.audio.map(|a| a.muted),
+            battery: cx.battery.map(|b| b.percent.clamp(0.0, 100.0).round() as u8),
+            charging: cx.battery.map(|b| b.charging),
+            online: cx.net.is_some(),
+            weather: cx.weather.as_ref().map_or("", |w| w.status),
+            note: cx.notif.as_ref().filter(|n| !n.text.is_empty()).map(|n| format!("{}\t{}", n.app, n.text)).unwrap_or_default(),
+            busy: cx.cpu >= 0.85,
+        }
+    }
+}
+
+/// What he'd say about a change since `old`; None when nothing worth a line happened.
+fn notice(old: &Around, new: &Around) -> Option<String> {
+    let low = |a: &Around| a.battery.is_some_and(|p| p <= 15) && a.charging != Some(true);
+    if low(new) && !low(old) { return Some("Battery's low. Find a plug, would you?".into()); }
+    if !new.note.is_empty() && new.note != old.note {
+        return Some(format!("Word from {}.", pretty_app(new.note.split('\t').next().unwrap_or(""))));
+    }
+    if !new.track.is_empty() && new.track != old.track {
+        return Some(format!("{}, huh? Good taste.", cut(new.track.split('\t').next().unwrap_or(""), 28)));
+    }
+    if new.playing != old.playing && !new.track.is_empty() {
+        return Some(if new.playing { "Music's on. Turn it up~".into() } else { "Aw, the music stopped.".to_string() });
+    }
+    if let (Some(a), Some(b)) = (old.muted, new.muted) {
+        if a != b { return Some(if b { "Muted? I can't hear a thing.".into() } else { "Sound's back.".to_string() }); }
+    }
+    if let (Some(a), Some(b)) = (old.volume, new.volume) {
+        if !new.muted.unwrap_or(false) && (a as i16 - b as i16).abs() >= 20 {
+            return Some(if b > a { "That's loud. I approve.".into() } else { "Too quiet in here.".to_string() });
+        }
+    }
+    if new.online != old.online {
+        return Some(if new.online { "We're back online.".into() } else { "The internet's gone. Not my doing.".to_string() });
+    }
+    if let (Some(a), Some(b)) = (old.charging, new.charging) {
+        if a != b { return Some(if b { "Charging. Good.".into() } else { "On battery? Better be quick.".to_string() }); }
+    }
+    if new.weather != old.weather {
+        let line = match new.weather {
+            s if s.starts_with("thunder") => "Thunder outside? Even I'd stay in.",
+            s if s.starts_with("snow") => "It's snowing. Cute.",
+            s if s.contains("rain") => "It's raining out there. Stay in.",
+            _ => "",
+        };
+        if !line.is_empty() { return Some(line.into()); }
+    }
+    if new.busy && !old.busy { return Some("Whatever's running is working hard.".into()); }
+    None
+}
+
+/// `s` shortened to `n` characters, so a long track title fits in a bubble line.
+fn cut(s: &str, n: usize) -> String {
+    match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() }
+}
 
 /// Opens or closes Gojo when config "native" changes.
 pub fn sync(app: &mut App) {
@@ -98,6 +183,12 @@ pub struct Gojo {
     last_click: f32,
     was_down: bool,
     chat_at: f32,
+    /// The desktop as he last saw it, and whether he has seen enough to compare against.
+    around: Around,
+    primed: bool,
+    /// No ambient remark before this time, and the newest one waiting for its turn to speak.
+    quiet: f32,
+    queued: Option<String>,
     hidden: bool,
     check_at: f32,
     mon: RECT,
@@ -111,7 +202,8 @@ impl Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
-            chat_at: 200.0, hidden: false, check_at: 0.0, mon: RECT::default(), scale: 1.0,
+            chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0,
+            mon: RECT::default(), scale: 1.0,
         };
         g.say(&format!("Yo~ {}!", greeting(util::now().wHour)), 4.0);
         g
@@ -127,6 +219,23 @@ impl Gojo {
     fn say(&mut self, s: &str, secs: f32) { self.bubble = Some((s.to_string(), self.t + secs)); }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
     fn line(&self) -> f32 { self.mon.top as f32 + (BAR * self.scale).round() }
+
+    /// Looks at what's going on around him and comments on a change: at most one line every ~20-35 s, and
+    /// never over one he's already saying (the newest change waits for its turn).
+    fn react(&mut self, cx: &Ctx) {
+        let now = Around::of(cx);
+        if !self.primed {
+            // the first look, once the data sources have answered at least once, only records the state
+            if cx.net.is_some() || self.t > 15.0 { self.primed = true; self.around = now; }
+            return;
+        }
+        if let Some(l) = notice(&self.around, &now) { self.queued = Some(l); }
+        self.around = now;
+        if self.t < self.quiet || self.talking() || self.mode == Mode::Sleep { return; }
+        let Some(line) = self.queued.take() else { return };
+        self.quiet = self.t + 20.0 + self.rand() * 15.0;
+        self.say(&line, 4.0);
+    }
 
     /// One simulation step: pointer, buttons, behaviour, then moves the window to his feet.
     fn step(&mut self, s: f32) {
@@ -193,7 +302,7 @@ impl Gojo {
                 if self.y >= line { self.y = line; self.mode = Mode::Stand; self.wait = 2.0; self.hop = Some(self.t); self.say("Perfect landing.", 2.0); }
             }
             Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say("Hm? Oh, you're back.", 3.0); },
-            _ if idle_s > 180.0 => { self.mode = Mode::Sleep; self.bubble = None; }
+            _ if idle_s > 180.0 => { self.mode = Mode::Sleep; self.bubble = None; self.queued = None; }
             Mode::Walk => {
                 let d = self.to - self.x;
                 self.dir = d.signum();
@@ -417,6 +526,7 @@ impl View for Gojo {
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.step(c.scale);
+        self.react(cx);
         if self.hidden { return; }
         let t = self.t;
         let hop = self.hop.map_or(0.0, |h0| { let p = (t - h0) / 0.45; if p >= 1.0 { -1.0 } else { 4.0 * p * (1.0 - p) * 7.0 } });
@@ -545,6 +655,54 @@ mod tests {
         let mut g = Gojo::new();
         for _ in 0..1000 { let r = g.rand(); assert!((0.0..1.0).contains(&r)); }
         assert!(CLICK.contains(&g.pick(CLICK).as_str()));
+    }
+
+    /// A quiet desktop: music on, plugged in, online, clear sky.
+    fn calm() -> Around {
+        Around {
+            track: "Blue in Green\tMiles Davis".into(), playing: true, volume: Some(40), muted: Some(false),
+            battery: Some(80), charging: Some(true), online: true, weather: "clear_day", note: String::new(), busy: false,
+        }
+    }
+    #[test]
+    fn notice_fires_once_per_change() {
+        let a = calm();
+        assert_eq!(notice(&a, &a), None);
+        let mut b = a.clone();
+        b.track = "Kikufuku\tSatoru".into();
+        assert_eq!(notice(&a, &b).as_deref(), Some("Kikufuku, huh? Good taste."));
+        assert_eq!(notice(&b, &b), None);
+        let mut c = b.clone();
+        c.battery = Some(10);
+        c.charging = Some(false);
+        assert_eq!(notice(&b, &c).as_deref(), Some("Battery's low. Find a plug, would you?"));
+        assert_eq!(notice(&c, &b).as_deref(), Some("Charging. Good."));
+        assert_eq!(notice(&c, &c), None);
+    }
+    #[test]
+    fn notices_audio_media_and_weather() {
+        let a = calm();
+        let mut b = a.clone();
+        b.volume = Some(75);
+        assert_eq!(notice(&a, &b).as_deref(), Some("That's loud. I approve."));
+        let mut c = a.clone();
+        c.muted = Some(true);
+        assert_eq!(notice(&a, &c).as_deref(), Some("Muted? I can't hear a thing."));
+        let mut d = a.clone();
+        d.note = "spotify.exe\tSomebody".into();
+        assert_eq!(notice(&a, &d).as_deref(), Some("Word from Spotify."));
+        let mut e = a.clone();
+        e.playing = false;
+        assert_eq!(notice(&a, &e).as_deref(), Some("Aw, the music stopped."));
+        let mut f = a.clone();
+        f.online = false;
+        assert_eq!(notice(&a, &f).as_deref(), Some("The internet's gone. Not my doing."));
+        let mut g = a.clone();
+        g.weather = "light_rain_night";
+        assert_eq!(notice(&a, &g).as_deref(), Some("It's raining out there. Stay in."));
+        assert_eq!(notice(&a, &calm()), None, "an unchanged look says nothing");
+        assert_eq!(cut("Hollow Purple", 6), "Hollow…");
+        assert_eq!(cut("Nah", 6), "Nah");
     }
 }
 

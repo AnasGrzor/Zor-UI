@@ -63,6 +63,18 @@
     .notif .tx b { display: block; font-weight: 500; }
     .notif .tx span { display: block; color: var(--on-surface-variant); }
     .notif time { font-size: 11px; color: var(--on-surface-variant); flex: none; }
+    .agent { display: flex; flex-direction: column; gap: 6px; }
+    .agent .ah { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .agent .ah small { color: var(--on-surface-variant); font-size: 11.5px; min-width: 0; }
+    .agent .st { margin-left: auto; padding: 2px 8px; border-radius: 99px; font-size: 11px; background: var(--surface-container-high, var(--layer2)); }
+    .agent .st.waiting { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+    .agent .st.working { background: var(--secondary-container); color: var(--on-secondary-container); }
+    .agent .ask { font-size: 12.5px; color: var(--tertiary); }
+    .agent .use { display: grid; grid-template-columns: 56px 1fr 38px auto; align-items: center; gap: 8px; font-size: 12px; }
+    .agent .use .bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--primary) 18%, transparent); overflow: hidden; }
+    .agent .use .bar span { display: block; height: 100%; border-radius: 3px; background: var(--primary); }
+    .agent .use b { font-weight: 500; text-align: right; }
+    .agent .use small { color: var(--on-surface-variant); font-size: 11px; }
     .muted-line { font-size: 12.5px; color: var(--on-surface-variant); }
   </style>
 </head>

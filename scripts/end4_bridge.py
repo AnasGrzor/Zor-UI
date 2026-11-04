@@ -29,6 +29,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py video-frame <video> <out.png>
     end4_bridge.py we-status / we-list / we-apply <id|path> [monitor] / we-close
     end4_bridge.py we-sync                 (streams; re-themes when Wallpaper Engine changes wallpaper)
+    end4_bridge.py agents / agents-watch   AI agents' state and usage, from end4_agent.py (watch streams)
 
 Every command prints exactly one JSON line unless it says it streams.
 Parts of the logic follow end4-pC's services (GPL-3.0, (c) end-4 / pctrade).
@@ -555,6 +556,71 @@ def cmd_notifications_watch():
                     seen.add(n["id"])
                     out({"new": n})
         time.sleep(2)
+
+
+# ===================================================================== AI agents (end4_agent.py writes, the island reads)
+AGENTS_DIR = ROOT / "agents"
+AGENT_LABELS = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini", "opencode": "OpenCode", "cursor": "Cursor"}
+
+
+def agents_summary():
+    """One entry per agent: the session that needs you (if any), what's running, and usage windows."""
+    now, res = time.time(), []
+    if not AGENTS_DIR.is_dir():
+        return res
+    for d in sorted(p for p in AGENTS_DIR.iterdir() if p.is_dir()):
+        sessions = []
+        for f in d.glob("*.json"):
+            if f.name == "usage.json":
+                continue
+            s = load_json(f, {})
+            age = now - float(s.get("at") or 0)
+            if age > 12 * 3600:   # the agent quit without a SessionEnd
+                f.unlink(missing_ok=True)
+                continue
+            if s.get("state") == "working" and age > 15 * 60:
+                s["state"] = "done"   # crashed or killed mid-turn: don't show it working forever
+            sessions.append(s)
+        u = load_json(d / "usage.json", {})
+        windows = {k: v for k, v in (u.get("windows") or {}).items() if not v.get("resets_at") or float(v["resets_at"]) > now}
+        if not sessions and not windows:
+            continue
+        waiting = sorted((s for s in sessions if s.get("state") == "waiting"), key=lambda s: -float(s.get("at") or 0))
+        working = [s for s in sessions if s.get("state") == "working"]
+        res.append({"id": d.name, "label": AGENT_LABELS.get(d.name, d.name.title()),
+                    "state": "waiting" if waiting else "working" if working else "idle",
+                    "message": waiting[0].get("message", "") if waiting else "",
+                    "cwd": (waiting or working or [{}])[0].get("cwd", ""),
+                    "waiting": len(waiting), "working": len(working),
+                    "usage": windows, "model": u.get("model", ""), "usageAt": u.get("at")})
+    return res
+
+
+def cmd_agents():
+    out({"agents": agents_summary()})
+
+
+def cmd_agents_watch():
+    """Streams {"agents": [...]} whenever an agent reports (and every 30 s, for resets and stale
+    sessions). One copy runs for all bars; the bar shares it through localStorage."""
+    if not _first_instance("agents-watch"):
+        return out({"skip": "already running"})
+    ppid = _owner_pid()
+    _exit_with_owner(ppid)
+    stamp, last, sent = None, None, 0.0
+    while _parent_alive(ppid):
+        try:
+            now = tuple(sorted((e.path, e.stat().st_mtime_ns) for d in os.scandir(AGENTS_DIR) if d.is_dir()
+                               for e in os.scandir(d.path) if e.name.endswith(".json")))
+        except OSError:
+            now = ()
+        if now != stamp or time.time() - sent > 30:
+            stamp, sent = now, time.time()
+            cur = agents_summary()
+            if cur != last:
+                last = cur
+                out({"agents": cur})
+        time.sleep(0.5)
 
 
 def cmd_notifications_dismiss(*ids):
@@ -1639,6 +1705,7 @@ COMMANDS = {
     "secret-set": cmd_secret_set, "secret-status": cmd_secret_status,
     "notifications": cmd_notifications, "notifications-dismiss": cmd_notifications_dismiss,
     "notifications-watch": cmd_notifications_watch,
+    "agents": cmd_agents, "agents-watch": cmd_agents_watch,
     "nightlight": cmd_nightlight, "config-set": cmd_config_set,
     "presets-online": cmd_presets_online, "preset-apply-online": cmd_preset_apply_online,
     "presets-local": cmd_presets_local, "preset-save": cmd_preset_save,

@@ -232,6 +232,12 @@ if ($we -and $we.installed) {
   Info '  live wallpapers use it, and end4 re-themes when you change wallpaper there (Settings > Wallpapers).'
 }
 
+# ------------------------------------------------------------------ 6c. AI agents -> Dynamic Island
+# Hooks (and Claude Code's status line, for usage limits) report to end4_agent.py. Other agents can
+# pipe the same JSON into it; see the top of scripts\end4_agent.py.
+Info 'AI agents (Claude Code, Codex): adding end4 hooks'
+Invoke-Native { & $venvPy -X utf8 (Join-Path $Scripts 'end4_agent.py') --install 2>&1 | ForEach-Object { Info "  $_" } }
+
 # ------------------------------------------------------------------ 7. taskbar
 if ($HideTaskbar) {
   Step 'Turning on taskbar auto-hide'

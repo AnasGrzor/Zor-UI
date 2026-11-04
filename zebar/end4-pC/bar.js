@@ -215,11 +215,17 @@ function renderNet() {
 // else the time (or weather, when the clock module is on the bar) and status icons. Hovering media
 // shows its controls, and so does a track change, for 3 s.
 let diNotif = null, diNotifTimer, diFocus = '', diHover = false, diTrack = '', diTrackUntil = 0, diArt = '';
-const DI_BADGE = { recording: 'screen_record', timer: 'timer', media: 'music_note' };
+const DI_BADGE = { recording: 'screen_record', timer: 'timer', media: 'music_note', agent: 'smart_toy' };
+// AI agents (scripts/end4_agent.py -> bridge agents-watch). One bar runs the watcher and shares the
+// list through localStorage, which the other bars and the island panel read.
+let agents = JSON.parse(localStorage.getItem('end4.agents') || '[]');
 function diProviders() {
   const s = out.media?.currentSession;
-  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['recording', !!localStorage.getItem('end4-pC.rec')],
-    ['timer', !!timerChip().html], ['media', !!s?.title]].filter(p => p[1]);
+  const asks = agents.some(a => a.state === 'waiting');
+  // An agent waiting for you comes before everything but a new notification; one at work only
+  // takes the island when nothing else does.
+  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['agent', asks], ['recording', !!localStorage.getItem('end4-pC.rec')],
+    ['timer', !!timerChip().html], ['media', !!s?.title], ['agent', !asks && agents.some(a => a.state === 'working')]].filter(p => p[1]);
 }
 // Sets the HTML and springs the width from the old size to the new one.
 function morph(el, html) {
@@ -252,6 +258,14 @@ function renderIsland() {
   if (state === 'notification') {
     wide = true;
     html = `${icon('notifications', { fill: true, cls: 'big' })}<span class="di-text ellipsis"><b>${esc(diNotif.app)}</b> · ${esc(diNotif.title || diNotif.body)}</span>`;
+  } else if (state === 'agent') {
+    const w = agents.filter(a => a.state === 'waiting'), a = w[0] || agents.find(x => x.state === 'working');
+    const u = a.usage?.five_hour || Object.values(a.usage || {})[0];
+    const more = w.reduce((n, x) => n + x.waiting, 0) - 1;   // other sessions waiting too
+    wide = !!w.length;
+    html = w.length
+      ? `<span class="di-dot"></span>${icon('smart_toy', { fill: true, cls: 'big' })}<span class="di-text ellipsis"><b>${esc(a.label)}</b> · ${esc(a.message || 'Needs your input')}</span>${more > 0 ? `<span>+${more}</span>` : ''}`
+      : `${u ? `<div class="ring-wrap">${ring(u.used_percentage / 100, { size: 28, stroke: 2.5 })}${icon('smart_toy', { fill: true })}</div>` : icon('smart_toy', { fill: true, cls: 'big' })}<span class="di-text ellipsis">${esc(a.label)}${u ? ` · ${Math.round(u.used_percentage)}%` : ''}</span>`;
   } else if (state === 'osd') {
     html = `${icon(osd.icon, { fill: true, cls: 'big' })}${osd.value != null ? `<span class="osd-bar"><span style="width:${Math.round(osd.value)}%"></span></span>` : ''}<span>${osd.text}</span>`;
   } else if (state === 'recording') {
@@ -280,6 +294,7 @@ function renderIsland() {
   el.dataset.state = state;
   el.classList.toggle('wide', wide);
   el.classList.toggle('done', state === 'timer' && !!t.done);
+  el.classList.toggle('ask', state === 'agent' && wide);
   morph(el, `<div class="di-main">${html}</div>${badges.map(([id]) => `<button class="di-badge" data-di-focus="${id}" title="Show ${id}">${icon(DI_BADGE[id], { fill: true })}</button>`).join('')}`);
 }
 
@@ -472,6 +487,18 @@ if (cfg.visualizer.bar && !$(vizAnchor).hidden) {
 if (cfg.wallpaperEngine.follow) {
   const we = await bridgeStream('we-sync', [], () => {});
   window.addEventListener('beforeunload', () => we?.kill());
+}
+
+// ---------------------------------------------------------------- island: AI agents
+window.addEventListener('storage', e => { if (e.key === 'end4.agents') { agents = JSON.parse(e.newValue || '[]'); renderIsland(); } });
+if (islandShown) {
+  const watch = await bridgeStream('agents-watch', [], m => {
+    if (!m.agents) return;
+    agents = m.agents;
+    localStorage.setItem('end4.agents', JSON.stringify(agents));
+    renderIsland();
+  });
+  window.addEventListener('beforeunload', () => watch?.kill());
 }
 
 // ---------------------------------------------------------------- island: new notifications

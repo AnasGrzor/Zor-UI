@@ -66,11 +66,32 @@ function sections() {
     parts.push(`<section class="idle"><div class="when"><b id="clock"></b><span>${now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</span></div>
       ${w ? `<div class="wx">${icon(weatherIcon(w.status), { fill: true })}<b>${temp(w, cfg.tempUnit)}</b><br />${esc(weatherText(w.status))}${out.ip?.approxCity ? ` · ${esc(out.ip.approxCity)}` : ''}</div>` : ''}</section>`);
   }
+  parts.push(agentSection());
   parts.push(`<section><h4>${icon('notifications')}Notifications</h4>${notifs.length ? notifs.map(n => `
     <div class="notif" data-act="notifs"><div class="tx"><b class="ellipsis">${esc(n.app)} · ${esc(n.title)}</b>${n.body ? `<span class="ellipsis">${esc(n.body)}</span>` : ''}</div><time>${ago(n.time)}</time></div>`).join('')
     : '<div class="muted-line">Nothing new</div>'}</section>`);
   return parts.join('');
 }
+
+// AI agents: what needs you and how much of each usage limit is left (the bar keeps the list).
+const WINDOWS = { five_hour: '5-hour', seven_day: 'Weekly', spend_limit: 'Spend' };
+function agentSection() {
+  const list = JSON.parse(localStorage.getItem('end4.agents') || '[]');
+  if (!list.length) return '';
+  const resets = t => {
+    if (!t) return '';
+    const d = new Date(t * 1000), hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !cfg.use24h });
+    return `resets ${d - Date.now() < 86400000 ? hm : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${hm}`}`;
+  };
+  return `<section><h4>${icon('smart_toy')}AI agents</h4>${list.map(a => `
+    <div class="agent"><div class="ah"><b>${esc(a.label)}</b>${a.model ? `<small class="ellipsis">${esc(a.model)}</small>` : ''}
+      <span class="st ${a.state}">${a.state === 'waiting' ? 'Needs you' : a.state === 'working' ? 'Working' : 'Idle'}</span></div>
+      ${a.state === 'waiting' ? `<div class="ask ellipsis" title="${esc(a.cwd)}">${esc(a.message || 'Needs your input')}</div>` : ''}
+      ${Object.entries(a.usage || {}).map(([k, u]) => `<div class="use"><span>${esc(WINDOWS[k] || k)}</span>
+        <div class="bar"><span style="width:${Math.min(100, u.used_percentage)}%"></span></div><b>${Math.round(u.used_percentage)}%</b><small>${resets(u.resets_at)}</small></div>`).join('')}
+    </div>`).join('')}</section>`;
+}
+window.addEventListener('storage', e => e.key === 'end4.agents' && render());
 
 function tick() {
   const s = out.media?.currentSession, t = timer.load();

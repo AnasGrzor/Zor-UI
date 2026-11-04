@@ -36,7 +36,7 @@ const KEY_PROVIDERS: [(&str, &str); 6] = [("gemini", "Google Gemini"), ("anthrop
 const ISLAND_ACTIONS: [(&str, &str); 6] = [("panel", "Expand the island"), ("sidebar-left", "Left sidebar"), ("sidebar-right", "Right sidebar"),
     ("overview", "Overview"), ("play", "Play / pause"), ("none", "Nothing")];
 /// LANGS in lib/tab-translate.js, without "auto".
-const LANGS: [(&str, &str); 48] = [("af", "Afrikaans"), ("ar", "Arabic"), ("bn", "Bengali"), ("bg", "Bulgarian"), ("ca", "Catalan"), ("zh-CN", "Chinese (Simplified)"),
+const LANGS: [(&str, &str); 49] = [("af", "Afrikaans"), ("ar", "Arabic"), ("bn", "Bengali"), ("bg", "Bulgarian"), ("ca", "Catalan"), ("zh-CN", "Chinese (Simplified)"),
     ("zh-TW", "Chinese (Traditional)"), ("hr", "Croatian"), ("cs", "Czech"), ("da", "Danish"), ("nl", "Dutch"), ("en", "English"), ("et", "Estonian"), ("fil", "Filipino"),
     ("fi", "Finnish"), ("fr", "French"), ("de", "German"), ("el", "Greek"), ("gu", "Gujarati"), ("he", "Hebrew"), ("hi", "Hindi"), ("hu", "Hungarian"), ("id", "Indonesian"),
     ("it", "Italian"), ("ja", "Japanese"), ("ko", "Korean"), ("lv", "Latvian"), ("lt", "Lithuanian"), ("ms", "Malay"), ("mr", "Marathi"), ("no", "Norwegian"), ("fa", "Persian"),
@@ -659,6 +659,6 @@ mod tests {
     fn every_page_has_its_id() {
         assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "services", "about"]);
         assert!(layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
-        assert_eq!(LANGS.len(), 48);
+        assert_eq!(LANGS.len(), 49);
     }
 }

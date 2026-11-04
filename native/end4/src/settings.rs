@@ -10,7 +10,7 @@
 mod form;
 mod layout;
 mod pages;
-mod store;
+pub(crate) mod store;
 
 use crate::{
     app::{Action, Ctx},

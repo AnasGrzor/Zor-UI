@@ -10,7 +10,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 
-pub const LANGS: [(&str, &str); 51] = [
+pub const LANGS: [(&str, &str); 50] = [
     ("auto", "Detect language"), ("af", "Afrikaans"), ("ar", "Arabic"), ("bn", "Bengali"), ("bg", "Bulgarian"), ("ca", "Catalan"), ("zh-CN", "Chinese (Simplified)"),
     ("zh-TW", "Chinese (Traditional)"), ("hr", "Croatian"), ("cs", "Czech"), ("da", "Danish"), ("nl", "Dutch"), ("en", "English"), ("et", "Estonian"), ("fil", "Filipino"),
     ("fi", "Finnish"), ("fr", "French"), ("de", "German"), ("el", "Greek"), ("gu", "Gujarati"), ("he", "Hebrew"), ("hi", "Hindi"), ("hu", "Hungarian"), ("id", "Indonesian"),

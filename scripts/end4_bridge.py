@@ -1090,6 +1090,12 @@ def we_current():
     return line if line and Path(line).exists() else ""
 
 
+def _still_chosen(st):
+    """end4's last wallpaper was a still picture or a colour. A state with neither (missing or wiped)
+    says nothing, and must not close a Wallpaper Engine wallpaper the user is watching."""
+    return not st.get("live") and bool(st.get("image") or st.get("color"))
+
+
 def cmd_we_sync():
     """Streams: re-themes end4 whenever Wallpaper Engine's wallpaper changes (its UI, playlists...).
     Started by the bar; only one copy runs even with a bar on every monitor."""
@@ -1104,12 +1110,12 @@ def cmd_we_sync():
     interval = float(os.environ.get("END4_WE_INTERVAL", "5"))
     # Closing a wallpaper through WE's CLI doesn't clear its saved one, so WE reopens it when it
     # starts with Windows and hides the picture end4 set. Close it again for a while after start-up
-    # whenever end4's last choice was a still picture (state.live empty).
+    # whenever end4's last choice was a still picture (state has an image or colour and no live).
     started, closes, last_close = time.time(), 0, 0.0
     while _parent_alive(ppid):
         follow = config().get("wallpaperEngine", {}).get("follow", True)
         if (follow and closes < 3 and time.time() - started < 90 and time.time() - last_close > 10
-                and not load_json(ROOT / "state.json", {}).get("live") and we_exe() and we_running()):
+                and _still_chosen(load_json(ROOT / "state.json", {})) and we_exe() and we_running()):
             try:
                 we_control("closeWallpaper")
                 out({"closed": "restored end4's picture"})

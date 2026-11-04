@@ -100,8 +100,7 @@ impl SidebarRight {
             }
             i if i == ID_MODE || i == ID_MODE + 1 => {
                 self.sw_mode = i == ID_MODE + 1;
-                cx.state.v["timerMode"] = json!(if self.sw_mode { "sw" } else { "pomo" });
-                cx.state.save();
+                cx.state.update(|v| v["timerMode"] = json!(if self.sw_mode { "sw" } else { "pomo" }));
             }
             i if (ID_T..ID_T + 3).contains(&i) => {
                 let k = i - ID_T;

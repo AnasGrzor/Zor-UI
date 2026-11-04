@@ -64,7 +64,7 @@ pub fn sync(app: &mut App) {
         });
         let card = Card::new(id);
         let hwnd = card.hwnd.clone();
-        let Ok(mut w) = Win::new(Box::new(card), &format!("end4-pC / desk-{id}"), x, y, Z::Bottom, false) else { continue };
+        let Ok(mut w) = Win::new(Box::new(card), &format!("Zor UI / desk-{id}"), x, y, Z::Bottom, false) else { continue };
         w.drag_key = Some(id.clone());
         hwnd.store(w.hwnd.0 as isize, Ordering::Relaxed);
         w.update(&app.g, &app.cx, true);
@@ -75,9 +75,10 @@ pub fn sync(app: &mut App) {
 
 /// A card was dragged: remember where (physical px, like Zebar's localStorage).
 pub fn save_pos(cx: &mut Ctx, id: &str, (x, y): (i32, i32)) {
-    if !cx.state.v["deskPos"].is_object() { cx.state.v["deskPos"] = json!({}); }
-    cx.state.v["deskPos"][id] = json!({ "x": x, "y": y });
-    cx.state.save();
+    cx.state.update(|v| {
+        if !v["deskPos"].is_object() { v["deskPos"] = json!({}); }
+        v["deskPos"][id] = json!({ "x": x, "y": y });
+    });
 }
 
 pub struct Card {

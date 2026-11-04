@@ -73,6 +73,8 @@ pub struct Win {
     /// The left button is down on a spot (Input::Drag is flowing).
     held: bool,
     last: (u64, String, u32, (i32, i32)),
+    /// When this window last painted; the frame timer uses it to give each view its own rate.
+    painted: std::time::Instant,
 }
 
 struct Drag { start: POINT, from: POINT, moved: bool }
@@ -110,7 +112,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)) })
+                hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now() })
         }
     }
 
@@ -192,6 +194,12 @@ impl Win {
         }
     }
 
+    /// True when the view has been due for a frame (`View::frame_ms`) since it last painted. One
+    /// animation mustn't drag every other window down to its rate.
+    pub fn due(&self, now: std::time::Instant, ms: u32) -> bool {
+        now.duration_since(self.painted) >= std::time::Duration::from_millis(ms as u64)
+    }
+
     /// Repaints if the view's picture could have changed (data version, time key, hover, DPI).
     pub fn update(&mut self, g: &Gfx, cx: &Ctx, force: bool) {
         let key = self.view.key(cx);
@@ -223,6 +231,7 @@ impl Win {
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
             let _ = UpdateLayeredWindow(self.hwnd, None, None, Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
         }
+        self.painted = std::time::Instant::now();
     }
 
     fn hit_at(&self, x: f32, y: f32) -> u32 {

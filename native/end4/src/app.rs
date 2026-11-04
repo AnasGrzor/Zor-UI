@@ -208,7 +208,7 @@ impl App {
         if have.len() == mons.len() && mons.iter().all(|m| have.iter().any(|h| h.0 == m.left && h.1 == m.top)) { return; }
         self.bars.clear();
         for m in mons {
-            let Ok(mut w) = Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left))), "end4-pC / bar", m.left, m.top, Z::Normal, false) else { continue };
+            let Ok(mut w) = Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left))), "Zor UI / bar", m.left, m.top, Z::Normal, false) else { continue };
             w.update(&self.g, &self.cx, true);
             w.move_to(m.left, m.top);
             w.show();
@@ -335,7 +335,7 @@ impl App {
         if bar.view.hover_popup().map(|p| p.0) != Some(id) { return; }
         let (bx, by) = bar.pos();
         let s = bar.scale();
-        if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id }), "end4-pC / bar-popup", -32000, -32000, Z::Top, true).ok(); }
+        if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
         let Some(p) = self.popup.as_mut() else { return };
         p.view = Box::new(Popup { id });
         p.update(&self.g, &self.cx, true);
@@ -362,7 +362,7 @@ impl App {
         let s = dpi_scale(rect);
         let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s);
         let Some(view) = popup::make(name, area) else { return };
-        let Ok(mut w) = Win::new(view, &format!("end4-pC / {name}"), rect.left, rect.top, if name == "settings" { Z::Normal } else { Z::Top }, false) else { return };
+        let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if name == "settings" { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
         w.update(&self.g, &self.cx, true);
         let px = w.size_px();
@@ -457,7 +457,14 @@ impl App {
             match (msg, wp.0) {
                 (WM_TIMER, TICK) => self.tick(),
                 (WM_TIMER, FRAME) => {
-                    for w in self.bars.iter_mut().chain(self.wins.iter_mut()).chain(self.pops.iter_mut().map(|p| &mut p.win)) { if w.view.frame_ms() > 0 { w.update(&self.g, &self.cx, true); } }
+                    // each view paints at its own rate: a tile that wants 33 ms frames must not drag the
+                    // bar, the desk cards and the island down to 30 fps with it
+                    let now = std::time::Instant::now();
+                    for w in self.bars.iter_mut().chain(self.wins.iter_mut()).chain(self.pops.iter_mut().map(|p| &mut p.win)) {
+                        let ms = w.view.frame_ms();
+                        if ms > 0 && w.due(now, ms) { w.update(&self.g, &self.cx, true); }
+                        else { w.update(&self.g, &self.cx, false); }
+                    }
                     self.frames();
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
@@ -496,8 +503,12 @@ impl App {
                     let before = self.cx.ver;
                     self.bars[bi].mouse(msg, wp, lp, &mut self.cx);
                     if !matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) { self.popup_check(bi); }
-                    if self.cx.ver != before || matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_LBUTTONDBLCLK | WM_MOUSEWHEEL) { self.cx.ver += 1; self.repaint(); }
-                    else { self.bars[bi].update(&self.g, &self.cx, false); self.frames(); }
+                    if self.cx.ver != before || matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_LBUTTONDBLCLK | WM_MOUSEWHEEL) { self.cx.ver += 1; }
+                    // only this bar changed: repainting every window on each pointer move is what made
+                    // the whole desktop feel sluggish
+                    self.bars[bi].update(&self.g, &self.cx, false);
+                    self.paint_pops(false);
+                    self.frames();
                 }
             }
             return;

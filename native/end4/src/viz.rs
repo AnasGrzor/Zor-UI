@@ -117,7 +117,7 @@ pub fn sync(app: &mut App) {
     let (true, Some(m), Some((_, x, y, w))) = (want, mon, spec) else { return };
     let mut v = Viz::new((m.left, y, w));
     v.start(&app.cx.cfg, bars);
-    let Ok(mut win) = Win::new(Box::new(v), "end4-pC / visualizer", x, y, Z::Bottom, true) else { return };
+    let Ok(mut win) = Win::new(Box::new(v), "Zor UI / visualizer", x, y, Z::Bottom, true) else { return };
     win.update(&app.g, &app.cx, true);
     win.move_to(x, y);
     win.show();

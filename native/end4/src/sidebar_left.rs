@@ -80,8 +80,7 @@ impl SidebarLeft {
     fn go(&mut self, tab: usize, cx: &mut Ctx) {
         self.tab = tab.min(TABS.len() - 1);
         if !sync() {
-            cx.state.v["leftTab"] = json!(TABS[self.tab].0);
-            cx.state.save();
+            cx.state.update(|v| v["leftTab"] = json!(TABS[self.tab].0));
         }
         self.cur().show(cx);
     }

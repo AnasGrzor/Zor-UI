@@ -96,7 +96,11 @@ fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f6
     }
 }
 
-type ArtCache = HashMap<String, (String, Option<Arc<Vec<u8>>>)>;
+/// Per app: the track whose artwork we hold, its bytes, and how often we've asked for them. Windows
+/// publishes a track's thumbnail a moment after its title, so a miss is retried for a while instead of
+/// leaving the player without a cover until the next song.
+type ArtCache = HashMap<String, (String, Option<Arc<Vec<u8>>>, u8)>;
+const ART_TRIES: u8 = 20;
 
 fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<&Media>, now: f64) -> Option<Media> {
     let props = s.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
@@ -105,8 +109,9 @@ fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<
     let artist = props.Artist().map(|a| a.to_string()).unwrap_or_default();
     let key = format!("{title}|{artist}");
     let e = arts.entry(id.to_string()).or_default();
-    if e.0 != key {
-        e.0 = key;
+    if e.0 != key { *e = (key, None, 0); }
+    if e.1.is_none() && e.2 < ART_TRIES {
+        e.2 += 1;
         e.1 = (|| {
             let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
             let size = stream.Size().ok()? as u32;

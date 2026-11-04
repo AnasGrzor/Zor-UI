@@ -2,7 +2,7 @@
 
 use super::{
     form::{chip_w, Act, Fmt, Pen, Sl, ACT0},
-    layout::{self, bar_layout, info, SIDES},
+    layout::{bar_layout, info, SIDES},
     Load, Settings,
 };
 use crate::{
@@ -72,7 +72,7 @@ impl Settings {
             self.sw(p, "island.volume", "Volume changes", "The new level, with a bar", "volume_up");
             self.sw(p, "island.mic", "Microphone mute", "When the mic is muted or turned back on", "mic");
             self.num(p, "island.osdSeconds", "Volume and mic seconds", 1, 10, "timer");
-            self.sw(p, "island.agents", "AI agents that need you", "A permission prompt or a question from Claude, Codex or any agent reporting to end4", "smart_toy");
+            self.sw(p, "island.agents", "AI agents that need you", "A permission prompt or a question from Claude, Codex or any agent reporting to Zor UI", "smart_toy");
             self.sw(p, "island.agentWorking", "AI agents at work", "The agent and its 5-hour usage, when nothing else is showing", "pending");
             self.sw(p, "island.recording", "Screen recording", "A red pill with the recording time", "screen_record");
             self.sw(p, "island.timer", "Timer and stopwatch", "Pomodoro countdown or stopwatch", "timer");
@@ -203,12 +203,12 @@ impl Settings {
         let mut types = vec!["all".to_string()];
         for it in &list { if let Some(t) = it["type"].as_str().filter(|t| !t.is_empty() && !types.contains(&t.to_string())) { types.push(t.into()); } }
         p.h2("animated_images", "Wallpaper Engine", "");
-        let playing = if cur.is_empty() { "No live wallpaper from end4".to_string() } else {
+        let playing = if cur.is_empty() { "No live wallpaper from Zor UI".to_string() } else {
             format!("Playing: {}", list.iter().find(|i| is_cur(i)).and_then(|i| i["title"].as_str().map(String::from))
                 .unwrap_or_else(|| { let c = we["current"].as_str().unwrap_or(""); c.rsplitn(3, '\\').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\\") }))
         };
         p.card(|p| {
-            self.sw(p, "wallpaperEngine.follow", "Follow Wallpaper Engine", "Re-theme end4 when you change wallpaper in Wallpaper Engine or a playlist moves on", "sync");
+            self.sw(p, "wallpaperEngine.follow", "Follow Wallpaper Engine", "Re-theme Zor UI when you change wallpaper in Wallpaper Engine or a playlist moves on", "sync");
             if let Some(r) = p.row(40.0) {
                 let running = we["running"] == true;
                 let w = chip_w(p.c, "Stop live wallpaper", true);
@@ -504,7 +504,7 @@ impl Settings {
         p.card(|p| {
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "end4-pC", true);
-                p.left(r, "", "end4-pC for Windows", "A port of pctrade's end4-pC (illogical-impulse by end-4) to GlazeWM + Zebar", w);
+                p.left(r, "", "Zor UI", "Built on pctrade's end4-pC (illogical-impulse by end-4), for GlazeWM on Windows", w);
                 p.chip_right(r, Some("open_in_new"), "end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
             }
             if let Some(r) = p.row(40.0) {
@@ -543,7 +543,7 @@ impl Settings {
 
     /// `.grid`: auto-fill columns of at least 190 px, 10 px apart.
     pub fn grid(&mut self, p: &mut Pen, tiles: Vec<Tile>) {
-        p.lead_gap(0.0);
+        p.lead_gap(12.0);
         let cols = (((p.w + 10.0) / 200.0).floor() as usize).max(1);
         let tw = (p.w - 10.0 * (cols as f32 - 1.0)) / cols as f32;
         let th = (tw * 9.0 / 16.0).round() + 52.0;
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn every_page_has_its_id() {
         assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "services", "about"]);
-        assert!(layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
+        assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }
 }

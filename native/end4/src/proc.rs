@@ -24,6 +24,7 @@ fn last_json(out: &[u8]) -> Value {
 
 /// run() in core.js: scriptsDir\<script>.ps1 with args, in the background. Returns its JSON line.
 pub fn run(cfg: &Config, script: &str, args: &[&str]) -> Value {
+    if let Some(v) = crate::bridge::script(cfg, script, args) { return v; }
     let dir = cfg.str("scriptsDir");
     if dir.is_empty() { return Value::Null; }
     let file = format!("{dir}\\{script}.ps1");
@@ -52,15 +53,25 @@ fn bridge_cmd(cfg: &Config, name: &str, args: &[&str]) -> Option<Command> {
 
 /// bridge() in core.js: one end4_bridge.py command, its JSON line.
 pub fn bridge(cfg: &Config, name: &str, args: &[&str]) -> Value {
+    if let Some(v) = crate::bridge::call(cfg, name, args) { return v; }
     bridge_cmd(cfg, name, args).and_then(|mut c| c.output().ok()).map(|o| last_json(&o.stdout)).unwrap_or(Value::Null)
 }
 
 /// bridgeStream() in core.js: a long-running bridge command; `on_line` gets each stdout line
 /// (on a reader thread). The child is killed when the returned handle drops.
-pub struct Stream(Child);
-impl Drop for Stream { fn drop(&mut self) { let _ = self.0.kill(); } }
+/// A ported command runs on a thread instead; dropping sets its stop flag.
+pub enum Stream { Child(Child), Thread(std::sync::Arc<std::sync::atomic::AtomicBool>) }
+impl Drop for Stream {
+    fn drop(&mut self) {
+        match self {
+            Stream::Child(c) => { let _ = c.kill(); }
+            Stream::Thread(stop) => stop.store(true, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
 
-pub fn stream(cfg: &Config, name: &str, args: &[&str], on_line: impl Fn(&str) + Send + 'static) -> Option<Stream> {
+pub fn stream(cfg: &Config, name: &str, args: &[&str], on_line: impl Fn(&str) + Send + Sync + 'static) -> Option<Stream> {
+    if crate::bridge::ported_stream(name) { return crate::bridge::stream(cfg, name, args, "", on_line, || {}).map(Stream::Thread); }
     let mut child = bridge_cmd(cfg, name, args)?.stdout(Stdio::piped()).spawn().ok()?;
     let out = child.stdout.take()?;
     std::thread::spawn(move || {
@@ -68,7 +79,7 @@ pub fn stream(cfg: &Config, name: &str, args: &[&str], on_line: impl Fn(&str) + 
             if !line.trim().is_empty() { on_line(&line); }
         }
     });
-    Some(Stream(child))
+    Some(Stream::Child(child))
 }
 
 /// Opens a Zebar widget the way openHere() does: a fresh copy with the preset's placement (Zebar
@@ -92,8 +103,9 @@ pub fn zebar_preset(name: &str) {
 
 /// `stream` for commands that read one JSON line on stdin (ai-chat): writes `stdin`, closes it, and calls
 /// `on_exit` (reader thread) once stdout ends. Dropping the handle kills the child.
-pub fn stream_stdin(cfg: &Config, name: &str, args: &[&str], stdin: &str, on_line: impl Fn(&str) + Send + 'static, on_exit: impl FnOnce() + Send + 'static) -> Option<Stream> {
+pub fn stream_stdin(cfg: &Config, name: &str, args: &[&str], stdin: &str, on_line: impl Fn(&str) + Send + Sync + 'static, on_exit: impl FnOnce() + Send + 'static) -> Option<Stream> {
     use std::io::Write;
+    if crate::bridge::ported_stream(name) { return crate::bridge::stream(cfg, name, args, stdin, on_line, on_exit).map(Stream::Thread); }
     let mut child = bridge_cmd(cfg, name, args)?.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().ok()?;
     let mut input = child.stdin.take()?;
     let _ = writeln!(input, "{stdin}");
@@ -105,5 +117,5 @@ pub fn stream_stdin(cfg: &Config, name: &str, args: &[&str], stdin: &str, on_lin
         }
         on_exit();
     });
-    Some(Stream(child))
+    Some(Stream::Child(child))
 }

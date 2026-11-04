@@ -119,7 +119,7 @@ fn we_exe() -> Option<PathBuf> {
 }
 
 /// Is a Wallpaper Engine process alive?
-fn we_running() -> bool {
+pub(super) fn we_running() -> bool {
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return false };
         let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
@@ -158,7 +158,7 @@ fn run_timeout(mut cmd: std::process::Command, secs: u64) -> std::io::Result<Out
 fn no_we() -> std::io::Error { std::io::Error::new(std::io::ErrorKind::NotFound, "Wallpaper Engine not found in your Steam libraries") }
 
 /// `wallpaper64.exe -control <args>`.
-fn we_control(args: &[&str], secs: u64) -> std::io::Result<Output> {
+pub(super) fn we_control(args: &[&str], secs: u64) -> std::io::Result<Output> {
     let mut c = hidden(we_exe().ok_or_else(no_we)?);
     c.arg("-control").args(args);
     run_timeout(c, secs)

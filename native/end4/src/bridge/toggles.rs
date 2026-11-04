@@ -1,5 +1,5 @@
-//! Rust port of scripts/toggles.ps1. Actions it can't do faithfully (brightness set, gamemode,
-//! colorpick, screentranslate, timer-done) return None so the script still runs them.
+//! Rust port of scripts/toggles.ps1. colorpick and screentranslate (full-screen Python tools)
+//! return None so the script still runs them.
 
 use super::common::*;
 use super::*;
@@ -8,14 +8,17 @@ use std::process::Stdio;
 use windows::{
     core::{w, BSTR, HSTRING, PCWSTR, VARIANT},
     ApplicationModel::DataTransfer::{Clipboard, SetHistoryItemAsContentStatus, StandardDataFormats},
+    Data::Xml::Dom::XmlDocument,
     Devices::Radios::{Radio, RadioKind, RadioState},
+    UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
         Foundation::CloseHandle,
         System::{
             Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
             Power::SetSuspendState,
             Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
-            Threading::{GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE},
+            Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
+            Threading::{GetCurrentProcessId, GetExitCodeProcess, OpenMutexW, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZATION_SYNCHRONIZE},
             Wmi::{IWbemLocator, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE},
         },
         UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
@@ -68,7 +71,14 @@ pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
         "logout" => { let _ = hidden("shutdown.exe").arg("/l").spawn(); ok() }
         "restart" => { let _ = hidden("shutdown.exe").args(["/r", "/t", "0"]).spawn(); ok() }
         "shutdown" => { let _ = hidden("shutdown.exe").args(["/s", "/t", "0"]).spawn(); ok() }
-        "brightness" | "gamemode" | "colorpick" | "screentranslate" | "timer-done" => None,
+        "brightness" => {
+            let pct: i32 = match value.trim().parse() { Ok(p) => p, Err(_) => return Some(json!({ "error": format!("Cannot convert value \"{value}\" to type \"System.Int32\".") })) };
+            Some(match set_brightness(pct.clamp(1, 100)) { Ok(p) => json!({ "brightness": p }), Err(e) => json!({ "error": e }) })
+        }
+        "gamemode" => Some(json!({ "gamemode": game_mode() })),
+        "timer-done" => Some(timer_done(&value)),
+        // full-screen Python tools: still the script
+        "colorpick" | "screentranslate" => None,
         _ => Some(json!({ "error": format!("unknown action '{action}'") })),
     }
 }
@@ -184,6 +194,100 @@ fn brightness() -> Value {
     }
 }
 
+/// WmiSetBrightness on the first panel with brightness control (laptops); the percentage set.
+fn set_brightness(pct: i32) -> Result<i32, String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let loc: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).map_err(msg)?;
+        let svc = loc.ConnectServer(&BSTR::from("ROOT\\WMI"), &BSTR::new(), &BSTR::new(), &BSTR::new(), 0, &BSTR::new(), None).map_err(msg)?;
+        let en = svc.ExecQuery(&BSTR::from("WQL"), &BSTR::from("SELECT __PATH FROM WmiMonitorBrightnessMethods"),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, None).map_err(msg)?;
+        let mut objs = [None];
+        let mut n = 0u32;
+        en.Next(WBEM_INFINITE, &mut objs, &mut n).ok().map_err(msg)?;
+        let o = objs[0].take().ok_or("This display has no brightness control.")?;
+        let mut v = VARIANT::default();
+        o.Get(w!("__PATH"), 0, &mut v, None, None).map_err(msg)?;
+        let path = BSTR::try_from(&v).map_err(msg)?;
+        let mut class = None;
+        svc.GetObject(&BSTR::from("WmiMonitorBrightnessMethods"), Default::default(), None, Some(&mut class), None).map_err(msg)?;
+        let mut sig = None;
+        class.ok_or("WmiMonitorBrightnessMethods is missing.")?.GetMethod(w!("WmiSetBrightness"), 0, &mut sig, std::ptr::null_mut()).map_err(msg)?;
+        let inp = sig.ok_or("WmiSetBrightness is missing.")?.SpawnInstance(0).map_err(msg)?;
+        inp.Put(w!("Timeout"), 0, &VARIANT::from(1i32), 0).map_err(msg)?;
+        inp.Put(w!("Brightness"), 0, &VARIANT::from(pct), 0).map_err(msg)?;
+        svc.ExecMethod(&path, &BSTR::from("WmiSetBrightness"), Default::default(), None, &inp, None, None).map_err(msg)?;
+        Ok(pct)
+    }
+}
+
+/// Process ids of every process whose exe name (lower case) is in `names`.
+fn pids(names: &[&str]) -> Vec<u32> {
+    let mut out = vec![];
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            if names.contains(&String::from_utf16_lossy(&e.szExeFile[..n]).to_lowercase().as_str()) { out.push(e.th32ProcessID); }
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+fn kill(pid: u32) {
+    unsafe { if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) { let _ = TerminateProcess(h, 1); let _ = CloseHandle(h); } }
+}
+
+/// Game mode: frees RAM by stopping the native shell, Zebar, Flow Launcher and the live wallpaper; run
+/// again to bring them back. "On" = neither the shell (it holds the single-instance mutex) nor Zebar
+/// runs, so no state file can go stale. GlazeWM keeps running so the key still works. Returns the new state.
+fn game_mode() -> bool {
+    let shell_up = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("end4-pC-native")).map(|h| { let _ = CloseHandle(h); }).is_ok() };
+    let stopping = shell_up || !pids(&["zebar.exe"]).is_empty();
+    let we = super::we::we_running();
+    if stopping {
+        pids(&["zebar.exe", "flow.launcher.exe"]).into_iter().for_each(kill);
+        if we { let _ = super::we::we_control(&["stop"], 15); }
+        let (me, others) = (unsafe { GetCurrentProcessId() }, pids(&["end4.exe"]));
+        others.iter().filter(|&&p| p != me).for_each(|&p| kill(p));
+        // run from the shell itself (no other end4.exe): it goes last
+        if shell_up && others.iter().all(|&p| p == me) { std::process::exit(0); }
+        true
+    } else {
+        if we { let _ = super::we::we_control(&["play"], 15); }
+        let null = || (Stdio::null(), Stdio::null());
+        let launch = |mut c: std::process::Command| { let (o, e) = null(); let _ = c.stdin(Stdio::null()).stdout(o).stderr(e).spawn(); };
+        launch(hidden("zebar"));
+        if let Ok(me) = std::env::current_exe() { launch(hidden(me)); }
+        let flow = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("FlowLauncher").join("Flow.Launcher.exe");
+        if flow.is_file() { launch(hidden(flow)); }
+        false
+    }
+}
+
+/// Windows toast when a pomodoro phase ends; `phase` is focus / short / long.
+fn timer_done(phase: &str) -> Value {
+    let text = match phase {
+        "focus" => "Focus session done. Take a break.",
+        "short" => "Break is over. Back to focus.",
+        "long" => "Long break is over. Back to focus.",
+        _ => return json!({ "error": format!("unknown phase '{phase}'") }),
+    };
+    let go = || -> windows::core::Result<()> {
+        unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from(format!("<toast><visual><binding template='ToastGeneric'><text>Pomodoro</text><text>{text}</text></binding></visual><audio src='ms-winsoundevent:Notification.Reminder'/></toast>")))?;
+        // PowerShell's registered AUMID: toasts need a registered app id
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"))?
+            .Show(&ToastNotification::CreateToastNotification(&xml)?)
+    };
+    match go() { Ok(()) => json!({ "ok": true }), Err(e) => json!({ "error": msg(e) }) }
+}
+
 /// (guid, name, active) from `powercfg /list`, matching the script's regex `([0-9a-f-]{36})\s+\((.+)\)(\s*\*)?`.
 fn power_plans() -> Vec<(String, String, bool)> {
     let out = hidden("powercfg").arg("/list").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
@@ -235,7 +339,10 @@ fn history_items() -> Result<windows::Foundation::Collections::IVectorView<windo
     Clipboard::GetHistoryItemsAsync().and_then(|o| o.get()).and_then(|r| r.Items()).map_err(msg)
 }
 
-fn msg(e: windows::core::Error) -> String { e.message().to_string() }
+fn msg(e: windows::core::Error) -> String {
+    let m = e.message().to_string();
+    if m.trim().is_empty() { format!("Windows error 0x{:08X}", e.code().0 as u32) } else { m }
+}
 
 /// Start-Process equivalent: ShellExecute "open".
 fn shell(file: &str, params: &str) {

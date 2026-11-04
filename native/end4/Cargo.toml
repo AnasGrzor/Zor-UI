@@ -56,6 +56,8 @@ windows = { version = "0.58", features = [
   "Foundation_Collections",
   "Devices_Radios",
   "ApplicationModel_DataTransfer",
+  "UI_Notifications",
+  "Data_Xml_Dom",
 ] }
 
 [profile.release]

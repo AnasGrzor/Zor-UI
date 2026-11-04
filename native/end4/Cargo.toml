@@ -32,6 +32,8 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Imaging",
+  "Graphics_Imaging",
+  "Media_Ocr",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",

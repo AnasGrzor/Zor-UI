@@ -209,7 +209,7 @@ fn secret_set(name: &str, value: &str) -> Value {
 
 // ------------------------------------------------------------------ translate
 
-fn translate(target: &str, source: &str, text: &str) -> Value {
+pub(super) fn translate(target: &str, source: &str, text: &str) -> Value {
     let text = text.trim();
     if text.is_empty() { return json!({ "text": "", "detected": source }); }
     let src = if source.is_empty() { "auto" } else { source };

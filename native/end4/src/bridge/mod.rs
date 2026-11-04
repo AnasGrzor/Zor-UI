@@ -15,6 +15,8 @@ mod common;
 mod football;
 mod media;
 mod notify;
+mod picker;
+mod screen_translate;
 mod sys;
 mod theme;
 mod toggles;
@@ -55,6 +57,8 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         .or_else(|| notify::call(cfg, name, args))
         .or_else(|| we::call(cfg, name, args))
         .or_else(|| media::call(cfg, name, args))
+        .or_else(|| picker::call(cfg, name, args))
+        .or_else(|| screen_translate::call(cfg, name, args))
 }
 
 type Streamer = fn(&Config, &str, &[String], &str, &Sink);

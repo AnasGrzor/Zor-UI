@@ -67,7 +67,7 @@ function sections() {
       ${w ? `<div class="wx">${icon(weatherIcon(w.status), { fill: true })}<b>${temp(w, cfg.tempUnit)}</b><br />${esc(weatherText(w.status))}${out.ip?.approxCity ? ` · ${esc(out.ip.approxCity)}` : ''}</div>` : ''}</section>`);
   }
   parts.push(agentSection());
-  parts.push(`<section><h4>${icon('notifications')}Notifications</h4>${notifs.length ? notifs.map(n => `
+  parts.push(`<section><h4>${icon('notifications')}Notifications${notifs.length ? `<button class="clear" data-act="notifs-clear">${icon('clear_all')}Clear all</button>` : ''}</h4>${notifs.length ? notifs.map(n => `
     <div class="notif" data-act="notifs"><div class="tx"><b class="ellipsis">${esc(n.app)} · ${esc(n.title)}</b>${n.body ? `<span class="ellipsis">${esc(n.body)}</span>` : ''}</div><time>${ago(n.time)}</time></div>`).join('')
     : '<div class="muted-line">Nothing new</div>'}</section>`);
   return parts.join('');
@@ -132,6 +132,7 @@ $('#panel').addEventListener('click', async e => {
   if (act === 'sw-toggle') timer.sw.toggle();
   if (act === 'sw-reset') timer.sw.reset();
   if (act === 'timer-next') { localStorage.removeItem('end4-pC.timerDone'); timer.pomo.toggle(cfg); }
+  if (act === 'notifs-clear') { notifs = []; bridge('notifications-dismiss', 'all'); return render(); }
   if (act === 'notifs') { localStorage.setItem('end4-pC.rightTab', 'notif'); openWidget('sidebar-right'); return close(); }
   render();
 });

@@ -3,7 +3,7 @@
 // (DPAPI-encrypted), never in the webview.
 import { $, esc, icon, md, bridge, bridgeStream, config, openUrl } from './core.js';
 
-const STORE = 'end4-pC.ai.history';
+const STORE = 'zor-ui.ai.history';
 const PROVIDERS = ['gemini', 'anthropic', 'openai', 'mistral', 'openrouter'];
 const HELP = [
   ['/key <provider> <key>', `Save an API key (${PROVIDERS.join(', ')}). Without a key it removes it.`],

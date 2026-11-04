@@ -31,6 +31,9 @@ fn defaults() -> Value {
         },
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie",
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
+        "buddies": { "pair": true,
+            "a": { "character": "gojo", "name": "", "chatty": "normal", "walk": true },
+            "b": { "on": false, "character": "geto", "name": "", "chatty": "normal", "walk": true } },
         "native": {}
     }"#).expect("defaults are valid JSON")
 }
@@ -134,10 +137,10 @@ impl State {
     }
 }
 
-pub fn pack_dir() -> PathBuf { home().join(r".glzr\zebar\end4-pC") }
+pub fn pack_dir() -> PathBuf { home().join(r".glzr\zebar\zor-ui") }
 pub fn home() -> PathBuf { PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()) }
 pub fn data_dir() -> PathBuf {
-    let d = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("end4-pC");
+    let d = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("zor-ui");
     let _ = fs::create_dir_all(&d);
     d
 }

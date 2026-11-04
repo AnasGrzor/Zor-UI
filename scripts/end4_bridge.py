@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-end4-pC for Windows - backend for the Zebar widgets.
+Zor UI - backend for the Zebar widgets.
 
 Zebar widgets run in a webview, so anything that needs the network without
 CORS limits, Windows APIs, or long-running processes goes through here:
@@ -32,7 +32,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py agents / agents-watch   AI agents' state and usage, from end4_agent.py (watch streams)
 
 Every command prints exactly one JSON line unless it says it streams.
-Parts of the logic follow end4-pC's services (GPL-3.0, (c) end-4 / pctrade).
+Parts of the logic follow zor-ui's services (GPL-3.0, (c) end-4 / pctrade).
 """
 import base64
 import json
@@ -49,8 +49,8 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent                                     # %LOCALAPPDATA%\end4-pC
-PACK = Path(os.environ.get("END4_PACK", Path.home() / ".glzr" / "zebar" / "end4-pC"))
+ROOT = HERE.parent                                     # %LOCALAPPDATA%\zor-ui
+PACK = Path(os.environ.get("END4_PACK", Path.home() / ".glzr" / "zebar" / "zor-ui"))
 CONFIG = PACK / "config.json"
 SECRETS = ROOT / "secrets.json"
 PRESETS = ROOT / "presets"
@@ -58,7 +58,7 @@ DISMISSED = ROOT / "notifications-dismissed.json"
 WALLPAPERS = Path.home() / "Pictures" / "Wallpapers"
 IS_WIN = os.name == "nt"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0 Safari/537.36 end4-pC"
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0 Safari/537.36 zor-ui"
 
 
 def out(obj):
@@ -147,7 +147,7 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
     blob_in, blob_out = BLOB(len(data), buf), BLOB()
     fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
     if protect:
-        ok = fn(ctypes.byref(blob_in), "end4-pC", None, None, None, 0, ctypes.byref(blob_out))
+        ok = fn(ctypes.byref(blob_in), "zor-ui", None, None, None, 0, ctypes.byref(blob_out))
     else:
         ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
     if not ok:
@@ -205,15 +205,15 @@ def sync_zebar_startup(cfg):
     """Keeps Zebar's startup list in line with the widgets enabled in config."""
     path = PACK.parent / "settings.json"
     s = load_json(path, {})
-    keep = [c for c in s.get("startupConfigs", []) if c.get("pack") != "end4-pC"]
+    keep = [c for c in s.get("startupConfigs", []) if c.get("pack") != "zor-ui"]
     native = cfg.get("native", {})  # parts native/end4 draws instead of Zebar
-    mine = [] if native.get("bar") else [{"pack": "end4-pC", "widget": "bar", "preset": "default"}]
+    mine = [] if native.get("bar") else [{"pack": "zor-ui", "widget": "bar", "preset": "default"}]
     if cfg.get("desktopWidgets", True):
-        mine.append({"pack": "end4-pC", "widget": "desktop", "preset": "default"})
+        mine.append({"pack": "zor-ui", "widget": "desktop", "preset": "default"})
     if cfg.get("visualizer", {}).get("desktop", True):
-        mine.append({"pack": "end4-pC", "widget": "visualizer", "preset": "default"})
+        mine.append({"pack": "zor-ui", "widget": "visualizer", "preset": "default"})
     if cfg.get("dock", {}).get("enabled", False):
-        mine.append({"pack": "end4-pC", "widget": "dock", "preset": "default"})
+        mine.append({"pack": "zor-ui", "widget": "dock", "preset": "default"})
     s["startupConfigs"] = mine + keep
     save_json(path, s)
 
@@ -448,7 +448,7 @@ def cmd_ai_chat():
             if key:
                 headers["Authorization"] = f"Bearer {key}"
             if provider == "openrouter":
-                headers.update({"HTTP-Referer": "https://github.com/pctrade/end4-pC", "X-Title": "end4-pC for Windows"})
+                headers.update({"HTTP-Referer": "https://github.com/pctrade/end4-pC", "X-Title": "Zor UI"})
             body = {"model": model["id"], "stream": True, "temperature": temp,
                     "messages": [{"role": "system", "content": system}] + [{"role": m["role"], "content": m["content"]} for m in msgs]}
             with http(url, body, headers=headers, timeout=180) as r:
@@ -723,7 +723,7 @@ def cmd_presets_online():
 
 
 def windows_settings_from_end4(preset):
-    """Maps the parts of an end4-pC preset that mean something on Windows."""
+    """Maps the parts of an zor-ui preset that mean something on Windows."""
     a, bar = preset.get("appearance", {}), preset.get("bar", {})
     palette = a.get("palette", {}).get("type", "auto") or "auto"
     scheme = palette.replace("scheme-", "") if palette.startswith("scheme-") else "auto"
@@ -1149,7 +1149,7 @@ def _first_instance(name):
     import ctypes
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.CreateMutexW.restype = ctypes.c_void_p
-    _first_instance.handle = k.CreateMutexW(None, False, f"Local\\end4-pC-{name}")   # kept open until exit
+    _first_instance.handle = k.CreateMutexW(None, False, f"Local\\zor-ui-{name}")   # kept open until exit
     return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
 
 
@@ -1324,7 +1324,7 @@ def cmd_click_through(widget):
     import ctypes
     u = ctypes.windll.user32
     u.FindWindowW.restype = ctypes.c_void_p
-    h = ctypes.c_void_p(u.FindWindowW(None, f"Zebar - end4-pC / {widget}"))
+    h = ctypes.c_void_p(u.FindWindowW(None, f"Zebar - zor-ui / {widget}"))
     if not h.value:
         return out({"ok": False, "error": "window not found"})
     ex = u.GetWindowLongW(h, -20)                      # GWL_EXSTYLE
@@ -1342,7 +1342,7 @@ def cmd_focus_widget(widget, x="0", y="0"):
     import ctypes
     from ctypes import wintypes
     u = ctypes.windll.user32
-    title, found = f"Zebar - end4-pC / {widget}", []
+    title, found = f"Zebar - zor-ui / {widget}", []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def each(h, _):

@@ -146,6 +146,8 @@ pub struct Gfx {
     weight_shift: std::cell::Cell<i32>,
     icon_family: HSTRING,
     formats: RefCell<HashMap<(bool, bool, u32, u16), IDWriteTextFormat>>,
+    /// Shaped text kept between frames (a label is drawn identically every frame); cleared on a font change or when big.
+    layouts: RefCell<HashMap<(String, [u32; 3], [bool; 3], u16, u8), IDWriteTextLayout>>,
     sink: IDWriteTextRenderer,
 }
 
@@ -178,6 +180,7 @@ impl Gfx {
                 weight_shift: std::cell::Cell::new(0),
                 icon_family: HSTRING::from(if has_icons { "Material Symbols Rounded" } else { "Segoe Fluent Icons" }),
                 formats: RefCell::new(HashMap::new()),
+                layouts: RefCell::new(HashMap::new()),
             })
         }
     }
@@ -196,6 +199,7 @@ impl Gfx {
         *self.text_family.borrow_mut() = fam;
         self.text_scale.set(scale);
         self.formats.borrow_mut().clear();
+        self.layouts.borrow_mut().clear();
         true
     }
 
@@ -222,6 +226,16 @@ impl Gfx {
     }
 
     fn layout(&self, s: &str, f: Font, w: f32, h: f32, align: Align, wrap: bool) -> Option<IDWriteTextLayout> {
+        let key = (s.to_string(), [f.size.to_bits(), w.to_bits(), h.to_bits()], [f.icon, f.fill, wrap], f.weight, align as u8);
+        if let Some(l) = self.layouts.borrow().get(&key) { return Some(l.clone()); }
+        let l = self.layout_new(s, f, w, h, align, wrap)?;
+        let mut all = self.layouts.borrow_mut();
+        if all.len() > 3000 { all.clear(); }
+        all.insert(key, l.clone());
+        Some(l)
+    }
+
+    fn layout_new(&self, s: &str, f: Font, w: f32, h: f32, align: Align, wrap: bool) -> Option<IDWriteTextLayout> {
         unsafe {
             let l = self.dw.CreateTextLayout(&wide(s), &self.format(f).ok()?, w.max(1.0), h.max(1.0)).ok()?;
             let _ = l.SetTextAlignment(match align { Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING, Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER, Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING });
@@ -432,6 +446,21 @@ impl<'a> Canvas<'a> {
         match &self.surf { Surface::Pix(p) => (p.width(), p.height()), Surface::Mask(m) => (m.width(), m.height()) }
     }
     fn ts(&self) -> Transform { Transform::from_row(self.scale, 0.0, 0.0, self.scale, 0.0, self.dy * self.scale) }
+
+    /// Something static drawn first (a window's panel, with its blurred shadow): `draw` renders it once into
+    /// a bitmap kept under `key` (one entry; put everything it depends on in the key), later frames blit that.
+    pub fn backdrop(&mut self, key: &[u32], draw: impl FnOnce(&mut Canvas)) {
+        thread_local! { static KEPT: std::cell::RefCell<Option<(Vec<u32>, Pixmap)>> = Default::default(); }
+        let (pw, ph) = self.size_px();
+        if !KEPT.with(|k| k.borrow().as_ref().is_some_and(|e| e.0 == key)) {
+            let Some(mut pm) = Pixmap::new(pw, ph) else { return draw(self) };
+            if let Some(mut sc) = Canvas::new(self.g, pm.data_mut(), pw, ph, self.scale, 0) { draw(&mut sc); }
+            KEPT.with(|k| *k.borrow_mut() = Some((key.to_vec(), pm)));
+        }
+        KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().as_ref(), &mut self.surf) {
+            px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref());
+        });
+    }
 
     /// A clickable spot; returns true while the pointer is over it (for hover backgrounds).
     pub fn hit(&mut self, r: R, id: u32) -> bool { self.hits.push((r, id)); self.hover == id }

@@ -13,9 +13,9 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-pub const PAGES: [(&str, &str, &str); 8] = [
+pub const PAGES: [(&str, &str, &str); 9] = [
     ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
-    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("services", "hub", "Services"), ("about", "info", "About"),
+    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("services", "hub", "Services"), ("about", "info", "About"),
 ];
 const SCHEMES: [(&str, &str, &str); 10] = [
     ("auto", "auto_awesome", "Auto"), ("content", "image", "Content"), ("expressive", "palette", "Expressive"),
@@ -58,6 +58,7 @@ impl Settings {
             "presets" => self.presets(p),
             "bar" => self.bar(p),
             "island" => self.island(p),
+            "buddies" => self.buddies(p),
             "services" => self.services(p),
             _ => self.about(p),
         }
@@ -172,6 +173,16 @@ impl Settings {
             }
             if !self.busy.is_empty() { p.spinner_block(); }
         });
+        if let Load::Ready(mons) = &self.mons {
+            let mons = mons.clone();
+            if !mons.is_empty() {
+                p.h2("brightness_6", "Brightness", "");
+                p.card(|p| for m in mons {
+                    let (i, name) = m.split_once('|').unwrap_or(("0", ""));
+                    self.slider(p, &format!("monitor.{i}"), name, Sl { min: 1.0, max: 100.0, step: 1.0, fmt: Fmt::PctInt }, "brightness_6");
+                });
+            }
+        }
         p.card(|p| {
             self.slider(p, "transparency", "Bar & panel transparency", Sl { min: 0.0, max: 0.6, step: 0.02, fmt: Fmt::Pct }, "opacity");
             self.text_ph(p, "font.family", "Font", "Any installed font, by its name. Empty: Google Sans Flex", "font_download", "Google Sans Flex");
@@ -400,6 +411,27 @@ impl Settings {
         });
     }
 
+    /// Two buddy slots on the bar. Slot 1 is the original `native.gojo` flag, slot 2 is `buddies.b.on`.
+    fn buddies(&mut self, p: &mut Pen) {
+        let casts: Vec<(Value, String)> = crate::cast::CASTS.iter().map(|c| (json!(c.id), c.label.to_string())).collect();
+        let chatty = [("quiet", "Quiet"), ("normal", "Normal"), ("chatty", "Chatty")];
+        for (k, title, on) in [("a", "Buddy 1", "native.gojo"), ("b", "Buddy 2", "buddies.b.on")] {
+            p.h2("pets", title, "");
+            p.card(|p| {
+                self.sw(p, on, "Show on the bar", "Turn the buddy off and it goes away", "visibility");
+                self.pick(p, &format!("buddies.{k}.character"), casts.clone(), "Character", "Their look and what they say", "face", 190.0);
+                self.text_ph(p, &format!("buddies.{k}.name"), "Name", "What their partner calls them", "badge", "Character's own name");
+                self.seg(p, &format!("buddies.{k}.chatty"), &chatty, "Talks", "chat");
+                self.sw(p, &format!("buddies.{k}.walk"), "Walks around", "Off: they stay where they are and only sit or stand", "directions_walk");
+            });
+        }
+        p.h2("favorite", "Partners", "");
+        p.card(|p| {
+            self.sw(p, "buddies.pair", "Make them partners", "With both on, they walk to each other, face each other and trade lines", "group");
+            p.note("Click a buddy to hear them, double-click for their move, drag to move them. With two on, only buddy 1 comments on the desktop. Quiet turns a buddy's comments and chat off.", 12.0);
+        });
+    }
+
     fn services(&mut self, p: &mut Pen) {
         let keys = match &self.keys { Load::Ready(k) => Some(k.clone()), _ => None };
         let current_model = self.gs(p.cx, "ai.model");
@@ -503,9 +535,9 @@ impl Settings {
         p.h2("info", "About", "");
         p.card(|p| {
             if let Some(r) = p.row(40.0) {
-                let w = chip_w(p.c, "end4-pC", true);
-                p.left(r, "", "Zor UI", "Built on pctrade's end4-pC (illogical-impulse by end-4), for GlazeWM on Windows", w);
-                p.chip_right(r, Some("open_in_new"), "end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
+                let w = chip_w(p.c, "zor-ui", true);
+                p.left(r, "", "Zor UI", "Built on pctrade's zor-ui (illogical-impulse by end-4), for GlazeWM on Windows", w);
+                p.chip_right(r, Some("open_in_new"), "Upstream: end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
             }
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Open", true);
@@ -514,7 +546,7 @@ impl Settings {
             }
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Edit", true);
-                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zebar\\end4-pC\\config.json" }, w);
+                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json" }, w);
                 p.chip_right(r, Some("edit"), "Edit", Act::Do("editcfg", String::new()));
             }
         });
@@ -657,7 +689,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "services", "about"]);
+        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "services", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }

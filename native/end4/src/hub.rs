@@ -11,8 +11,8 @@ use std::{
 };
 
 /// Same list as SHARED in lib/core.js.
-pub const KEYS: &[&str] = &["end4-pC.timer", "end4-pC.rec", "end4-pC.timerDone", "end4.agents", "end4.openOn",
-    "end4.islandAt", "end4-pC.rightTab", "end4-pC.todo", "end4-pC.notes", "end4.closedAt.island-panel", "end4.closedAt.overview",
+pub const KEYS: &[&str] = &["zor-ui.timer", "zor-ui.rec", "zor-ui.timerDone", "end4.agents", "end4.openOn",
+    "end4.islandAt", "zor-ui.rightTab", "zor-ui.todo", "zor-ui.notes", "end4.closedAt.island-panel", "end4.closedAt.overview",
     "end4.closedAt.sidebar-left", "end4.closedAt.sidebar-right", "end4.closedAt.settings"];
 pub const PORT: u16 = 6133;
 
@@ -192,7 +192,7 @@ fn fresh() -> Value {
 
 pub fn timer() -> Value {
     let mut t = fresh();
-    if let (Some(o), Value::Object(saved)) = (t.as_object_mut(), get_json("end4-pC.timer")) { for (k, v) in saved { o.insert(k, v); } }
+    if let (Some(o), Value::Object(saved)) = (t.as_object_mut(), get_json("zor-ui.timer")) { for (k, v) in saved { o.insert(k, v); } }
     t
 }
 
@@ -224,7 +224,7 @@ pub fn tick(cfg: &crate::conf::Config) -> Option<String> {
     } else { t["phase"] = json!("focus"); }
     t["running"] = json!(false);
     t["left"] = Value::Null;
-    set("end4-pC.timer", Some(t.to_string()));
+    set("zor-ui.timer", Some(t.to_string()));
     Some(done)
 }
 

@@ -1,6 +1,6 @@
 // Run: node tests/lyricpick.test.mjs
 import assert from 'node:assert/strict';
-import { pickLyrics, plainText } from '../zebar/end4-pC/lib/lyricpick.js';
+import { pickLyrics, plainText } from '../zebar/zor-ui/lib/lyricpick.js';
 
 const song = (trackName, artistName, duration, synced = true) => ({
   trackName, artistName, duration, plainLyrics: 'line one\nline two', syncedLyrics: synced ? '[00:01.00] line one\n[00:03.50] line two' : null,

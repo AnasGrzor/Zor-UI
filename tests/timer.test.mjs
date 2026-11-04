@@ -6,7 +6,7 @@ globalThis.localStorage = { getItem: k => store[k] ?? null, setItem: (k, v) => {
 let now = 1_000_000;
 Date.now = () => now;
 
-const timer = await import('../zebar/end4-pC/lib/timer.js');
+const timer = await import('../zebar/zor-ui/lib/timer.js');
 const cfg = { timer: { focus: 25, short: 5, long: 15, cycles: 2 } };
 
 // Fresh state: focus, 25 minutes, not running.

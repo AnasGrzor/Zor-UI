@@ -1,8 +1,8 @@
 {
   "$schema": "https://github.com/glzr-io/zebar/raw/v3.0.0/resources/zpack-schema.json",
-  "name": "end4-pC",
+  "name": "zor-ui",
   "version": "0.3.0",
-  "description": "end4-pC (illogical-impulse) for Windows: Material You bar, sidebars, overview and desktop widgets.",
+  "description": "zor-ui (illogical-impulse) for Windows: Material You bar, sidebars, overview and desktop widgets.",
   "tags": [
     "topbar",
     "material",

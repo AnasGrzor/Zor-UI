@@ -3,7 +3,7 @@
 use crate::{
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    desk, dock, glaze, gojo, gfx::Gfx, gfx::R, hub, media, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, dock, glaze, gojo, gfx::Gfx, gfx::R, hub, media, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -26,6 +26,7 @@ pub struct Ctx {
     pub theme: Theme,
     pub state: State,
     pub weather: Option<weather::Weather>,
+    pub claude: Option<claude_usage::Usage>,
     pub host: String,
     pub cpu: f32,
     pub mem: f32,
@@ -72,7 +73,7 @@ impl Ctx {
     pub fn new(all: bool) -> Ctx {
         Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
-            weather: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
+            weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
             notif: None, osd: None, ver: 0, all, actions: vec![],
         }
@@ -161,6 +162,13 @@ impl App {
                 Some(w) => { post(Box::new(move |cx| cx.weather = Some(w))); std::thread::sleep(std::time::Duration::from_secs(1800)); }
                 None => std::thread::sleep(std::time::Duration::from_secs(60)),
             }
+        });
+        // Claude plan usage for Gojo, every 3 min; a failed fetch keeps the last value.
+        std::thread::spawn(|| loop {
+            if gojo::on() {
+                if let Some(u) = claude_usage::fetch() { post(Box::new(move |cx| cx.claude = Some(u))); }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(180));
         });
         Ok(())
     }
@@ -295,14 +303,14 @@ impl App {
             if n % 2 == 0 && self.cx.cfg.bool("showKeyboardLayout") { self.cx.kb = sys::keyboard(); }
             // pomodoro phases end here (bar.js renderTimer): whichever bar sees it first announces it
             if let Some(done) = hub::tick(&self.cx.cfg) {
-                hub::set("end4-pC.timerDone", Some(done.clone()));
+                hub::set("zor-ui.timerDone", Some(done.clone()));
                 proc::run_bg(&self.cx.cfg, "toggles", &["-Action", "timer-done", "-Value", &done]);
             }
             // a recording that died mustn't leave its chip behind
-            if n % 15 == 0 && hub::get("end4-pC.rec").is_some() {
+            if n % 15 == 0 && hub::get("zor-ui.rec").is_some() {
                 let cfg = Config(self.cx.cfg.0.clone());
                 std::thread::spawn(move || {
-                    if proc::bridge(&cfg, "record", &[])["recording"].as_bool() == Some(false) { hub::set("end4-pC.rec", None); post(Box::new(|_| {})); }
+                    if proc::bridge(&cfg, "record", &[])["recording"].as_bool() == Some(false) { hub::set("zor-ui.rec", None); post(Box::new(|_| {})); }
                 });
             }
         }

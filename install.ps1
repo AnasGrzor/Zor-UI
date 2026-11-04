@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Installs end4-pC for Windows (GlazeWM + Zebar + Flow Launcher + Material You theming).
+  Installs Zor UI (GlazeWM + Zebar + Flow Launcher + Material You theming).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -33,10 +33,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Repo = $PSScriptRoot
-$Root = Join-Path $env:LOCALAPPDATA 'end4-pC'
+$Root = Join-Path $env:LOCALAPPDATA 'zor-ui'
 $Scripts = Join-Path $Root 'scripts'
 $Glzr = Join-Path $env:USERPROFILE '.glzr'
-$Pack = Join-Path $Glzr 'zebar\end4-pC'
+$Pack = Join-Path $Glzr 'zebar\zor-ui'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM: Zebar's JSON parser rejects it
 
@@ -63,7 +63,38 @@ function ConvertTo-RustRegex([string]$s) {
   ($s.ToCharArray() | ForEach-Object { if ('\.^$|?*+()[]{}'.Contains([string]$_)) { '\' + $_ } else { [string]$_ } }) -join ''
 }
 
-if ([Environment]::OSVersion.Version.Major -lt 10) { throw 'end4-pC for Windows needs Windows 10 or 11.' }
+if ([Environment]::OSVersion.Version.Major -lt 10) { throw 'Zor UI needs Windows 10 or 11.' }
+
+# ------------------------------------------------------------------ 0. the old name
+# Zor UI was called end4-pC. Move its folders and theme files so settings, saved state and the
+# Python environment carry over. Runs once: it does nothing when the old folders are gone.
+$oldRoot = Join-Path $env:LOCALAPPDATA 'end4-pC'
+$oldPack = Join-Path $Glzr 'zebar\end4-pC'
+$oldFlow = Join-Path $env:APPDATA 'FlowLauncher\Themes\end4-pC.xaml'
+$oldFrag = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\end4-pC'
+if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
+  Step 'Moving settings from the old end4-pC name'
+  Get-Process end4, zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+  Start-Sleep -Seconds 1
+  if ((Test-Path $oldRoot) -and -not (Test-Path $Root)) { Move-Item $oldRoot $Root; Info "moved $oldRoot" }
+  if ((Test-Path $oldPack) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $oldPack $Pack; Info "moved $oldPack" }
+  if ((Test-Path $oldFlow) -and -not (Test-Path ($oldFlow -replace 'end4-pC', 'zor-ui'))) { Move-Item $oldFlow ($oldFlow -replace 'end4-pC', 'zor-ui') }
+  if ((Test-Path $oldFrag) -and -not (Test-Path ($oldFrag -replace 'end4-pC', 'zor-ui'))) {
+    Move-Item $oldFrag ($oldFrag -replace 'end4-pC', 'zor-ui')
+    $frag = $oldFrag -replace 'end4-pC', 'zor-ui'
+    if (Test-Path "$frag\end4-pC.json") { Move-Item "$frag\end4-pC.json" "$frag\zor-ui.json" }
+  }
+}
+# Paths and keys inside the moved files, and the AI agent hooks other tools point at the scripts with.
+# Checked on every run, so a move that was interrupted still gets its paths fixed.
+$stale = @("$Pack\config.json", "$Pack\theme.json", "$Root\state.json", "$Root\shared.json",
+    "$env:USERPROFILE\.claude\settings.json", "$env:USERPROFILE\.codex\config.toml", "$env:USERPROFILE\.codex\hooks.json") |
+  Where-Object { (Test-Path $_) -and ([IO.File]::ReadAllText($_) -match 'end4-pC') }
+foreach ($f in @($stale)) {
+  if ($f -match '\\\.(claude|codex)\\') { Backup $f }
+  [IO.File]::WriteAllText($f, ([IO.File]::ReadAllText($f) -replace 'end4-pC', 'zor-ui'), $Utf8)
+  Info "updated $f"
+}
 
 # ------------------------------------------------------------------ 1. apps
 if (-not $SkipDeps) {
@@ -120,7 +151,7 @@ if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, 
 # ------------------------------------------------------------------ 3. zebar widget pack
 Step "Installing the Zebar widget pack to $Pack"
 New-Item -ItemType Directory -Force -Path $Pack | Out-Null
-Copy-Item -Recurse -Force (Join-Path $Repo 'zebar\end4-pC\*') $Pack
+Copy-Item -Recurse -Force (Join-Path $Repo 'zebar\zor-ui\*') $Pack
 
 # Fonts for offline use (Google Fonts is the fallback if this fails).
 $fontDir = Join-Path $Pack 'assets\fonts'
@@ -140,7 +171,7 @@ foreach ($f in $fonts.Keys) {
 }
 
 $scriptsRe = (ConvertTo-RustRegex $Scripts).Replace('\', '\\')   # JSON-escape too
-$zpack = [IO.File]::ReadAllText((Join-Path $Repo 'zebar\end4-pC\zpack.json')).Replace('{{SCRIPTS_RE}}', $scriptsRe).Replace('{{PYTHON}}', $venvPy.Replace('\', '\\'))
+$zpack = [IO.File]::ReadAllText((Join-Path $Repo 'zebar\zor-ui\zpack.json')).Replace('{{SCRIPTS_RE}}', $scriptsRe).Replace('{{PYTHON}}', $venvPy.Replace('\', '\\'))
 Write-Text (Join-Path $Pack 'zpack.json') $zpack
 
 # Native widgets (native/end4): one small process instead of a browser window per widget. Built
@@ -194,10 +225,10 @@ Backup $zebarSettings
 $settings = [ordered]@{
   '$schema' = 'https://github.com/glzr-io/zebar/raw/v3.0.0/resources/settings-schema.json'
   startupConfigs = @(
-    [ordered]@{ pack = 'end4-pC'; widget = 'bar'; preset = 'default' },
-    [ordered]@{ pack = 'end4-pC'; widget = 'desktop'; preset = 'default' },
-    [ordered]@{ pack = 'end4-pC'; widget = 'visualizer'; preset = 'default' }
-  ) + @(if ($cfg.dock -and $cfg.dock.enabled) { [ordered]@{ pack = 'end4-pC'; widget = 'dock'; preset = 'default' } })
+    [ordered]@{ pack = 'zor-ui'; widget = 'bar'; preset = 'default' },
+    [ordered]@{ pack = 'zor-ui'; widget = 'desktop'; preset = 'default' },
+    [ordered]@{ pack = 'zor-ui'; widget = 'visualizer'; preset = 'default' }
+  ) + @(if ($cfg.dock -and $cfg.dock.enabled) { [ordered]@{ pack = 'zor-ui'; widget = 'dock'; preset = 'default' } })
 }
 Write-Text $zebarSettings ($settings | ConvertTo-Json -Depth 5)
 
@@ -216,27 +247,27 @@ $secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Objec
 $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
 if (Test-Path $native) {   # the keys open the native popups (end4.exe --open falls back to Zebar when a part isn't native)
-  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack end4-pC --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --open ' + $m.Groups[1].Value })
+  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack zor-ui --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe --open ' + $m.Groups[1].Value })
   # wallpaper / mode / game mode keys run the Rust ports (end4.exe falls back to the script for anything not ported)
-  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe --script ' + $m.Groups[1].Value })
+  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe --script ' + $m.Groups[1].Value })
 }
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"
 
 # ------------------------------------------------------------------ 5. flow launcher
-Step 'Selecting the end4-pC Flow Launcher theme'
+Step 'Selecting the zor-ui Flow Launcher theme'
 $flowSettings = Join-Path $env:APPDATA 'FlowLauncher\Settings\Settings.json'
 if (Test-Path $flowSettings) {
   if (Get-Process Flow.Launcher -ErrorAction SilentlyContinue) {
-    Info 'Flow Launcher is running: pick "end4-pC" in Flow Settings > Theme (it will not be overwritten on exit).'
+    Info 'Flow Launcher is running: pick "zor-ui" in Flow Settings > Theme (it will not be overwritten on exit).'
   } else {
     Backup $flowSettings
     $raw = [IO.File]::ReadAllText($flowSettings)
-    $raw = [regex]::Replace($raw, '"Theme"\s*:\s*"[^"]*"', '"Theme": "end4-pC"')
+    $raw = [regex]::Replace($raw, '"Theme"\s*:\s*"[^"]*"', '"Theme": "zor-ui"')
     Write-Text $flowSettings $raw
   }
 } else {
-  Write-Text $flowSettings '{ "Theme": "end4-pC" }'
+  Write-Text $flowSettings '{ "Theme": "zor-ui" }'
 }
 
 # ------------------------------------------------------------------ 6. colors
@@ -303,7 +334,7 @@ $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }
 $o = if ($Mod -eq 'win') { 'Win+Tab' } else { 'Alt+`' }
 Write-Host @"
 
-end4-pC for Windows is installed.
+Zor UI is installed.
 
   $m+A          left sidebar (media, AI chat, translator, anime, football)
   $m+N          right sidebar (toggles, notifications, calendar, to-do)

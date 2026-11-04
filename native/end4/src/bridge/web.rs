@@ -16,7 +16,7 @@ use std::{
 /// Streaming commands this module runs.
 pub const STREAMS: &[&str] = &["ai-chat"];
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0 Safari/537.36 end4-pC";
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0 Safari/537.36 zor-ui";
 const PRESET_REPO: &str = "pctrade/end4-pCpresets";
 const RAW: &str = "https://raw.githubusercontent.com/pctrade/end4-pCpresets";
 
@@ -170,7 +170,7 @@ fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
     // SAFETY: the blobs outlive the calls; the output buffer is copied, then freed with LocalFree.
     unsafe {
         if protect {
-            CryptProtectData(&input, windows::core::w!("end4-pC"), None, None, None, 0, &mut output).ok()?;
+            CryptProtectData(&input, windows::core::w!("zor-ui"), None, None, None, 0, &mut output).ok()?;
         } else {
             CryptUnprotectData(&input, None, None, None, None, 0, &mut output).ok()?;
         }
@@ -209,7 +209,7 @@ fn secret_set(name: &str, value: &str) -> Value {
 
 // ------------------------------------------------------------------ translate
 
-fn translate(target: &str, source: &str, text: &str) -> Value {
+pub(super) fn translate(target: &str, source: &str, text: &str) -> Value {
     let text = text.trim();
     if text.is_empty() { return json!({ "text": "", "detected": source }); }
     let src = if source.is_empty() { "auto" } else { source };
@@ -579,7 +579,7 @@ fn int_or(v: &Value, default: i64) -> i64 {
     if n == 0 { default } else { n }
 }
 
-/// Maps the parts of an end4-pC preset that mean something on Windows. `viz` is config.json's visualizer.
+/// Maps the parts of an zor-ui preset that mean something on Windows. `viz` is config.json's visualizer.
 fn windows_settings_from_end4(preset: &Value, viz: &Value) -> Value {
     let a = &preset["appearance"];
     let palette = a["palette"]["type"].as_str().filter(|s| !s.is_empty()).unwrap_or("auto");
@@ -612,13 +612,13 @@ fn sync_zebar_startup(cfg: &Value) {
     let Some(dir) = pack().parent().map(Path::to_path_buf) else { return };
     let path = dir.join("settings.json");
     let mut s = load_json(&path, json!({}));
-    let widget = |w: &str| json!({ "pack": "end4-pC", "widget": w, "preset": "default" });
+    let widget = |w: &str| json!({ "pack": "zor-ui", "widget": w, "preset": "default" });
     let mut list: Vec<Value> = Vec::new();
     if !truthy(&cfg["native"]["bar"]) { list.push(widget("bar")); }
     if cfg.get("desktopWidgets").map_or(true, truthy) { list.push(widget("desktop")); }
     if cfg["visualizer"].get("desktop").map_or(true, truthy) { list.push(widget("visualizer")); }
     if truthy(&cfg["dock"]["enabled"]) { list.push(widget("dock")); }
-    list.extend(s["startupConfigs"].as_array().into_iter().flatten().filter(|c| c["pack"] != "end4-pC").cloned());
+    list.extend(s["startupConfigs"].as_array().into_iter().flatten().filter(|c| c["pack"] != "zor-ui").cloned());
     s["startupConfigs"] = json!(list);
     save_json(&path, &s);
 }

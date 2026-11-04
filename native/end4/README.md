@@ -4,8 +4,8 @@ The Zor UI widgets (formerly end4-pC) drawn by one small Windows process instead
 The bar on two monitors plus four desktop cards take about 32 MB working set (9 MB private) here;
 the same widgets in Zebar used about 1 GB.
 
-It reads the same files as the Zebar pack (`~/.glzr/zebar/end4-pC/config.json`, `theme.json`, the fonts in
-`assets/fonts`). Card positions live in `%LOCALAPPDATA%\end4-pC\state.json`.
+It reads the same files as the Zebar pack (`~/.glzr/zebar/zor-ui/config.json`, `theme.json`, the fonts in
+`assets/fonts`). Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
 
 ## What it draws
 
@@ -15,7 +15,7 @@ It reads the same files as the Zebar pack (`~/.glzr/zebar/end4-pC/config.json`, 
 |---|---|---|
 | Desktop cards | `"desktop": true` | clock (all 4 styles), weather, week, greeting, calendar, world clock, resources, text, image 1-3 |
 | Bar | `"bar": true` | every module (layout, styles and groups from Settings > Bar), Dynamic Island, hover popups, tray |
-| Gojo | `"gojo": true` | native only (`gojo.rs`): a small Gojo on the bar. He walks, sits on the bar's edge and sleeps after 3 idle minutes. Hover lifts his blindfold, click makes him talk, double-click fires Hollow Purple, and right-click turns on Infinity, which keeps the pointer 60 px away for 10 s. Drag him to move him. He hides behind full-screen apps. He also comments on new tracks, the volume, the battery, the network, the weather, notifications and a busy CPU. |
+| Gojo and buddies | `"gojo": true` (buddy 1), `"buddies": {"b": {"on": true}}` (buddy 2) | native only (`gojo.rs`, `cast.rs`): small buddies on the bar. Settings > Buddies picks Gojo, Geto or Yuji for each, renames them, sets how much they talk, turns walking off, and makes the two partners, who walk to each other and trade lines. Gojo: he walks, sits on the bar's edge and sleeps after 3 idle minutes. Hover lifts his blindfold, click makes him talk, double-click fires Hollow Purple, and right-click turns on Infinity, which keeps the pointer 60 px away for 10 s. Drag him to move him. He hides behind full-screen apps. He also comments on new tracks, the volume, the battery, the network, the weather, notifications and a busy CPU. |
 | Island panel | `"island-panel": true` | media, timer, notifications, agents, recording |
 | Overview | `"overview": true` | windows, workspaces, clipboard history |
 | Left / right sidebar | `"sidebar-left"`, `"sidebar-right"` | left: home, AI chat, translator, anime, football. Right: toggles, sliders, mixer, notifications, calendar, to-do, timer |
@@ -72,7 +72,7 @@ cargo build --release
 releases link through `windows-link` (raw-dylib), which needs `dlltool` + an assembler that rustup's GNU
 toolchain doesn't ship. Keep the lock file when updating.
 
-`install.ps1` builds it when `cargo` is on PATH, copies `end4.exe` to `%LOCALAPPDATA%\end4-pC`, and turns on every missing
+`install.ps1` builds it when `cargo` is on PATH, copies `end4.exe` to `%LOCALAPPDATA%\zor-ui`, and turns on every missing
 `"native"` key (`desktop`, `bar`, `visualizer`, `dock`, the popups). GlazeWM starts it with Zebar (`startup_commands`) and ignores its
 windows (`window_rules`).
 

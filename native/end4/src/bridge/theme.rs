@@ -36,8 +36,8 @@ mod palette;
 use palette::*;
 
 const VIDEO_EXT: &[&str] = &["mp4", "webm", "mkv", "mov", "avi", "wmv", "m4v"];
-const BEGIN: &str = "# >>> end4-pC colors (managed by end4_theme.py)";
-const END: &str = "# <<< end4-pC colors";
+const BEGIN: &str = "# >>> zor-ui colors (managed by end4_theme.py)";
+const END: &str = "# <<< zor-ui colors";
 
 // ------------------------------------------------------------------ images (WIC)
 
@@ -148,14 +148,14 @@ fn write_flow(template: &Path, themes_dir: &Path, c: &BTreeMap<String, String>, 
         out = out.replace(&format!("{{{{{k}}}}}"), &v);
     }
     let _ = std::fs::create_dir_all(themes_dir);
-    std::fs::write(themes_dir.join("end4-pC.xaml"), out.replace('\n', "\r\n")).is_ok()
+    std::fs::write(themes_dir.join("zor-ui.xaml"), out.replace('\n', "\r\n")).is_ok()
 }
 
-/// Windows Terminal fragment with an "end4-pC" colour scheme.
+/// Windows Terminal fragment with an "zor-ui" colour scheme.
 fn write_terminal(frag_dir: &Path, c: &BTreeMap<String, String>, t: &BTreeMap<String, String>) {
     let get = |m: &BTreeMap<String, String>, k: &str| Value::from(m.get(k).cloned().unwrap_or_default());
     let mut s = serde_json::Map::new();
-    for (k, v) in [("name", Value::from("end4-pC")), ("background", get(c, "surface")), ("foreground", get(c, "onSurface")), ("cursorColor", get(c, "primary")), ("selectionBackground", get(c, "secondaryContainer"))] {
+    for (k, v) in [("name", Value::from("zor-ui")), ("background", get(c, "surface")), ("foreground", get(c, "onSurface")), ("cursorColor", get(c, "primary")), ("selectionBackground", get(c, "secondaryContainer"))] {
         s.insert(k.into(), v);
     }
     for (i, n) in ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"].iter().enumerate() {
@@ -163,7 +163,7 @@ fn write_terminal(frag_dir: &Path, c: &BTreeMap<String, String>, t: &BTreeMap<St
         s.insert(format!("bright{}{}", n[..1].to_uppercase(), &n[1..]), get(t, &format!("term{}", i + 8)));
     }
     let _ = std::fs::create_dir_all(frag_dir);
-    let _ = std::fs::write(frag_dir.join("end4-pC.json"), serde_json::to_string_pretty(&json!({ "schemes": [s] })).unwrap_or_default());
+    let _ = std::fs::write(frag_dir.join("zor-ui.json"), serde_json::to_string_pretty(&json!({ "schemes": [s] })).unwrap_or_default());
 }
 
 /// Asks GlazeWM to reload its config (best effort, 10 s at most).
@@ -200,9 +200,9 @@ impl Paths {
             state: root().join("state.json"),
             pack: pack(),
             glazewm: home.join(".glzr").join("glazewm").join("config.yaml"),
-            flow_template: root().join("flowlauncher").join("end4-pC.xaml.template"),
+            flow_template: root().join("flowlauncher").join("zor-ui.xaml.template"),
             flow_themes: PathBuf::from(appdata).join("FlowLauncher").join("Themes"),
-            terminal: PathBuf::from(local).join("Microsoft").join("Windows Terminal").join("Fragments").join("end4-pC"),
+            terminal: PathBuf::from(local).join("Microsoft").join("Windows Terminal").join("Fragments").join("zor-ui"),
             reload: true,
         }
     }
@@ -499,7 +499,7 @@ mod tests {
         let t = d.join("t.template");
         std::fs::write(&t, "{{BG}} {{FG}} {{COLORSCHEME}} {{PRIMARY}}").unwrap();
         assert!(write_flow(&t, &d.join("themes"), &colors(), false));
-        assert_eq!(std::fs::read_to_string(d.join("themes").join("end4-pC.xaml")).unwrap(), "#000002 #000003 Light #000000");
+        assert_eq!(std::fs::read_to_string(d.join("themes").join("zor-ui.xaml")).unwrap(), "#000002 #000003 Light #000000");
         assert!(!write_flow(&d.join("none"), &d.join("themes"), &colors(), true));
     }
 
@@ -508,9 +508,9 @@ mod tests {
         let d = tmp("term");
         let (_, term, _) = generate(hex_rgb("#6750A4").unwrap(), true, "tonal-spot", false);
         write_terminal(&d, &colors(), &term);
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(d.join("end4-pC.json")).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(d.join("zor-ui.json")).unwrap()).unwrap();
         let s = &v["schemes"][0];
-        assert_eq!(s["name"], "end4-pC");
+        assert_eq!(s["name"], "zor-ui");
         assert_eq!(s["brightPurple"], json!(term["term13"]));
         assert_eq!(s["black"], json!(term["term0"]));
     }

@@ -180,21 +180,21 @@ function renderSystem() {
 // Screen recording chip (started from the right sidebar). Checks now and then that ffmpeg is
 // still running, so a recording that died doesn't leave the chip behind.
 function renderRec() {
-  const started = Number(localStorage.getItem('end4-pC.rec')) || 0;
+  const started = Number(localStorage.getItem('zor-ui.rec')) || 0;
   setHTML($('#g-rec'), started ? `${icon('stop_circle', { fill: true })}${timer.clock((Date.now() - started) / 1000)}` : '');
 }
 setInterval(async () => {
-  if (localStorage.getItem('end4-pC.rec') && !(await bridge('record')).recording) { localStorage.removeItem('end4-pC.rec'); renderRec(); }
+  if (localStorage.getItem('zor-ui.rec') && !(await bridge('record')).recording) { localStorage.removeItem('zor-ui.rec'); renderRec(); }
 }, 15000);
 $('#g-rec').addEventListener('click', async () => {
-  localStorage.removeItem('end4-pC.rec');
+  localStorage.removeItem('zor-ui.rec');
   renderRec();
   await bridge('record', 'stop');   // opens Explorer on the new file
 });
 
 // The timer chip's content ('' when no timer runs); also used by the island.
 function timerChip() {
-  const timerDone = localStorage.getItem('end4-pC.timerDone'), s = timer.load();
+  const timerDone = localStorage.getItem('zor-ui.timerDone'), s = timer.load();
   if (timerDone) return { done: true, html: `${icon('alarm', { fill: true })}${timerDone === 'focus' ? 'Break time' : 'Focus time'}` };
   if (s.running) return { html: `${icon(s.phase === 'focus' ? 'timer' : 'coffee')}${timer.clock(timer.left(s, cfg))}` };
   if (s.sw.running) return { html: `${icon('timer_play')}${timer.clock(timer.swElapsed(s))}` };
@@ -202,7 +202,7 @@ function timerChip() {
 }
 function renderTimer() {
   const done = timer.tick(cfg);
-  if (done) { localStorage.setItem('end4-pC.timerDone', done); run('toggles', '-Action', 'timer-done', '-Value', done); }
+  if (done) { localStorage.setItem('zor-ui.timerDone', done); run('toggles', '-Action', 'timer-done', '-Value', done); }
   const t = timerChip();
   $('#g-timer').classList.toggle('done', !!t.done);
   setHTML($('#g-timer'), t.html);
@@ -230,7 +230,7 @@ function diProviders() {
   const asks = di.agents && agents.some(a => a.state === 'waiting');
   // An agent waiting for you comes before everything but a new notification; one at work only
   // takes the island when nothing else does.
-  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['agent', asks], ['recording', di.recording && !!localStorage.getItem('end4-pC.rec')],
+  return [['notification', !!diNotif, true], ['osd', !!osd, true], ['agent', asks], ['recording', di.recording && !!localStorage.getItem('zor-ui.rec')],
     ['timer', di.timer && !!timerChip().html], ['media', di.media && !!s?.title],
     ['agent', di.agents && di.agentWorking && !asks && agents.some(a => a.state === 'working')]].filter(p => p[1]);
 }
@@ -276,7 +276,7 @@ function renderIsland() {
   } else if (state === 'osd') {
     html = `${icon(osd.icon, { fill: true, cls: 'big' })}${osd.value != null ? `<span class="osd-bar"><span style="width:${Math.round(osd.value)}%"></span></span>` : ''}<span>${osd.text}</span>`;
   } else if (state === 'recording') {
-    html = `<span class="di-dot"></span>Recording ${timer.clock((Date.now() - Number(localStorage.getItem('end4-pC.rec'))) / 1000)}`;
+    html = `<span class="di-dot"></span>Recording ${timer.clock((Date.now() - Number(localStorage.getItem('zor-ui.rec'))) / 1000)}`;
   } else if (state === 'timer') {
     html = t.html;
   } else if (state === 'media') {
@@ -409,8 +409,8 @@ $('#btn-left').addEventListener('click', () => here('sidebar-left'));
 $('#g-sys').addEventListener('click', () => here('sidebar-right'));
 $('#g-clock').addEventListener('click', () => here('sidebar-right'));
 $('#g-timer').addEventListener('click', () => {
-  localStorage.removeItem('end4-pC.timerDone');
-  localStorage.setItem('end4-pC.rightTab', 'timer');
+  localStorage.removeItem('zor-ui.timerDone');
+  localStorage.setItem('zor-ui.rightTab', 'timer');
   renderTimer();
   here('sidebar-right');
 });

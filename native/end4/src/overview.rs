@@ -145,7 +145,7 @@ fn sample() -> Wm {
     let ws = |n: &str| Ws { name: n.into(), display: n.into(), displayed: n == "1", occupied: true };
     Wm {
         monitors: vec![Monitor { id: "m".into(), focus: true, workspaces: ["1", "2", "3"].map(ws).to_vec(), ..Default::default() }],
-        windows: vec![w("a", "end4-pC - Visual Studio Code", "Code", "1", true, false), w("b", "Docs - Google Chrome", "chrome", "1", false, false),
+        windows: vec![w("a", "zor-ui - Visual Studio Code", "Code", "1", true, false), w("b", "Docs - Google Chrome", "chrome", "1", false, false),
             w("c", "Downloads", "explorer", "2", false, true), w("d", "PowerShell", "WindowsTerminal", "3", false, false)],
         workspace: "1".into(),
         ..Default::default()

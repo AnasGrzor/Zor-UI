@@ -17,9 +17,13 @@ pub fn layer0(cx: &Ctx) -> Color { alpha(cx.theme.c("background"), 1.0 - cx.cfg.
 /// The popup background (bar hover popups, sidebars): shadow, 1px border, `--layer0` fill. `r` is the
 /// card; leave ~12 px around it in the window for the shadow.
 pub fn panel(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) {
-    c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(r, radius, col) });
-    c.rect(r, radius, alpha(cx.theme.c("outlineVariant"), 0.45));
-    c.rect(R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), radius - 1.0, layer0(cx));
+    let (outline, fill) = (alpha(cx.theme.c("outlineVariant"), 0.45), layer0(cx));
+    let key = [c.w as u32, c.h as u32, (c.scale * 100.0) as u32, (radius * 100.0) as u32, r.x as u32, r.y as u32, r.w as u32, r.h as u32, outline, fill];
+    c.backdrop(&key, |c| {
+        c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(r, radius, col) });
+        c.rect(r, radius, outline);
+        c.rect(R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), radius - 1.0, fill);
+    });
 }
 
 /// `.card`: `--layer1` (surfaceContainerLow) fill, radius 23 by default (--round-lg).
@@ -147,7 +151,7 @@ pub fn blink() -> bool { (hub::now_ms() / 500.0) as u64 % 2 == 0 }
 
 /// Vertical scroll offset of a clipped list. Keep one per scrollable area.
 #[derive(Default)]
-pub struct Scroll { pub y: f32 }
+pub struct Scroll { pub y: f32, tgt: Option<f32> }
 
 impl Scroll {
     /// Wheel step: three lines per notch (`d` is Input::Wheel's delta, >0 up).
@@ -155,7 +159,22 @@ impl Scroll {
         self.y -= d as f32 / 120.0 * 48.0;
         self.clamp(content_h, view_h);
     }
-    pub fn clamp(&mut self, content_h: f32, view_h: f32) { self.y = self.y.clamp(0.0, (content_h - view_h).max(0.0)); }
+    pub fn clamp(&mut self, content_h: f32, view_h: f32) {
+        let max = (content_h - view_h).max(0.0);
+        self.y = self.y.clamp(0.0, max);
+        if let Some(t) = &mut self.tgt { *t = t.clamp(0.0, max); }
+    }
+    /// Like `wheel`, but `y` eases to the new spot: call `ease` once per frame while `moving`.
+    pub fn glide(&mut self, d: i32, content_h: f32, view_h: f32) {
+        self.tgt = Some(self.tgt.unwrap_or(self.y) - d as f32 / 120.0 * 48.0);
+        self.clamp(content_h, view_h);
+    }
+    pub fn moving(&self) -> bool { self.tgt.is_some_and(|t| (t - self.y).abs() > 0.5) }
+    pub fn ease(&mut self) {
+        if let Some(t) = self.tgt {
+            self.y = if (t - self.y).abs() > 0.5 { self.y + (t - self.y) * 0.25 } else { self.tgt = None; t };
+        }
+    }
     /// Draws `body(canvas, top)` clipped to `r`, where `top` is the y of the content's first pixel
     /// (r.y - scroll), plus a thin scrollbar. Skip items outside the view yourself: hit spots ignore the clip.
     pub fn region(&mut self, c: &mut Canvas, cx: &Ctx, r: R, content_h: f32, body: impl FnOnce(&mut Canvas, f32)) {

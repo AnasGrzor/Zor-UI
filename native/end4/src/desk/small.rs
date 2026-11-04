@@ -16,9 +16,9 @@ use windows::Win32::{
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-const TODO: &str = "end4-pC.todo";
-const NOTES: &str = "end4-pC.notes";
-const TIMER: &str = "end4-pC.timer";
+const TODO: &str = "zor-ui.todo";
+const NOTES: &str = "zor-ui.notes";
+const TIMER: &str = "zor-ui.timer";
 const ITEM0: u32 = 100;
 const AREA: u32 = 1;
 const GO: u32 = 2;

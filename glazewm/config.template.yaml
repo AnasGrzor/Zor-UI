@@ -1,11 +1,11 @@
-# end4-pC for Windows - GlazeWM config
+# Zor UI - GlazeWM config
 # Keybinds mirror end4 / illogical-impulse on Hyprland. "{{MOD}}" is replaced by
 # install.ps1 (-Mod alt | win). Edit freely; re-run install.ps1 -SkipDeps only
 # if you want to regenerate this file from the template.
 
 general:
   # Flow Launcher (Alt+Space) starts here: its own "start on login" setting is off by default.
-  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\end4-pC\end4.exe', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
+  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
   shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F', 'shell-exec taskkill /IM end4.exe /F']
   config_reload_commands: []
   focus_follows_cursor: false
@@ -29,7 +29,7 @@ gaps:
 
 # Border colors below are rewritten by scripts/end4_theme.py on every
 # wallpaper change. Keep the marker lines so it can find this block.
-# >>> end4-pC colors (managed by end4_theme.py)
+# >>> zor-ui colors (managed by end4_theme.py)
 window_effects:
   focused_window:
     border: { enabled: true, color: '#D0BCFF' }
@@ -41,7 +41,7 @@ window_effects:
     hide_title_bar: { enabled: false }
     corner_style: { enabled: true, style: 'rounded' }
     transparency: { enabled: false, opacity: '92%' }
-# <<< end4-pC colors
+# <<< zor-ui colors
 
 window_behavior:
   initial_state: 'tiling'
@@ -134,15 +134,15 @@ keybindings:
   # ---- end4 shell: sidebars, overview, wallpaper -------------------------
   # Sidebars and overview open on the focused monitor; pressing again closes them
   # (openOnTargetMonitor in lib/core.js). Placement matches the presets in zpack.json.
-  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name sidebar-left --anchor top_left --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
+  - commands: ['shell-exec zebar start-widget --pack zor-ui --widget-name sidebar-left --anchor top_left --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
     bindings: ['{{MOD}}+a']
-  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name sidebar-right --anchor top_right --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
+  - commands: ['shell-exec zebar start-widget --pack zor-ui --widget-name sidebar-right --anchor top_right --offset-x 0px --offset-y 56px --width 480px --height 100% --monitor-type all']
     bindings: ['{{MOD}}+n']
-  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name overview --anchor center --offset-x 0px --offset-y 0px --width 82% --height 74% --monitor-type all']
+  - commands: ['shell-exec zebar start-widget --pack zor-ui --widget-name overview --anchor center --offset-x 0px --offset-y 0px --width 82% --height 74% --monitor-type all']
     bindings: ['{{OVERVIEW}}']
-  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name settings --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
+  - commands: ['shell-exec zebar start-widget --pack zor-ui --widget-name settings --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
     bindings: ['{{MOD}}+i']
-  - commands: ['shell-exec zebar start-widget --pack end4-pC --widget-name keybinds --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
+  - commands: ['shell-exec zebar start-widget --pack zor-ui --widget-name keybinds --anchor center --offset-x 0px --offset-y 0px --width 64% --height 80% --monitor-type primary']
     bindings: ['{{MOD}}+oem_question']
   - commands: ['shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "{{SCRIPTS}}\switchwall.ps1"']
     bindings: ['{{MOD}}+ctrl+t']

@@ -84,7 +84,7 @@ fn config_set(config: &Path, settings: &Path, key: &str, value_json: &str) -> Va
 fn sync_zebar_startup(cfg: &Value, path: &Path) {
     let mut s = load_json(path, json!({}));
     if !s.is_object() { s = json!({}); }
-    let entry = |w: &str| json!({ "pack": "end4-pC", "widget": w, "preset": "default" });
+    let entry = |w: &str| json!({ "pack": "zor-ui", "widget": w, "preset": "default" });
     let on = |k: &str, k2: Option<&str>, default: bool| {
         let v = match k2 { Some(k2) => cfg.get(k).and_then(|d| d.get(k2)), None => cfg.get(k) };
         v.map_or(default, truthy)
@@ -95,7 +95,7 @@ fn sync_zebar_startup(cfg: &Value, path: &Path) {
     if on("visualizer", Some("desktop"), true) { mine.push(entry("visualizer")); }
     if on("dock", Some("enabled"), false) { mine.push(entry("dock")); }
     let old = s.get("startupConfigs").and_then(Value::as_array).cloned().unwrap_or_default();
-    mine.extend(old.into_iter().filter(|c| c.get("pack").and_then(Value::as_str) != Some("end4-pC")));
+    mine.extend(old.into_iter().filter(|c| c.get("pack").and_then(Value::as_str) != Some("zor-ui")));
     s["startupConfigs"] = Value::Array(mine);
     save_json(path, &s);
 }
@@ -207,7 +207,7 @@ fn native_open(name: &str) -> Value {
 /// Lets mouse clicks pass through a widget's window (WS_EX_LAYERED | WS_EX_TRANSPARENT).
 fn click_through(widget: &str) -> Value {
     if !widget_ok(widget) { return json!({ "ok": false }); }
-    let title = wide(&format!("Zebar - end4-pC / {widget}"));
+    let title = wide(&format!("Zebar - zor-ui / {widget}"));
     unsafe {
         let Ok(h) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) else { return err("window not found") };
         if h.0.is_null() { return err("window not found"); }
@@ -233,7 +233,7 @@ unsafe extern "system" fn each_window(h: HWND, lp: LPARAM) -> BOOL {
 fn focus_widget(widget: &str, x: &str, y: &str) -> Option<Value> {
     if !widget_ok(widget) { return Some(json!({ "ok": false })); }
     let (x, y) = (int_of(x)?, int_of(y)?);
-    let title = format!("Zebar - end4-pC / {widget}");
+    let title = format!("Zebar - zor-ui / {widget}");
     let mut all: Vec<(String, HWND)> = vec![];
     unsafe {
         let _ = EnumWindows(Some(each_window), LPARAM(&mut all as *mut _ as isize));
@@ -413,7 +413,7 @@ mod tests {
     fn config_set_nests_and_syncs() {
         let d = tmp("cfg");
         let (c, s) = (d.join("config.json"), d.join("settings.json"));
-        std::fs::write(&s, r#"{"startupConfigs":[{"pack":"other","widget":"x"},{"pack":"end4-pC","widget":"old"}],"keep":1}"#).unwrap();
+        std::fs::write(&s, r#"{"startupConfigs":[{"pack":"other","widget":"x"},{"pack":"zor-ui","widget":"old"}],"keep":1}"#).unwrap();
         assert_eq!(config_set(&c, &s, "ai.model", "\"gem\""), json!({ "ok": true }));
         assert_eq!(load_json(&c, json!(null)), json!({ "ai": { "model": "gem" } }));
         assert_eq!(config_set(&c, &s, "bad key", "1")["ok"], false);

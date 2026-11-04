@@ -1,6 +1,6 @@
 // Run: node tests/barlayout.test.mjs
 import assert from 'node:assert/strict';
-import { BAR_MODULES, barLayout, moveModule, placeModule } from '../zebar/end4-pC/lib/barlayout.js';
+import { BAR_MODULES, barLayout, moveModule, placeModule } from '../zebar/zor-ui/lib/barlayout.js';
 
 // Nothing saved: the defaults, in order.
 assert.deepEqual(barLayout(undefined), BAR_MODULES.map(m => [m[0], m[1]]));

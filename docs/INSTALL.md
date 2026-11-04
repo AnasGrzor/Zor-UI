@@ -2,11 +2,11 @@
 
 Zor UI is a Windows desktop shell built on GlazeWM (tiling), Zebar (widget host) and a native Rust
 process, `end4.exe`, that draws the bar, Dynamic Island, sidebars, overview, settings and desktop cards.
-It is a port of [end4-pC](https://github.com/pctrade/end4-pC) by pctrade, itself based on
+It began as a port of [end4-pC](https://github.com/pctrade/end4-pC) by pctrade, itself based on
 [illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4.
 
-The installer, folders and config keys still use the name `end4-pC`, so existing setups keep working.
-Wherever this guide says `end4-pC` in a path, that is the real folder name.
+If you installed it under its old name, `end4-pC`, re-running `install.ps1` moves your settings, saved state and
+Python environment to the new `zor-ui` folders and updates the AI agent hooks that point at the scripts.
 
 ## What you need
 
@@ -68,11 +68,11 @@ Nerd Font. It creates a Python virtual environment for the helper scripts that a
 
    | Where | What |
    |---|---|
-   | `%LOCALAPPDATA%\end4-pC\` | `end4.exe`, the helper scripts, the Python virtual environment, your saved state. |
-   | `~\.glzr\zebar\end4-pC\` | The widget pack, `config.json` (your settings) and `theme.json` (generated colors). |
+   | `%LOCALAPPDATA%\zor-ui\` | `end4.exe`, the helper scripts, the Python virtual environment, your saved state. |
+   | `~\.glzr\zebar\zor-ui\` | The widget pack, `config.json` (your settings) and `theme.json` (generated colors). |
    | `~\.glzr\glazewm\config.yaml` | The GlazeWM config with Zor UI's keybinds. Your old file is saved as `config.yaml.bak-<date>`. |
    | `~\.glzr\zebar\settings.json` | Which widgets Zebar starts with Windows. |
-   | Flow Launcher, Windows Terminal | A color theme named `end4-pC` for each, regenerated whenever the wallpaper changes. |
+   | Flow Launcher, Windows Terminal | A color theme named `zor-ui` for each, regenerated whenever the wallpaper changes. |
 
 Running `install.ps1` again updates everything and keeps your `config.json` settings.
 
@@ -86,7 +86,7 @@ If you need to start or restart the shell by hand (or press `alt+ctrl+r`):
 ```powershell
 # restart only the native part (bar, island, sidebars, overview, settings, desktop cards)
 Stop-Process -Name end4 -Force -ErrorAction SilentlyContinue
-Start-Process "$env:LOCALAPPDATA\end4-pC\end4.exe"
+Start-Process "$env:LOCALAPPDATA\zor-ui\end4.exe"
 
 # start the whole stack
 glazewm start
@@ -118,7 +118,7 @@ The full list is in the [README](../README.md#keybinds). Click the Dynamic Islan
 
 ## Turning native parts on and off
 
-`~\.glzr\zebar\end4-pC\config.json` has a `native` section. A part set to `true` is drawn by `end4.exe`;
+`~\.glzr\zebar\zor-ui\config.json` has a `native` section. A part set to `true` is drawn by `end4.exe`;
 a part set to `false` or missing is drawn by Zebar instead.
 
 ```json

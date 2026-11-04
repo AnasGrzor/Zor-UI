@@ -1,9 +1,9 @@
-// end4-pC for Windows - pomodoro + stopwatch (end4's TimerService).
+// Zor UI - pomodoro + stopwatch (end4's TimerService).
 // State lives in localStorage as timestamps, so it survives the sidebar closing and every
 // widget (bar, sidebar, desktop) sees the same timer. The bar calls tick() every second and
 // announces finished phases.
 
-const KEY = 'end4-pC.timer';
+const KEY = 'zor-ui.timer';
 const fresh = () => ({ phase: 'focus', cycle: 0, running: false, endsAt: 0, left: null, sw: { running: false, start: 0, acc: 0, laps: [] } });
 
 export function load() {

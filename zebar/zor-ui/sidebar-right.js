@@ -59,7 +59,7 @@ function toggleDefs() {
 }
 
 // Screen recording: the bar shows it too (red chip) and can stop it.
-const recStarted = () => Number(localStorage.getItem('end4-pC.rec')) || 0;
+const recStarted = () => Number(localStorage.getItem('zor-ui.rec')) || 0;
 setInterval(() => recStarted() && renderToggles(), 1000);
 
 function renderToggles() {
@@ -92,9 +92,9 @@ async function toggle(id) {
     case 'osk': return run('toggles', '-Action', 'osk');
     case 'power': return exec(async () => { const r = await run('toggles', '-Action', 'powerplan', '-Value', 'next'); if (r.plans) sys.plan = r.plans.find(p => p.active)?.name || null; });
     case 'record': return exec(async () => {
-      if (recStarted()) { await bridge('record', 'stop'); localStorage.removeItem('end4-pC.rec'); return; }
+      if (recStarted()) { await bridge('record', 'stop'); localStorage.removeItem('zor-ui.rec'); return; }
       const r = await bridge('record', 'start');
-      if (r.recording) { localStorage.setItem('end4-pC.rec', Math.round(r.started * 1000)); closeWindow(); }
+      if (r.recording) { localStorage.setItem('zor-ui.rec', Math.round(r.started * 1000)); closeWindow(); }
     });
     case 'colorpick': case 'screentranslate': closeWindow(); return run('toggles', '-Action', id);
   }
@@ -208,7 +208,7 @@ $('#page-cal').addEventListener('click', e => {
 });
 
 // ---------------------------------------------------------------- to-do
-const TODO_KEY = 'end4-pC.todo';
+const TODO_KEY = 'zor-ui.todo';
 const loadTodos = () => { try { return JSON.parse(localStorage.getItem(TODO_KEY)) || []; } catch { return []; } };
 const saveTodos = t => { try { localStorage.setItem(TODO_KEY, JSON.stringify(t)); } catch {} };
 function renderTodos() {
@@ -237,7 +237,7 @@ $('#todo-form').addEventListener('submit', e => {
 });
 
 // ---------------------------------------------------------------- timer (pomodoro + stopwatch)
-let timerMode = localStorage.getItem('end4-pC.timerMode') || 'pomo';
+let timerMode = localStorage.getItem('zor-ui.timerMode') || 'pomo';
 function renderTimer() {
   const s = timer.load();
   const modes = `<div class="chips mode">${[['pomo', 'Pomodoro'], ['sw', 'Stopwatch']].map(([m, l]) =>
@@ -265,7 +265,7 @@ function renderTimer() {
 }
 $('#page-timer').addEventListener('click', e => {
   const b = e.target.closest('button');
-  if (b?.dataset.tmode) { timerMode = b.dataset.tmode; localStorage.setItem('end4-pC.timerMode', timerMode); }
+  if (b?.dataset.tmode) { timerMode = b.dataset.tmode; localStorage.setItem('zor-ui.timerMode', timerMode); }
   const t = b?.dataset.t;
   if (t === 'pomo-toggle') timer.pomo.toggle(cfg);
   if (t === 'pomo-reset') timer.pomo.reset();
@@ -281,13 +281,13 @@ function showTab(tab) {
   if (!$(`.tabs [data-tab="${tab}"]`)) tab = 'notif';
   $$('.tabs button').forEach(b => b.classList.toggle('sel', b.dataset.tab === tab));
   $$('.page').forEach(p => p.classList.toggle('sel', p.id === 'page-' + tab));
-  localStorage.setItem('end4-pC.rightTab', tab);
+  localStorage.setItem('zor-ui.rightTab', tab);
 }
 $('.tabs').addEventListener('click', e => {
   const tab = e.target.closest('[data-tab]')?.dataset.tab;
   if (tab) showTab(tab);
 });
-showTab(localStorage.getItem('end4-pC.rightTab') || 'notif');
+showTab(localStorage.getItem('zor-ui.rightTab') || 'notif');
 
 // ---------------------------------------------------------------- notifications (Windows' notification history)
 let notifs = [], notifErr = '';

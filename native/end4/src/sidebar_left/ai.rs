@@ -1,6 +1,6 @@
 //! AI tab (tab-ai.js): streaming chat through the bridge `ai-chat` command (the conversation goes in as one JSON
 //! line on stdin), model picker, `/key` `/model` `/prompt` `/temp` `/clear` commands, Markdown replies.
-//! The history lives in %LOCALAPPDATA%\end4-pC\ai-history.json (the Zebar tab keeps its own in localStorage).
+//! The history lives in %LOCALAPPDATA%\zor-ui\ai-history.json (the Zebar tab keeps its own in localStorage).
 
 use super::{call, config_set, dots, md, sync, wake, Inbox, Tab};
 use crate::{

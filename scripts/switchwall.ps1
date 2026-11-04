@@ -1,5 +1,5 @@
 <#
-  end4-pC for Windows - wallpaper + Material You switcher (port of end4's switchwall.sh).
+  Zor UI - wallpaper + Material You switcher (port of end4's switchwall.sh).
 
     switchwall.ps1                       # pick an image with a file dialog
     switchwall.ps1 -Image C:\wall.jpg    # set wallpaper and theme from it
@@ -27,12 +27,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path -Parent $PSScriptRoot          # %LOCALAPPDATA%\end4-pC
+$Root = Split-Path -Parent $PSScriptRoot          # %LOCALAPPDATA%\zor-ui
 $Python = Join-Path $Root 'venv\Scripts\python.exe'
 $Theme = Join-Path $PSScriptRoot 'end4_theme.py'
 $StatePath = Join-Path $Root 'state.json'
 $Bridge = Join-Path $PSScriptRoot 'end4_bridge.py'
-$PackConfig = Join-Path $env:USERPROFILE '.glzr\zebar\end4-pC\config.json'
+$PackConfig = Join-Path $env:USERPROFILE '.glzr\zebar\zor-ui\config.json'
 $VideoExt = @('.mp4', '.webm', '.mkv', '.mov', '.avi', '.wmv', '.m4v')
 
 function Find-Lively {

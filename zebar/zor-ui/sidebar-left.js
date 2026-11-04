@@ -19,7 +19,7 @@ async function showTab(name) {
   if (!document.getElementById('tab-' + name)) name = 'home';
   $$('#tabs button').forEach(b => b.classList.toggle('sel', b.dataset.tab === name));
   $$('.tab-page').forEach(p => p.classList.toggle('sel', p.id === 'tab-' + name));
-  try { localStorage.setItem('end4-pC.leftTab', name); } catch {}
+  try { localStorage.setItem('zor-ui.leftTab', name); } catch {}
   if (mounters[name] && !mounted[name]) mounted[name] = mountTabSafe(name);
   (await mounted[name])?.focus?.();
 }
@@ -39,7 +39,7 @@ window.addEventListener('keydown', e => {
   }
 });
 let startTab = 'home';
-try { startTab = localStorage.getItem('end4-pC.leftTab') || 'home'; } catch {}
+try { startTab = localStorage.getItem('zor-ui.leftTab') || 'home'; } catch {}
 showTab(new URLSearchParams(location.search).get('tab') || startTab);
 
 const providers = zebar.createProviderGroup({

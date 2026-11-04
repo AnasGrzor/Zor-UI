@@ -1,4 +1,4 @@
-// end4-pC for Windows - dock (end4's Dock): pinned apps, then every other app with an open window.
+// Zor UI - dock (end4's Dock): pinned apps, then every other app with an open window.
 import { zebar, $, esc, setHTML, config, watchTheme, bridge, prettyApp, reloadOnConfigChange, closeWindow } from './lib/core.js';
 
 const cfg = await config();

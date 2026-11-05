@@ -15,6 +15,7 @@ mod claude_cli;
 mod common;
 mod football;
 mod media;
+mod sub_cli;
 mod notify;
 mod picker;
 mod screen_translate;

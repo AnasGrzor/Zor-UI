@@ -642,6 +642,11 @@ impl Settings {
                 p.chip_right(r, Some("settings"), "Open", Act::Do("winsettings", String::new()));
             }
             if let Some(r) = p.row(40.0) {
+                let w = chip_w(p.c, "Check", true);
+                p.left(r, "", "Updates", &format!("Version {}. Installs a newer release if there is one", env!("CARGO_PKG_VERSION")), w);
+                p.chip_right(r, Some("update"), "Check", Act::Do("update", String::new()));
+            }
+            if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Edit", true);
                 p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json" }, w);
                 p.chip_right(r, Some("edit"), "Edit", Act::Do("editcfg", String::new()));

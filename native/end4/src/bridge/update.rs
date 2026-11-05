@@ -36,14 +36,18 @@ fn mod_arg(cfg: &Config) -> &'static str { if cfg.str("modKey") == "lwin" { "win
 
 fn state_path() -> PathBuf { root().join("update.json") }
 
+/// Whether release `tag` should be installed. `force` (the Settings button) ignores the one-attempt-per-tag rule.
+fn should_install(tag: &str, current: &str, tried: Option<&str>, force: bool) -> bool {
+    newer(tag, current) && (force || tried != Some(tag))
+}
+
 /// One check. Ok(Some(tag)) when an install was started, Ok(None) when up to date or already tried.
-pub fn check(cfg: &Config) -> Result<Option<String>, String> {
+pub fn check(cfg: &Config, force: bool) -> Result<Option<String>, String> {
     let release = get_json(LATEST, &[("Accept", "application/vnd.github+json")]).ok_or("could not reach GitHub")?;
     let tag = release.get("tag_name").and_then(Value::as_str).ok_or("no release found")?;
-    if !newer(tag, env!("CARGO_PKG_VERSION")) { return Ok(None); }
     // One attempt per tag: a release built without a version bump would otherwise reinstall every day.
     let state = load_json(&state_path(), json!({}));
-    if state.get("tried").and_then(Value::as_str) == Some(tag) { return Ok(None); }
+    if !should_install(tag, env!("CARGO_PKG_VERSION"), state.get("tried").and_then(Value::as_str), force) { return Ok(None); }
     let url = asset_url(&release).ok_or_else(|| format!("release {tag} has no {ASSET}"))?;
     let zip = get_bytes(url, &[], 300).ok_or("download failed")?;
     let dir = std::env::temp_dir().join("zorui-update");
@@ -68,7 +72,7 @@ pub fn spawn() {
         std::thread::sleep(Duration::from_secs(60));
         loop {
             let cfg = Config::load();
-            if cfg.get("autoUpdate").as_bool().unwrap_or(true) { let _ = check(&cfg); }
+            if cfg.get("autoUpdate").as_bool().unwrap_or(true) { let _ = check(&cfg, false); }
             std::thread::sleep(Duration::from_secs(24 * 3600));
         }
     });
@@ -76,7 +80,7 @@ pub fn spawn() {
 
 /// `zorui.exe --update`: checks now, prints what happened.
 pub fn cli() -> i32 {
-    match check(&Config::load()) {
+    match check(&Config::load(), false) {
         Ok(Some(tag)) => { println!("updating to {tag}"); 0 }
         Ok(None) => { println!("up to date ({})", env!("CARGO_PKG_VERSION")); 0 }
         Err(e) => { eprintln!("update failed: {e}"); 1 }
@@ -94,6 +98,14 @@ mod tests {
         assert!(!newer("v0.1.0", "0.1.0"));
         assert!(!newer("v0.0.9", "0.1.0"));
         assert!(!newer("nightly", "0.1.0"));
+    }
+
+    #[test]
+    fn force_ignores_the_tried_tag() {
+        assert!(should_install("v0.2.0", "0.1.0", None, false));
+        assert!(!should_install("v0.2.0", "0.1.0", Some("v0.2.0"), false));
+        assert!(should_install("v0.2.0", "0.1.0", Some("v0.2.0"), true));
+        assert!(!should_install("v0.1.0", "0.1.0", None, true));
     }
 
     #[test]

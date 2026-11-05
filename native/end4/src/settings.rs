@@ -386,6 +386,18 @@ impl Settings {
             }
             "winsettings" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", ""]),
             "editcfg" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "editconfig"]),
+            "update" => {
+                self.toast("Checking for updates...");
+                let inbox = self.inbox.clone();
+                std::thread::spawn(move || {
+                    let msg = match crate::bridge::update::check(&crate::conf::Config::load(), true) {
+                        Ok(Some(tag)) => format!("Updating to {tag}. The app restarts"),
+                        Ok(None) => format!("You're up to date ({})", env!("CARGO_PKG_VERSION")),
+                        Err(e) => format!("Update check failed: {e}"),
+                    };
+                    inbox.send(move |s| s.toast(&msg));
+                });
+            }
             "url" => store::open_url(&arg),
             "close" => cx.actions.push(Action::Close("settings".into())),
             "bu" => {

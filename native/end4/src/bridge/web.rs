@@ -39,6 +39,7 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         "ai-models" => {
             let mut keys = key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter"]);
             keys["claude-cli"] = json!(claude_cli_on() && super::claude_cli::find().is_some()); // no key: it signs in through Claude Code
+            for m in super::sub_cli::models() { let p = m["provider"].as_str().unwrap_or(""); keys[p] = json!(super::sub_cli::installed(p)); }
             json!({ "models": all_models(), "keys": keys })
         }
         "presets-online" => presets_online(),
@@ -414,6 +415,7 @@ fn claude_cli_on() -> bool { raw_config()["ai"]["claudeCli"].as_bool().unwrap_or
 
 fn all_models() -> Vec<Value> {
     let mut v = if claude_cli_on() && super::claude_cli::find().is_some() { super::claude_cli::models() } else { vec![] };
+    v.extend(super::sub_cli::models());
     v.extend(default_models());
     if let Some(c) = raw_config()["ai"]["customModels"].as_array() {
         v.extend(c.iter().filter(|m| m.is_object() && truthy(&m["id"])).cloned());
@@ -494,6 +496,10 @@ fn ai_chat(stdin: &str, out: &Sink) {
     if provider == "claude-cli" {
         if !claude_cli_on() { out.emit(&json!({ "error": "Claude subscription is turned off in Settings, Services." })); return; }
         super::claude_cli::chat(model["id"].as_str().unwrap_or(""), &msgs, system, out);
+        return;
+    }
+    if provider.ends_with("-cli") {
+        super::sub_cli::chat(&provider, &msgs, system, out);
         return;
     }
     let key = if provider == "ollama" { String::new() } else { secret_get(&provider) };

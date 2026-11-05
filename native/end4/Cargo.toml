@@ -1,6 +1,6 @@
 [package]
 name = "end4"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
 

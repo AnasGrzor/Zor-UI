@@ -8,7 +8,7 @@ use crate::conf::Config;
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 
-const LATEST: &str = "https://api.github.com/repos/AnasGrzor/end4-pC-windows/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/AnasGrzor/Zor-UI/releases/latest";
 const ASSET: &str = "payload.zip";
 
 /// "v0.2.1" -> [0, 2, 1]; None when any part is not a number.

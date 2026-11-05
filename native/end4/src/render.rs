@@ -1,4 +1,4 @@
-//! `end4.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
+//! `zorui.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
 //! theme and sample media, and writes a PNG, so drawing code can be checked without windows.
 //! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", "gojo", or a popup name.
 //! w, h are CSS px (default: the view's own size, or the popup preset on a 1920x1080 screen); scale defaults to 1.
@@ -27,7 +27,7 @@ use windows::{
 const FLAT: [u8; 3] = [0x3C, 0x38, 0x44]; // transparent pixels show as this, in the PNG
 
 pub fn run(args: &[String]) {
-    let (Some(part), Some(out)) = (args.first(), args.get(1)) else { return eprintln_ui("usage: end4.exe --render <part> <out.png> [w h scale]") };
+    let (Some(part), Some(out)) = (args.first(), args.get(1)) else { return eprintln_ui("usage: zorui.exe --render <part> <out.png> [w h scale]") };
     let num = |i: usize| args.get(i).and_then(|a| a.parse::<f32>().ok());
     let pack = conf::pack_dir();
     let Ok(g) = Gfx::new(&pack.join(r"assets\fonts"), &conf::data_dir()) else { return };
@@ -41,9 +41,10 @@ pub fn run(args: &[String]) {
     let mon = (0, 0, (1920.0 * scale) as i32);
     let mut view: Box<dyn View> = match part.as_str() {
         "bar" => Box::new(Bar::new(mon)),
-        "dock" => Box::new(Dock::new(mon)),
+        "dock" => Box::new(Dock::new([0, 0, mon.2, (1080.0 * scale) as i32], cx.cfg.str("dock.side") == "right")),
         "visualizer" => Box::new(Viz::new(mon)),
         "gojo" => Box::new(gojo::Gojo::new()),
+        "pill" => Box::new(crate::pill::Pill::demo()),
         p => popup::make(p, area).unwrap_or_else(|| Box::new(Card::new(p))),
     };
     let (w, h) = if num(2).is_some() && num(3).is_some() { area } else { view.size(&g, &cx, scale) };

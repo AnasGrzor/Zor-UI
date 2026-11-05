@@ -28,12 +28,17 @@ pub struct Cast {
     pub chat: &'static [&'static str],
     /// Said on a right-click when there is no Infinity.
     pub right: &'static [&'static str],
-    /// What they say to their partner ("{p}" is the partner's name), and what they answer.
-    pub to: &'static [&'static str],
-    pub reply: &'static [&'static str],
+    /// What they say to their partner ("{p}" is the partner's name), each tagged with its tone.
+    pub to: &'static [(Tone, &'static str)],
+    /// What they answer, by the tone of the line they heard (indexed by `Tone as usize`).
+    pub reply: [&'static [&'static str]; 4],
 }
 
-pub const CASTS: [Cast; 3] = [
+/// What a line to the partner is: the partner's answer has to fit it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tone { Tease, Invite, Love, Talk }
+
+const PUBLIC: [Cast; 3] = [
     Cast {
         id: "gojo", label: "Gojo",
         hair: 0xFFF5F7FC, hair_sh: 0xFFC3CDE2, coat: 0xFF1E2133, coat_hi: 0xFF323858, pants: 0xFF151724, eye: 0xFF8FE3FF, eye_d: 0xFF2A9EE6,
@@ -52,8 +57,13 @@ pub const CASTS: [Cast; 3] = [
         peek: &["Oh? You wanted to see my eyes?", "Six Eyes: watching your tabs.", "Don't stare too long. You'll fall for me."],
         chat: &["Hmm~ I'm bored.", "Got any sweets?", "This bar's a nice place to hang out.", "Need help? Just click me."],
         right: &[],
-        to: &["Hey {p}, bet I can beat you.", "{p}, you're quiet. Boring~", "Wanna grab sweets, {p}?"],
-        reply: &["Don't act like I'm your sidekick.", "Tch. Obviously.", "Sure. You're buying."],
+        to: &[(Tone::Tease, "Hey {p}, bet I can beat you."), (Tone::Tease, "{p}, you're quiet. Boring~"), (Tone::Invite, "Wanna grab sweets, {p}?")],
+        reply: [
+            &["Don't act like I'm your sidekick.", "Tch. Obviously."],
+            &["Sure. You're buying.", "Sweets? Now you're talking."],
+            &["Aw, I know. Everybody does.", "Don't get sappy. ...Me too."],
+            &["Thinking about sweets. Obviously.", "Me? Just being the strongest."],
+        ],
     },
     Cast {
         id: "geto", label: "Geto",
@@ -70,8 +80,13 @@ pub const CASTS: [Cast; 3] = [
         peek: &["Hm? Can I help you?", "You're welcome to sit with me.", "Careful. I notice things."],
         chat: &["Quiet today.", "I could stay here all day.", "Some days I miss the old classroom."],
         right: &["Please don't.", "I'd rather you didn't.", "Not now."],
-        to: &["{p}, try not to cause trouble.", "{p}, we should sit for a while.", "Remember when it was just us, {p}?"],
-        reply: &["Heh. You're no fun.", "Fine. Five minutes.", "Don't get sentimental on me."],
+        to: &[(Tone::Tease, "{p}, try not to cause trouble."), (Tone::Invite, "{p}, we should sit for a while."), (Tone::Talk, "Remember when it was just us, {p}?")],
+        reply: [
+            &["Heh. You're no fun.", "Me? Trouble? Never."],
+            &["Fine. Five minutes.", "Sure. Let's sit."],
+            &["That's kind of you to say.", "Thank you. I mean it."],
+            &["I remember. Those were good days.", "Don't get sentimental on me."],
+        ],
     },
     Cast {
         id: "yuji", label: "Yuji",
@@ -88,10 +103,28 @@ pub const CASTS: [Cast; 3] = [
         peek: &["Oh, hey!", "Need something?", "You've got a tab open for way too long."],
         chat: &["I'm hungry.", "Wonder what's for dinner.", "I should stretch. You should too!"],
         right: &["Ow! Hey!", "What was that for?", "Whoa, easy!"],
-        to: &["{p}! Race you to the end of the bar!", "{p}, you hungry? I'm starving.", "Hey {p}, what're you thinking about?"],
-        reply: &["Eh? Sure, why not!", "Always. Let's go.", "Nothing, really. Just vibing."],
+        to: &[(Tone::Invite, "{p}! Race you to the end of the bar!"), (Tone::Invite, "{p}, you hungry? I'm starving."), (Tone::Talk, "Hey {p}, what're you thinking about?")],
+        reply: [
+            &["Hey! I'll beat you next time!", "Oh, you're on!"],
+            &["Eh? Sure, why not!", "Always. Let's go."],
+            &["Haha, thanks! Same here!", "Aw, you're the best."],
+            &["Nothing, really. Just vibing.", "Food, mostly."],
+        ],
     },
 ];
+
+// Private buddies live in cast_personal.rs, which is gitignored. build.rs sets `personal` only
+// when that file exists and ZORUI_PUBLIC is unset, so a clone or the release exe never has them.
+#[cfg(personal)]
+#[path = "cast_personal.rs"]
+mod personal;
+
+pub static CASTS: std::sync::LazyLock<Vec<Cast>> = std::sync::LazyLock::new(|| {
+    let mut v = PUBLIC.to_vec();
+    #[cfg(personal)]
+    v.extend(personal::PERSONAL);
+    v
+});
 
 /// The cast with this id; Gojo for anything unknown.
 pub fn get(id: &str) -> &'static Cast { CASTS.iter().find(|c| c.id == id).unwrap_or(&CASTS[0]) }
@@ -121,20 +154,28 @@ mod tests {
     fn lookup_and_lines() {
         assert_eq!(get("geto").label, "Geto");
         assert_eq!(get("nobody").id, "gojo", "an unknown id falls back to Gojo");
-        for c in &CASTS {
-            assert!(!c.click.is_empty() && !c.peek.is_empty() && !c.chat.is_empty() && !c.to.is_empty() && !c.reply.is_empty(), "{} lacks lines", c.id);
+        for c in CASTS.iter() {
+            assert!(!c.click.is_empty() && !c.peek.is_empty() && !c.chat.is_empty() && !c.to.is_empty() && c.reply.iter().all(|r| !r.is_empty()), "{} lacks lines", c.id);
             assert!(c.blindfold || !c.right.is_empty(), "{} needs right-click lines without Infinity", c.id);
-            assert!(c.to.iter().all(|l| l.contains("{p}")), "{} should name the partner", c.id);
+            assert!(c.to.iter().all(|(_, l)| l.contains("{p}")), "{} should name the partner", c.id);
         }
     }
 
     #[test]
     fn dress_overrides_only_valid_colours() {
-        let mut c = get("yuji").clone();
+        let mut c = get("gojo").clone();
         c.dress("#102030", "nope", "", "#FFFFFF", "yes");
         assert_eq!(c.hair, 0xFF10_2030);
-        assert_eq!(c.coat, get("yuji").coat, "an invalid colour keeps the original");
+        assert_eq!(c.coat, get("gojo").coat, "an invalid colour keeps the original");
         assert_eq!(c.eye_d, 0xFF99_9999);
         assert!(c.bun);
+    }
+}
+
+#[cfg(all(test, not(personal)))]
+mod public_tests {
+    #[test]
+    fn release_has_no_private_buddies() {
+        assert_eq!(super::CASTS.len(), super::PUBLIC.len());
     }
 }

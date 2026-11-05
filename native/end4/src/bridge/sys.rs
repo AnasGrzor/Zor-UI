@@ -103,7 +103,7 @@ fn sync_zebar_startup(cfg: &Value, path: &Path) {
 // ---------------------------------------------------------------- open / launch
 
 /// ShellExecute "open" on a URL or path (default browser / default app).
-fn shell_open(target: &str) {
+pub(crate) fn shell_open(target: &str) {
     let t = wide(target);
     unsafe { ShellExecuteW(HWND::default(), windows::core::w!("open"), PCWSTR(t.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL); }
 }
@@ -195,9 +195,9 @@ fn icon_script(todo: &[(&String, &String)], folder: &Path) -> String {
 
 // ---------------------------------------------------------------- native-open / click-through / focus-widget
 
-/// Toggles a popup in native/end4 (`end4.exe --open <name>`); it starts Zebar's copy if end4 isn't running.
+/// Toggles a popup in native/end4 (`zorui.exe --open <name>`); it starts Zebar's copy if end4 isn't running.
 fn native_open(name: &str) -> Value {
-    let exe = root().join("end4.exe");
+    let exe = root().join("zorui.exe");
     if !(widget_ok(name) && exe.exists()) { return json!({ "ok": false }); }
     let null = std::process::Stdio::null;
     let _ = hidden(exe).args(["--open", name]).stdin(null()).stdout(null()).stderr(null()).spawn();

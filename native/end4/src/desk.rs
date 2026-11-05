@@ -4,7 +4,11 @@ mod np;
 mod small;
 
 use crate::{
-    app::{App, Ctx},
+    app::{Action, App, Ctx},
+    conf::Config,
+    hub,
+    menu::Item,
+    proc,
     gfx::{alpha, cookie_points, ico, polygon, txt, Align, Canvas, Gfx, Pixmap, Shape, R},
     util::{self, add_days, date_fmt, days_in_month, monday_index},
     weather,
@@ -14,7 +18,7 @@ use serde_json::json;
 use std::{path::PathBuf, sync::{atomic::{AtomicIsize, Ordering}, Arc}, time::SystemTime};
 
 /// Cards ported (all of them; desktop.js keeps the same list in NATIVE).
-pub const PORTED: &[&str] = &["clock", "weather", "week", "greet", "calendar", "worldclock", "resources", "text", "image1", "image2", "image3",
+pub const PORTED: &[&str] = &["clock", "weather", "week", "greet", "calendar", "worldclock", "resources", "text", "image1", "image2", "image3", "sticker",
     "media", "lyrics", "cover", "todo", "notes", "timer"];
 
 const W: f32 = 310.0; // #col width; cards sit 4px inside it
@@ -25,7 +29,7 @@ fn slot_height(id: &str) -> f32 {
     match id {
         "clock" => 250.0, "weather" => 92.0, "week" | "greet" => 90.0, "media" => 92.0, "calendar" => 270.0, "todo" => 150.0,
         "notes" => 170.0, "timer" => 100.0, "worldclock" => 140.0, "resources" => 130.0, "text" => 60.0, "lyrics" => 390.0,
-        "cover" => 290.0, "image1" | "image2" | "image3" => 310.0, _ => 120.0,
+        "cover" => 290.0, "image1" | "image2" | "image3" => 310.0, "sticker" => 180.0, _ => 120.0,
     }
 }
 
@@ -112,7 +116,7 @@ pub fn month_cells(now: &windows::Win32::Foundation::SYSTEMTIME) -> Vec<(u16, bo
 
 fn image_conf(cx: &Ctx, id: &str) -> (Shape, f32, String) {
     let c = cx.cfg.get(&format!("desktop.images.{id}"));
-    let size = c["size"].as_f64().unwrap_or(280.0).clamp(120.0, 800.0) as f32;
+    let size = c["size"].as_f64().unwrap_or(if id == "sticker" { 140.0 } else { 280.0 }).clamp(120.0, 800.0) as f32;
     (Shape::parse(c["shape"].as_str().unwrap_or("cookie")), size, c["file"].as_str().unwrap_or("").to_string())
 }
 
@@ -156,6 +160,27 @@ impl View for Card {
         }
     }
 
+    fn context(&mut self, _id: u32, cx: &Ctx) -> Vec<Item> {
+        let mut items = vec![];
+        let copy = match self.id.as_str() {
+            "clock" => Some(util::clock(util::now().wHour, util::now().wMinute, cx.cfg.get("use24h").as_bool() != Some(false))),
+            "text" => Some(cx.cfg.str("desktop.text").to_string()),
+            _ => None,
+        };
+        if let Some(text) = copy.filter(|t| !t.is_empty()) { items.push(Item::new("content_copy", "Copy", move |_| util::clipboard_set(&text))); }
+        let section = match self.id.as_str() { id if id.starts_with("image") || id == "sticker" => "Image cards", "greet" => "Greeting card", "timer" => "Pomodoro", _ => "Desktop" };
+        items.push(Item::new("settings", "Customize in Settings", move |cx| {
+            hub::set(crate::settings::GOTO, Some(format!("bar|{section}")));
+            cx.actions.push(Action::open("settings"));
+        }));
+        let (cfg, id) = (Config(cx.cfg.0.clone()), self.id.clone());
+        let rest: Vec<String> = cx.cfg.strs("desktop.widgets").into_iter().filter(|w| *w != id).collect();
+        items.push(Item::new("visibility_off", "Remove from desktop", move |_| {
+            std::thread::spawn(move || { proc::bridge(&cfg, "config-set", &["desktop.widgets", &json!(rest).to_string()]); }); // reloads config.json
+        }));
+        items
+    }
+
     fn frame_ms(&self) -> u32 {
         match self.id.as_str() {
             "media" | "lyrics" | "cover" => self.np.anim,
@@ -172,7 +197,7 @@ impl View for Card {
             "todo" => (W, small::todo_size(g) + pad - 8.0),
             "notes" => (W, self.notes.as_ref().map_or(pad, |n| n.size(g) + pad - 8.0)),
             "timer" => (W, small::timer_size() + pad - 8.0),
-            "clock" => (W, if matches!(clock_style(cx), "digital" | "pixel") { 150.0 } else { 250.0 } + pad),
+            "clock" => (W, if clock_vertical(cx) { 190.0 } else if matches!(clock_style(cx), "digital" | "pixel") { 150.0 } else { 250.0 } + pad),
             "weather" => (W, 92.0 + pad),
             "week" => (W, 12.0 + 26.0 + 2.0 * (8.0 + 26.0) + 10.0 + pad),
             "greet" => (W, 90.0 + pad),
@@ -186,7 +211,7 @@ impl View for Card {
                 let t = cx.cfg.str("desktop.text");
                 (W, if t.is_empty() { pad } else { 24.0 + g.measure_wrapped(t, txt(20.0, 500), W - pad - 28.0) + pad })
             }
-            id if id.starts_with("image") => {
+            id if id.starts_with("image") || id == "sticker" => {
                 let (_, size, file) = image_conf(cx, id);
                 if file.is_empty() { (size + 32.0, 28.0 + 53.0) } else { (size + 32.0, size + 28.0) }
             }
@@ -347,7 +372,7 @@ impl View for Card {
                 bg(c);
                 c.para(s, R::new(18.0, 16.0, W - 8.0 - 28.0, h - 32.0), txt(20.0, 500), fg, Align::Left);
             }
-            id if id.starts_with("image") => {
+            id if id.starts_with("image") || id == "sticker" => {
                 let id = id.to_string();
                 let (shape, size, file) = image_conf(cx, &id);
                 let r = R::new(14.0, 14.0, size, size);
@@ -381,10 +406,30 @@ fn h3(c: &mut Canvas, cx: &Ctx, icon: &str, title: &str) -> f32 {
 const PX: [&str; 10] = ["111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001",
     "111100111001111", "111100111101111", "111001001001001", "111101111101111", "111101111001111"];
 
+/// The digital clock stacked: hours over minutes ("22" / "54").
+fn stacked_time(h: u16, m: u16, h24: bool) -> (String, String) {
+    let t = util::clock(h, m, h24);
+    let (hh, mm) = t.split_once(':').unwrap_or((&t, ""));
+    (hh.to_string(), mm.to_string())
+}
+
+fn clock_vertical(cx: &Ctx) -> bool { clock_style(cx) == "digital" && cx.cfg.bool("desktop.clockVertical") }
+
 fn clock(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME, h24: bool) {
     let t = &cx.theme;
     let (h, m, s) = ((st.wHour % 12) as f32, st.wMinute as f32, st.wSecond as f32);
     match clock_style(cx) {
+        "digital" if clock_vertical(cx) => {
+            let (hh, mm) = stacked_time(st.wHour, st.wMinute, h24);
+            let date = date_fmt(st, "ddd, MM/dd");
+            let fg = t.c("onSurface");
+            c.shadow(2.0, 12.0, 0.35, |c, col| {
+                let col = col.unwrap_or(fg);
+                c.text(&hh, R::new(12.0, 4.0, W - 24.0, 80.0), txt(92.0, 400), col, Align::Left);
+                c.text(&mm, R::new(12.0, 76.0, W - 24.0, 80.0), txt(92.0, 400), col, Align::Left);
+                c.text(&date, R::new(12.0, 156.0, W - 24.0, 18.0 * LH), txt(18.0, 500), col, Align::Left);
+            });
+        }
         "digital" => {
             let time = util::clock(st.wHour, st.wMinute, h24);
             let date = date_fmt(st, "dddd, MMMM d");
@@ -463,6 +508,11 @@ fn clock(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stacked_clock_splits_hours_and_minutes() {
+        assert_eq!(stacked_time(22, 54, true), ("22".into(), "54".into()));
+        assert_eq!(stacked_time(0, 5, false), ("12".into(), "05".into()));
+    }
     #[test]
     fn slots_wrap_into_columns() {
         let w: Vec<String> = ["clock", "weather", "calendar", "lyrics"].iter().map(|s| s.to_string()).collect();

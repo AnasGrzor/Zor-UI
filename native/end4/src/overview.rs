@@ -7,7 +7,7 @@ use crate::{
     conf::Config,
     gfx::{alpha, ico, txt, Align, Canvas, Gfx, R},
     glaze::{self, GWin, Wm},
-    hub, island::ago, proc, ui::{self, Edit, Scroll, TextBox},
+    hub, island::ago, menu::Item, proc, ui::{self, Edit, Scroll, TextBox},
     win::{Btn, Input, Phase, View},
 };
 use serde_json::Value;
@@ -186,11 +186,33 @@ impl View for Overview {
     fn key(&self, _: &Ctx) -> String { String::new() }
     fn frame_ms(&self) -> u32 { if self.focus { 500 } else { 0 } } // the caret blinks
 
+    fn context(&mut self, id: u32, cx: &Ctx) -> Vec<Item> {
+        if id >= CLIPS {
+            let Some(n) = self.clip_items().get((id - CLIPS) as usize).map(|c| c["i"].to_string()) else { return vec![] };
+            let cfg = Config(cx.cfg.0.clone());
+            return vec![Item::new("content_paste", "Copy to clipboard", move |cx| {
+                std::thread::spawn(move || { proc::run(&cfg, "toggles", &["-Action", "clipboard-set", "-Value", &n]); });
+                cx.actions.push(Action::Close("overview".into()));
+            })];
+        }
+        if !(TILES..HEADS).contains(&id) { return vec![]; }
+        self.rows(cx);
+        let Some(w) = self.flat.get((id - TILES) as usize) else { return vec![] };
+        let (a, b) = (w.id.clone(), w.id.clone());
+        vec![
+            Item::new("open_in_new", "Focus window", move |cx| { glaze::command(&format!("focus --container-id {a}")); cx.actions.push(Action::Close("overview".into())); }),
+            Item::new("close", "Close window", move |_| glaze::command_on(&b, "close")),
+        ]
+    }
+
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         let t = &cx.theme;
         let (w, h) = (c.w, c.h);
-        c.rect(R::new(0.0, 0.0, w, h), 30.0, alpha(t.c("outlineVariant"), 0.45));
-        c.rect(R::new(1.0, 1.0, w - 2.0, h - 2.0), 29.0, alpha(ui::layer0(cx), 0.94));
+        let (edge, fill) = (alpha(t.c("outlineVariant"), 0.45), alpha(ui::layer0(cx), 0.94));
+        c.backdrop(&[0x0F, c.w as u32, c.h as u32, (c.scale * 100.0) as u32, edge, fill], |c| {
+            c.rect(R::new(0.0, 0.0, w, h), 30.0, edge);
+            c.rect(R::new(1.0, 1.0, w - 2.0, h - 2.0), 29.0, fill);
+        });
         // search
         let sw = 560f32.min(w - 2.0 * PAD);
         let sr = R::new((w - sw) / 2.0, PAD, sw, 50.0);

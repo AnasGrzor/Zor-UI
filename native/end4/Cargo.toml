@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
 
+[[bin]]
+name = "zorui"
+path = "src/main.rs"
+
 [dependencies]
 serde_json = "1"
 # no "std": it pulls getrandom 0.3, which needs dlltool on this gnu toolchain
@@ -17,6 +21,7 @@ windows = { version = "0.58", features = [
   "Foundation",
   "Media_Control",
   "Storage_Streams",
+  "Win32_Media",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_NetworkManagement_IpHelper",

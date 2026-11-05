@@ -2,14 +2,14 @@
   "$schema": "https://github.com/glzr-io/zebar/raw/v3.0.0/resources/zpack-schema.json",
   "name": "zor-ui",
   "version": "0.3.0",
-  "description": "zor-ui (illogical-impulse) for Windows: Material You bar, sidebars, overview and desktop widgets.",
+  "description": "Zor UI for Windows: Material You bar, sidebars, overview and desktop widgets.",
   "tags": [
     "topbar",
     "material",
     "glazewm"
   ],
   "previewImages": [],
-  "repositoryUrl": "https://github.com/pctrade/end4-pC",
+  "repositoryUrl": "https://github.com/AnasGrzor/end4-pC-windows",
   "widgets": [
     {
       "name": "bar",

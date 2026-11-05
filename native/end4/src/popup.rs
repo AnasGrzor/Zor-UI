@@ -7,7 +7,7 @@ use crate::{
 };
 use windows::Win32::Foundation::RECT;
 
-/// Names `App::open` / `end4.exe --open` handle natively when config "native" has them.
+/// Names `App::open` / `zorui.exe --open` handle natively when config "native" has them.
 pub const NAMES: [&str; 6] = ["island-panel", "overview", "sidebar-left", "sidebar-right", "settings", "keybinds"];
 
 /// An open popup.

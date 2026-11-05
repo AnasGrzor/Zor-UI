@@ -414,6 +414,8 @@ impl View for SidebarRight {
         self.paint_bottom(c, cx, &s, bottom);
     }
 
+    fn context(&mut self, id: u32, _cx: &Ctx) -> Vec<crate::menu::Item> { self.notif_menu(id) }
+
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         match ev {
             Input::Click(id, btn) => self.click(id, btn, cx),

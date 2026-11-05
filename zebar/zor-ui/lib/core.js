@@ -260,7 +260,7 @@ export function md(src) {
   return out.join('').replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[i]);
 }
 
-/** Popups native/end4 draws when config "native" has them; it opens them itself (`end4.exe --open`, via the bridge). */
+/** Popups native/end4 draws when config "native" has them; it opens them itself (`zorui.exe --open`, via the bridge). */
 const NATIVE_POPUPS = ['island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings'];
 const nativeOpen = async name => NATIVE_POPUPS.includes(name) && (await config()).native?.[name] && (await bridge('native-open', name), true);
 

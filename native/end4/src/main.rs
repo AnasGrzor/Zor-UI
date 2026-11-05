@@ -1,13 +1,15 @@
 //! zor-ui native shell. Replaces the Zebar widget pack part by part; config.json "native" lists the
-//! parts it has taken over. `end4.exe --all` runs every ported part regardless (for testing next to Zebar).
+//! parts it has taken over. `zorui.exe --all` runs every ported part regardless (for testing next to Zebar).
 #![windows_subsystem = "windows"]
 
 mod app;
+mod assist;
 mod bridge;
 mod bar;
 mod conf;
 mod desk;
 mod dock;
+mod frame;
 mod gfx;
 mod glaze;
 mod gojo;
@@ -17,7 +19,9 @@ mod cast;
 mod claude_usage;
 mod lyrics;
 mod media;
+mod menu;
 mod overview;
+mod pill;
 mod popup;
 mod proc;
 mod render;
@@ -41,18 +45,20 @@ use windows::{
     },
 };
 
-/// `end4.exe --open <name>`: asks the running instance to open (or toggle) a popup; without one, Zebar's copy opens.
+/// `zorui.exe --open <name>`: asks the running instance to open (or toggle) a popup; without one, Zebar's copy opens.
 fn open_running(name: &str) {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') { return; }
+    if !send_running(&format!("open {name}")) { proc::zebar_widget(name); }
+}
+
+/// Sends a command line to the running instance's message window; false when none is running.
+fn send_running(text: &str) -> bool {
     unsafe {
-        if let Ok(h) = FindWindowExW(HWND_MESSAGE, None, win::CLASS, w!("end4")) {
-            let text = format!("open {name}");
-            let cds = COPYDATASTRUCT { dwData: app::COPYDATA_ID, cbData: text.len() as u32, lpData: text.as_ptr() as *mut _ };
-            SendMessageW(h, WM_COPYDATA, WPARAM(0), LPARAM(&cds as *const _ as isize));
-            return;
-        }
+        let Ok(h) = FindWindowExW(HWND_MESSAGE, None, win::CLASS, w!("end4")) else { return false };
+        let cds = COPYDATASTRUCT { dwData: app::COPYDATA_ID, cbData: text.len() as u32, lpData: text.as_ptr() as *mut _ };
+        SendMessageW(h, WM_COPYDATA, WPARAM(0), LPARAM(&cds as *const _ as isize));
+        true
     }
-    proc::zebar_widget(name);
 }
 
 fn main() {
@@ -61,6 +67,13 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // `--buddy listen` records your voice for the primary buddy; `--buddy "open steam"` hands it text
+        if let Some(i) = arg("--buddy") {
+            let what = args[i + 1..].join(" ");
+            let line = if what == "listen" { "buddy listen".to_string() } else { format!("buddy ask {what}") };
+            if !what.is_empty() { send_running(&line); }
+            return;
+        }
         if let Some(i) = arg("--open") { return open_running(args.get(i + 1).map_or("", String::as_str)); }
         for kind in ["--bridge", "--script"] {
             if let Some(i) = arg(kind) { std::process::exit(bridge::cli(kind, &args[i + 1..])); }

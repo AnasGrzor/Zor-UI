@@ -4,7 +4,7 @@ use super::{data::*, SidebarRight, ID_TAB};
 use crate::{
     app::Ctx,
     gfx::{alpha, ico, txt, Align, Canvas, Font, Gfx, R},
-    hub, proc, ui,
+    hub, menu::Item, proc, ui,
 };
 use serde_json::{json, Value};
 
@@ -15,6 +15,7 @@ const ID_ADD: u32 = 231;
 const ID_TODO_CHK: u32 = 400;
 const ID_TODO_DEL: u32 = 500;
 const ID_DISMISS: u32 = 600;
+const ID_GROUP: u32 = 700; // a notification card's body, for its right-click menu
 const ID_MODE: u32 = 240; // pomodoro, stopwatch
 const ID_T: u32 = 242; // reset, toggle, skip / lap
 
@@ -65,6 +66,31 @@ impl SidebarRight {
         t.push(json!({ "text": text, "done": false }));
         save_todos(&t);
         self.todo.set("");
+    }
+
+    /// Right-click menu of notification group `id - ID_GROUP` (or its close button).
+    pub(super) fn notif_menu(&self, id: u32) -> Vec<Item> {
+        let gi = match id { i if (ID_GROUP..ID_GROUP + 100).contains(&i) => i - ID_GROUP, i if (ID_DISMISS..ID_DISMISS + 100).contains(&i) => i - ID_DISMISS, _ => return vec![] };
+        let s = lock(&self.sh);
+        let Some(g) = group(&s.notifs).into_iter().nth(gi as usize) else { return vec![] };
+        let text = g.items.iter().map(|n| if n.body.is_empty() { n.title.clone() } else { format!("{}
+{}", n.title, n.body) }).collect::<Vec<_>>().join("
+
+");
+        let ids: Vec<String> = s.notifs.iter().filter(|n| n.app == g.app).map(|n| n.id.clone()).collect();
+        let app = g.app.clone();
+        let (sh, cfg) = (self.sh.clone(), self.cfg.clone());
+        vec![
+            Item::new("content_copy", "Copy text", move |_| crate::util::clipboard_set(&text)),
+            Item::new("close", "Dismiss", move |_| {
+                lock(&sh).notifs.retain(|n| n.app != app);
+                if let Some(cfg) = cfg { std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); proc::bridge(&cfg, "notifications-dismiss", &a); }); }
+            }),
+            Item::new("clear_all", "Clear all", { let (sh, cfg) = (self.sh.clone(), self.cfg.clone()); move |_| {
+                lock(&sh).notifs.clear();
+                if let Some(cfg) = cfg { std::thread::spawn(move || { proc::bridge(&cfg, "notifications-dismiss", &["all"]); }); }
+            } }),
+        ]
     }
 
     pub(super) fn page_click(&mut self, id: u32, cx: &mut Ctx) {
@@ -206,6 +232,8 @@ impl SidebarRight {
                 c.circle(card.x + 21.0, gy + 20.0, 11.0, t.c("secondaryContainer"));
                 c.text(&letter, R::new(card.x + 10.0, gy + 9.0, 22.0, 22.0), txt(11.0, 600), t.c("onSecondaryContainer"), Align::Center);
                 c.text(&g.app, R::new(card.x + 38.0, gy + 8.0, card.w - 38.0 - 40.0, 24.0), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Left);
+                let (top, bot) = (card.y.max(list.y), (card.y + card.h).min(list.y + list.h));
+                c.hit(R::new(card.x, top, card.w, bot - top), ID_GROUP + gi as u32);
                 let x = R::new(card.x + card.w - 34.0, gy + 8.0, 24.0, 24.0);
                 if c.hit(x, ID_DISMISS + gi as u32) { c.circle(x.x + 12.0, x.y + 12.0, 12.0, alpha(t.c("onSurface"), 0.08)); }
                 c.icon("close", x, ico(16.0, false), t.c("onSurfaceVariant"));

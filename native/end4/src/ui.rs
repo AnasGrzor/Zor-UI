@@ -128,9 +128,22 @@ pub fn tabs(c: &mut Canvas, cx: &Ctx, r: R, id0: u32, items: &[(&str, &str)], se
     let t = &cx.theme;
     c.rect(r, r.h / 2.0, t.c("surfaceContainerLow"));
     if items.is_empty() { return; }
-    let w = (r.w - 8.0 - 2.0 * (items.len() - 1) as f32) / items.len() as f32;
+    let avail = r.w - 8.0 - 2.0 * (items.len() - 1) as f32;
+    let even = avail / items.len() as f32;
+    // the selected tab grows to fit its label (plus padding); the others share what is left
+    let sel_w = match items.get(sel) {
+        Some((icon, label)) if !label.is_empty() => {
+            let tw = c.g.measure(label, txt(12.5, 400)).0.ceil();
+            (tw + if icon.is_empty() { 0.0 } else { 25.0 } + 32.0).max(even).min(avail * 0.6)
+        }
+        _ => even,
+    };
+    let other = if items.len() > 1 { (avail - sel_w) / (items.len() - 1) as f32 } else { sel_w };
+    let mut bx = r.x + 4.0;
     for (i, (icon, label)) in items.iter().enumerate() {
-        let b = R::new(r.x + 4.0 + i as f32 * (w + 2.0), r.y + 4.0, w, r.h - 8.0);
+        let w = if i == sel { sel_w } else { other };
+        let b = R::new(bx, r.y + 4.0, w, r.h - 8.0);
+        bx += w + 2.0;
         let on = i == sel;
         let fg = if on { t.c("onSecondaryContainer") } else { t.c("onSurfaceVariant") };
         if on { c.rect(b, b.h / 2.0, t.c("secondaryContainer")); }
@@ -149,16 +162,18 @@ pub fn blink() -> bool { (hub::now_ms() / 500.0) as u64 % 2 == 0 }
 
 // ------------------------------------------------------------------ scrolling
 
+thread_local! {
+    /// Set by `Scroll::region` while a glide is still running during the current paint.
+    pub static MOVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Vertical scroll offset of a clipped list. Keep one per scrollable area.
 #[derive(Default)]
-pub struct Scroll { pub y: f32, tgt: Option<f32> }
+pub struct Scroll { pub y: f32, tgt: Option<f32>, at: Option<std::time::Instant> }
 
 impl Scroll {
     /// Wheel step: three lines per notch (`d` is Input::Wheel's delta, >0 up).
-    pub fn wheel(&mut self, d: i32, content_h: f32, view_h: f32) {
-        self.y -= d as f32 / 120.0 * 48.0;
-        self.clamp(content_h, view_h);
-    }
+    pub fn wheel(&mut self, d: i32, content_h: f32, view_h: f32) { self.glide(d, content_h, view_h) }
     pub fn clamp(&mut self, content_h: f32, view_h: f32) {
         let max = (content_h - view_h).max(0.0);
         self.y = self.y.clamp(0.0, max);
@@ -169,16 +184,21 @@ impl Scroll {
         self.tgt = Some(self.tgt.unwrap_or(self.y) - d as f32 / 120.0 * 48.0);
         self.clamp(content_h, view_h);
     }
-    pub fn moving(&self) -> bool { self.tgt.is_some_and(|t| (t - self.y).abs() > 0.5) }
+    pub fn moving(&self) -> bool { self.tgt.is_some() }
+    /// Moves `y` toward the target by elapsed time (about 70 ms time constant), so the glide takes
+    /// the same time at any frame rate.
     pub fn ease(&mut self) {
-        if let Some(t) = self.tgt {
-            self.y = if (t - self.y).abs() > 0.5 { self.y + (t - self.y) * 0.25 } else { self.tgt = None; t };
-        }
+        let Some(t) = self.tgt else { self.at = None; return };
+        let now = std::time::Instant::now();
+        let dt = self.at.replace(now).map_or(0.016, |a| (now - a).as_secs_f32().clamp(0.001, 0.05));
+        if (t - self.y).abs() > 0.5 { self.y += (t - self.y) * (1.0 - (-dt / 0.07).exp()); } else { self.y = t; self.tgt = None; self.at = None; }
     }
     /// Draws `body(canvas, top)` clipped to `r`, where `top` is the y of the content's first pixel
     /// (r.y - scroll), plus a thin scrollbar. Skip items outside the view yourself: hit spots ignore the clip.
     pub fn region(&mut self, c: &mut Canvas, cx: &Ctx, r: R, content_h: f32, body: impl FnOnce(&mut Canvas, f32)) {
         self.clamp(content_h, r.h);
+        self.ease();
+        if self.moving() { MOVING.with(|m| m.set(true)); } // Win::update keeps frames coming until it settles
         let top = r.y - self.y;
         c.scissor(r, |c| body(c, top));
         if content_h > r.h {
@@ -376,14 +396,33 @@ mod tests {
     }
 
     #[test]
-    fn scroll_clamps() {
+    fn wheel_glides_instead_of_jumping() {
         let mut s = Scroll::default();
         s.wheel(-120, 500.0, 200.0);
+        assert_eq!(s.y, 0.0); // nothing moves until a frame eases it
+        assert!(s.moving());
+        s.ease();
+        assert!(s.y >= 0.0 && s.y < 48.0);
+        while s.moving() { s.ease() }
+        assert_eq!((s.y, s.moving()), (48.0, false));
+        s.wheel(-120, 40.0, 200.0); // content shorter than the view: clamped to 0, settles at once
+        while s.moving() { s.ease() }
+        assert_eq!(s.y, 0.0);
+    }
+
+    #[test]
+    fn scroll_clamps() {
+        let mut s = Scroll::default();
+        let settle = |s: &mut Scroll| while s.moving() { s.ease() };
+        s.wheel(-120, 500.0, 200.0);
+        settle(&mut s);
         assert_eq!(s.y, 48.0);
         s.wheel(120, 500.0, 200.0);
         s.wheel(120, 500.0, 200.0);
+        settle(&mut s);
         assert_eq!(s.y, 0.0);
         s.wheel(-1200, 500.0, 200.0);
+        settle(&mut s);
         assert_eq!(s.y, 300.0);
         assert_eq!(slider_value(R::new(10.0, 0.0, 100.0, 44.0), 60.0), 0.5);
     }

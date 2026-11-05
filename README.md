@@ -1,14 +1,14 @@
 # Zor UI
 
-Zor UI is a desktop shell for Windows 10 and 11. One small native process (`end4.exe`, written in Rust) draws a
+Zor UI is a desktop shell for Windows 10 and 11. One small native process (`zorui.exe`, written in Rust) draws a
 Material You bar with a Dynamic Island, sidebars with AI chat, an overview, a settings app, desktop widgets, a
 dock, a visualizer and small animated buddies that live on your bar. Colors come from your wallpaper, and
 [GlazeWM](https://github.com/glzr-io/glazewm) does the tiling.
 
-It started as a port of [end4-pC](https://github.com/pctrade/end4-pC), pctrade's fork of
-[illogical-impulse](https://github.com/end-4/dots-hyprland), and it still follows that look and workflow. It has
-since grown its own parts: the native renderer, the island's AI agent status, the buddies, and a Claude usage
-watcher.
+Its look and workflow take inspiration from [end4-pC](https://github.com/pctrade/end4-pC) by pctrade, which is
+based on [illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4. A few parts are ported from end4-pC
+(see Credits). The rest is original: the native renderer, the Dynamic Island and its AI agent status, the buddies,
+the dock and the Claude usage watcher.
 
 ![Desktop](docs/desktop-dark.jpg)
 
@@ -90,7 +90,7 @@ process and uses about 32 MB.
 
 | Part | Technology |
 |---|---|
-| Bar, island, sidebars, overview, settings, desktop cards, dock, visualizer, buddies | `end4.exe` (Rust). CPU drawing with tiny-skia and DirectWrite, one layered window per widget. |
+| Bar, island, sidebars, overview, settings, desktop cards, dock, visualizer, buddies | `zorui.exe` (Rust). CPU drawing with tiny-skia and DirectWrite, one layered window per widget. |
 | Tiling, workspaces, keybinds | [GlazeWM](https://github.com/glzr-io/glazewm) |
 | Material You colors | The same algorithm as end4's `generate_colors_material.py`, in Rust (`src/bridge/theme.rs`) and in `scripts/end4_theme.py` |
 | Fallback widgets | A [Zebar](https://github.com/glzr-io/zebar) widget pack (`zebar/zor-ui`). Any part not listed under `"native"` in `config.json` is drawn here instead. |
@@ -106,7 +106,7 @@ Hyprland, PipeWire, BlueZ, UPower, NetworkManager and MPRIS. Zor UI rebuilds the
 | end4-pC on Hyprland | Zor UI on Windows |
 |---|---|
 | Hyprland tiling, workspaces, keybinds | [GlazeWM](https://github.com/glzr-io/glazewm) |
-| Quickshell bar, sidebars, overview, settings, desktop widgets | The native `end4.exe`, with Zebar widgets as a fallback |
+| Quickshell bar, sidebars, overview, settings, desktop widgets | The native `zorui.exe`, with Zebar widgets as a fallback |
 | `switchwall.sh` | A Rust port of `scripts/switchwall.ps1` (wallpaper, colors, Windows light and dark, lock screen picture) |
 | mpvpaper live wallpapers | **Wallpaper Engine** (if installed through Steam) or [Lively Wallpaper](https://github.com/rocksdanister/lively), themed from a frame or preview |
 | cava | WASAPI loopback and FFT, drawn natively |
@@ -146,7 +146,7 @@ don't have Wallpaper Engine and want video wallpapers.
 The installer:
 1. Installs GlazeWM, Zebar, Flow Launcher, Python 3.12, JetBrains Mono Nerd Font (and Lively with `-WithLively`) using winget.
 2. Copies the scripts to `%LOCALAPPDATA%\zor-ui` and creates a Python venv with `materialyoucolor`, `pillow`, `numpy`, `soundcard`, `imageio-ffmpeg` and `psutil`.
-3. Builds `end4.exe` when `cargo` is on PATH, copies it to `%LOCALAPPDATA%\zor-ui` and turns on every native part. Without Rust it falls back to the Zebar widgets.
+3. Builds `zorui.exe` when `cargo` is on PATH, copies it to `%LOCALAPPDATA%\zor-ui` and turns on every native part. Without Rust it falls back to the Zebar widgets.
 4. Installs the Zebar widget pack to `~\.glzr\zebar\zor-ui`.
 5. Writes `~\.glzr\glazewm\config.yaml`. Your old config is backed up as `config.yaml.bak-<date>`.
 6. Selects the Zor UI Flow Launcher theme, generates colors from your wallpaper, and starts GlazeWM, which starts the shell.
@@ -283,8 +283,20 @@ equivalents for theming:
 - Those widgets can only run four scripts: `toggles.ps1`, `switchwall.ps1`, `media-art.ps1` and `end4_bridge.py`,
   and only from the paths `install.ps1` writes into `zpack.json`.
 
+## Credits
+
+Zor UI is its own project, but these parts come from [end4-pC](https://github.com/pctrade/end4-pC) by pctrade
+(GPL-3.0, (c) end-4 / pctrade), which is based on [illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4:
+
+- `scripts/football.py` and its Rust port `native/end4/src/bridge/football.rs`, from `scripts/football/football.py`.
+- The color generation in `scripts/end4_theme.py` and `native/end4/src/bridge/theme/palette.rs`, adapted from
+  `scripts/colors/generate_colors_material.py`.
+- `scripts/switchwall.ps1`, a port of end4's `switchwall.sh`.
+- The football sidebar page, which follows end4-pC's `FootballPage.qml`.
+- The Community gallery, which downloads presets from [end4-pCpresets](https://github.com/pctrade/end4-pCpresets).
+- The keybinds in `glazewm/config.template.yaml`, which mirror illogical-impulse on Hyprland.
+
 ## License
 
-GPL-3.0, the same as end4-pC. `scripts/football.py` is end4-pC's, and the color generation is adapted from its
-`generate_colors_material.py`. Google Sans Flex is under the SIL Open Font License, and Material Symbols is under
+GPL-3.0, the same as end4-pC. Google Sans Flex is under the SIL Open Font License, and Material Symbols is under
 Apache 2.0 (license files are in `assets/fonts`).

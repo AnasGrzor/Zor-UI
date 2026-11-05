@@ -1,9 +1,10 @@
 //! The app: shared data (`Ctx`), every open window, timers, and jobs from background threads.
 
 use crate::{
+    assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, dock, glaze, gojo, gfx::Gfx, gfx::R, hub, media, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, dock, frame, glaze, gojo, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -60,13 +61,16 @@ pub enum Action {
     TogglePin(String),
     /// A view's size changed outside a paint (rare): repaint and re-place every popup.
     Relayout,
+    /// A right-click menu at a point (physical px).
+    Menu(Vec<menu::Item>, (i32, i32)),
+    CloseMenu,
 }
 
 impl Action {
     pub fn open(name: &str) -> Action { Action::Open { name: name.into(), mon: None, at: None } }
 }
 
-/// Written to the app's message window by `end4.exe --open <name>` (WM_COPYDATA dwData).
+/// Written to the app's message window by `zorui.exe --open <name>` (WM_COPYDATA dwData).
 pub const COPYDATA_ID: usize = 0x3434_4F50;
 
 impl Ctx {
@@ -101,6 +105,8 @@ pub struct App {
     bars: Vec<Win>,
     /// Open sidebars / overview / island panel / settings.
     pops: Vec<Pop>,
+    /// The right-click menu (and when it opened).
+    menu: Option<(Win, f64)>,
     /// A UTF-16 high surrogate from WM_CHAR waiting for its pair.
     hi: u16,
     /// The focused GlazeWM window id; a change closes unpinned popups (focus moved without a WM_ACTIVATE).
@@ -112,12 +118,16 @@ pub struct App {
     shown: Option<(usize, u32)>,
     jobs: mpsc::Receiver<Job>,
     cfg_file: Watched,
+    /// Workspaces on the main monitor as last read from config, to rebind GlazeWM when it changes.
+    ws_main: Option<u32>,
     theme_file: Watched,
     cpu: util::Cpu,
     netmon: sys::NetMon,
     ticks: u64,
     msg: HWND,
     frame: u32,
+    /// timeBeginPeriod(1) is active: without it a 16 ms timer fires every 15.6 or 31 ms.
+    hires: bool,
     started: bool,
     _streams: Vec<proc::Stream>,
 }
@@ -142,15 +152,17 @@ impl App {
         let mut app = App {
             g,
             cx: Ctx::new(all),
-            wins: vec![], bars: vec![], pops: vec![], hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
+            wins: vec![], bars: vec![], pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
+            ws_main: None,
             theme_file: Watched::new(pack.join("theme.json")),
-            cpu: util::Cpu::new(), netmon: sys::NetMon::default(), ticks: 0, msg, frame: 0, started: false, _streams: vec![],
+            cpu: util::Cpu::new(), netmon: sys::NetMon::default(), ticks: 0, msg, frame: 0, hires: false, started: false, _streams: vec![],
         };
         app.reload();
         desk::sync(&mut app);
         gojo::sync(&mut app);
         dock::sync(&mut app);
+        frame::sync(&mut app);
         viz::sync(&mut app);
         app.sync_bars();
         APP.with_borrow_mut(|a| *a = Some(app));
@@ -239,6 +251,9 @@ impl App {
             self.cx.cfg = Config::parse(&t);
             self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
                 self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
+            let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
+            if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
+            self.ws_main = Some(m);
             changed = true;
         }
         if let Some(t) = self.theme_file.changed() { self.cx.theme = Theme::parse(&t); changed = true; }
@@ -268,7 +283,12 @@ impl App {
 
     /// Keeps a fast timer running while any view animates.
     fn frames(&mut self) {
-        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).map(|w| w.view.frame_ms()).filter(|&m| m > 0).min().unwrap_or(0);
+        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).filter(|&m| m > 0).min().unwrap_or(0);
+        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding);
+        if glide != self.hires {
+            unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
+            self.hires = glide;
+        }
         if ms != self.frame {
             unsafe { if ms > 0 { SetTimer(self.msg, FRAME, ms, None); } else { let _ = KillTimer(self.msg, FRAME); } }
             self.frame = ms;
@@ -281,7 +301,9 @@ impl App {
         if n % 2 == 0 && self.reload() {
             desk::sync(self);
             gojo::sync(self);
+            pill::sync(self);
             dock::sync(self);
+            frame::sync(self);
             viz::sync(self);
             self.sync_bars();
             let gone: Vec<String> = self.pops.iter().filter(|p| !self.cx.native(&p.name)).map(|p| p.name.clone()).collect();
@@ -361,7 +383,11 @@ impl App {
         // "keybinds" is the Settings window on its Keybinds page
         let is_settings = name == "settings" || name == "keybinds";
         if !self.cx.native(if is_settings { "settings" } else { name }) { proc::zebar_widget(name); return; }
-        if self.pops.iter().any(|p| p.name == name) { self.close(name); return; }
+        if self.pops.iter().any(|p| p.name == name) {
+            // a desk card asking Settings for a section while it's open: go there instead of closing it
+            if !(is_settings && hub::get(crate::settings::GOTO).is_some()) { self.close(name); }
+            return;
+        }
         // the click or key that just closed it (focus loss) must not reopen it
         let closed: f64 = hub::get(&format!("end4.closedAt.{name}")).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         if hub::now_ms() - closed < 600.0 { return; }
@@ -402,6 +428,8 @@ impl App {
                     Action::Close(n) => self.close(&n),
                     Action::TogglePin(n) => if let Some(p) = self.pops.iter_mut().find(|p| p.name == n) { p.pinned = !p.pinned; },
                     Action::Relayout => {}
+                    Action::Menu(items, at) => self.show_menu(items, at),
+                    Action::CloseMenu => { self.menu = None; self.frames(); }
                 }
             }
             self.cx.ver += 1;
@@ -409,8 +437,45 @@ impl App {
         }
     }
 
-    /// A message from `end4.exe --open <name>`.
+    fn show_menu(&mut self, items: Vec<menu::Item>, (px, py): (i32, i32)) {
+        let (mons, _) = util::monitors();
+        let Some(m) = mons.iter().copied().find(|m| px >= m.left && px < m.right && py >= m.top && py < m.bottom).or(mons.first().copied()) else { return };
+        let Ok(mut w) = Win::new(Box::new(Menu::new(items)), "Zor UI / menu", px, py, Z::Top, false) else { return };
+        w.update(&self.g, &self.cx, true);
+        // the 12 px shadow margin sits around the card, so the card's corner lands on the pointer
+        let (cw, ch) = w.size_px();
+        let pad = (12.0 * w.scale()) as i32;
+        let (x, y) = ((px - pad).min(m.right - cw).max(m.left), (py - pad).min(m.bottom - ch).max(m.top));
+        w.move_to(x, y);
+        w.show();
+        self.menu = Some((w, hub::now_ms()));
+        self.frames();
+    }
+
+    /// The menu never has focus, so a click anywhere outside it, or Esc, is polled for here.
+    fn menu_check(&mut self) {
+        let Some((w, t)) = &self.menu else { return };
+        // bit 0 is "pressed since the last call": a click shorter than the 16 ms poll still counts
+        let down = |k: VIRTUAL_KEY| unsafe { GetAsyncKeyState(k.0 as i32) as u16 & 0x8001 != 0 };
+        let mut p = POINT::default();
+        unsafe { let _ = GetCursorPos(&mut p); }
+        let r = w.rect();
+        let outside = !(p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom);
+        let (esc, click) = (down(VK_ESCAPE), down(VK_LBUTTON) | down(VK_RBUTTON) | down(VK_MBUTTON)); // read every poll to reset bit 0
+        if esc || (hub::now_ms() - t > 200.0 && outside && click) {
+            self.menu = None;
+            self.frames();
+        }
+    }
+
+    /// A message from `zorui.exe --open <name>`.
     pub fn command(&mut self, text: &str) {
+        if text == "buddy listen" || text.starts_with("buddy ask ") {
+            if !assist::enabled(&self.cx.cfg) { assist::say_later("Voice commands are off. Turn them on in Settings, Buddies.", 5.0); return; }
+            if text == "buddy listen" && pill::active() { assist::cancel(); return; } // the hotkey toggles
+            match text.strip_prefix("buddy ask ") { Some(said) => assist::ask(&self.cx.cfg, said), None => { pill::open(self); assist::listen(&self.cx.cfg) } }
+            return;
+        }
         if let Some(n) = text.strip_prefix("open ").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')) {
             self.open(n, None, None);
             self.run_actions();
@@ -471,10 +536,11 @@ impl App {
                     // bar, the desk cards and the island down to 30 fps with it
                     let now = std::time::Instant::now();
                     for w in self.bars.iter_mut().chain(self.wins.iter_mut()).chain(self.pops.iter_mut().map(|p| &mut p.win)) {
-                        let ms = w.view.frame_ms();
+                        let ms = if w.gliding { 16 } else { w.view.frame_ms() };
                         if ms > 0 && w.due(now, ms) { w.update(&self.g, &self.cx, true); }
                         else { w.update(&self.g, &self.cx, false); }
                     }
+                    self.menu_check();
                     self.frames();
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
@@ -485,6 +551,7 @@ impl App {
                     let focus = self.cx.wm.windows.iter().find(|w| w.focus).map(|w| w.id.clone());
                     if focus != self.last_focus {
                         self.last_focus = focus;
+                        self.menu = None;
                         let stale: Vec<String> = self.pops.iter().filter(|p| !p.pinned && hub::now_ms() - p.armed_at > 500.0).map(|p| p.name.clone()).collect();
                         for n in stale { self.close(&n); }
                     }
@@ -499,6 +566,11 @@ impl App {
             self.pops.clear();
             self.sync_bars();
             desk::sync(self);
+            return;
+        }
+        if let Some((w, _)) = self.menu.as_mut().filter(|m| m.0.hwnd == hwnd) {
+            w.mouse(msg, wp, lp, &mut self.cx);
+            w.update(&self.g, &self.cx, false);
             return;
         }
         if let Some(pi) = self.pops.iter().position(|p| p.win.hwnd == hwnd) { self.pop_msg(pi, msg, wp, lp); return; }
@@ -531,6 +603,7 @@ impl App {
                     if let Some(k) = self.wins[i].drag_key.clone() { let p = self.wins[i].pos(); desk::save_pos(&mut self.cx, &k, p); }
                 }
                 self.wins[i].update(&self.g, &self.cx, false);
+                self.frames(); // a wheel may have started a scroll glide
             }
         }
     }

@@ -11,7 +11,25 @@ use crate::{
     ui::{self, IconKind, LH},
 };
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
+
+/// World clock cities: (time zone, name).
+pub const CITIES: [(&str, &str); 20] = [
+    ("Europe/London", "London"), ("Europe/Paris", "Paris"), ("Europe/Berlin", "Berlin"), ("Europe/Istanbul", "Istanbul"), ("Africa/Cairo", "Cairo"),
+    ("Asia/Dubai", "Dubai"), ("Asia/Karachi", "Karachi"), ("Asia/Kolkata", "Delhi"), ("Asia/Dhaka", "Dhaka"), ("Asia/Bangkok", "Bangkok"),
+    ("Asia/Singapore", "Singapore"), ("Asia/Shanghai", "Shanghai"), ("Asia/Tokyo", "Tokyo"), ("Asia/Seoul", "Seoul"), ("Australia/Sydney", "Sydney"),
+    ("Pacific/Auckland", "Auckland"), ("America/New_York", "New York"), ("America/Chicago", "Chicago"), ("America/Los_Angeles", "Los Angeles"), ("America/Sao_Paulo", "Sao Paulo"),
+];
+
+/// Buddy colors: (hex, name). Empty keeps the character's own.
+const COLORS: [(&str, &str); 13] = [
+    ("", "Character's own"), ("#16161D", "Black"), ("#F5F5F5", "White"), ("#B0B7C3", "Silver"), ("#D6303A", "Red"), ("#F48FB1", "Pink"), ("#F28C28", "Orange"),
+    ("#F2D13A", "Yellow"), ("#4CAF50", "Green"), ("#26A69A", "Teal"), ("#4A7BE0", "Blue"), ("#8E5BD0", "Purple"), ("#6B4423", "Brown"),
+];
+
+const CLOCK_FORMATS: [&str; 7] = ["EEE, dd/MM '•' HH:mm", "HH:mm", "h:mm a", "EEE d MMM, HH:mm", "EEE d MMM, h:mm a", "dd/MM/yyyy HH:mm", "EEEE, d MMMM"];
+
+static FONTS: OnceLock<Vec<String>> = OnceLock::new();
 
 pub const PAGES: [(&str, &str, &str); 9] = [
     ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
@@ -26,8 +44,8 @@ const SCHEMES: [(&str, &str, &str); 10] = [
 const LEAGUES: [(&str, &str); 14] = [("esp.1", "LaLiga"), ("eng.1", "Premier League"), ("ita.1", "Serie A"), ("fra.1", "Ligue 1"), ("por.1", "Primeira Liga"),
     ("tur.1", "Süper Lig"), ("ned.1", "Eredivisie"), ("ger.1", "Bundesliga"), ("mex.1", "Liga MX"), ("arg.1", "Liga Profesional"),
     ("bra.1", "Brasileirão"), ("ksa.1", "Saudi Pro League"), ("uefa.champions", "Champions League"), ("uefa.europa", "Europa League")];
-pub const DESKTOP_WIDGETS: [(&str, &str); 17] = [("clock", "Clock"), ("weather", "Weather"), ("week", "Week"), ("greet", "Greeting"), ("media", "Media"),
-    ("lyrics", "Lyrics"), ("cover", "Now playing"), ("image1", "Image 1"), ("image2", "Image 2"), ("image3", "Image 3"),
+pub const DESKTOP_WIDGETS: [(&str, &str); 18] = [("clock", "Clock"), ("weather", "Weather"), ("week", "Week"), ("greet", "Greeting"), ("media", "Media"),
+    ("lyrics", "Lyrics"), ("cover", "Now playing"), ("image1", "Image 1"), ("image2", "Image 2"), ("image3", "Image 3"), ("sticker", "Sticker"),
     ("calendar", "Calendar"), ("todo", "To do"), ("notes", "Notes"), ("timer", "Timer"), ("worldclock", "World clock"),
     ("resources", "Resources"), ("text", "Custom text")];
 const IMAGE_SHAPES: [(&str, &str); 7] = [("cookie", "Cookie"), ("flower", "Flower"), ("clover", "Clover"), ("squircle", "Squircle"), ("circle", "Circle"), ("rounded", "Rounded"), ("square", "Square")];
@@ -51,6 +69,10 @@ pub struct Tile { pub img: Option<PathBuf>, pub badge: String, pub title: String
 
 impl Settings {
     pub fn page(&mut self, p: &mut Pen) {
+        if self.query().is_empty() { self.body(p) } else { self.results(p) }
+    }
+
+    pub fn body(&mut self, p: &mut Pen) {
         match PAGES[self.page].0 {
             "quick" => self.quick(p),
             "keys" => self.keys(p),
@@ -185,7 +207,10 @@ impl Settings {
         }
         p.card(|p| {
             self.slider(p, "transparency", "Bar & panel transparency", Sl { min: 0.0, max: 0.6, step: 0.02, fmt: Fmt::Pct }, "opacity");
-            self.text_ph(p, "font.family", "Font", "Any installed font, by its name. Empty: Google Sans Flex", "font_download", "Google Sans Flex");
+            let fonts = FONTS.get_or_init(|| p.c.g.families());
+            let mut opts = vec![(json!(""), "Default (Google Sans Flex)".to_string())];
+            opts.extend(fonts.iter().map(|f| (json!(f), f.clone())));
+            self.pick(p, "font.family", opts, "Font", "Every font installed on this PC", "font_download", 260.0);
             self.slider(p, "font.size", "Bar & desktop text size", Sl { min: 0.8, max: 1.3, step: 0.05, fmt: Fmt::Pct }, "format_size");
             self.slider(p, "font.weight", "Bar & desktop font thickness", Sl { min: -300.0, max: 300.0, step: 50.0, fmt: Fmt::Weight }, "format_bold");
             self.slider(p, "nightLight.kelvin", "Night light warmth", Sl { min: 2500.0, max: 6000.0, step: 100.0, fmt: Fmt::Kelvin }, "nightlight");
@@ -320,9 +345,20 @@ impl Settings {
         p.h2("toolbar", "Bar", "");
         p.card(|p| {
             self.num(p, "workspaces", "Workspaces shown", 1, 20, "grid_view");
-            self.text(p, "workspaceLabels", "Workspace labels", "Comma separated, e.g. 一, 二, 三 (from end4 presets)", "label");
+            self.num(p, "workspacesMain", "Workspaces on the main monitor", 1, 9, "monitor");
+            self.sw(p, "workspacesRebind", "Rebind GlazeWM to match", "Changing the number above also edits and reloads GlazeWM's config. Off: only the bar changes", "sync_alt");
+            let many = |a: &[&str]| json!(a);
+            let labels = vec![
+                (json!([]), "Numbers (1 2 3)".to_string()),
+                (many(&["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]), "Kanji (一 二 三)".to_string()),
+                (many(&["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]), "Roman (I II III)".to_string()),
+                (many(&["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]), "Circled (① ② ③)".to_string()),
+            ];
+            self.pick(p, "workspaceLabels", labels, "Workspace labels", "What the active workspace shows", "label", 260.0);
             self.sw(p, "alwaysShowNumbers", "Always show workspace labels", "Otherwise only the active one shows a label", "pin");
-            self.text(p, "clockFormat", "Clock format", "Luxon tokens, e.g. EEE, dd/MM '•' HH:mm", "schedule");
+            let now = crate::util::now();
+            let formats: Vec<(Value, String)> = CLOCK_FORMATS.iter().map(|f| (json!(f), crate::sys::luxon(f, &now))).collect();
+            self.pick(p, "clockFormat", formats, "Clock format", "Shown as it looks right now", "schedule", 260.0);
             self.seg(p, "tempUnit", &[("C", "°C"), ("F", "°F")], "Temperature", "thermostat");
             self.sw(p, "showKeyboardLayout", "Keyboard layout indicator", "", "keyboard");
             self.sw(p, "visualizer.bar", "Visualizer in the bar", "Small cava-style bars next to the media", "graphic_eq");
@@ -345,13 +381,23 @@ impl Settings {
             let cur = self.garr(p.cx, "desktop.widgets");
             p.chips(DESKTOP_WIDGETS.iter().map(|(id, n)| (n.to_string(), None, cur.iter().any(|c| c == id), Act::Do("dwidget", id.to_string()))).collect());
             self.seg(p, "desktop.clock", &[("cookie", "Cookie"), ("analog", "Analog"), ("digital", "Digital"), ("pixel", "Pixel")], "Clock style", "schedule");
-            self.text(p, "desktop.worldClocks", "World clock cities", "Comma separated time zones, e.g. Europe/Paris, Asia/Dubai", "public");
+            self.sw(p, "desktop.clockVertical", "Stacked digital clock", "Hours over minutes, for the Digital style", "view_agenda");
+            p.note("World clock cities: pick as many as you like.", 12.0);
+            let cur = self.garr(p.cx, "desktop.worldClocks");
+            p.chips(CITIES.iter().map(|(tz, n)| (n.to_string(), None, cur.iter().any(|c| c == tz), Act::Do("tz", tz.to_string()))).collect());
             self.text(p, "desktop.text", "Custom text", "Shown by the Custom text card", "text_fields");
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Reset layout", false);
                 p.left(r, "restart_alt", "Card positions", "Put every card back in one column on the left", w);
                 p.chip_right(r, None, "Reset layout", Act::Do("reset-desk", String::new()));
             }
+            self.sw(p, "frame.enabled", "Screen frame", "A thin rounded frame around the screen", "crop_free");
+            self.seg(p, "dock.style", &[("hug", "Hug"), ("float", "Float"), ("plain", "Plain")], "Dock style", "style");
+            self.slider(p, "dock.iconSize", "Dock icon size", px(20.0, 56.0, 2.0), "aspect_ratio");
+            self.slider(p, "dock.radius", "Dock corner radius", px(0.0, 40.0, 2.0), "rounded_corner");
+            self.slider(p, "frame.thickness", "Frame thickness", px(1.0, 40.0, 1.0), "line_weight");
+            self.slider(p, "frame.radius", "Frame corner radius", px(0.0, 80.0, 2.0), "rounded_corner");
+            self.seg(p, "dock.side", &[("bottom", "Bottom"), ("right", "Right")], "Dock edge", "dock_to_right");
             self.sw(p, "dock.enabled", "Dock", "Pinned apps and open windows along the bottom. Right-click an app to pin it", "dock_to_bottom");
             self.sw(p, "visualizer.desktop", "Desktop visualizer", "Audio bars along the bottom of the screen (cava)", "equalizer");
             self.num(p, "visualizer.bars", "Visualizer bars", 16, 160, "bar_chart");
@@ -359,13 +405,13 @@ impl Settings {
         });
         p.h2("image", "Image cards", "");
         p.card(|p| {
-            for (i, id) in ["image1", "image2", "image3"].into_iter().enumerate() {
+            for (i, id) in ["image1", "image2", "image3", "sticker"].into_iter().enumerate() {
                 let file = self.gs(p.cx, &format!("desktop.images.{id}.file"));
                 let on = self.garr(p.cx, "desktop.widgets").iter().any(|w| w == id);
                 if let Some(r) = p.row(40.0) {
                     let sub = if file == "wallpaper.jpg" { "Your wallpaper" } else if !file.is_empty() { "Picture chosen" } else { "No picture yet" };
                     let (w1, w2, w3) = (chip_w(p.c, "Choose", true), chip_w(p.c, "Wallpaper", true), chip_w(p.c, if on { "On" } else { "Off" }, true));
-                    p.left(r, "image", &format!("Image {}", i + 1), sub, 130.0 + w1 + w2 + w3 + 36.0);
+                    p.left(r, "image", &if id == "sticker" { "Sticker".into() } else { format!("Image {}", i + 1) }, sub, 130.0 + w1 + w2 + w3 + 36.0);
                     let mut x = r.x + r.w;
                     x -= w3; let a = p.act(Act::Do("dwidget", id.into()));
                     ui::chip(p.c, p.cx, x, r.y + 4.0, a, Some(if on { "visibility" } else { "visibility_off" }), if on { "On" } else { "Off" }, on);
@@ -375,7 +421,7 @@ impl Settings {
                     ui::chip(p.c, p.cx, x, r.y + 4.0, a, Some("folder_open"), "Choose", false);
                     self.select_box(p, &format!("desktop.images.{id}.shape"), opts(&IMAGE_SHAPES), R::new(x - 12.0 - 130.0, r.y, 130.0, 40.0));
                 }
-                self.slider(p, &format!("desktop.images.{id}.size"), &format!("Image {} size", i + 1), px(120.0, 800.0, 10.0), "aspect_ratio");
+                self.slider(p, &format!("desktop.images.{id}.size"), &if id == "sticker" { "Sticker size".into() } else { format!("Image {} size", i + 1) }, px(120.0, 800.0, 10.0), "aspect_ratio");
             }
             p.note("Choosing a picture turns its card on. On/Off shows or hides the card.", 12.0);
         });
@@ -424,16 +470,39 @@ impl Settings {
                 self.seg(p, &format!("buddies.{k}.chatty"), &chatty, "Talks", "chat");
                 self.sw(p, &format!("buddies.{k}.walk"), "Walks around", "Off: they stay where they are and only sit or stand", "directions_walk");
                 for (f, label, ic) in [("hair", "Hair color", "brush"), ("shirt", "Shirt color", "checkroom"), ("pants", "Pants color", "styler"), ("eyes", "Eye color", "visibility")] {
-                    self.text_ph(p, &format!("buddies.{k}.{f}"), label, "Hex like #D6303A. Empty keeps the character's own", ic, "Character's own");
+                    let colors: Vec<(Value, String)> = COLORS.iter().map(|(h, n)| (json!(h), n.to_string())).collect();
+                    self.pick(p, &format!("buddies.{k}.{f}"), colors, label, "", ic, 190.0);
                 }
                 let bun = vec![(json!(""), "Character's own".to_string()), (json!("yes"), "Yes".to_string()), (json!("no"), "No".to_string())];
                 self.pick(p, &format!("buddies.{k}.bun"), bun, "Bun", "Hair tied up on top", "face_3", 190.0);
             });
         }
+        p.h2("mic", "Voice commands", "");
+        p.card(|p| {
+            self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say", "mic");
+            self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
+            self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
+            self.sw(p, "buddies.allow.message", "Start messages", "\"message <name> saying ...\" opens the chat with the text ready. You press Enter to send", "chat");
+            self.sw(p, "buddies.listenAi", "Ask the AI for other requests", "Sends what you said to the sidebar's AI model. Off: only the phrases above work", "auto_awesome");
+            self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
+            let mut mics = vec![(json!(""), "Windows default".to_string())];
+            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
+            self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
+            let mut models = vec![(json!(""), "Automatic".to_string())];
+            models.extend(crate::assist::speech_models().into_iter().map(|(dir, name)| (json!(dir), name)));
+            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC (Orca's Parakeet). Automatic uses the first one", "model_training", 260.0);
+            self.text_ph(p, "buddies.contacts", "Contacts", "name=app:number, comma separated", "contacts", "ali=whatsapp:+923001234567, sam=discord:1234567890");
+            p.note("Contacts are the one thing to type, since nobody else knows them: whatsapp takes a phone number with country code, discord takes the user id (Developer Mode, right-click, Copy User ID). Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
+        });
         p.h2("favorite", "Partners", "");
         p.card(|p| {
             self.sw(p, "buddies.pair", "Make them partners", "With both on, they walk to each other, face each other and trade lines", "group");
-            p.note("Click a buddy to hear them, double-click for their move, drag to move them. With two on, only buddy 1 comments on the desktop. Quiet turns a buddy's comments and chat off.", 12.0);
+            self.seg(p, "buddies.primary", &[("a", "Buddy 1"), ("b", "Buddy 2")], "Primary buddy", "star");
+            self.sw(p, "buddies.breaks", "Remind me to take breaks", "The primary buddy speaks up after a long stretch of work", "coffee");
+            self.num(p, "buddies.breakMins", "Minutes of work between breaks", 1, 240, "timer");
+            self.sw(p, "buddies.watch", "Comment on what I'm doing", "The primary buddy reacts to the app in front, like an editor, a video or a game", "visibility");
+            p.note("Talk to the primary buddy with the hotkey (default Alt+B): say \"search for ...\", \"open <app or game>\" or \"message <name> saying ...\". Names come from buddies.contacts in config.json, e.g. {\"ali\": {\"app\": \"whatsapp\", \"phone\": \"+923001234567\"}} or {\"app\": \"discord\", \"id\": \"<user id>\"}. Messages open in the app and wait for you to press Enter.", 12.0);
+            p.note("Click a buddy to hear them, double-click for their move, drag to move them. With two on, only the primary buddy comments on the desktop and reminds you to take breaks. Quiet turns a buddy's comments and chat off.", 12.0);
         });
     }
 
@@ -446,7 +515,8 @@ impl Settings {
         };
         p.h2("neurology", "AI", "");
         p.card(|p| {
-            self.pick(p, "ai.model", models, "Default model", "Ollama models appear when Ollama is running", "model_training", 260.0);
+            self.sw(p, "ai.claudeCli", "Use my Claude subscription", "Adds Claude Haiku, Sonnet and Opus through Claude Code, no API key. Needs the claude command, signed in. Counts against your plan", "workspace_premium");
+            self.pick(p, "ai.model", models, "Default model", "Used by the sidebar and the buddies. Ollama models appear when Ollama is running", "model_training", 260.0);
             self.slider(p, "ai.temperature", "Temperature", Sl { min: 0.0, max: 2.0, step: 0.1, fmt: Fmt::Fixed1 }, "thermostat");
             if let Some(r) = p.row(80.0) {
                 p.left(R::new(r.x, r.y, r.w, 40.0), "description", "System prompt", "Leave empty for the default", 300.0);
@@ -541,8 +611,8 @@ impl Settings {
         p.card(|p| {
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "zor-ui", true);
-                p.left(r, "", "Zor UI", "Built on pctrade's zor-ui (illogical-impulse by end-4), for GlazeWM on Windows", w);
-                p.chip_right(r, Some("open_in_new"), "Upstream: end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
+                p.left(r, "", "Zor UI", "Its own shell for GlazeWM on Windows. Some parts are ported from end4-pC by pctrade (GPL-3.0)", w);
+                p.chip_right(r, Some("open_in_new"), "Credit: end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
             }
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Open", true);

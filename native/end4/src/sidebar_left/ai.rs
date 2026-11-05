@@ -269,7 +269,8 @@ impl Tab for Ai {
         let th = c.g.measure_wrapped(if self.input.text.is_empty() { "x" } else { &self.input.text }, txt(13.5, 400), tw).clamp(17.0, 160.0);
         let bar_h = (th + 18.0).max(36.0) + 12.0;
         let bar = R::new(r.x, r.y + r.h - bar_h, r.w, bar_h);
-        c.rect(bar, 30.0, t.c("surfaceContainer"));
+        c.rect(bar, 30.0, alpha(t.c("outline"), 0.35));
+        c.rect(R::new(bar.x + 1.0, bar.y + 1.0, bar.w - 2.0, bar.h - 2.0), 29.0, t.c("surfaceContainer"));
         c.hit(bar, TEXT);
         self.input.draw(c, cx, R::new(bar.x + 16.0, bar.y + 6.0 + 9.0, tw, bar_h - 12.0 - 18.0), txt(13.5, 400), "Message the model\u{2026}  (/ for commands)", !self.menu);
         let sb = R::new(bar.x + bar.w - 6.0 - 36.0, bar.y + bar.h - 6.0 - 36.0, 36.0, 36.0);
@@ -334,14 +335,16 @@ impl Tab for Ai {
                             }
                             Lay::User { .. } => {
                                 let b = R::new(view.x + view.w - 2.0 - w, y, *w, *h);
-                                bubble(c, b, t.c("secondaryContainer"), true);
-                                c.para(&m.content, R::new(b.x + 14.0, b.y + 10.0, b.w - 28.0, b.h - 20.0), txt(13.5, 400), t.c("onSecondaryContainer"), Align::Left);
+                                bubble(c, b, t.c("primary"), true);
+                                c.para(&m.content, R::new(b.x + 14.0, b.y + 10.0, b.w - 28.0, b.h - 20.0), txt(13.5, 400), t.c("onPrimary"), Align::Left);
                             }
                             Lay::Asst { laid, .. } => {
                                 let b = R::new(view.x + 2.0, y, *w, *h);
-                                if m.error { c.rect(b, 23.0, t.c("surfaceContainerLow")); c.rect(b, 23.0, alpha(t.c("error"), 0.16)); } else { bubble(c, b, t.c("surfaceContainerLow"), false); }
-                                c.icon("neurology", R::new(b.x + 14.0, b.y + 10.0, 14.0, 14.0), ico(14.0, false), t.c("primary"));
-                                c.text(&m.model, R::new(b.x + 32.0, b.y + 10.0, b.w - 46.0, 14.0), txt(11.0, 400), t.c("primary"), Align::Left);
+                                // flat reply (no bubble) under an avatar + model name; only errors get a tinted card
+                                if m.error { c.rect(b, 23.0, t.c("surfaceContainerLow")); c.rect(b, 23.0, alpha(t.c("error"), 0.16)); }
+                                c.circle(b.x + 25.0, b.y + 17.0, 11.0, t.c("primaryContainer"));
+                                c.icon("neurology", R::new(b.x + 19.0, b.y + 11.0, 12.0, 12.0), ico(12.0, false), t.c("onPrimaryContainer"));
+                                c.text(&m.model, R::new(b.x + 42.0, b.y + 9.0, b.w - 56.0, 16.0), txt(11.5, 500), t.c("onSurfaceVariant"), Align::Left);
                                 if m.content.is_empty() && busy { dots(c, cx, b.x + 14.0 + 16.0, b.y + 38.0 + 10.0); }
                                 md::draw(c, cx, laid, b.x + 14.0, b.y + 38.0, &mut sink, (view.y, view.y + view.h), copied);
                             }

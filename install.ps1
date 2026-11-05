@@ -74,7 +74,7 @@ $oldFlow = Join-Path $env:APPDATA 'FlowLauncher\Themes\end4-pC.xaml'
 $oldFrag = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\end4-pC'
 if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
   Step 'Moving settings from the old end4-pC name'
-  Get-Process end4, zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+  Get-Process end4, zorui, zebar -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 1
   if ((Test-Path $oldRoot) -and -not (Test-Path $Root)) { Move-Item $oldRoot $Root; Info "moved $oldRoot" }
   if ((Test-Path $oldPack) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $oldPack $Pack; Info "moved $oldPack" }
@@ -145,8 +145,8 @@ if (-not (Test-Path $venvPy)) {
 }
 # pillow + materialyoucolor: colors. numpy + soundcard: visualizer. imageio-ffmpeg: live wallpaper frames,
 # screen recording. pycaw: per-app volume.
-Invoke-Native { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pillow materialyoucolor numpy 'soundcard>=0.4.3' imageio-ffmpeg psutil pycaw 2>&1 | ForEach-Object { Info $_ } }
-if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, numpy, soundcard, imageio-ffmpeg, psutil, pycaw).' }
+Invoke-Native { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pillow materialyoucolor numpy 'soundcard>=0.4.3' imageio-ffmpeg psutil pycaw sherpa-onnx sounddevice 2>&1 | ForEach-Object { Info $_ } }
+if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, numpy, soundcard, imageio-ffmpeg, psutil, pycaw, sherpa-onnx, sounddevice).' }
 
 # ------------------------------------------------------------------ 3. zebar widget pack
 Step "Installing the Zebar widget pack to $Pack"
@@ -176,14 +176,20 @@ Write-Text (Join-Path $Pack 'zpack.json') $zpack
 
 # Native widgets (native/end4): one small process instead of a browser window per widget. Built
 # when Rust is installed; config "native" tells Zebar which parts it now draws.
-$native = Join-Path $Root 'end4.exe'
+$native = Join-Path $Root 'zorui.exe'
+$prebuilt = Join-Path $Repo 'zorui.exe'   # the one-click release ships it built; no Rust needed
 $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-if ($cargo) {
+if (Test-Path $prebuilt) {
+  Step 'Installing the native widgets'
+  Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
+  Start-Sleep -Seconds 1
+  Copy-Item -Force $prebuilt $native
+} elseif ($cargo) {
   Step 'Building the native widgets (native\end4)'
   Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\end4\Cargo.toml') 2>&1 | Out-Null }
-  $built = Join-Path $Repo 'native\end4\target\release\end4.exe'
+  $built = Join-Path $Repo 'native\end4\target\release\zorui.exe'
   if (Test-Path $built) {
-    Get-Process end4 -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
     Copy-Item -Force $built $native
   } else { Write-Warning 'The native widgets failed to build; Zebar draws everything.' }
 } else { Info 'Rust not found (rustup.rs): Zebar draws every widget.' }
@@ -246,13 +252,21 @@ $mainIdx = [Math]::Max(0, [array]::IndexOf($screens, ($screens | Where-Object Pr
 $secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Object { $_ -ne $mainIdx })[0] } else { 1 }
 $yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
-if (Test-Path $native) {   # the keys open the native popups (end4.exe --open falls back to Zebar when a part isn't native)
-  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack zor-ui --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe --open ' + $m.Groups[1].Value })
-  # wallpaper / mode / game mode keys run the Rust ports (end4.exe falls back to the script for anything not ported)
-  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe --script ' + $m.Groups[1].Value })
+if (Test-Path $native) {   # the keys open the native popups (zorui.exe --open falls back to Zebar when a part isn't native)
+  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack zor-ui --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --open ' + $m.Groups[1].Value })
+  # wallpaper / mode / game mode keys run the Rust ports (zorui.exe falls back to the script for anything not ported)
+  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --script ' + $m.Groups[1].Value })
 }
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"
+
+if (Test-Path $native) {   # desktop / folder background right-click: "Open ZorUI settings" (Win11: under Show more options)
+  $ctx = 'HKCU:\Software\Classes\Directory\Background\shell\ZorUISettings'
+  New-Item -Path "$ctx\command" -Force | Out-Null
+  Set-ItemProperty -Path $ctx -Name '(default)' -Value 'Open ZorUI settings'
+  Set-ItemProperty -Path $ctx -Name Icon -Value $native
+  Set-ItemProperty -Path "$ctx\command" -Name '(default)' -Value "`"$native`" --open settings"
+}
 
 # ------------------------------------------------------------------ 5. flow launcher
 Step 'Selecting the zor-ui Flow Launcher theme'
@@ -327,7 +341,7 @@ if (-not $glaze) {
   # GlazeWM's startup_commands only run when GlazeWM starts, so start Flow Launcher now if needed.
   $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
   if ((Test-Path $flow) -and -not (Get-Process Flow.Launcher -ErrorAction SilentlyContinue)) { Start-Process $flow }
-  if ((Test-Path $native) -and -not (Get-Process end4 -ErrorAction SilentlyContinue)) { Start-Process $native }
+  if ((Test-Path $native) -and -not (Get-Process zorui -ErrorAction SilentlyContinue)) { Start-Process $native }
 }
 
 $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }

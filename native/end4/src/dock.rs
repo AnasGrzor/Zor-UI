@@ -19,11 +19,20 @@ use std::{
 };
 use windows::Win32::{Foundation::POINT, UI::{HiDpi::GetDpiForSystem, WindowsAndMessaging::GetCursorPos}};
 
-const H: f32 = 64.0; // zpack preset height
-const ITEM: f32 = 44.0;
-const ICON: f32 = 30.0;
+/// How the dock looks, from config dock.style / iconSize / radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look { pub icon: f32, pub item: f32, pub h: f32, pub gap: f32, pub radius: f32, pub plain: bool }
+
+/// "hug": the pill 4 px from the edge. "float": the pill 12 px from it. "plain": a square strip along the whole edge.
+pub fn look(cfg: &Config) -> Look {
+    let icon = cfg.get("dock.iconSize").as_f64().unwrap_or(30.0).clamp(20.0, 56.0) as f32;
+    let item = icon + 14.0;
+    let (gap, plain) = match cfg.str("dock.style") { "float" => (12.0, false), "plain" => (0.0, true), _ => (4.0, false) };
+    let radius = if plain { 0.0 } else { cfg.get("dock.radius").as_f64().unwrap_or(30.0).clamp(0.0, 40.0) as f32 };
+    Look { icon, item, h: item + 14.0 + gap + 2.0, gap, radius, plain }
+}
 /// The docks' (window handle, monitor rect) so a config change can close them.
-static CUR: Mutex<Vec<(isize, [i32; 4])>> = Mutex::new(Vec::new());
+static CUR: Mutex<Vec<(isize, [i32; 6])>> = Mutex::new(Vec::new());
 
 /// One dock button: an app and its windows.
 #[derive(Debug, PartialEq)]
@@ -65,7 +74,10 @@ struct Shared {
 }
 
 pub struct Dock {
-    mon: (i32, i32, i32),
+    /// The monitor's left, top, right, bottom in physical px.
+    mon: [i32; 4],
+    /// Docked to the right edge instead of the bottom (config dock.side).
+    right: bool,
     sh: Arc<Mutex<Shared>>,
     icons: HashMap<String, (u64, u32, Option<Pixmap>)>,
     /// Group names by hit id (filled by paint).
@@ -77,14 +89,14 @@ pub struct Dock {
 }
 
 impl Dock {
-    /// `mon`: the monitor's x, y and width in physical px, like `Bar::new`.
-    pub fn new(mon: (i32, i32, i32)) -> Dock { Dock { mon, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![], up: Cell::new(false), last_hit: Cell::new(None) } }
+    pub fn new(mon: [i32; 4], right: bool) -> Dock { Dock { mon, right, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![], up: Cell::new(false), last_hit: Cell::new(None) } }
 
-    /// Updates `up` from the pointer: reveal at the monitor's bottom 2 px, stay up while over the dock.
-    fn track(&self) -> bool {
+    /// Updates `up` from the pointer: reveal at the monitor's bottom (or right) 2 px, stay up while over the dock.
+    fn track(&self, h: f32) -> bool {
         let mut p = POINT::default();
-        let zone = if self.up.get() { (H * unsafe { GetDpiForSystem() } as f32 / 96.0) as i32 + 4 } else { 2 };
-        let hit = unsafe { GetCursorPos(&mut p) }.is_ok() && p.x >= self.mon.0 && p.x < self.mon.0 + self.mon.2 && p.y >= self.mon.1 - zone;
+        let zone = if self.up.get() { (h * unsafe { GetDpiForSystem() } as f32 / 96.0) as i32 + 4 } else { 2 };
+        let [l, t, r, b] = self.mon;
+        let hit = unsafe { GetCursorPos(&mut p) }.is_ok() && if self.right { p.y >= t && p.y < b && p.x >= r - zone } else { p.x >= l && p.x < r && p.y >= b - zone };
         if hit { self.last_hit.set(Some(Instant::now())); }
         let up = hit || self.last_hit.get().is_some_and(|t| t.elapsed() < Duration::from_millis(400));
         self.up.set(up);
@@ -127,10 +139,29 @@ impl Dock {
     }
 }
 
-impl View for Dock {
-    fn size(&self, _: &Gfx, _: &Ctx, scale: f32) -> (f32, f32) { (self.mon.2 as f32 / scale, H) }
+/// The dock pill inside a window of `cw` x `ch`: centred along the edge, 4 px in from it.
+/// Returns the pill and the length of the icons inside it (a plain strip is longer than its icons).
+fn pill_rect(right: bool, cw: f32, ch: f32, n: usize, sep: bool, k: &Look) -> (R, f32) {
+    let len = n as f32 * k.item + (n as f32 - 1.0) * 4.0 + if sep { 5.0 + 4.0 } else { 0.0 } + 12.0 + 2.0;
+    let thick = k.item + 14.0;
+    let r = if right {
+        let (y, l) = if k.plain { (0.0, ch) } else { (((ch - len) / 2.0).round(), len) };
+        R::new(cw - k.gap - thick, y, thick, l)
+    } else {
+        let (x, l) = if k.plain { (0.0, cw) } else { (((cw - len) / 2.0).round(), len) };
+        R::new(x, k.h - k.gap - thick, l, thick)
+    };
+    (r, len)
+}
 
-    fn key(&self, _: &Ctx) -> String { self.track().to_string() }
+impl View for Dock {
+    fn size(&self, _: &Gfx, cx: &Ctx, scale: f32) -> (f32, f32) {
+        let [l, t, r, b] = self.mon;
+        let h = look(&Config(cx.cfg.0.clone())).h;
+        if self.right { (h, (b - t) as f32 / scale) } else { ((r - l) as f32 / scale, h) }
+    }
+
+    fn key(&self, cx: &Ctx) -> String { self.track(look(&Config(cx.cfg.0.clone())).h).to_string() }
 
     /// Polls the pointer for the reveal.
     fn frame_ms(&self) -> u32 { 50 }
@@ -147,34 +178,37 @@ impl View for Dock {
         self.slots = list.iter().map(|g| g.name.clone()).collect();
         if list.is_empty() || !self.up.get() { return; } // #dock:empty { display: none }, and hidden until the pointer reaches the edge
         let sep = list.iter().position(|g| !g.pinned).filter(|&i| i > 0);
-        let w = list.len() as f32 * ITEM + (list.len() as f32 - 1.0) * 4.0 + if sep.is_some() { 5.0 + 4.0 } else { 0.0 } + 12.0 + 2.0;
-        let pill = R::new(((c.w - w) / 2.0).round(), H - 4.0 - (ITEM + 14.0), w, ITEM + 14.0);
-        ui::panel(c, cx, pill, 30.0);
-        let mut x = pill.x + 7.0;
-        let y = pill.y + 7.0;
+        let k = look(&Config(cx.cfg.0.clone()));
+        let (item, icon) = (k.item, k.icon);
+        let (pill, len) = pill_rect(self.right, c.w, c.h, list.len(), sep.is_some(), &k);
+        ui::panel(c, cx, pill, k.radius);
+        let slack = if self.right { (pill.h - len) / 2.0 } else { (pill.w - len) / 2.0 };
+        let (mut x, mut y) = if self.right { (pill.x + 7.0, pill.y + 7.0 + slack) } else { (pill.x + 7.0 + slack, pill.y + 7.0) };
         for (i, g) in list.iter().enumerate() {
             if sep == Some(i) {
-                c.rect(R::new(x + 2.0, y + 6.0, 1.0, ITEM - 12.0), 0.0, t.c("outlineVariant"));
-                x += 5.0 + 4.0;
+                if self.right { c.rect(R::new(x + 6.0, y + 2.0, item - 12.0, 1.0), 0.0, t.c("outlineVariant")); y += 5.0 + 4.0; }
+                else { c.rect(R::new(x + 2.0, y + 6.0, 1.0, item - 12.0), 0.0, t.c("outlineVariant")); x += 5.0 + 4.0; }
             }
-            let b = R::new(x, y, ITEM, ITEM);
+            let b = R::new(x, y, item, item);
             let focused = g.wins.iter().any(|w| w.1);
             if focused { c.rect(b, 17.0, t.c("secondaryContainer")); }
             if c.hit(b, 1 + i as u32) && !focused { c.rect(b, 17.0, alpha(t.c("onSurface"), 0.08)); }
-            let ir = R::new(b.x + (ITEM - ICON) / 2.0, b.y + (ITEM - ICON) / 2.0, ICON, ICON);
-            match self.icon(c.g, &g.name, (ICON * c.scale).round() as u32) {
+            let ir = R::new(b.x + (item - icon) / 2.0, b.y + (item - icon) / 2.0, icon, icon);
+            match self.icon(c.g, &g.name, (icon * c.scale).round() as u32) {
                 Some(p) => c.image(&p, ir, 1.0),
                 None => {
-                    c.circle(ir.x + ICON / 2.0, ir.y + ICON / 2.0, ICON / 2.0, t.c("tertiaryContainer"));
+                    c.circle(ir.x + icon / 2.0, ir.y + icon / 2.0, icon / 2.0, t.c("tertiaryContainer"));
                     let letter: String = bar::pretty_app(&g.name).chars().next().into_iter().collect();
                     c.text(&letter, ir, txt(14.0, 600), t.c("onTertiaryContainer"), Align::Center);
                 }
             }
             if !g.wins.is_empty() { // .running / .focused indicator
                 let iw = if focused { 14.0 } else { 6.0 };
-                c.rect(R::new(b.x + (ITEM - iw) / 2.0, b.y + ITEM - 2.0 - 3.0, iw, 3.0), 1.5, if focused { t.c("primary") } else { t.c("outline") });
+                let col = if focused { t.c("primary") } else { t.c("outline") };
+                if self.right { c.rect(R::new(b.x + item - 2.0 - 3.0, b.y + (item - iw) / 2.0, 3.0, iw), 1.5, col); }
+                else { c.rect(R::new(b.x + (item - iw) / 2.0, b.y + item - 2.0 - 3.0, iw, 3.0), 1.5, col); }
             }
-            x += ITEM + 4.0;
+            if self.right { y += item + 4.0 } else { x += item + 4.0 }
         }
     }
 
@@ -207,16 +241,22 @@ impl View for Dock {
 pub fn sync(app: &mut App) {
     let want = app.cx.native("dock") && app.cx.cfg.bool("dock.enabled");
     let (mons, _) = crate::util::monitors();
-    let spec: Vec<[i32; 4]> = if want { mons.iter().map(|m| [m.left, m.top, m.right, m.bottom]).collect() } else { vec![] };
+    let side = (app.cx.cfg.str("dock.side") == "right") as i32;
+    let k = look(&Config(app.cx.cfg.0.clone()));
+    // the window's thickness depends on the look, so a change of icon size or style rebuilds it
+    let spec: Vec<[i32; 6]> = if want { mons.iter().map(|m| [m.left, m.top, m.right, m.bottom, side, k.h as i32]).collect() } else { vec![] };
     let mut cur = CUR.lock().unwrap_or_else(|e| e.into_inner());
     if !cur.is_empty() && cur.iter().map(|c| c.1).collect::<Vec<_>>() == spec { return; }
     for (h, _) in cur.drain(..) {
         app.wins.retain(|w| w.hwnd.0 as isize != h);
     }
     for m in spec {
-        let Ok(mut w) = Win::new(Box::new(Dock::new((m[0], m[3], m[2] - m[0]))), "Zor UI / dock", m[0], m[3] - 1, Z::Top, false) else { continue };
+        let right = m[4] == 1;
+        let (x0, y0) = if right { (m[2] - 1, m[1]) } else { (m[0], m[3] - 1) };
+        let Ok(mut w) = Win::new(Box::new(Dock::new([m[0], m[1], m[2], m[3]], right)), "Zor UI / dock", x0, y0, Z::Top, false) else { continue };
         w.update(&app.g, &app.cx, true);
-        w.move_to(m[0], m[3] - (H * w.scale()).round() as i32);
+        let edge = (k.h * w.scale()).round() as i32;
+        if right { w.move_to(m[2] - edge, m[1]) } else { w.move_to(m[0], m[3] - edge) }
         w.show();
         w.pin(); // floats over the windows: no app bar, so nothing is reserved
         cur.push((w.hwnd.0 as isize, m));
@@ -242,6 +282,32 @@ mod tests {
         assert_eq!(next_window(&[("1".to_string(), false), ("2".to_string(), false)]), Some("1")); // none focused: first
         assert_eq!(next_window(&[("1".to_string(), true)]), Some("1"));
         assert_eq!(next_window(&[]), None);
+    }
+    #[test]
+    fn look_follows_config() {
+        let cfg = |j: &str| Config::parse(j);
+        let hug = look(&cfg("{}"));
+        assert_eq!((hug.icon, hug.item, hug.gap, hug.radius, hug.plain), (30.0, 44.0, 4.0, 30.0, false));
+        assert_eq!(hug.h, 64.0); // the old fixed height: 44 + 14 + 4 + 2
+        let f = look(&cfg(r#"{"dock":{"style":"float","iconSize":40,"radius":12}}"#));
+        assert_eq!((f.icon, f.gap, f.radius, f.h), (40.0, 12.0, 12.0, 82.0));
+        let p = look(&cfg(r#"{"dock":{"style":"plain","radius":20}}"#));
+        assert!(p.plain && p.radius == 0.0 && p.gap == 0.0);
+        assert_eq!(look(&cfg(r#"{"dock":{"iconSize":500}}"#)).icon, 56.0);
+    }
+    #[test]
+    fn pill_sits_on_the_chosen_edge() {
+        let k = look(&Config::parse("{}"));
+        let (b, len) = pill_rect(false, 1920.0, k.h, 3, false, &k);
+        assert_eq!((b.h, b.x + b.w / 2.0, b.w), (k.item + 14.0, 960.0, len));
+        assert!(b.y + b.h <= k.h - k.gap); // the gap to the edge is kept
+        let (r, rlen) = pill_rect(true, k.h, 1080.0, 3, true, &k);
+        assert_eq!((r.w, r.x + r.w + k.gap), (k.item + 14.0, k.h));
+        assert!((r.y + r.h / 2.0 - 540.0).abs() <= 0.5 && rlen > len); // y is rounded; the separator adds length
+        let p = look(&Config::parse(r#"{"dock":{"style":"plain"}}"#));
+        let (strip, inner) = pill_rect(false, 1920.0, p.h, 3, false, &p);
+        assert_eq!((strip.x, strip.w), (0.0, 1920.0));
+        assert!(inner < strip.w);
     }
     #[test]
     fn pin_and_unpin() {

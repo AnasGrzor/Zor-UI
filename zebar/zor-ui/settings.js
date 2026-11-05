@@ -384,8 +384,8 @@ const pages = {
 
   about() {
     return `<h2>${icon('info')}About</h2>
-    <div class="card"><div class="row"><div class="lbl"><b style="font-weight:500">Zor UI</b><small>A port of pctrade's zor-ui (illogical-impulse by end-4) to GlazeWM + Zebar</small></div>
-      <button class="chip" data-url="https://github.com/pctrade/end4-pC">${icon('open_in_new')}Upstream: end4-pC</button></div>
+    <div class="card"><div class="row"><div class="lbl"><b style="font-weight:500">Zor UI</b><small>Its own shell for GlazeWM + Zebar. Some parts are ported from end4-pC by pctrade (GPL-3.0)</small></div>
+      <button class="chip" data-url="https://github.com/pctrade/end4-pC">${icon('open_in_new')}Credit: end4-pC</button></div>
       <div class="row"><div class="lbl">Windows settings</div><button class="chip" data-act="winsettings">${icon('settings')}Open</button></div>
       <div class="row"><div class="lbl">Config file<small>${esc(cfg.scriptsDir ? '%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json' : '')}</small></div><button class="chip" data-act="editcfg">${icon('edit')}Edit</button></div></div>`;
   },

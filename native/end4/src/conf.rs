@@ -7,10 +7,10 @@ use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
 /// DEFAULTS in lib/core.js, plus "native": the parts this app has taken over from Zebar (Zebar skips them).
 fn defaults() -> Value {
     serde_json::from_str(r#"{
-        "scriptsDir": "", "userName": "", "workspaces": 10, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
+        "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
         "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "pythonPath": "", "bridgePath": "",
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
-        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "" },
+        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },
         "football": { "leagues": [] },
@@ -18,7 +18,8 @@ fn defaults() -> Value {
         "nightLight": { "kelvin": 4500 },
         "wallpaperEngine": { "follow": true, "path": "" },
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
-        "dock": { "enabled": false, "pinned": [] },
+        "frame": { "enabled": false, "thickness": 5, "radius": 20 },
+        "dock": { "enabled": false, "side": "bottom", "style": "hug", "iconSize": 30, "radius": 30, "pinned": [] },
         "bar": { "style": "float", "groups": "filled", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34 },
         "font": { "family": "", "size": 1, "weight": 0 },
         "island": {
@@ -29,9 +30,10 @@ fn defaults() -> Value {
             "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
             "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3 }
         },
-        "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie",
+        "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
-        "buddies": { "pair": true,
+        "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
+            "listen": true, "listenAi": true, "allow": { "search": true, "open": true, "message": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
         "native": {}

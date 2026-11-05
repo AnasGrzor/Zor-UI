@@ -48,6 +48,45 @@ pub fn command(c: &str) {
     }
 }
 
+/// GlazeWM's config with workspaces 1..=`main` bound to the monitor workspace 1 is bound to and the
+/// rest to the monitor workspace 10 is bound to. None when the config has no such pair, or both
+/// are on one monitor (single screen), or nothing would change.
+pub fn bind_split(yaml: &str, main: u32) -> Option<String> {
+    let ws_of = |l: &str| l.trim().strip_prefix("- name:").map(|n| n.trim().trim_matches(|c| c == '\'' || c == '"').parse::<u32>().ok());
+    let bound = |l: &str| l.trim().strip_prefix("bind_to_monitor:").map(|v| v.trim().to_string());
+    let (mut cur, mut first, mut last) = (None, None, None);
+    for l in yaml.lines() {
+        if let Some(n) = ws_of(l) { cur = n; }
+        if let (Some(n), Some(v)) = (cur, bound(l)) {
+            if n == 1 { first = Some(v.clone()); }
+            if n == 10 { last = Some(v); }
+        }
+    }
+    let (first, last) = (first?, last?);
+    if first == last { return None; }
+    let mut cur = None;
+    let out: String = yaml.split_inclusive('\n').map(|l| {
+        if let Some(n) = ws_of(l) { cur = n; }
+        match (cur, bound(l)) {
+            (Some(n), Some(_)) => {
+                let indent = &l[..l.len() - l.trim_start().len()];
+                let eol = &l[l.trim_end().len()..];
+                format!("{indent}bind_to_monitor: {}{eol}", if n <= main { &first } else { &last })
+            }
+            _ => l.to_string(),
+        }
+    }).collect();
+    (out != yaml).then_some(out)
+}
+
+/// Rebinds the workspaces in the user's GlazeWM config so `main` of them sit on the main monitor, and reloads it.
+pub fn apply_split(main: u32) {
+    let path = crate::conf::home().join(r".glzr\glazewm\config.yaml");
+    let Ok(old) = std::fs::read_to_string(&path) else { return };
+    let Some(new) = bind_split(&old, main) else { return };
+    if std::fs::write(&path, new).is_ok() { command("wm-reload-config"); }
+}
+
 /// The same on one container ("close" or "move --workspace 3" for window `id`, "focus" to focus it).
 /// shortcut: `command --id <id> <cmd>` is GlazeWM's CLI syntax; not tried against a live GlazeWM.
 pub fn command_on(id: &str, c: &str) { command(&format!("--id {id} {c}")) }
@@ -170,6 +209,19 @@ fn monitors(d: &Value) -> Vec<Monitor> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rebinds_workspaces_between_monitors() {
+        let ws = |m: &[&str]| (1..=10).map(|i| format!("  - name: '{i}'\r\n    bind_to_monitor: {}\r\n", m[(i > 5) as usize])).collect::<String>();
+        let yaml = format!("workspaces:\r\n{}\r\nwindow_rules:\r\n", ws(&["1", "0"]));
+        let out = super::bind_split(&yaml, 3).unwrap();
+        let want = (1..=10).map(|i| format!("  - name: '{i}'\r\n    bind_to_monitor: {}\r\n", if i <= 3 { "1" } else { "0" })).collect::<String>();
+        assert_eq!(out, format!("workspaces:\r\n{want}\r\nwindow_rules:\r\n"), "keeps CRLF and everything else");
+        assert_eq!(super::bind_split(&yaml, 5), None, "already 5/5");
+        assert_eq!(super::bind_split(&yaml.replace("bind_to_monitor: 0", "bind_to_monitor: 1"), 3), None, "one monitor");
+        assert_eq!(super::bind_split("general:\n  x: 1\n", 3), None, "no workspaces");
+        assert!(super::bind_split(&out, 9).unwrap().contains("- name: '9'\r\n    bind_to_monitor: 1"));
+    }
+
     use super::*;
     #[test]
     fn parses_tree() {

@@ -2,7 +2,7 @@
 //! Each tab is a submodule in sidebar_left/. Slow work (bridge commands, downloads) runs on threads that
 //! drop their answer in a tab's `Inbox` and call `wake()`; the tab drains it on its next paint.
 //!
-//! Testing aid: END4_RENDER_TAB=<home|ai|translate|anime|football> makes `end4.exe --render sidebar-left` open
+//! Testing aid: END4_RENDER_TAB=<home|ai|translate|anime|football> makes `zorui.exe --render sidebar-left` open
 //! that tab and do its network loads inline (so the PNG shows data); END4_RENDER_DEMO=1 adds sample chat /
 //! translator text. Neither is read by the running app's popup (they only exist in a shell you set them in).
 

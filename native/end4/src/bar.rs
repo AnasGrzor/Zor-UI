@@ -51,6 +51,11 @@ pub fn pretty_app(name: &str) -> String {
     }
 }
 
+/// The workspaces of `1..=n` one monitor shows: the first `main_count` on the main monitor, the rest on the other.
+pub fn split_workspaces(n: u32, main_count: u32, main: bool) -> Vec<u32> {
+    (1..=n).filter(|&i| (i <= main_count) == main).collect()
+}
+
 /// volumeIcon() in core.js.
 pub fn volume_icon(a: Option<&media::Audio>) -> &'static str {
     match a {
@@ -135,13 +140,12 @@ impl Bar {
 
     fn monitor<'a>(&self, cx: &'a Ctx) -> Option<&'a crate::glaze::Monitor> { cx.wm.monitor_at(self.mon.0, self.mon.1) }
 
-    /// myWorkspaces() in bar.js: 1-5 on the main monitor and 6-10 on the other when there are two.
+    /// myWorkspaces() in bar.js: the first `workspacesMain` (default 5) on the main monitor and the rest on the other when there are two.
     fn my_workspaces(&self, cx: &Ctx) -> Vec<u32> {
         let n = cx.cfg.get("workspaces").as_u64().unwrap_or(10) as u32;
-        let all: Vec<u32> = (1..=n).collect();
-        if cx.wm.monitors.len() < 2 { return all; }
+        if cx.wm.monitors.len() < 2 { return (1..=n).collect(); }
         let main = self.monitor(cx).map_or(true, |m| m.x == 0 && m.y == 0);
-        all.into_iter().filter(|&i| if main { i <= 5 } else { i > 5 }).collect()
+        split_workspaces(n, cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32, main)
     }
 
     /// Opens a Zebar popup on this bar's monitor (openHere).
@@ -863,6 +867,14 @@ impl View for Popup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspaces_split_between_monitors() {
+        assert_eq!(split_workspaces(10, 5, true), [1, 2, 3, 4, 5]);
+        assert_eq!(split_workspaces(10, 5, false), [6, 7, 8, 9, 10]);
+        assert_eq!(split_workspaces(10, 3, false), [4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(split_workspaces(6, 5, false), [6], "the old one-workspace second bar");
+        assert_eq!(split_workspaces(6, 2, false), [3, 4, 5, 6]);
+    }
     use super::*;
     #[test]
     fn layout_fills_in_defaults() {

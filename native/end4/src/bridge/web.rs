@@ -36,7 +36,11 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         "booru" if matches!(a(0), "yandere" | "danbooru") => return None,
         "booru" => booru(a(0), a(1), args.get(2..).unwrap_or(&[])),
         "download-wallpaper" => download_wallpaper(cfg, a(0), args.get(1..).unwrap_or(&[])),
-        "ai-models" => json!({ "models": all_models(), "keys": key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter"]) }),
+        "ai-models" => {
+            let mut keys = key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter"]);
+            keys["claude-cli"] = json!(claude_cli_on() && super::claude_cli::find().is_some()); // no key: it signs in through Claude Code
+            json!({ "models": all_models(), "keys": keys })
+        }
         "presets-online" => presets_online(),
         "preset-apply-online" => preset_apply_online(cfg, a(0)),
         "presets-local" => presets_local(),
@@ -405,8 +409,12 @@ fn ollama_models() -> Vec<Value> {
     }).collect()).unwrap_or_default()
 }
 
+/// Settings, Services, "Use my Claude subscription" (on unless turned off).
+fn claude_cli_on() -> bool { raw_config()["ai"]["claudeCli"].as_bool().unwrap_or(true) }
+
 fn all_models() -> Vec<Value> {
-    let mut v = default_models();
+    let mut v = if claude_cli_on() && super::claude_cli::find().is_some() { super::claude_cli::models() } else { vec![] };
+    v.extend(default_models());
     if let Some(c) = raw_config()["ai"]["customModels"].as_array() {
         v.extend(c.iter().filter(|m| m.is_object() && truthy(&m["id"])).cloned());
     }
@@ -483,6 +491,11 @@ fn ai_chat(stdin: &str, out: &Sink) {
     let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"])).cloned().collect()).unwrap_or_default();
     let system = req["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant inside a Windows desktop sidebar. Use Markdown. Be concise.");
     let temp = req["temperature"].as_f64().or_else(|| req["temperature"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.5);
+    if provider == "claude-cli" {
+        if !claude_cli_on() { out.emit(&json!({ "error": "Claude subscription is turned off in Settings, Services." })); return; }
+        super::claude_cli::chat(model["id"].as_str().unwrap_or(""), &msgs, system, out);
+        return;
+    }
     let key = if provider == "ollama" { String::new() } else { secret_get(&provider) };
     if provider != "ollama" && provider != "custom" && key.is_empty() {
         out.emit(&json!({ "error": format!("No API key for {provider}. Type /key {provider} YOUR_KEY") }));
@@ -579,6 +592,77 @@ fn int_or(v: &Value, default: i64) -> i64 {
     if n == 0 { default } else { n }
 }
 
+/// Preset widget key -> native desktop card id.
+const CARD_IDS: [(&str, &str); 15] = [("clock", "clock"), ("weather", "weather"), ("calendar", "calendar"), ("userCard", "greet"), ("media", "media"), ("resources", "resources"),
+    ("worldClock", "worldclock"), ("todo", "todo"), ("notes", "notes"), ("timers", "timer"), ("customText", "text"), ("imageCard", "image1"), ("customImage", "image2"),
+    ("images", "image3"), ("sticker", "sticker")];
+
+/// Where the preset puts each enabled card: id -> { x, y } (state.json "deskPos").
+fn positions_from_end4(pw: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, id) in CARD_IDS {
+        let w = &pw[k];
+        if let (true, Some(x), Some(y)) = (truthy(&w["enable"]), w["x"].as_f64(), w["y"].as_f64()) { out.insert(id.into(), json!({ "x": x.round() as i64, "y": y.round() as i64 })); }
+    }
+    Value::Object(out)
+}
+
+/// The native bar style for a preset's `bar`: segmented groups are islands; otherwise corner style 1 floats and 0/2 sit flat.
+fn bar_style_from_end4(b: &Value) -> Option<&'static str> {
+    if b["borderless"] == "segmented" { return Some("islands"); }
+    match b["cornerStyle"].as_i64()? { 1 => Some("float"), 0 | 2 => Some("flat"), _ => None }
+}
+
+/// Dock, notification/OSD timeouts and night light from a preset, merged over the current `cfg` sections.
+fn extras_from_end4(preset: &Value, cfg: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let secs = |ms: &Value| ms.as_f64().filter(|m| *m > 0.0).map(|m| (m / 1000.0 * 10.0).round() / 10.0);
+    let mut island = cfg["island"].clone();
+    if island.is_object() {
+        if let Some(n) = secs(&preset["notifications"]["timeout"]) { island["notifySeconds"] = json!(n); }
+        if let Some(o) = secs(&preset["osd"]["timeout"]) { island["osdSeconds"] = json!(o); }
+        out.insert("island".into(), island);
+    }
+    let mut dock = cfg["dock"].clone();
+    if dock.is_object() && preset["dock"].get("enable").is_some() {
+        dock["enabled"] = json!(truthy(&preset["dock"]["enable"]));
+        dock["side"] = json!(if preset["dock"]["position"] == "right" { "right" } else { "bottom" });
+        if let Some(st) = preset["dock"]["style"].as_str().filter(|s| ["hug", "float", "plain"].contains(s)) { dock["style"] = json!(st); }
+        if let Some(i) = preset["dock"]["iconSize"].as_f64().filter(|i| (20.0..=56.0).contains(i)) { dock["iconSize"] = json!(i.round() as i64); }
+        if let Some(r) = preset["dock"]["radius"].as_f64().filter(|r| (0.0..=40.0).contains(r)) { dock["radius"] = json!(r.round() as i64); }
+        out.insert("dock".into(), dock);
+    }
+    let mut bar = cfg["bar"].clone();
+    if let (true, Some(style)) = (bar.is_object(), bar_style_from_end4(&preset["bar"])) {
+        bar["style"] = json!(style);
+        out.insert("bar".into(), bar);
+    }
+    let mut frame = cfg["frame"].clone();
+    if frame.is_object() && preset["bar"].get("showFrame").is_some() {
+        frame["enabled"] = json!(truthy(&preset["bar"]["showFrame"]) && int_or(&preset["appearance"]["fakeScreenRounding"], 0) != 0);
+        if let Some(t) = preset["bar"]["frameThickness"].as_u64().filter(|t| (1..=40).contains(t)) { frame["thickness"] = json!(t); }
+        out.insert("frame".into(), frame);
+    }
+    let mut night = cfg["nightLight"].clone();
+    if let (true, Some(k)) = (night.is_object(), preset["light"]["night"]["colorTemperature"].as_f64().filter(|k| (1000.0..=10000.0).contains(k))) {
+        night["kelvin"] = json!(k as i64);
+        out.insert("nightLight".into(), night);
+    }
+    out
+}
+
+/// Preset widget keys -> desktop card ids.
+/// `desktop` is config.json's current desktop section; anything but an object is returned untouched.
+fn desktop_from_end4(pw: &Value, mut desktop: Value) -> Value {
+    if pw.is_object() && desktop.is_object() {
+        desktop["widgets"] = json!(CARD_IDS.iter().filter(|(k, _)| truthy(&pw[*k]["enable"])).map(|(_, id)| *id).collect::<Vec<_>>());
+        if let Some(st) = pw["clock"]["style"].as_str().filter(|s| ["cookie", "digital", "pixel"].contains(s)) { desktop["clock"] = json!(st); }
+        if let Some(t) = pw["customText"]["content"].as_str() { desktop["text"] = json!(t); }
+        if let Some(v) = pw["clock"]["digital"]["vertical"].as_bool() { desktop["clockVertical"] = json!(v); }
+    }
+    desktop
+}
+
 /// Maps the parts of an zor-ui preset that mean something on Windows. `viz` is config.json's visualizer.
 fn windows_settings_from_end4(preset: &Value, viz: &Value) -> Value {
     let a = &preset["appearance"];
@@ -594,15 +678,20 @@ fn windows_settings_from_end4(preset: &Value, viz: &Value) -> Value {
     let pv = &preset["background"]["widgets"]["visualizer"];
     let mut visualizer = if viz.is_object() { viz.clone() } else { json!({}) };
     if pv.get("enable").is_some() { visualizer["desktop"] = json!(truthy(&pv["enable"])); }
-    json!({
-        "scheme": if known.contains(&scheme.as_str()) { scheme.as_str() } else { "auto" },
-        "config": {
+    let desktop = desktop_from_end4(&preset["background"]["widgets"], crate::conf::Config::load().get("desktop").clone());
+    let mut config = json!({
             "workspaces": int_or(&ws["shown"], 10),
             "workspaceLabels": or(&ws["numberMap"], &json!([])),
             "alwaysShowNumbers": truthy(&ws["alwaysShowNumbers"]),
             "transparency": transparency,
             "visualizer": visualizer,
-        },
+    });
+    if desktop.is_object() { config["desktop"] = desktop; }
+    for (k, v) in extras_from_end4(preset, &crate::conf::Config::load().0) { config[k] = v; }
+    json!({
+        "scheme": if known.contains(&scheme.as_str()) { scheme.as_str() } else { "auto" },
+        "config": config,
+        "positions": positions_from_end4(&preset["background"]["widgets"]),
         "wallpaper": preset["background"]["wallpaperPath"].as_str().unwrap_or(""),
     })
 }
@@ -633,7 +722,18 @@ fn merge_config(extra: &Value) -> Value {
     cfg
 }
 
+/// Merges card positions into state.json; the desktop reads them the next time it starts.
+fn save_positions(pos: &Value) {
+    let Some(map) = pos.as_object().filter(|m| !m.is_empty()) else { return };
+    let path = root().join("state.json");
+    let mut st = load_json(&path, json!({}));
+    if !st["deskPos"].is_object() { st["deskPos"] = json!({}); }
+    for (id, p) in map { st["deskPos"][id] = p.clone(); }
+    save_json(&path, &st);
+}
+
 fn apply_settings(cfg: &Config, mapped: &Value, wallpaper: Option<&str>, mode: Option<&str>) -> Value {
+    save_positions(&mapped["positions"]);
     sync_zebar_startup(&merge_config(&mapped["config"]));
     let mut args: Vec<&str> = Vec::new();
     if let Some(w) = wallpaper { args.extend(["-Image", w]); }
@@ -682,7 +782,7 @@ fn preset_save(name: &str) -> Value {
     let cfg = raw_config();
     let pid: String = safe_id(name).chars().take(60).collect();
     let pid = if pid.is_empty() { "preset".to_string() } else { pid };
-    let keep: serde_json::Map<String, Value> = ["workspaces", "workspaceLabels", "alwaysShowNumbers", "transparency", "visualizer", "clockFormat", "tempUnit", "desktopWidgets"]
+    let keep: serde_json::Map<String, Value> = ["workspaces", "workspaceLabels", "alwaysShowNumbers", "transparency", "visualizer", "clockFormat", "tempUnit", "desktopWidgets", "desktop"]
         .iter().filter_map(|k| cfg.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
     save_json(&root().join("presets").join(&pid).join("preset.json"), &json!({
         "name": name, "from": "local", "scheme": state.get("scheme").cloned().unwrap_or(json!("auto")),
@@ -809,5 +909,51 @@ mod tests {
         assert_eq!(m["wallpaper"], "C:/x/y.png");
         let d = windows_settings_from_end4(&json!({}), &Value::Null);
         assert_eq!((d["scheme"].clone(), d["config"]["workspaces"].clone(), d["config"]["transparency"].clone()), (json!("auto"), json!(10), json!(0)));
+    }
+
+    #[test]
+    fn preset_widgets_become_desktop_cards() {
+        let pw = json!({ "clock": { "enable": true, "style": "pixel" }, "weather": { "enable": false }, "sticker": { "enable": true },
+            "userCard": { "enable": true }, "imageCard": { "enable": true }, "customImage": { "enable": true }, "images": { "enable": false }, "customText": { "enable": true, "content": "hi" }, "glass": { "enable": true } });
+        let d = desktop_from_end4(&pw, json!({ "widgets": ["weather"], "worldClocks": ["Asia/Tokyo"], "clock": "cookie", "text": "" }));
+        assert_eq!(d["widgets"], json!(["clock", "greet", "text", "image1", "image2", "sticker"]));
+        assert_eq!((d["clock"].clone(), d["text"].clone(), d["worldClocks"].clone()), (json!("pixel"), json!("hi"), json!(["Asia/Tokyo"])));
+        let d = desktop_from_end4(&json!({ "clock": { "enable": true, "style": "bogus" } }), json!({ "clock": "cookie" }));
+        assert_eq!((d["clock"].clone(), d["widgets"].clone()), (json!("cookie"), json!(["clock"])));
+        let d = desktop_from_end4(&json!({ "clock": { "enable": true, "style": "digital", "digital": { "vertical": true } } }), json!({}));
+        assert_eq!(d["clockVertical"], json!(true));
+        assert_eq!(desktop_from_end4(&Value::Null, json!({ "widgets": ["clock"] })), json!({ "widgets": ["clock"] }));
+        assert_eq!(desktop_from_end4(&pw, Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn angel_style_preset_applies_on_a_config_without_desktop() {
+        // config.json written before the user touched Desktop settings has no "desktop" key; the defaults supply it.
+        let base = crate::conf::Config::parse("{}").get("desktop").clone();
+        let d = desktop_from_end4(&json!({ "clock": { "enable": true, "style": "pixel" }, "weather": { "enable": false } }), base);
+        assert_eq!((d["widgets"].clone(), d["clock"].clone()), (json!(["clock"]), json!("pixel")));
+    }
+
+    #[test]
+    fn preset_positions_and_extras() {
+        let pw = json!({ "clock": { "enable": true, "x": 60.4, "y": 84 }, "weather": { "enable": false, "x": 1, "y": 2 }, "sticker": { "enable": true }, "userCard": { "enable": true, "x": 24, "y": 108 } });
+        assert_eq!(positions_from_end4(&pw), json!({ "clock": { "x": 60, "y": 84 }, "greet": { "x": 24, "y": 108 } }));
+        let cfg = json!({ "island": { "notifySeconds": 5, "osdSeconds": 2, "keep": 1 }, "dock": { "enabled": false, "pinned": [1] }, "nightLight": { "kelvin": 4500 } });
+        let p = json!({ "notifications": { "timeout": 7000 }, "osd": { "timeout": 1000 }, "dock": { "enable": true, "position": "right", "style": "float", "iconSize": 33, "radius": 23 }, "light": { "night": { "colorTemperature": 5000 } } });
+        let e = extras_from_end4(&p, &cfg);
+        assert_eq!(e["island"], json!({ "notifySeconds": 7.0, "osdSeconds": 1.0, "keep": 1 }));
+        assert_eq!(e["dock"], json!({ "enabled": true, "side": "right", "style": "float", "iconSize": 33, "radius": 23, "pinned": [1] }));
+        assert_eq!(e["nightLight"], json!({ "kelvin": 5000 }));
+        assert_eq!((bar_style_from_end4(&json!({ "borderless": "segmented", "cornerStyle": 1 })), bar_style_from_end4(&json!({ "cornerStyle": 1 })),
+            bar_style_from_end4(&json!({ "cornerStyle": 2 })), bar_style_from_end4(&json!({ "cornerStyle": 9 })), bar_style_from_end4(&json!({}))),
+            (Some("islands"), Some("float"), Some("flat"), None, None));
+        let b = extras_from_end4(&json!({ "bar": { "cornerStyle": 2 } }), &json!({ "bar": { "style": "float", "groups": "filled" } }));
+        assert_eq!(b["bar"], json!({ "style": "flat", "groups": "filled" }));
+        let cfg2 = json!({ "frame": { "enabled": false, "thickness": 5, "radius": 20 } });
+        let f = extras_from_end4(&json!({ "bar": { "showFrame": true, "frameThickness": 8 }, "appearance": { "fakeScreenRounding": 1 } }), &cfg2);
+        assert_eq!(f["frame"], json!({ "enabled": true, "thickness": 8, "radius": 20 }));
+        let f = extras_from_end4(&json!({ "bar": { "showFrame": true }, "appearance": { "fakeScreenRounding": 0 } }), &cfg2);
+        assert_eq!(f["frame"]["enabled"], json!(false));
+        assert!(extras_from_end4(&json!({}), &cfg).get("dock").is_none() && extras_from_end4(&json!({ "osd": { "timeout": 0 } }), &cfg)["island"] == cfg["island"]);
     }
 }

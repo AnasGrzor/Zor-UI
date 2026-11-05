@@ -1,5 +1,5 @@
 //! Rust port of scripts/football.py (ESPN fixtures, win/draw/goal/corner odds, standings, form, live
-//! scores) behind the bridge `football` command. Responses are cached under
+//! scores), which comes from end4-pC by pctrade (GPL-3.0, (c) end-4 / pctrade). It sits behind the bridge `football` command. Responses are cached under
 //! %LOCALAPPDATA%\zor-ui\cache\football, in the same files and formats the script used.
 
 use super::common::*;

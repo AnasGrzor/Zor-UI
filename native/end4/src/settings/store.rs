@@ -79,7 +79,8 @@ pub fn open_url(url: &str) {
 
 /// A GET's bytes through curl.exe (util::http_get only returns text), for preset previews.
 pub fn curl_bytes(url: &str) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("curl.exe").args(["-s", "-f", "-L", "--max-time", "20", url]).creation_flags(0x0800_0000).output().ok()?;
+    if !crate::util::web_url(url) { return None; }
+    let out = std::process::Command::new("curl.exe").args(["-s", "-f", "-L", "--max-time", "20", "--", url]).creation_flags(0x0800_0000).output().ok()?;
     (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
 }
 

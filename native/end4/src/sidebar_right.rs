@@ -25,7 +25,7 @@ const ID_SETTINGS: u32 = 1;
 const ID_RELOAD: u32 = 2;
 const ID_POWER: u32 = 3;
 const ID_POWER_ITEM: u32 = 10; // + 0..5
-const ID_TOGGLE: u32 = 20; // + 0..14
+const ID_TOGGLE: u32 = 20; // + 0..16
 const ID_SLIDER: u32 = 40; // volume, mic, brightness
 const ID_MIXER_BTN: u32 = 50;
 const ID_MIX_SLIDER: u32 = 100; // + row
@@ -146,6 +146,13 @@ impl SidebarRight {
             "caffeine" => self.exec(id, |cfg, sh| if let Some(b) = proc::run(cfg, "toggles", &["-Action", "caffeine"])["caffeine"].as_bool() { lock(sh).caffeine = b; }),
             "dark" => self.exec(id, |cfg, _| { proc::run(cfg, "switchwall", &["-ToggleMode"]); }),
             "sound" => if let Some(a) = cx.audio.as_mut() { a.muted = !a.muted; media::set_mute(a.muted); },
+            "output" => {
+                // a menu of the output devices at the pointer; picking one makes it the default
+                let mut p = windows::Win32::Foundation::POINT::default();
+                unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p); }
+                let items = output_items(&media::output_devices(), &self.sh);
+                if !items.is_empty() { cx.actions.push(Action::Menu(items, (p.x, p.y))); }
+            }
             "mic" => if let Some(a) = cx.audio.as_mut() { if let Some(m) = a.mic_muted { a.mic_muted = Some(!m); media::set_mic_mute(!m); } },
             "tiling" => if !cx.wm.monitors.is_empty() { glaze::command("wm-toggle-pause"); },
             "nightlight" => self.exec(id, |cfg, sh| {
@@ -156,6 +163,7 @@ impl SidebarRight {
             }),
             "snip" => { Self::close(cx); proc::run_bg(&cx.cfg, "toggles", &["-Action", "snip"]); }
             "osk" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "osk"]),
+            "gamemode" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "gamemode"]), // same as Mod+Shift+G
             "power" => self.exec(id, |cfg, sh| { let p = parse_plan(&proc::run(cfg, "toggles", &["-Action", "powerplan", "-Value", "next"])); if p.is_some() { lock(sh).plan = p; } }),
             "record" => {
                 let recording = rec_started() > 0.0;
@@ -179,7 +187,7 @@ impl SidebarRight {
         match id {
             ID_SETTINGS if right => proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", ""]),
             ID_SETTINGS => { cx.actions.push(Action::open("settings")); Self::close(cx); }
-            _ if right && (ID_TOGGLE..ID_TOGGLE + 14).contains(&id) => {
+            _ if right && (ID_TOGGLE..ID_TOGGLE + 16).contains(&id) => {
                 if let Some(&(_, page)) = self.tg.get((id - ID_TOGGLE) as usize).filter(|t| !t.1.is_empty()) { proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", page]); }
             }
             _ if right => {}
@@ -190,7 +198,7 @@ impl SidebarRight {
                 if k >= 3 && !self.armed[k - 3] { self.armed[k - 3] = true; return; }
                 proc::run_bg(&cx.cfg, "toggles", &["-Action", ["lock", "sleep", "logout", "restart", "shutdown"][k]]);
             }
-            i if (ID_TOGGLE..ID_TOGGLE + 14).contains(&i) => if let Some(&(t, _)) = self.tg.get((i - ID_TOGGLE) as usize) { self.toggle(t, cx); },
+            i if (ID_TOGGLE..ID_TOGGLE + 16).contains(&i) => if let Some(&(t, _)) = self.tg.get((i - ID_TOGGLE) as usize) { self.toggle(t, cx); },
             ID_MIXER_BTN => {
                 self.mixer_open = !self.mixer_open;
                 lock(&self.sh).mixer_open = self.mixer_open;
@@ -359,6 +367,16 @@ impl SidebarRight {
 
 fn rec_started() -> f64 { hub::get("zor-ui.rec").and_then(|t| t.parse().ok()).unwrap_or(0.0) }
 
+/// One menu row per output device, the default one ticked; a row sets that device as the default.
+fn output_items(devs: &[media::OutDev], sh: &Sh) -> Vec<crate::menu::Item> {
+    devs.iter().map(|d| {
+        let (id, name, sh) = (d.id.clone(), d.name.clone(), sh.clone());
+        crate::menu::Item::new(if d.default { "check" } else { "speaker" }, &d.name, move |_| {
+            std::thread::spawn(move || if media::set_output(&id) { lock(&sh).out_name = name; repaint(); });
+        })
+    }).collect()
+}
+
 /// What `--render` shows: a plausible session without running the helpers.
 fn sample() -> Shared {
     let n = |id: &str, app: &str, title: &str, body: &str, ago: f64| Notif { id: id.into(), app: app.into(), title: title.into(), body: body.into(), time: hub::now_ms() / 1000.0 - ago };
@@ -370,7 +388,7 @@ fn sample() -> Shared {
             n("3", "Mail", "Build finished", "", 7200.0),
         ],
         mixer: vec![Mix { app: "Spotify.exe".into(), volume: 62.0, muted: false }, Mix { app: "chrome.exe".into(), volume: 30.0, muted: true }],
-        os: "Windows 11 Pro 25H2".into(),
+        os: "Windows 11 Pro 25H2".into(), out_name: "Speakers (Realtek Audio)".into(),
         ..Default::default()
     }
 }
@@ -405,7 +423,7 @@ impl View for SidebarRight {
             y += 58.0 + 10.0;
         }
         self.paint_toggles(c, cx, &s, x0, y, cw);
-        y += 7.0 * 58.0 + 6.0 * 6.0 + 10.0;
+        y += 8.0 * 58.0 + 7.0 * 6.0 + 10.0; // 16 toggles, two per row
         y += self.paint_sliders(c, cx, &s, x0, y, cw) + 10.0;
         ui::chip(c, cx, x0, y, ID_MIXER_BTN, Some("tune"), "App volume", self.mixer_open);
         y += 32.0 + 10.0;
@@ -413,6 +431,8 @@ impl View for SidebarRight {
         let bottom = R::new(x0, y, cw, (p.y + p.h - 13.0 - y).max(0.0));
         self.paint_bottom(c, cx, &s, bottom);
     }
+
+    fn context(&mut self, id: u32, _cx: &Ctx) -> Vec<crate::menu::Item> { self.notif_menu(id) }
 
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         match ev {
@@ -430,5 +450,18 @@ impl View for SidebarRight {
             Input::Focus(false) => self.todo_focus = false,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn output_menu_ticks_the_default() {
+        let d = |n: &str, default| media::OutDev { id: n.into(), name: n.into(), default };
+        let items = output_items(&[d("Speakers", false), d("Headset", true)], &Sh::default());
+        assert_eq!(items.iter().map(|i| (i.icon, i.label.as_str())).collect::<Vec<_>>(), [("speaker", "Speakers"), ("check", "Headset")]);
+        assert!(output_items(&[], &Sh::default()).is_empty());
     }
 }

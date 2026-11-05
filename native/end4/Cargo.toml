@@ -1,8 +1,12 @@
 [package]
 name = "end4"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
+
+[[bin]]
+name = "zorui"
+path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
@@ -17,6 +21,7 @@ windows = { version = "0.58", features = [
   "Foundation",
   "Media_Control",
   "Storage_Streams",
+  "Win32_Media",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_NetworkManagement_IpHelper",
@@ -25,6 +30,8 @@ windows = { version = "0.58", features = [
   "Win32_Networking_WinSock",
   "Win32_System_Power",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Devices_FunctionDiscovery",
   "Win32_Foundation",
   "Win32_Globalization",
   "Win32_Graphics_Direct2D_Common",

@@ -22,9 +22,11 @@ pub enum Act {
     Step(String, i64, i64, i64),
     Slider(String, Sl, R),
     Select(String, R, Rc<Vec<(Value, String)>>),
-    Field(String, R),
+    Field(String),
     /// A named button: ("bu", "snip"), ("apply-local", id)...; settings.rs matches on the name.
     Do(&'static str, String),
+    /// A search hit: page index, section title.
+    Goto(usize, String),
 }
 
 /// A range slider: min, max, step and how its value reads.
@@ -78,12 +80,19 @@ pub struct Pen<'p, 'a> {
     pub acts: Vec<Act>,
     first: bool,
     pub t: f32,
+    /// Each `h2` title and its y (measuring pass), for "open Settings at this section".
+    pub heads: Vec<(String, f32)>,
+    /// Search index (measuring pass): (section, label, sub text) of every control and title.
+    pub index: Vec<(String, String, String)>,
+    sect: String,
 }
 
 impl<'p, 'a> Pen<'p, 'a> {
     pub fn new(c: &'p mut Canvas<'a>, cx: &'p Ctx, x: f32, y: f32, w: f32, lo: f32, hi: f32) -> Pen<'p, 'a> {
-        Pen { c, cx, x, w, y, lo, hi, dry: false, cards: vec![], ci: 0, measured: vec![], acts: vec![], first: true, t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
+        Pen { c, cx, x, w, y, lo, hi, dry: false, cards: vec![], ci: 0, measured: vec![], acts: vec![], first: true, heads: vec![], index: vec![], sect: String::new(), t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
     }
+    /// Records a control for search (before `row`, which hides rows in the measuring pass).
+    pub fn tag(&mut self, label: &str, sub: &str) { if self.dry { self.index.push((self.sect.clone(), label.into(), sub.into())); } }
     pub fn col(&self, name: &str) -> Color { self.cx.theme.c(name) }
     pub fn show(&self, h: f32) -> bool { !self.dry && self.y + h > self.lo && self.y < self.hi }
     pub fn act(&mut self, a: Act) -> u32 { self.acts.push(a); ACT0 + self.acts.len() as u32 - 1 }
@@ -107,6 +116,7 @@ impl<'p, 'a> Pen<'p, 'a> {
     /// `h2`: a 32 px round icon and a 17 px title.
     pub fn h2(&mut self, icon: &str, title: &str, extra: &str) {
         self.y += 6.0;
+        if self.dry { self.heads.push((title.to_string(), self.y)); self.index.push((title.into(), title.into(), String::new())); self.sect = title.into(); }
         if self.show(32.0) {
             let (x, y) = (self.x, self.y);
             self.c.circle(x + 16.0, y + 16.0, 16.0, self.col("surfaceContainer"));
@@ -199,6 +209,13 @@ impl<'p, 'a> Pen<'p, 'a> {
     }
 }
 
+/// Does option value `opt` stand for the stored value `cur`? An unset value matches "" and []; a stored list
+/// matches a preset list that starts with it (3 saved labels still match the 10-label preset).
+pub fn is_choice(opt: &Value, cur: &Value) -> bool {
+    if opt == cur || ((*opt == json!("") || *opt == json!([])) && cur.is_null()) { return true; }
+    match (opt.as_array(), cur.as_array()) { (Some(o), Some(c)) => !c.is_empty() && o.starts_with(c), _ => false }
+}
+
 pub fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { 14.0 + if icon { 24.0 } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + 14.0 }
 
 // ---------------------------------------------------------------- controls (settings.js: sw, seg, num, text, slider, pick)
@@ -206,6 +223,7 @@ pub fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { 14.0 + if icon { 24.
 impl Settings {
     /// `sw`: a label with a switch.
     pub fn sw(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str) {
+        p.tag(label, sub);
         let Some(r) = p.row(40.0) else { return };
         let on = self.gb(p.cx, path);
         p.left(r, ic, label, sub, 52.0);
@@ -215,6 +233,7 @@ impl Settings {
 
     /// `seg`: a segmented choice. Options are (value, label).
     pub fn seg(&mut self, p: &mut Pen, path: &str, opts: &[(&str, &str)], label: &str, ic: &str) {
+        p.tag(label, "");
         let Some(r) = p.row(40.0) else { return };
         let cur = self.gs(p.cx, path);
         let widths: Vec<f32> = opts.iter().map(|o| 28.0 + p.c.g.measure(o.1, txt(12.5, 400)).0.ceil()).collect();
@@ -238,6 +257,7 @@ impl Settings {
 
     /// `num`: - [value] + stepper, whole numbers between min and max.
     pub fn num(&mut self, p: &mut Pen, path: &str, label: &str, min: i64, max: i64, ic: &str) {
+        p.tag(label, "");
         let Some(r) = p.row(40.0) else { return };
         p.left(r, ic, label, "", 36.0 * 2.0 + 56.0 + 8.0);
         let x = r.x + r.w - (36.0 + 4.0 + 56.0 + 4.0 + 36.0);
@@ -255,6 +275,7 @@ impl Settings {
     pub fn text(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str) { self.text_ph(p, path, label, sub, ic, "") }
 
     pub fn text_ph(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str, placeholder: &str) {
+        p.tag(label, sub);
         let Some(r) = p.row(40.0) else { return };
         let w = 300.0f32.min(r.w * 0.6);
         p.left(r, ic, label, sub, w);
@@ -270,6 +291,7 @@ impl Settings {
 
     /// `slider`: a native-style range input with its value on the right.
     pub fn slider(&mut self, p: &mut Pen, path: &str, label: &str, sl: Sl, ic: &str) {
+        p.tag(label, "");
         let Some(r) = p.row(40.0) else { return };
         p.left(r, ic, label, "", 220.0 + 12.0 + 56.0);
         let v = match &self.drag_val { Some((k, v)) if k == path => *v, _ => self.gn(p.cx, path) };
@@ -286,6 +308,7 @@ impl Settings {
 
     /// `pick`: a label with a drop-down (the `<select>`); `opts` are (value, label).
     pub fn pick(&mut self, p: &mut Pen, path: &str, opts: Vec<(Value, String)>, label: &str, sub: &str, ic: &str, w: f32) {
+        p.tag(label, sub);
         let Some(r) = p.row(40.0) else { return };
         p.left(r, ic, label, sub, w);
         self.select_box(p, path, opts, R::new(r.x + r.w - w, r.y, w, 40.0));
@@ -294,7 +317,7 @@ impl Settings {
     /// The closed `<select>`: its current choice and a chevron.
     pub fn select_box(&mut self, p: &mut Pen, path: &str, opts: Vec<(Value, String)>, fr: R) {
         let cur = self.get(p.cx, path);
-        let shown = opts.iter().find(|o| o.0 == cur || (o.0 == json!("") && cur.is_null())).map_or_else(|| cur.as_str().unwrap_or("").to_string(), |o| o.1.clone());
+        let shown = opts.iter().find(|o| is_choice(&o.0, &cur)).map_or_else(|| if cur.is_array() { "Custom".to_string() } else { cur.as_str().unwrap_or("").to_string() }, |o| o.1.clone());
         let open = self.menu.as_ref().is_some_and(|m| m.path == path);
         p.field_box(fr, open, 17.0);
         let id = p.act(Act::Select(path.into(), fr, Rc::new(opts)));
@@ -312,7 +335,7 @@ impl Settings {
         f.kind = kind;
         if let Some(init) = init { if self.focus.as_deref() != Some(key) && f.tb.text != init { f.tb.set(init); f.orig = init.to_string(); } }
         p.field_box(r, self.focus.as_deref() == Some(key), radius);
-        let id = p.act(Act::Field(key.into(), r));
+        let id = p.act(Act::Field(key.into()));
         p.c.hit(r, id);
         let font = txt(14.0, 400);
         let area = if multi { R::new(r.x + 14.0, r.y + 10.0, r.w - 28.0, r.h - 20.0) } else { R::new(r.x + 14.0, r.y + 1.0, r.w - 28.0, r.h - 2.0) };
@@ -333,6 +356,19 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn choices_match_like_the_dropdown_shows_them() {
+        use super::is_choice;
+        assert!(is_choice(&json!("a"), &json!("a")));
+        assert!(!is_choice(&json!("a"), &json!("b")));
+        assert!(is_choice(&json!(""), &Value::Null), "unset is the empty option");
+        assert!(is_choice(&json!([]), &Value::Null), "unset is the empty list option");
+        let kanji = json!(["一", "二", "三", "四"]);
+        assert!(is_choice(&kanji, &json!(["一", "二", "三"])), "a shorter saved list still matches its preset");
+        assert!(!is_choice(&kanji, &json!(["I", "II"])));
+        assert!(!is_choice(&kanji, &json!([])), "an empty list is the Numbers option, not Kanji");
+    }
+
     use super::*;
 
     #[test]

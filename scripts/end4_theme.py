@@ -11,7 +11,7 @@ applies it to every part of the Windows setup:
   * Windows Terminal   -> fragment with an "zor-ui" color scheme
 
 Color math is adapted from end4-pC's scripts/colors/generate_colors_material.py
-(GPL-3.0, (c) end-4 / pctrade) so the palettes match the Linux shell exactly.
+(GPL-3.0, (c) end-4 / pctrade) so the palettes match end4-pC exactly.
 """
 import argparse
 import json

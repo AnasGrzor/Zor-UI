@@ -50,6 +50,10 @@ impl Media {
         let p = if self.playing { self.position + (crate::hub::now_ms() - self.at) / 1000.0 } else { self.position };
         if self.duration > 0.0 { p.clamp(0.0, self.duration) } else { p.max(0.0) }
     }
+    /// A browser tab (YouTube and friends): its titles are rarely songs, so a lyrics miss isn't worth a note.
+    pub fn browser(&self) -> bool {
+        is_browser(&self.id)
+    }
     pub fn progress(&self) -> f32 { if self.duration > 0.0 { (self.now() / self.duration) as f32 } else { 0.0 } }
 }
 
@@ -96,10 +100,25 @@ fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f6
     }
 }
 
+/// Whole-name match on the exe stem ("chrome.exe" or "Chrome"), so "ZenMusic" isn't a browser.
+fn is_browser(id: &str) -> bool {
+    let id = id.to_lowercase();
+    let stem = id.split(['.', '!']).next().unwrap_or("");
+    ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "zen"].contains(&stem)
+}
+
+/// Only a browser re-serves the previous track's art after a title change; elsewhere identical bytes
+/// are a real cover (same album), so they must be kept.
+fn stale_art(browser: bool, got: Option<&Arc<Vec<u8>>>, prev: Option<&Arc<Vec<u8>>>, tries: u8) -> bool {
+    browser && tries < ART_TRIES && got.zip(prev).is_some_and(|(a, b)| a == b)
+}
+
 /// Per app: the track whose artwork we hold, its bytes, and how often we've asked for them. Windows
 /// publishes a track's thumbnail a moment after its title, so a miss is retried for a while instead of
 /// leaving the player without a cover until the next song.
-type ArtCache = HashMap<String, (String, Option<Arc<Vec<u8>>>, u8)>;
+/// The last field is the previous track's bytes: a browser keeps handing those out for a moment after
+/// the title changes, so identical bytes are treated as "not published yet" until the tries run out.
+type ArtCache = HashMap<String, (String, Option<Arc<Vec<u8>>>, u8, Option<Arc<Vec<u8>>>)>;
 const ART_TRIES: u8 = 20;
 
 fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<&Media>, now: f64) -> Option<Media> {
@@ -109,10 +128,10 @@ fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<
     let artist = props.Artist().map(|a| a.to_string()).unwrap_or_default();
     let key = format!("{title}|{artist}");
     let e = arts.entry(id.to_string()).or_default();
-    if e.0 != key { *e = (key, None, 0); }
+    if e.0 != key { let old = e.1.take().or(e.3.take()); *e = (key, None, 0, old); }
     if e.1.is_none() && e.2 < ART_TRIES {
         e.2 += 1;
-        e.1 = (|| {
+        let got = (|| {
             let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
             let size = stream.Size().ok()? as u32;
             let r = DataReader::CreateDataReader(&stream).ok()?;
@@ -121,6 +140,7 @@ fn read(s: &Session, arts: &mut ArtCache, id: &str, current: bool, prev: Option<
             r.ReadBytes(&mut buf).ok()?;
             Some(Arc::new(buf))
         })();
+        e.1 = if stale_art(is_browser(id), got.as_ref(), e.3.as_ref(), e.2) { None } else { got };
     }
     let info = s.GetPlaybackInfo().ok()?;
     let playing = info.PlaybackStatus().ok()? == Status::Playing;
@@ -281,6 +301,62 @@ pub fn start_audio(on: impl Fn(Audio) + Send + 'static) {
     });
 }
 
+// ------------------------------------------------------------------ output device
+
+/// Windows' undocumented policy-config COM interface, the one every audio switcher uses. Only
+/// SetDefaultEndpoint is called; the other slots just hold the vtable layout.
+#[windows::core::interface("f8679f50-850a-41cf-9c72-430f290290c8")]
+unsafe trait IPolicyConfig: windows::core::IUnknown {
+    fn GetMixFormat(&self) -> windows::core::HRESULT;
+    fn GetDeviceFormat(&self) -> windows::core::HRESULT;
+    fn ResetDeviceFormat(&self) -> windows::core::HRESULT;
+    fn SetDeviceFormat(&self) -> windows::core::HRESULT;
+    fn GetProcessingPeriod(&self) -> windows::core::HRESULT;
+    fn SetProcessingPeriod(&self) -> windows::core::HRESULT;
+    fn GetShareMode(&self) -> windows::core::HRESULT;
+    fn SetShareMode(&self) -> windows::core::HRESULT;
+    fn GetPropertyValue(&self) -> windows::core::HRESULT;
+    fn SetPropertyValue(&self) -> windows::core::HRESULT;
+    fn SetDefaultEndpoint(&self, id: windows::core::PCWSTR, role: ERole) -> windows::core::HRESULT;
+    fn SetEndpointVisibility(&self) -> windows::core::HRESULT;
+}
+
+/// An active output device.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutDev { pub id: String, pub name: String, pub default: bool }
+
+/// The active playback devices (speakers, headphones, ...) with the default one marked.
+pub fn output_devices() -> Vec<OutDev> {
+    use windows::Win32::{Devices::FunctionDiscovery::PKEY_Device_FriendlyName, System::Com::{StructuredStorage::{PropVariantClear, PropVariantToStringAlloc}, STGM_READ}};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return vec![] };
+        let cur = en.GetDefaultAudioEndpoint(eRender, eConsole).ok().and_then(|d| dev_id(&d));
+        let Ok(list) = en.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else { return vec![] };
+        (0..list.GetCount().unwrap_or(0)).filter_map(|i| {
+            let d = list.Item(i).ok()?;
+            let id = dev_id(&d)?;
+            let mut v = d.OpenPropertyStore(STGM_READ).ok()?.GetValue(&PKEY_Device_FriendlyName).ok()?;
+            let name = PropVariantToStringAlloc(&v).ok().and_then(|p| { let s = p.to_string().ok(); CoTaskMemFree(Some(p.0 as _)); s }).unwrap_or_default();
+            let _ = PropVariantClear(&mut v);
+            Some(OutDev { default: cur.as_deref() == Some(id.as_str()), id, name })
+        }).collect()
+    }
+}
+
+/// The default output device's name.
+pub fn output_name() -> Option<String> { output_devices().into_iter().find(|d| d.default).map(|d| d.name) }
+
+/// Makes the device `id` the default for every role.
+pub fn set_output(id: &str) -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(pc) = CoCreateInstance::<_, IPolicyConfig>(&windows::core::GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9), None, CLSCTX_ALL) else { return false };
+        let id: Vec<u16> = id.encode_utf16().chain([0]).collect();
+        [eConsole, eMultimedia, eCommunications].into_iter().all(|role| pc.SetDefaultEndpoint(windows::core::PCWSTR(id.as_ptr()), role).is_ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +383,29 @@ mod tests {
         assert_eq!(anchor((62.0, now + 3000.0), true, Some(&paused), now + 3000.0), (62.0, now + 3000.0));
         // a snapshot without a usable stamp anchors to our clock instead of 1601
         assert_eq!(anchor((5.0, 0.0), true, None, now), (5.0, now));
+    }
+
+    #[test]
+    fn browsers_are_told_from_players() {
+        let m = |id: &str| Media { id: id.into(), ..Default::default() };
+        assert!(m("chrome.exe").browser() && m("MSEdge").browser() && m("firefox.exe").browser());
+        assert!(!m("Spotify.exe").browser());
+    }
+
+    #[test]
+    fn browser_match_is_the_whole_name() {
+        assert!(!m_browser("ZenMusic.exe") && !m_browser("OperaTor") && m_browser("zen.exe"));
+    }
+
+    fn m_browser(id: &str) -> bool { Media { id: id.into(), ..Default::default() }.browser() }
+
+    #[test]
+    fn only_browsers_drop_repeated_art() {
+        let (a, b) = (Arc::new(vec![1u8]), Arc::new(vec![1u8]));
+        assert!(stale_art(true, Some(&a), Some(&b), 3));
+        assert!(!stale_art(true, Some(&a), Some(&b), ART_TRIES), "last try accepts");
+        assert!(!stale_art(false, Some(&a), Some(&b), 3), "same album keeps its cover");
+        assert!(!stale_art(true, Some(&a), None, 3));
     }
 
     #[test]

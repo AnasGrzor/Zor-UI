@@ -60,7 +60,7 @@ impl Np {
     }
 }
 
-/// Debug builds only: `END4_SAMPLE_ART=<picture>` gives `end4.exe --render` a cover to draw.
+/// Debug builds only: `END4_SAMPLE_ART=<picture>` gives `zorui.exe --render` a cover to draw.
 #[cfg(debug_assertions)]
 fn sampled(mut m: Media) -> Media {
     if let Some(b) = std::env::var_os("END4_SAMPLE_ART").and_then(|p| std::fs::read(p).ok()) { m.art = Some(Arc::new(b)); }
@@ -350,6 +350,7 @@ impl Np {
             return Some(Lyr::Found(Arc::new(Lyrics::Synced(l))));
         }
         cx.cfg.bool("lyrics").then(|| lyrics::get(&Track { title: &m.title, artist: &m.artist, album: &m.album, dur: m.duration }))
+            .filter(|l| !l.hidden_for(m))
     }
 
     fn paint_lyrics(&mut self, c: &mut Canvas, cx: &Ctx, m: &Media) {

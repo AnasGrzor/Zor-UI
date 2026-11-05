@@ -1,4 +1,4 @@
-//! `end4.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
+//! `zorui.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
 //! theme and sample media, and writes a PNG, so drawing code can be checked without windows.
 //! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", "gojo", or a popup name.
 //! w, h are CSS px (default: the view's own size, or the popup preset on a 1920x1080 screen); scale defaults to 1.
@@ -27,7 +27,7 @@ use windows::{
 const FLAT: [u8; 3] = [0x3C, 0x38, 0x44]; // transparent pixels show as this, in the PNG
 
 pub fn run(args: &[String]) {
-    let (Some(part), Some(out)) = (args.first(), args.get(1)) else { return eprintln_ui("usage: end4.exe --render <part> <out.png> [w h scale]") };
+    let (Some(part), Some(out)) = (args.first(), args.get(1)) else { return eprintln_ui("usage: zorui.exe --render <part> <out.png> [w h scale]") };
     let num = |i: usize| args.get(i).and_then(|a| a.parse::<f32>().ok());
     let pack = conf::pack_dir();
     let Ok(g) = Gfx::new(&pack.join(r"assets\fonts"), &conf::data_dir()) else { return };
@@ -37,13 +37,15 @@ pub fn run(args: &[String]) {
     g.set_font(cx.cfg.str("font.family"), cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32, cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
     sample(&mut cx);
     let scale = num(4).unwrap_or(1.0);
-    let area = match (num(2), num(3)) { (Some(w), Some(h)) => (w, h), _ => popup::area(part, 1920.0, 1080.0) };
+    let area = match (num(2), num(3)) { (Some(w), Some(h)) => (w, h), _ => popup::area(part, 1920.0, 1080.0, crate::bar::Edge::Top) };
     let mon = (0, 0, (1920.0 * scale) as i32);
     let mut view: Box<dyn View> = match part.as_str() {
-        "bar" => Box::new(Bar::new(mon)),
-        "dock" => Box::new(Dock::new(mon)),
+        // END4_BAR_EDGE=left|right|bottom previews a bar on another edge (a 1080 px tall monitor)
+        "bar" => Box::new(Bar::new((0, 0, mon.2, (1080.0 * scale) as i32), crate::bar::Edge::parse(&std::env::var("END4_BAR_EDGE").unwrap_or_default()), (0, 0))),
+        "dock" => Box::new(Dock::new([0, 0, mon.2, (1080.0 * scale) as i32], cx.cfg.str("dock.side") == "right")),
         "visualizer" => Box::new(Viz::new(mon)),
         "gojo" => Box::new(gojo::Gojo::new()),
+        "pill" => Box::new(crate::pill::Pill::demo()),
         p => popup::make(p, area).unwrap_or_else(|| Box::new(Card::new(p))),
     };
     let (w, h) = if num(2).is_some() && num(3).is_some() { area } else { view.size(&g, &cx, scale) };
@@ -52,6 +54,11 @@ pub fn run(args: &[String]) {
     {
         let Some(mut c) = Canvas::new(&g, &mut px, pw, ph, scale, 0) else { return };
         view.paint(&mut c, &cx);
+        if std::env::var("END4_BENCH").is_ok() { // TEMP
+            let t = std::time::Instant::now();
+            for _ in 0..20 { view.paint(&mut c, &cx); }
+            eprintln!("{part} paint avg {:?}", t.elapsed() / 20);
+        }
     }
     // premultiplied BGRA over a flat backdrop -> opaque BGRA
     for p in px.chunks_exact_mut(4) {

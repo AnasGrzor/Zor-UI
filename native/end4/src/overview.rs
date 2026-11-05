@@ -7,7 +7,7 @@ use crate::{
     conf::Config,
     gfx::{alpha, ico, txt, Align, Canvas, Gfx, R},
     glaze::{self, GWin, Wm},
-    hub, island::ago, proc, ui::{self, Edit, Scroll, TextBox},
+    hub, island::ago, menu::Item, proc, ui::{self, Edit, Scroll, TextBox},
     win::{Btn, Input, Phase, View},
 };
 use serde_json::Value;
@@ -23,6 +23,9 @@ const HEADS: u32 = 2000; // + workspace index
 const BODIES: u32 = 3000; // + workspace index
 const CLIPS: u32 = 4000; // + index in the filtered clipboard list
 const CLIP_LIST: u32 = 3999;
+
+/// Workspace columns for a grid area: five on a wide screen, fewer on a tall one so cells keep a usable shape.
+fn columns(w: f32, h: f32) -> usize { if w > h * 1.3 { 5 } else if w > h * 0.9 { 3 } else { 2 } }
 
 pub struct Overview {
     area: (f32, f32),
@@ -186,11 +189,33 @@ impl View for Overview {
     fn key(&self, _: &Ctx) -> String { String::new() }
     fn frame_ms(&self) -> u32 { if self.focus { 500 } else { 0 } } // the caret blinks
 
+    fn context(&mut self, id: u32, cx: &Ctx) -> Vec<Item> {
+        if id >= CLIPS {
+            let Some(n) = self.clip_items().get((id - CLIPS) as usize).map(|c| c["i"].to_string()) else { return vec![] };
+            let cfg = Config(cx.cfg.0.clone());
+            return vec![Item::new("content_paste", "Copy to clipboard", move |cx| {
+                std::thread::spawn(move || { proc::run(&cfg, "toggles", &["-Action", "clipboard-set", "-Value", &n]); });
+                cx.actions.push(Action::Close("overview".into()));
+            })];
+        }
+        if !(TILES..HEADS).contains(&id) { return vec![]; }
+        self.rows(cx);
+        let Some(w) = self.flat.get((id - TILES) as usize) else { return vec![] };
+        let (a, b) = (w.id.clone(), w.id.clone());
+        vec![
+            Item::new("open_in_new", "Focus window", move |cx| { glaze::command(&format!("focus --container-id {a}")); cx.actions.push(Action::Close("overview".into())); }),
+            Item::new("close", "Close window", move |_| glaze::command_on(&b, "close")),
+        ]
+    }
+
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         let t = &cx.theme;
         let (w, h) = (c.w, c.h);
-        c.rect(R::new(0.0, 0.0, w, h), 30.0, alpha(t.c("outlineVariant"), 0.45));
-        c.rect(R::new(1.0, 1.0, w - 2.0, h - 2.0), 29.0, alpha(ui::layer0(cx), 0.94));
+        let (edge, fill) = (alpha(t.c("outlineVariant"), 0.45), alpha(ui::layer0(cx), 0.94));
+        c.backdrop(&[0x0F, c.w as u32, c.h as u32, (c.scale * 100.0) as u32, edge, fill], |c| {
+            c.rect(R::new(0.0, 0.0, w, h), 30.0, edge);
+            c.rect(R::new(1.0, 1.0, w - 2.0, h - 2.0), 29.0, fill);
+        });
         // search
         let sw = 560f32.min(w - 2.0 * PAD);
         let sr = R::new((w - sw) / 2.0, PAD, sw, 50.0);
@@ -291,11 +316,12 @@ impl Overview {
         }
         let flat: Vec<GWin> = list.iter().flat_map(|w| w.wins.clone()).collect();
         self.sel = self.sel.min(flat.len().saturating_sub(1));
-        let rows = list.len().div_ceil(5);
-        let (cw, ch) = ((g.w - 4.0 * GAP) / 5.0, (g.h - (rows - 1) as f32 * GAP) / rows as f32);
+        let cols = columns(g.w, g.h);
+        let rows = list.len().div_ceil(cols);
+        let (cw, ch) = ((g.w - (cols - 1) as f32 * GAP) / cols as f32, (g.h - (rows - 1) as f32 * GAP) / rows as f32);
         let mut n = 0;
         for (k, ws) in list.iter().enumerate() {
-            let cell = R::new(g.x + (k % 5) as f32 * (cw + GAP), g.y + (k / 5) as f32 * (ch + GAP), cw, ch);
+            let cell = R::new(g.x + (k % cols) as f32 * (cw + GAP), g.y + (k / cols) as f32 * (ch + GAP), cw, ch);
             let cur = ws.name == wm.workspace;
             let drop = self.drag.as_ref().is_some_and(|d| d.moving && cell.contains(d.at.0, d.at.1));
             self.cells.push((cell, ws.name.clone()));
@@ -376,6 +402,11 @@ mod tests {
     use super::*;
 
     fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, ws: ws.into() } }
+
+    #[test]
+    fn tall_screens_get_fewer_columns() {
+        assert_eq!([columns(1574.0, 799.0), columns(900.0, 800.0), columns(1015.0, 1536.0)], [5, 3, 2]);
+    }
 
     #[test]
     fn slots_match_core_js() {

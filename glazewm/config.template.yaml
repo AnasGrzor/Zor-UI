@@ -1,12 +1,12 @@
-# Zor UI - GlazeWM config
+﻿# Zor UI - GlazeWM config
 # Keybinds mirror end4 / illogical-impulse on Hyprland. "{{MOD}}" is replaced by
 # install.ps1 (-Mod alt | win). Edit freely; re-run install.ps1 -SkipDeps only
 # if you want to regenerate this file from the template.
 
 general:
   # Flow Launcher (Alt+Space) starts here: its own "start on login" setting is off by default.
-  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\zor-ui\end4.exe', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
-  shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F', 'shell-exec taskkill /IM end4.exe /F']
+  startup_commands: ['shell-exec zebar', 'shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe', 'shell-exec %LOCALAPPDATA%\FlowLauncher\Flow.Launcher.exe']
+  shutdown_commands: ['shell-exec taskkill /IM zebar.exe /F', 'shell-exec taskkill /IM zorui.exe /F']
   config_reload_commands: []
   focus_follows_cursor: false
   # Off: pressing the key (or dot) of the workspace you're on must not jump elsewhere.
@@ -82,7 +82,7 @@ window_rules:
     match:
       # Zebar widgets (bar, sidebars, overview, desktop widgets).
       - window_process: { equals: 'zebar' }
-      - window_process: { equals: 'end4' }   # native/end4 widgets
+      - window_process: { equals: 'zorui' }   # native/end4 widgets
       - window_process: { equals: 'Flow.Launcher' }
       - window_title: { regex: '[Pp]icture.in.[Pp]icture' }
         window_class: { regex: 'Chrome_WidgetWin_1|MozillaDialogClass' }
@@ -183,6 +183,9 @@ keybindings:
     bindings: ['{{MOD}}+m']
   - commands: ['toggle-tiling-direction']
     bindings: ['{{MOD}}+v']
+  # Talk to the primary buddy: say "search for ...", "open <app or game>" or "message <name> saying ...".
+  - commands: ['shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --buddy listen']
+    bindings: ['{{MOD}}+b']
   - commands: ['wm-enable-binding-mode --name resize']
     bindings: ['{{MOD}}+r']
   - commands: ['wm-toggle-pause']

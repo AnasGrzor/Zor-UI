@@ -1,9 +1,10 @@
 # Install and run Zor UI
 
 Zor UI is a Windows desktop shell built on GlazeWM (tiling), Zebar (widget host) and a native Rust
-process, `end4.exe`, that draws the bar, Dynamic Island, sidebars, overview, settings and desktop cards.
-It began as a port of [end4-pC](https://github.com/pctrade/end4-pC) by pctrade, itself based on
-[illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4.
+process, `zorui.exe`, that draws the bar, Dynamic Island, sidebars, overview, settings and desktop cards.
+Its look takes inspiration from [end4-pC](https://github.com/pctrade/end4-pC) by pctrade, which is based on
+[illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4. Some parts are ported from end4-pC; the README
+lists them under Credits.
 
 If you installed it under its old name, `end4-pC`, re-running `install.ps1` moves your settings, saved state and
 Python environment to the new `zor-ui` folders and updates the AI agent hooks that point at the scripts.
@@ -15,7 +16,7 @@ Python environment to the new `zor-ui` folders and updates the AI agent hooks th
 | Windows 10 or 11 | | Windows 10 also needs the WebView2 runtime (built into Windows 11). |
 | winget | Installs the apps below | Comes with "App Installer" in the Microsoft Store. Skip it with `-SkipDeps` if you install the apps yourself. |
 | Windows PowerShell 5.1 | Runs `install.ps1` | Already part of Windows. |
-| Rust (rustup) | Builds `end4.exe` | Optional but strongly recommended. Without it, Zebar draws every widget in its own browser window and uses about 1 GB instead of about 35 MB. |
+| Rust (rustup) | Builds `zorui.exe` | Optional but strongly recommended. Without it, Zebar draws every widget in its own browser window and uses about 1 GB instead of about 35 MB. |
 | Wallpaper Engine | Live wallpapers | Optional. Zor UI finds it in your Steam libraries. Without it, use `-WithLively` for video wallpapers. |
 
 The installer uses winget to install GlazeWM, Zebar, Flow Launcher, Python 3.12 and the JetBrains Mono
@@ -62,13 +63,13 @@ Nerd Font. It creates a Python virtual environment for the helper scripts that a
    | `-SkipDeps` | Do not use winget (GlazeWM, Zebar, Flow Launcher and Python are already installed). |
 
    The first run takes a few minutes: winget downloads, `pip` installs the Python packages, and
-   `cargo build --release` compiles `end4.exe` (about a minute on a recent PC).
+   `cargo build --release` compiles `zorui.exe` (about a minute on a recent PC).
 
 4. **What the installer changed.**
 
    | Where | What |
    |---|---|
-   | `%LOCALAPPDATA%\zor-ui\` | `end4.exe`, the helper scripts, the Python virtual environment, your saved state. |
+   | `%LOCALAPPDATA%\zor-ui\` | `zorui.exe`, the helper scripts, the Python virtual environment, your saved state. |
    | `~\.glzr\zebar\zor-ui\` | The widget pack, `config.json` (your settings) and `theme.json` (generated colors). |
    | `~\.glzr\glazewm\config.yaml` | The GlazeWM config with Zor UI's keybinds. Your old file is saved as `config.yaml.bak-<date>`. |
    | `~\.glzr\zebar\settings.json` | Which widgets Zebar starts with Windows. |
@@ -78,15 +79,15 @@ Running `install.ps1` again updates everything and keeps your `config.json` sett
 
 ## Run it
 
-The installer starts GlazeWM, which starts Zebar and `end4.exe`. It also starts them at every login, so
+The installer starts GlazeWM, which starts Zebar and `zorui.exe`. It also starts them at every login, so
 after installing there is nothing to launch.
 
 If you need to start or restart the shell by hand (or press `alt+ctrl+r`):
 
 ```powershell
 # restart only the native part (bar, island, sidebars, overview, settings, desktop cards)
-Stop-Process -Name end4 -Force -ErrorAction SilentlyContinue
-Start-Process "$env:LOCALAPPDATA\zor-ui\end4.exe"
+Stop-Process -Name zorui -Force -ErrorAction SilentlyContinue
+Start-Process "$env:LOCALAPPDATA\zor-ui\zorui.exe"
 
 # start the whole stack
 glazewm start
@@ -118,7 +119,7 @@ The full list is in the [README](../README.md#keybinds). Click the Dynamic Islan
 
 ## Turning native parts on and off
 
-`~\.glzr\zebar\zor-ui\config.json` has a `native` section. A part set to `true` is drawn by `end4.exe`;
+`~\.glzr\zebar\zor-ui\config.json` has a `native` section. A part set to `true` is drawn by `zorui.exe`;
 a part set to `false` or missing is drawn by Zebar instead.
 
 ```json
@@ -129,7 +130,7 @@ a part set to `false` or missing is drawn by Zebar instead.
 
 `"theme": true` makes wallpaper and color changes run in Rust. Set it to `false` to use the original
 PowerShell and Python scripts for theming. To force every helper command back to the Python scripts for
-a test, set the environment variable `END4_PYTHON_BRIDGE=1` before starting `end4.exe`.
+a test, set the environment variable `END4_PYTHON_BRIDGE=1` before starting `zorui.exe`.
 
 ## Update
 
@@ -143,13 +144,13 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipDeps
 
 | Symptom | Fix |
 |---|---|
-| No bar after install | Check that `end4.exe` is running (`Get-Process end4`). If not, start it as shown above. If GlazeWM is not running, run `glazewm start`. |
+| No bar after install | Check that `zorui.exe` is running (`Get-Process zorui`). If not, start it as shown above. If GlazeWM is not running, run `glazewm start`. |
 | `cargo` not found, or the installer prints "Zebar draws every widget" | Rust is missing or not on the PATH. Install it, open a new PowerShell window and run `install.ps1 -SkipDeps` again. |
 | Build fails with `dlltool ... CreateProcess` | You are on the GNU toolchain and ran `cargo update`. Restore `Cargo.lock` with `git checkout Cargo.lock` and rebuild. |
-| The bar overlaps windows, or the work area does not shrink | Reload GlazeWM's config (`glazewm command wm-reload-config`) so its `end4` ignore rule is loaded, then restart `end4.exe`. |
+| The bar overlaps windows, or the work area does not shrink | Reload GlazeWM's config (`glazewm command wm-reload-config`) so its `zorui` ignore rule is loaded, then restart `zorui.exe`. |
 | The Wallpaper Engine wallpaper disappears after a restart | Update to the current version. Older builds closed Wallpaper Engine's wallpaper at start-up when the saved state was empty. |
 | Colors look wrong after changing wallpaper | Set `"theme": false` in `config.json` to use the original scripts, and report the wallpaper. |
-| A widget shows an empty list or an error | Run the same helper from a terminal. `end4.exe --bridge <command>` prints the JSON it returns (for example `end4.exe --bridge we-status`). |
+| A widget shows an empty list or an error | Run the same helper from a terminal. `zorui.exe --bridge <command>` prints the JSON it returns (for example `zorui.exe --bridge we-status`). |
 
 ## Uninstall
 

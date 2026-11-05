@@ -1,7 +1,7 @@
 //! One layered window per widget. A `View` paints into it; the window turns pixels into
 //! UpdateLayeredWindow calls and mouse messages into hover / click / wheel / drag.
 
-use crate::{app::Ctx, gfx::{Canvas, Gfx, R}};
+use crate::{app::{Action, Ctx}, gfx::{Canvas, Gfx, R}, menu::Item};
 use windows::{
     core::w,
     Win32::{
@@ -42,6 +42,8 @@ pub trait View {
     fn key(&self, _cx: &Ctx) -> String { String::new() }
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx);
     fn input(&mut self, _ev: Input, _cx: &mut Ctx) {}
+    /// Right-click menu for spot `id` (0: the window's background). Empty: no menu.
+    fn context(&mut self, _id: u32, _cx: &Ctx) -> Vec<Item> { vec![] }
     /// Repaint interval while something moves (16 for the island spring, 100 for pulsing dots), 0 when still.
     fn frame_ms(&self) -> u32 { 0 }
     /// The hovered spot that has a popup, and its rect (bar groups).
@@ -75,6 +77,8 @@ pub struct Win {
     last: (u64, String, u32, (i32, i32)),
     /// When this window last painted; the frame timer uses it to give each view its own rate.
     painted: std::time::Instant,
+    /// The last paint left a scroll glide running: needs 16 ms frames until it settles.
+    pub gliding: bool,
 }
 
 struct Drag { start: POINT, from: POINT, moved: bool }
@@ -112,7 +116,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now() })
+                hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
         }
     }
 
@@ -174,12 +178,12 @@ impl Win {
         unsafe { let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); }
     }
 
-    /// Reserves `h` physical px at the top of the monitor for this window (Zebar's dockToEdge), so
-    /// maximised windows and GlazeWM's tiling stay below it.
-    pub fn dock_top(&mut self, mon: RECT, h: i32) {
+    /// Reserves `h` physical px along `edge` of the monitor for this window (Zebar's dockToEdge), so
+    /// maximised windows and GlazeWM's tiling stay clear of it.
+    pub fn dock(&mut self, mon: RECT, edge: crate::bar::Edge, h: i32) {
         unsafe {
-            let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, uCallbackMessage: WM_APPBAR, uEdge: ABE_TOP,
-                rc: RECT { left: mon.left, top: mon.top, right: mon.right, bottom: mon.top + h }, ..Default::default() };
+            let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, uCallbackMessage: WM_APPBAR, uEdge: edge.abe(),
+                rc: crate::bar::strip(mon, edge, h), ..Default::default() };
             if !self.appbar {
                 // Explorer leaves tool windows out when it lays out app bars; WS_EX_NOACTIVATE alone
                 // keeps the bar off the taskbar and out of Alt+Tab.
@@ -189,7 +193,7 @@ impl Win {
                 self.appbar = true;
             }
             SHAppBarMessage(ABM_QUERYPOS, &mut d);
-            d.rc.bottom = d.rc.top + h;
+            d.rc = crate::bar::strip(d.rc, edge, h); // the shell may have moved the edge in, past other app bars
             SHAppBarMessage(ABM_SETPOS, &mut d);
         }
     }
@@ -225,7 +229,9 @@ impl Win {
             let (pw, ph) = (px.0.max(1) as u32, px.1.max(1) as u32);
             let pixels = std::slice::from_raw_parts_mut(self.bits, (pw * ph * 4) as usize);
             let Some(mut c) = Canvas::new(g, pixels, pw, ph, s, self.hover) else { return };
+            crate::ui::MOVING.with(|m| m.set(false));
             self.view.paint(&mut c, cx);
+            self.gliding = crate::ui::MOVING.with(|m| m.get());
             self.hits = std::mem::take(&mut c.hits);
             drop(c);
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
@@ -296,6 +302,13 @@ impl Win {
                     if id != 0 && id == self.press {
                         let b = match msg { WM_RBUTTONUP => Btn::Right, WM_MBUTTONUP => Btn::Middle, _ => Btn::Left };
                         self.view.input(Input::Click(id, b), cx);
+                    }
+                    if msg == WM_RBUTTONUP {
+                        let items = self.view.context(id, cx);
+                        if !items.is_empty() {
+                            let m = GetMessagePos(); // where the click was, not where the pointer is by the time we get here
+                            cx.actions.push(Action::Menu(items, (m as i16 as i32, (m >> 16) as i16 as i32)));
+                        }
                     }
                     self.press = 0;
                 }

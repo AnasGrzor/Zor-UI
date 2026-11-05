@@ -347,9 +347,9 @@ fn game_mode() -> bool {
     if stopping {
         pids(&["zebar.exe", "flow.launcher.exe"]).into_iter().for_each(kill);
         if we { let _ = super::we::we_control(&["stop"], 15); }
-        let (me, others) = (unsafe { GetCurrentProcessId() }, pids(&["end4.exe"]));
+        let (me, others) = (unsafe { GetCurrentProcessId() }, pids(&["zorui.exe"]));
         others.iter().filter(|&&p| p != me).for_each(|&p| kill(p));
-        // run from the shell itself (no other end4.exe): it goes last
+        // run from the shell itself (no other zorui.exe): it goes last
         if shell_up && others.iter().all(|&p| p == me) { std::process::exit(0); }
         true
     } else {

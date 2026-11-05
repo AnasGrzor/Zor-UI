@@ -91,6 +91,7 @@ impl Home {
         if !cx.cfg.bool("lyrics") { return; }
         match lyrics::get(&Track { title: &m.title, artist: &m.artist, album: &m.album, dur: m.duration }) {
             Lyr::Searching => note(c, "Searching lyrics\u{2026}"),
+            l @ Lyr::Missing if l.hidden_for(m) => {}
             Lyr::Missing => note(c, "No lyrics found"),
             Lyr::Found(l) => {
                 let f = txt(14.0, 400);

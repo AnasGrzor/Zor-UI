@@ -367,7 +367,7 @@ fn choose_picture(start: &Path) -> windows::core::Result<Option<PathBuf>> {
 
 /// Asks for a picture and copies it into the pack's images folder (widgets can only show files inside the pack).
 fn pick_image(slot: &str) -> Value {
-    let ok = slot == "greet" || (slot.len() == 6 && slot.starts_with("image") && matches!(slot.as_bytes()[5], b'1'..=b'3'));
+    let ok = slot == "greet" || slot == "sticker" || (slot.len() == 6 && slot.starts_with("image") && matches!(slot.as_bytes()[5], b'1'..=b'3'));
     if !ok { return json!({ "error": "bad slot" }); }
     let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default());
     let pics = home.join("Pictures");

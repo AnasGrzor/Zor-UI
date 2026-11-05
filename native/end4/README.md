@@ -1,4 +1,4 @@
-# Zor UI native shell (`end4.exe`)
+# Zor UI native shell (`zorui.exe`)
 
 The Zor UI widgets (formerly end4-pC) drawn by one small Windows process instead of a Zebar browser window per widget.
 The bar on two monitors plus four desktop cards take about 32 MB working set (9 MB private) here;
@@ -34,12 +34,12 @@ The Python and PowerShell helpers are ported module by module: `sys` (config, ni
 Engine), `media` (visualizer, recorder, file picker), `toggles` (toggles.ps1) and `theme` (switchwall.ps1 and the
 Material You colors). Each command prints the same JSON as the script. One that is not ported yet (the color picker,
 the screen translator, brightness and game mode, and the yande.re and danbooru sources, whose TLS handshake `curl.exe`
-fails on some networks) runs the script. `end4.exe --bridge <command>` and `end4.exe --script <toggles|switchwall>`
+fails on some networks) runs the script. `zorui.exe --bridge <command>` and `zorui.exe --script <toggles|switchwall>`
 run a command from a terminal; `END4_PYTHON_BRIDGE=1` forces the scripts.
 
 ## Opening popups
 
-`end4.exe --open <name>` (name: `island-panel`, `overview`, `sidebar-left`, `sidebar-right`, `settings`) asks the
+`zorui.exe --open <name>` (name: `island-panel`, `overview`, `sidebar-left`, `sidebar-right`, `settings`) asks the
 running instance (WM_COPYDATA to its message window) to open the popup, or close it if it's open. Native when the
 part is in `"native"`, else Zebar's copy; with no instance running it starts Zebar's copy. `install.ps1` points the
 GlazeWM keys at it, and the bridge has `native-open <name>` for Zebar's own code. Popups sit on the clicked bar's
@@ -47,7 +47,7 @@ monitor, else GlazeWM's focused one, take keyboard focus, and close on Esc or wh
 
 ## Checking drawing without windows
 
-`end4.exe --render <part> <out.png> [w h scale]` paints one view offscreen (real config and theme, sample media)
+`zorui.exe --render <part> <out.png> [w h scale]` paints one view offscreen (real config and theme, sample media)
 and writes a PNG: a desk card id, `bar`, `dock`, `visualizer`, or a popup name. w and h are CSS px.
 
 ## Shared state with Zebar
@@ -72,11 +72,11 @@ cargo build --release
 releases link through `windows-link` (raw-dylib), which needs `dlltool` + an assembler that rustup's GNU
 toolchain doesn't ship. Keep the lock file when updating.
 
-`install.ps1` builds it when `cargo` is on PATH, copies `end4.exe` to `%LOCALAPPDATA%\zor-ui`, and turns on every missing
+`install.ps1` builds it when `cargo` is on PATH, copies `zorui.exe` to `%LOCALAPPDATA%\zor-ui`, and turns on every missing
 `"native"` key (`desktop`, `bar`, `visualizer`, `dock`, the popups). GlazeWM starts it with Zebar (`startup_commands`) and ignores its
 windows (`window_rules`).
 
-`end4.exe --all` draws every ported part whatever `"native"` says, for comparing next to Zebar.
+`zorui.exe --all` draws every ported part whatever `"native"` says, for comparing next to Zebar.
 
 ## How it draws
 

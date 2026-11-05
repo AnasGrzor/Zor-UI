@@ -9,15 +9,16 @@
 
 use crate::{
     app::{App, Ctx},
+    assist,
     bar::pretty_app,
-    cast::{self, Cast},
+    cast::{self, Cast, Hair},
     desk::greeting,
     gfx::{alpha, polygon, txt, Align, Canvas, Color, Gfx, R},
     util,
     win::{Btn, Input, View, Win, Z},
 };
 use std::{
-    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
     time::Instant,
 };
 use windows::Win32::{
@@ -28,6 +29,8 @@ use windows::Win32::{
 };
 
 static HWNDS: [AtomicIsize; 2] = [AtomicIsize::new(0), AtomicIsize::new(0)];
+/// Slot of the primary buddy, from config buddies.primary.
+static PRIMARY: AtomicUsize = AtomicUsize::new(0);
 static ON: AtomicBool = AtomicBool::new(false);
 /// config.json "native": {"gojoVoice": true} turns his spoken voice on; off by default.
 static TALK: AtomicBool = AtomicBool::new(false);
@@ -65,6 +68,8 @@ const FX: f32 = W / 2.0;
 const FY: f32 = 56.0;
 /// The bar's height (bar.rs docks 56 px).
 const BAR: f32 = 56.0;
+/// The bar is on the top edge, so the buddies walk along its bottom; on any other edge they walk along the monitor's top.
+static BAR_ON_TOP: AtomicBool = AtomicBool::new(true);
 const SPEED: f32 = 28.0;
 
 /// One look at the desktop around him: the bar's data sources, reduced to what he comments on.
@@ -155,6 +160,22 @@ fn notice(old: &Around, new: &Around) -> Option<String> {
     None
 }
 
+/// What kind of app is in front: "code", "video", "social", "chat", "game", or "" for anything else.
+fn focus_kind(title: &str, process: &str) -> &'static str {
+    let p = process.to_lowercase();
+    let p = p.trim_end_matches(".exe");
+    let t = title.to_lowercase();
+    let has = |xs: &[&str], s: &str| xs.iter().any(|x| s.contains(x));
+    if has(&["discord", "whatsapp", "telegram", "slack", "teams"], p) { return "chat"; }
+    if has(&["code", "cursor", "devenv", "idea64", "pycharm64", "rustrover", "zed", "sublime_text", "nvim"], p) { return "code"; }
+    if has(&["steam", "valorant", "javaw", "fortnite", "leagueclient", "epicgameslauncher", "cs2", "gta5"], p) { return "game"; }
+    if has(&["chrome", "msedge", "firefox", "brave", "opera", "vlc", "mpv"], p) {
+        if has(&["youtube", "netflix", "twitch", "prime video", "crunchyroll", "disney+"], &t) || p == "vlc" || p == "mpv" { return "video"; }
+        if has(&["instagram", "reddit", "twitter", "facebook", "tiktok"], &t) { return "social"; }
+    }
+    ""
+}
+
 /// `s` shortened to `n` characters, so a long track title fits in a bubble line.
 fn cut(s: &str, n: usize) -> String {
     match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() }
@@ -166,6 +187,8 @@ pub fn sync(app: &mut App) {
     let wants = [app.cx.native("gojo"), app.cx.native("buddyB") || app.cx.cfg.bool("buddies.b.on")];
     ON.store(wants.iter().any(|&w| w), Ordering::Relaxed);
     TALK.store(app.cx.cfg.bool("native.gojoVoice"), Ordering::Relaxed);
+    BAR_ON_TOP.store(app.cx.bar_edge() == crate::bar::Edge::Top, Ordering::Relaxed);
+    PRIMARY.store((app.cx.cfg.str("buddies.primary") == "b") as usize, Ordering::Relaxed);
     for (slot, want) in wants.into_iter().enumerate() {
         let at = app.wins.iter().position(|w| w.hwnd.0 as isize == HWNDS[slot].load(Ordering::Relaxed));
         match (want, at) {
@@ -196,7 +219,7 @@ struct Peer {
     calm: bool,
     name: String,
     /// A line waiting for this buddy's answer: (when to answer, who spoke).
-    inbox: Option<(f32, String)>,
+    inbox: Option<(f32, String, cast::Tone)>,
 }
 const NO_PEER: Peer = Peer { on: false, x: 0.0, mon_left: 0, calm: false, name: String::new(), inbox: None };
 static PEERS: std::sync::Mutex<[Peer; 2]> = std::sync::Mutex::new([NO_PEER, NO_PEER]);
@@ -256,7 +279,8 @@ pub struct Gojo {
     scale: f32,
     /// 0 or 1: which window and which "buddies" config slot ("a" or "b") this is.
     slot: usize,
-    cast: &'static Cast,
+    cast: Cast,
+    style: Hair,
     /// Empty: the cast's own name.
     name: String,
     walk: bool,
@@ -266,6 +290,19 @@ pub struct Gojo {
     /// Shared-clock time of the next line to the partner.
     banter_at: f32,
     greeted: bool,
+    /// Seconds of continuous work (reset by a 5 minute pause), and the minutes between break reminders (0 = off).
+    work: f32,
+    break_mins: f32,
+    breaks: bool,
+    /// What kind of app is in front, since when, and the last kind he remarked on and when.
+    focus: &'static str,
+    focus_since: f32,
+    /// Where he stood before a game sent him to the other monitor: (x, y).
+    away_from: Option<(f32, f32, isize)>,
+    /// Next time (s) a walking buddy looks for the window top under his feet.
+    ground_at: f32,
+    focus_said: (&'static str, f32),
+    watch: bool,
 }
 
 impl Gojo {
@@ -273,13 +310,14 @@ impl Gojo {
 
     fn slot(slot: usize) -> Gojo {
         let seed = unsafe { GetTickCount() } as u64 | 1;
-        let mut g = Gojo {
+        let g = Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false,
             mon: RECT::default(), scale: 1.0,
-            slot, cast: &cast::CASTS[slot.min(cast::CASTS.len() - 1)], name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
+            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
+            work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true,
         };
         g
     }
@@ -287,18 +325,28 @@ impl Gojo {
     /// Reads this buddy's settings from config (once a second, so Settings changes show at once).
     fn tune(&mut self, cx: &Ctx) {
         let k = ["a", "b"][self.slot];
-        self.cast = cast::get(cx.cfg.str(&format!("buddies.{k}.character")));
+        (self.cast, self.style) = cast::pick(&cx.cfg, cx.cfg.str(&format!("buddies.{k}.character")));
+        let s = |f: &str| cx.cfg.str(&format!("buddies.{k}.{f}")).to_string();
+        self.cast.dress(&s("hair"), &s("shirt"), &s("pants"), &s("eyes"), &s("bun"));
+        if let Some(h) = Hair::parse(&s("style")) { self.style = h; }
         self.name = cx.cfg.str(&format!("buddies.{k}.name")).trim().to_string();
         self.walk = cx.cfg.get(&format!("buddies.{k}.walk")).as_bool().unwrap_or(true);
         self.chatty = match cx.cfg.str(&format!("buddies.{k}.chatty")) { "quiet" => 0.0, "chatty" => 2.0, _ => 1.0 };
         self.pair = cx.cfg.bool("buddies.pair");
+        self.break_mins = cx.cfg.get("buddies.breakMins").as_f64().unwrap_or(50.0) as f32;
+        self.breaks = cx.cfg.get("buddies.breaks").as_bool().unwrap_or(true);
+        self.watch = cx.cfg.get("buddies.watch").as_bool().unwrap_or(true);
         // the first look at the config is also when they greet you, in the chosen character's words
         if !std::mem::replace(&mut self.greeted, true) { self.say(&format!("{} {}!", self.cast.greet, greeting(util::now().wHour)), 4.0); }
     }
     fn shown_name(&self) -> String { if self.name.is_empty() { self.cast.label.to_string() } else { self.name.clone() } }
 
-    /// Only one buddy comments on the desktop, so a pair doesn't say everything twice: slot 0, or slot 1 alone.
-    fn leads(&self) -> bool { self.slot == 0 || PEERS.lock().map_or(true, |p| !p[0].on) }
+    /// Only the primary buddy (config buddies.primary) comments on the desktop, so a pair doesn't say
+    /// everything twice. The other one leads when the primary is off.
+    fn leads(&self) -> bool {
+        let pri = PRIMARY.load(Ordering::Relaxed);
+        self.slot == pri || PEERS.lock().map_or(true, |p| !p[pri].on)
+    }
 
     /// Publishes where this buddy is, answers a line from the partner, and starts a chat now and then.
     /// Returns the partner's x when they are partnered, both on, and on the same monitor.
@@ -315,11 +363,11 @@ impl Gojo {
         p[me].calm = calm;
         if !(self.pair && p[other].on) { p[me].inbox = None; return None; }
         let near = p[other].mon_left == self.mon.left;
-        if let Some((due, from)) = p[me].inbox.clone() {
+        if let Some((due, from, tone)) = p[me].inbox.clone() {
             if now > due + 20.0 { p[me].inbox = None; } // missed it
             else if now >= due && calm && !self.talking() {
                 p[me].inbox = None;
-                let l = self.pick(self.cast.reply).replace("{p}", &from);
+                let l = self.pick(self.cast.reply[tone as usize]).replace("{p}", &from); // answers the tone it heard
                 self.say(&l, 3.5);
             }
         }
@@ -327,9 +375,9 @@ impl Gojo {
         if now >= self.banter_at && self.chatty > 0.0 && calm && p[other].calm && !self.talking() && p[me].inbox.is_none() {
             if close {
                 self.banter_at = now + (50.0 + self.rand() * 70.0) / self.chatty;
-                let l = self.pick(self.cast.to).replace("{p}", &p[other].name);
-                self.say(&l, 4.0);
-                p[other].inbox = Some((now + 4.2, name));
+                let (tone, line) = self.cast.to[(self.rand() * self.cast.to.len() as f32) as usize % self.cast.to.len()];
+                self.say(&line.replace("{p}", &p[other].name), 4.0);
+                p[other].inbox = Some((now + 4.2, name, tone));
             } else { self.banter_at = now + 6.0; } // wait until they have walked together
         }
         near.then_some(p[other].x)
@@ -344,7 +392,7 @@ impl Gojo {
     fn pick(&mut self, lines: &[&str]) -> String { lines[(self.rand() * lines.len() as f32) as usize % lines.len()].to_string() }
     fn say(&mut self, s: &str, secs: f32) { self.bubble = Some((s.to_string(), self.t + secs)); speak(s); }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
-    fn line(&self) -> f32 { self.mon.top as f32 + (BAR * self.scale).round() }
+    fn line(&self) -> f32 { self.mon.top as f32 + if BAR_ON_TOP.load(Ordering::Relaxed) { (BAR * self.scale).round() } else { 0.0 } }
 
     /// Looks at what's going on around him and comments on a change: at most one line every ~20-35 s, and
     /// never over one he's already saying (the newest change waits for its turn).
@@ -357,6 +405,7 @@ impl Gojo {
             return;
         }
         if let Some(l) = notice(&self.around, &now) { self.queued = Some(l); }
+        self.watch_focus(cx);
         self.around = now;
         if self.t < self.quiet || self.talking() { return; }
         let Some(line) = self.queued.take() else { return };
@@ -364,6 +413,67 @@ impl Gojo {
         if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
         self.quiet = self.t + (20.0 + self.rand() * 15.0) / self.chatty;
         self.say(&line, 4.0);
+    }
+
+    /// Remarks on the kind of app in front once it has been there 20 s, and at most one remark per
+    /// kind every 15 minutes, so alt-tabbing doesn't make him chatty.
+    fn watch_focus(&mut self, cx: &Ctx) {
+        if !self.watch || self.queued.is_some() { return; }
+        let kind = cx.wm.window.as_ref().map_or("", |(title, proc)| focus_kind(title, proc));
+        if kind != self.focus { self.focus = kind; self.focus_since = self.t; return; }
+        if kind.is_empty() || self.t - self.focus_since < 20.0 || (self.focus_said.0 == kind && self.t - self.focus_said.1 < 900.0) { return; }
+        let lines: &[&str] = match kind {
+            "code" => &["Coding? Don't let a bug beat you.", "Writing code again. I'll be here if it breaks."],
+            "video" => &["Watching something? Don't forget to blink.", "Is it any good? Move over."],
+            "social" => &["Scrolling again? Just a little, okay?", "Social media time. Don't lose an hour."],
+            "chat" => &["Chatting with someone? Say hi from me.", "Busy talking, I see."],
+            "game" => &["A game! Show them what you've got.", "Game time. Go win."],
+            _ => return,
+        };
+        self.focus_said = (kind, self.t);
+        let l = self.pick(lines);
+        self.queued = Some(l);
+    }
+
+    /// A full-screen game on his monitor sends him to the other monitor (if there is one) to cheer from
+    /// there; when the game ends he walks back to where he was.
+    fn follow_game(&mut self, cx: &Ctx) {
+        let fs = fullscreen_monitor();
+        let game = fs.is_some() && cx.wm.window.as_ref().map_or(true, |(t, p)| focus_kind(t, p) != "video");
+        if self.mode == Mode::Held { return; }
+        if game && self.away_from.is_none() {
+            let Some(fs) = fs.filter(|f| *f == self.mon) else { return };
+            let other = [fs.right + 10, fs.left - 10].map(|x| monitor(POINT { x, y: fs.top }, false)).into_iter().find(|m| *m != fs);
+            let Some(o) = other else { return };
+            self.away_from = Some((self.x, self.y, unsafe { GetForegroundWindow() }.0 as isize));
+            self.mon = o;
+            self.perch = None;
+            // each slot gets its own spot, like on first load, so a pair doesn't stack
+            let from_right = if self.slot == 0 { 0.3 } else { 0.55 };
+            self.x = o.right as f32 - (o.right - o.left) as f32 * from_right;
+            self.y = self.line();
+            self.mode = Mode::Stand;
+            self.wait = 2.0;
+            self.hidden = false;
+            if self.leads() { let l = self.pick(&["A game! I'll watch from here. Go win.", "Game time. I'm on the other screen, cheering."]); self.say(&l, 5.0); }
+        } else if let Some((x, y, game_win)) = self.away_from {
+            // he stays until the game's window is gone, so clicking the other monitor doesn't call him back
+            if unsafe { IsWindow(HWND(game_win as *mut _)) }.as_bool() { return; }
+            self.away_from = None;
+            self.x = x; self.y = y; self.perch = None;
+            if self.leads() { self.say("Good game? Welcome back.", 4.0); }
+        }
+    }
+
+    /// Counts how long you have worked without a 5 minute pause and says when it's time for a break.
+    fn watch_break(&mut self, idle_s: f32, dt: f32) {
+        if idle_s > 300.0 { self.work = 0.0; } else if idle_s < 60.0 { self.work += dt; }
+        if !self.breaks || self.break_mins <= 0.0 || self.work < self.break_mins * 60.0 || !self.leads() || self.hidden || self.talking() || self.mode == Mode::Held { return; }
+        let mins = (self.work / 60.0).round() as u32;
+        self.work = 0.0;
+        if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
+        let l = self.pick(&["Stand up, stretch, drink some water.", "Look away from the screen for a minute.", "Take a walk. The code will wait."]);
+        self.say(&format!("{mins} minute{} straight. Break time! {l}", if mins == 1 { "" } else { "s" }), 7.0);
     }
 
     /// One simulation step: pointer, buttons, behaviour, then moves the window to his feet.
@@ -379,7 +489,9 @@ impl Gojo {
 
         if self.x.is_nan() {
             self.mon = monitor(POINT { x: 0, y: 0 }, true);
-            self.x = self.mon.right as f32 - (self.mon.right - self.mon.left) as f32 * 0.3;
+            // each slot starts at its own spot so a pair doesn't stack on first load
+            let from_right = if self.slot == 0 { 0.3 } else { 0.55 };
+            self.x = self.mon.right as f32 - (self.mon.right - self.mon.left) as f32 * from_right;
             self.y = self.line();
         }
         let m = monitor(POINT { x: self.x as i32, y: self.y as i32 - 1 }, false);
@@ -388,6 +500,7 @@ impl Gojo {
         if self.t >= self.check_at {
             self.check_at = self.t + 1.0;
             self.tune(ctx);
+            self.follow_game(ctx);
             self.hidden = fullscreen_on(self.mon);
             // the window he sits on moved or closed
             if self.perch.is_some() && self.mode == Mode::Sit {
@@ -426,6 +539,15 @@ impl Gojo {
             if GetLastInputInfo(&mut li).as_bool() { GetTickCount().wrapping_sub(li.dwTime) as f32 / 1000.0 } else { 0.0 }
         };
 
+        self.watch_break(idle_s, dt);
+        // what you asked the primary buddy to do (assist.rs) answers in his bubble
+        if self.leads() {
+            if let Some((l, secs)) = assist::next_line() {
+                if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
+                self.say(&l, secs);
+            }
+        }
+
         match self.mode {
             Mode::Held => {
                 if down { self.x = cx + self.grab.0; self.y = cy + self.grab.1; }
@@ -458,6 +580,12 @@ impl Gojo {
                 self.dir = d.signum();
                 let stepx = SPEED * s * dt;
                 if d.abs() <= stepx { self.x = self.to; self.mode = Mode::Stand; self.wait = 3.0 + self.rand() * 5.0; } else { self.x += self.dir * stepx; }
+                // he walks on the top edge of the window under him, stepping up onto taller ones and dropping off edges
+                if self.t >= self.ground_at {
+                    self.ground_at = self.t + 0.1;
+                    self.perch = window_top(self.mon, self.x, line).filter(|t| *t > line + 6.0 * s);
+                }
+                (self.y, self.vy) = settle(self.y, self.perch.unwrap_or(line), self.vy, 1800.0 * s, dt);
             }
             Mode::Stand | Mode::Sit => {
                 self.wait -= dt;
@@ -580,11 +708,11 @@ const SHOE: Color = 0xFF09090D;
 const MOUTH: Color = 0xFF9A5050;
 
 /// What the drawing needs from the state for one frame.
-struct Look { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, c: &'static Cast }
+struct Look<'c> { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, style: Hair, c: &'c Cast }
 
 /// The chibi, feet at the pose origin, y up is negative. Colours are replaced by `over` in the
 /// shadow pass.
-fn figure(k: &mut Ink, l: &Look) {
+fn figure(k: &mut Ink, l: &Look<'_>) {
     // legs and shoes
     let (hip, u) = if l.sit { (0.0, 10.0) } else { (-10.0, 0.0) };
     for side in [-1.0f32, 1.0] {
@@ -615,13 +743,23 @@ fn figure(k: &mut Ink, l: &Look) {
     if l.arm > 0.05 { k.fill(&ell(hx + 0.8, hy - 0.4, 1.8, 1.8), SKIN); }
     // hair behind the head: the spikes the blindfold pushes up
     let b = l.hair;
-    let spikes = [
-        (-10.4, -29.0), (-13.4, -35.5), (-10.2, -35.0), (-12.0, -41.5 + b), (-7.2, -38.6), (-6.4, -45.5 + b), (-2.6, -40.4),
-        (0.6, -48.0 + b), (3.2, -40.8), (7.2, -45.8 + b), (7.8, -39.4), (12.4, -41.8 + b), (10.6, -35.4), (13.8, -34.6), (10.6, -29.0),
-    ];
-    let spikes: Vec<_> = spikes.iter().map(|&(x, y)| (x, y + u)).collect();
-    k.fill(&spikes, l.c.hair);
-    for (x0, x1, y1) in [(-6.0, -9.5, -39.0), (-1.0, -4.5, -42.5), (3.5, 5.5, -42.0), (7.5, 10.0, -38.5)] {
+    let behind: Vec<(f32, f32)> = match l.style {
+        Hair::Spiky => vec![
+            (-10.4, -29.0), (-13.4, -35.5), (-10.2, -35.0), (-12.0, -41.5 + b), (-7.2, -38.6), (-6.4, -45.5 + b), (-2.6, -40.4),
+            (0.6, -48.0 + b), (3.2, -40.8), (7.2, -45.8 + b), (7.8, -39.4), (12.4, -41.8 + b), (10.6, -35.4), (13.8, -34.6), (10.6, -29.0),
+        ],
+        Hair::Short => vec![],
+        Hair::Long => rr(-11.6, -37.0 + u, 11.6, -13.0 + u, 4.5),
+        Hair::Mohawk => vec![(-3.4, -38.0), (-3.0, -45.0 + b), (-1.4, -42.0), (0.6, -49.5 + b), (2.2, -42.0), (3.6, -45.0 + b), (3.8, -38.0)],
+    };
+    let behind: Vec<_> = behind.iter().map(|&(x, y)| (x, y + u)).collect();
+    if !behind.is_empty() { k.fill(&behind, l.c.hair); }
+    let streaks: &[(f32, f32, f32)] = match l.style {
+        Hair::Spiky => &[(-6.0, -9.5, -39.0), (-1.0, -4.5, -42.5), (3.5, 5.5, -42.0), (7.5, 10.0, -38.5)],
+        Hair::Long => &[(-8.0, -9.0, -18.0), (8.0, 9.0, -18.0)],
+        _ => &[],
+    };
+    for &(x0, x1, y1) in streaks {
         k.line((x0, -36.0 + u), (x1, y1 + u + b * 0.6), 0.7, l.c.hair_sh);
     }
     // head, hair cap, blindfold, face (features nudged 1.2 px towards where he faces)
@@ -709,7 +847,7 @@ impl View for Gojo {
         let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
         let look = Look {
             walk, sit: self.sitting(), swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
-            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, c: self.cast,
+            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, style: self.style, c: &self.cast,
         };
 
         if self.infinity > t {
@@ -785,6 +923,13 @@ impl View for Gojo {
     }
 }
 
+/// One step of getting to `ground` (screen y): up is instant, down falls with gravity `g`. Returns (y, vy).
+fn settle(y: f32, ground: f32, vy: f32, g: f32, dt: f32) -> (f32, f32) {
+    if y >= ground { return (ground, 0.0); }
+    let vy = vy + g * dt;
+    ((y + vy * dt).min(ground), vy)
+}
+
 /// The monitor rect under `p` (or the primary one).
 fn monitor(p: POINT, primary: bool) -> RECT {
     unsafe {
@@ -822,15 +967,27 @@ fn window_top(mon: RECT, x: f32, line: f32) -> Option<f32> {
 }
 
 /// A full-screen app (game, video) in front on `mon`: he hides so he isn't drawn over it.
-fn fullscreen_on(mon: RECT) -> bool {
+fn fullscreen_on(mon: RECT) -> bool { fullscreen_monitor() == Some(mon) }
+
+/// True when window rect `r` fills `mon`: it may overhang by the invisible resize border (7 px on Windows 11).
+fn covers(r: RECT, mon: RECT) -> bool {
+    const SLACK: i32 = 16;
+    r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom
+        && r.left >= mon.left - SLACK && r.top >= mon.top - SLACK && r.right <= mon.right + SLACK && r.bottom <= mon.bottom + SLACK
+}
+
+/// The monitor that the foreground window covers completely, if any.
+pub fn fullscreen_monitor() -> Option<RECT> {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.0.is_null() { return false; }
+        if fg.0.is_null() { return None; }
         let mut r = RECT::default();
-        if GetWindowRect(fg, &mut r).is_err() || r != mon { return false; }
+        if GetWindowRect(fg, &mut r).is_err() { return None; }
+        let mon = monitor(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }, false);
+        if !covers(r, mon) { return None; }
         let mut cls = [0u16; 32];
         let n = GetClassNameW(fg, &mut cls) as usize;
-        !matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW")
+        (!matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW")).then_some(mon)
     }
 }
 
@@ -838,12 +995,27 @@ fn fullscreen_on(mon: RECT) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn fullscreen_may_overhang_by_its_border() {
+        let m = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        assert!(covers(m, m));
+        assert!(covers(RECT { left: -1927, top: 0, right: 7, bottom: 1087 }, m));
+        assert!(!covers(RECT { left: -1920, top: 56, right: 0, bottom: 1080 }, m)); // tiled below the bar
+        assert!(!covers(RECT { left: -3840, top: 0, right: 0, bottom: 1080 }, m)); // spans two monitors
+    }
+    #[test]
     fn pose_mirrors_and_tilts() {
         let p = Pose { ox: 10.0, oy: 20.0, dir: -1.0, rot: 0.0 };
         assert_eq!(p.p(3.0, -5.0), (7.0, 15.0));
         let q = Pose { ox: 0.0, oy: 0.0, dir: 1.0, rot: std::f32::consts::FRAC_PI_2 };
         let (x, y) = q.p(1.0, 0.0);
         assert!(x.abs() < 1e-5 && (y - 1.0).abs() < 1e-5);
+    }
+    #[test]
+    fn settle_steps_up_at_once_and_falls_down() {
+        assert_eq!(settle(300.0, 200.0, 5.0, 1800.0, 0.016), (200.0, 0.0), "a taller window is stepped onto");
+        let (y, vy) = settle(200.0, 300.0, 0.0, 1800.0, 0.016);
+        assert!(y > 200.0 && y < 300.0 && vy > 0.0, "off an edge he falls: {y} {vy}");
+        assert_eq!(settle(299.9, 300.0, 400.0, 1800.0, 0.1).0, 300.0, "and stops at the ground");
     }
     #[test]
     fn rand_stays_in_range() {
@@ -911,5 +1083,87 @@ mod tests {
         assert_eq!(cut("Hollow Purple", 6), "Hollow…");
         assert_eq!(cut("Nah", 6), "Nah");
     }
-}
 
+    /// Tests that touch the shared PRIMARY/PEERS statics take this, so they don't race.
+    static SHARED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn focus_kind_sorts_apps() {
+        assert_eq!(focus_kind("main.rs - end4", "Code.exe"), "code");
+        assert_eq!(focus_kind("Lo-fi - YouTube - Google Chrome", "chrome.exe"), "video");
+        assert_eq!(focus_kind("Home / X - Reddit", "msedge.exe"), "social");
+        assert_eq!(focus_kind("Docs", "chrome.exe"), "");
+        assert_eq!(focus_kind("general", "Discord.exe"), "chat");
+        assert_eq!(focus_kind("Steam", "steam.exe"), "game");
+        assert_eq!(focus_kind("", "notepad.exe"), "");
+    }
+
+    #[test]
+    fn break_reminder_fires_once_and_resets_on_pause() {
+        let _l = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        PRIMARY.store(0, Ordering::Relaxed);
+        let mut g = Gojo::new();
+        g.break_mins = 1.0;
+        for _ in 0..50 { g.watch_break(0.0, 1.0); }
+        assert!(g.bubble.is_none(), "not yet: 50 s of work");
+        for _ in 0..10 { g.watch_break(0.0, 1.0); }
+        let b = g.bubble.clone().expect("reminder after 60 s").0;
+        assert!(b.starts_with("1 minute straight. Break time!"), "{b}");
+        assert!(g.work < 1.0, "work counter restarts");
+        g.work = 30.0;
+        g.watch_break(400.0, 1.0);
+        assert_eq!(g.work, 0.0, "a 5 minute pause resets the count");
+        g.work = 30.0;
+        g.watch_break(120.0, 1.0);
+        assert_eq!(g.work, 30.0, "idle 1-5 min neither counts nor resets");
+        g.break_mins = 0.0;
+        g.bubble = None;
+        g.work = 99999.0;
+        g.watch_break(0.0, 1.0);
+        assert!(g.bubble.is_none(), "0 minutes is off too");
+        g.break_mins = 1.0;
+        g.breaks = false;
+        g.watch_break(0.0, 1.0);
+        assert!(g.bubble.is_none(), "the switch turns reminders off");
+    }
+
+    #[test]
+    fn only_the_primary_leads() {
+        let _l = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, mut b) = (Gojo::new(), Gojo::slot(1));
+        let on = |i: usize, v: bool| PEERS.lock().unwrap()[i].on = v;
+        PRIMARY.store(1, Ordering::Relaxed);
+        on(0, true); on(1, true);
+        assert!(!a.leads() && b.leads(), "buddy 2 is primary");
+        on(1, false);
+        assert!(a.leads(), "primary off: the other takes over");
+        PRIMARY.store(0, Ordering::Relaxed);
+        on(1, true);
+        assert!(a.leads() && !b.leads(), "buddy 1 is primary");
+        b.break_mins = 1.0; b.work = 999.0;
+        b.watch_break(0.0, 1.0);
+        assert!(b.bubble.is_none(), "a non-primary never reminds");
+        on(0, false); on(1, false);
+    }
+
+    #[test]
+    fn focus_remark_waits_20s_and_then_cools_down() {
+        let _l = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        PRIMARY.store(0, Ordering::Relaxed);
+        let mut cx = Ctx::new(false);
+        cx.wm.window = Some(("main.rs".into(), "Code.exe".into()));
+        let mut g = Gojo::new();
+        g.watch_focus(&cx);
+        assert_eq!(g.focus, "code");
+        g.t = 10.0; g.watch_focus(&cx);
+        assert!(g.queued.is_none(), "only 10 s in front");
+        g.t = 25.0; g.watch_focus(&cx);
+        assert!(g.queued.is_some(), "20 s passed");
+        g.queued = None; g.t = 100.0; g.watch_focus(&cx);
+        assert!(g.queued.is_none(), "same kind again within 15 min");
+        g.t = 1000.0; g.watch_focus(&cx);
+        assert!(g.queued.is_some(), "after the cooldown");
+        g.queued = None; g.watch = false; g.focus_said.1 = -9999.0; g.t = 2000.0; g.watch_focus(&cx);
+        assert!(g.queued.is_none(), "switch off");
+    }
+}

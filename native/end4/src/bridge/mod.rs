@@ -11,15 +11,18 @@ use std::sync::{
     Arc,
 };
 
+mod claude_cli;
 mod common;
 mod football;
 mod media;
+mod sub_cli;
 mod notify;
 mod picker;
 mod screen_translate;
-mod sys;
+pub(crate) mod sys;
 mod theme;
 mod toggles;
+pub(crate) mod update;
 mod we;
 mod web;
 
@@ -97,7 +100,7 @@ pub fn script(cfg: &Config, script: &str, args: &[&str]) -> Option<Value> {
     }
 }
 
-/// `end4.exe --bridge <command> [args]` / `--script <toggles|switchwall> [args]`: runs a command from the
+/// `zorui.exe --bridge <command> [args]` / `--script <toggles|switchwall> [args]`: runs a command from the
 /// command line (GlazeWM keybinds use this) and prints what the script would; anything not ported runs
 /// the script itself. stdin feeds streaming commands such as ai-chat.
 pub fn cli(kind: &str, args: &[String]) -> i32 {

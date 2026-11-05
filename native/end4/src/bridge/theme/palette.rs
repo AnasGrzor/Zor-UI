@@ -1,3 +1,4 @@
+//! Adapted from end4-pC's generate_colors_material.py (GPL-3.0, (c) end-4 / pctrade).
 //! The colour science of end4_theme.py: a Material You palette from an image or a hex colour,
 //! plus the terminal colours harmonised toward it. Pure functions, no I/O.
 

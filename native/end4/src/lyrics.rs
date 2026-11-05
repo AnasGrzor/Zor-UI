@@ -15,6 +15,11 @@ pub enum Lyrics { Plain(Vec<String>), Synced(Vec<(f64, String)>) }
 #[derive(Clone)]
 pub enum Lyr { Searching, Missing, Found(Arc<Lyrics>) }
 
+impl Lyr {
+    /// A miss on a browser tab (rarely a song) isn't worth a "No lyrics found" note.
+    pub fn hidden_for(&self, m: &crate::media::Media) -> bool { matches!(self, Lyr::Missing) && m.browser() }
+}
+
 /// What is playing (Media::title / artist / album / duration).
 pub struct Track<'a> { pub title: &'a str, pub artist: &'a str, pub album: &'a str, pub dur: f64 }
 

@@ -28,8 +28,9 @@ pub struct Imgs {
 
 /// GET a picture's bytes through curl.exe (same reason as util::http_get: no TLS stack here).
 fn fetch(url: &str) -> Option<Vec<u8>> {
+    if !crate::util::web_url(url) { return None; }
     let out = std::process::Command::new("curl.exe")
-        .args(["-s", "-f", "-L", "--max-time", "25", "-A", "Mozilla/5.0", url])
+        .args(["-s", "-f", "-L", "--max-time", "25", "-A", "Mozilla/5.0", "--", url])
         .creation_flags(0x0800_0000)
         .output().ok()?;
     (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)

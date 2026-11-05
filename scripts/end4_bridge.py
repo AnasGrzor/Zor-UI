@@ -32,7 +32,7 @@ CORS limits, Windows APIs, or long-running processes goes through here:
     end4_bridge.py agents / agents-watch   AI agents' state and usage, from end4_agent.py (watch streams)
 
 Every command prints exactly one JSON line unless it says it streams.
-Parts of the logic follow zor-ui's services (GPL-3.0, (c) end-4 / pctrade).
+Parts of the logic follow end4-pC's services (GPL-3.0, (c) end-4 / pctrade).
 """
 import base64
 import json
@@ -384,13 +384,21 @@ def ollama_models():
         return []
 
 
+def claude_cli_models():
+    """The subscription models, when Claude Code is installed and ai.claudeCli isn't turned off."""
+    import claude_cli
+    return claude_cli.MODELS if config().get("ai", {}).get("claudeCli", True) and claude_cli.find() else []
+
+
 def all_models():
     custom = config().get("ai", {}).get("customModels", [])
-    return DEFAULT_MODELS + [m for m in custom if isinstance(m, dict) and m.get("id")] + ollama_models()
+    return claude_cli_models() + DEFAULT_MODELS + [m for m in custom if isinstance(m, dict) and m.get("id")] + ollama_models()
 
 
 def cmd_ai_models():
-    out({"models": all_models(), "keys": {k: bool(secret_get(k)) for k in ("gemini", "openai", "anthropic", "mistral", "openrouter")}})
+    keys = {k: bool(secret_get(k)) for k in ("gemini", "openai", "anthropic", "mistral", "openrouter")}
+    keys["claude-cli"] = bool(claude_cli_models())  # no key: it signs in through Claude Code
+    out({"models": all_models(), "keys": keys})
 
 
 def _sse(resp):
@@ -408,6 +416,12 @@ def _sse(resp):
             continue
 
 
+def cmd_buddy_listen(*argv):
+    """stdin none; prints {"state"}, then {"text"} or {"error"}: speech to text, see buddy_listen.py"""
+    import buddy_listen
+    buddy_listen.main(list(argv))
+
+
 def cmd_ai_chat():
     """stdin: {"model": id, "messages": [{"role": "user"|"assistant", "content": str}], "system": str, "temperature": float}"""
     try:
@@ -419,6 +433,11 @@ def cmd_ai_chat():
     msgs = [m for m in req.get("messages", []) if m.get("content")]
     system = req.get("system") or "You are a helpful assistant inside a Windows desktop sidebar. Use Markdown. Be concise."
     temp = float(req.get("temperature", 0.5))
+    if provider == "claude-cli":
+        import claude_cli
+        if not config().get("ai", {}).get("claudeCli", True):
+            return out({"error": "Claude subscription is turned off in Settings, Services."})
+        return claude_cli.chat(model["id"], msgs, system, out)
     key = secret_get(provider) if provider != "ollama" else ""
     if provider not in ("ollama", "custom") and not key:
         return out({"error": f"No API key for {provider}. Type /key {provider} YOUR_KEY"})
@@ -1364,8 +1383,8 @@ def cmd_focus_widget(widget, x="0", y="0"):
 
 
 def cmd_native_open(name):
-    """Opens a popup in native/end4 (`end4.exe --open <name>`): it toggles the popup, and starts Zebar's copy if end4 isn't running."""
-    exe = ROOT / "end4.exe"
+    """Opens a popup in native/end4 (`zorui.exe --open <name>`): it toggles the popup, and starts Zebar's copy if end4 isn't running."""
+    exe = ROOT / "zorui.exe"
     if not (re.fullmatch(r"[a-z-]+", name) and exe.exists()):
         return out({"ok": False})
     subprocess.Popen([str(exe), "--open", name], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1717,7 +1736,7 @@ COMMANDS = {
     "focus-widget": cmd_focus_widget, "native-open": cmd_native_open,
     "click-through": cmd_click_through,
     "translate": cmd_translate, "booru": cmd_booru, "download-wallpaper": cmd_download_wallpaper, "open": cmd_open,
-    "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat,
+    "football": cmd_football, "ai-models": cmd_ai_models, "ai-chat": cmd_ai_chat, "buddy-listen": cmd_buddy_listen,
     "secret-set": cmd_secret_set, "secret-status": cmd_secret_status,
     "notifications": cmd_notifications, "notifications-dismiss": cmd_notifications_dismiss,
     "notifications-watch": cmd_notifications_watch,

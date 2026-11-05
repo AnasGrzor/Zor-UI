@@ -53,6 +53,10 @@ pub struct Bl { pub id: String, sx: f32, sy: f32, x: f32, y: f32, pub ghost: boo
 #[derive(Default)]
 struct Info { mode: String, scheme: String, seed: String, live: bool, stamp: Option<std::time::SystemTime> }
 
+/// hub key a desk card sets before opening Settings: "<page key>|<section title>".
+pub const GOTO: &str = "end4.settingsGoto";
+const SEARCH: &str = "search";
+
 pub struct Settings {
     area: (f32, f32),
     page: usize,
@@ -90,6 +94,8 @@ pub struct Settings {
     bl_focus: Option<String>,
     bl_geo: Vec<(String, R, Vec<(String, R)>)>,
     rendering: bool,
+    /// Every page's (page, section, label, sub), built when the first search is typed.
+    index: Vec<(usize, String, String, String)>,
 }
 
 pub fn preview_path(name: &str) -> PathBuf {
@@ -118,7 +124,7 @@ impl Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""), native: [false; 3],
             over: HashMap::new(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, sl: None, drag_val: None, toast: None,
             busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle,
-            models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(),
+            models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
         };
         if std::env::var("END4_RENDER_DEMO").is_ok() { s.demo(); }
         s
@@ -288,6 +294,7 @@ impl Settings {
             Kind::Plain | Kind::Secret if submit => match key {
                 "save-name" => self.act(cx, Act::Do("save-preset", String::new())),
                 "seed" => self.act(cx, Act::Do("seed", String::new())),
+                k if k.starts_with("bname-") => { let slot = &k[6..]; let id = self.gs(cx, &format!("buddies.{slot}.character")); self.act(cx, Act::Do("rename-buddy", format!("{slot}:{id}"))) }
                 k if k.starts_with("key-") => self.act(cx, Act::Do("save-key", k[4..].to_string())),
                 _ => {}
             },
@@ -340,6 +347,12 @@ impl Settings {
             Act::Select(path, anchor, opts) => {
                 self.menu = if self.menu.as_ref().is_some_and(|m| m.path == path) { None } else { Some(Menu { path, anchor, opts, scroll: Scroll::default() }) };
             }
+            Act::Goto(i, sect) => {
+                if let Some(f) = self.fields.get_mut(SEARCH) { f.tb.set(""); }
+                self.focus = None;
+                hub::set(GOTO, Some(format!("{}|{sect}", PAGES[i].0)));
+                self.page = i;
+            }
             Act::Slider(..) | Act::Field(..) => {}
             Act::Do(name, arg) => self.do_named(cx, name, arg),
         }
@@ -373,6 +386,18 @@ impl Settings {
             }
             "winsettings" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", ""]),
             "editcfg" => proc::run_bg(&cx.cfg, "toggles", &["-Action", "editconfig"]),
+            "update" => {
+                self.toast("Checking for updates...");
+                let inbox = self.inbox.clone();
+                std::thread::spawn(move || {
+                    let msg = match crate::bridge::update::check(&crate::conf::Config::load(), true) {
+                        Ok(Some(tag)) => format!("Updating to {tag}. The app restarts"),
+                        Ok(None) => format!("You're up to date ({})", env!("CARGO_PKG_VERSION")),
+                        Err(e) => format!("Update check failed: {e}"),
+                    };
+                    inbox.send(move |s| s.toast(&msg));
+                });
+            }
             "url" => store::open_url(&arg),
             "close" => cx.actions.push(Action::Close("settings".into())),
             "bu" => {
@@ -390,6 +415,13 @@ impl Settings {
                 });
             }
             "wall-image" => { self.set(&format!("desktop.images.{arg}.file"), json!("wallpaper.jpg")); self.show_card(&arg); }
+            "tz" => {
+                let mut cur = self.garr(cx, "desktop.worldClocks");
+                match cur.iter().position(|c| *c == arg) { Some(i) => { cur.remove(i); } None => cur.push(arg) }
+                let listed = |z: &str| pages::CITIES.iter().any(|c| c.0 == z);
+                let ordered: Vec<String> = pages::CITIES.iter().map(|c| c.0.to_string()).filter(|z| cur.contains(z)).chain(cur.iter().filter(|z| !listed(z)).cloned()).collect();
+                self.set("desktop.worldClocks", json!(ordered));
+            }
             "dwidget" => {
                 let mut cur = self.garr(cx, "desktop.widgets");
                 let was = cur.contains(&arg);
@@ -397,6 +429,39 @@ impl Settings {
                 let v: Vec<&str> = DESKTOP_WIDGETS.iter().map(|w| w.0).filter(|w| cur.iter().any(|c| c == w)).collect();
                 self.set("desktop.widgets", json!(v));
                 if !was && !self.native[0] { proc::zebar_preset(&format!("desk-{arg}")); } // turned-off cards close themselves
+            }
+            "new-buddy" => {
+                let key = |f: &str| format!("buddies.{arg}.{f}");
+                let cur = self.gs(cx, &key("character"));
+                let look: Vec<(&str, String)> = ["hair", "shirt", "pants", "eyes", "bun", "style"].iter().map(|f| (*f, self.gs(cx, &key(f)))).collect();
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                let id = format!("custom{}", hub::now_ms() as i64);
+                let e = crate::cast::save(&list, &cur, &look.iter().map(|(f, v)| (*f, v.as_str())).collect::<Vec<_>>(), &self.gs(cx, &key("name")), &id);
+                let name = e["name"].as_str().unwrap_or("").to_string();
+                list.push(e);
+                self.set("buddies.custom", json!(list));
+                // the slot now shows the new buddy, whose look already has what its own fields held
+                for (f, _) in &look { self.set(&key(f), json!("")); }
+                self.set(&key("character"), json!(id));
+                self.toast(&format!("Created {name}"));
+            }
+            "rename-buddy" => {
+                let Some((slot, id)) = arg.split_once(':') else { return };
+                let Some(f) = self.fields.get(&format!("bname-{slot}")) else { return };
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                if crate::cast::rename(&mut list, id, &f.tb.text) { self.set("buddies.custom", json!(list)); }
+            }
+            "remove-buddy" => {
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                if crate::cast::remove(&mut list, &arg) {
+                    self.set("buddies.custom", json!(list));
+                    // a slot still showing it goes back to the first built-in character
+                    for k in ["a", "b"] {
+                        let path = format!("buddies.{k}.character");
+                        if self.gs(cx, &path) == arg { self.set(&path, json!("gojo")); }
+                    }
+                    self.toast("Buddy removed");
+                }
             }
             "reset-desk" => {
                 // native cards keep their spots in state.json; Zebar's are in the webview's localStorage (not reachable from here)
@@ -503,7 +568,14 @@ impl View for Settings {
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.sync(cx);
         self.ensure_loaded(cx);
+        // a desk card's "Customize in Settings": "<page>|<section title>"
+        let goto = hub::get(GOTO).and_then(|g| g.split_once('|').map(|(p, s)| (p.to_string(), s.to_string())));
+        if let Some((page, _)) = &goto {
+            hub::set(GOTO, None);
+            if let Some(i) = PAGES.iter().position(|p| p.0 == page) { self.page = i; }
+        }
         let (w, h) = (c.w, c.h);
+        if self.index.is_empty() && !self.query().is_empty() { self.build_index(c, cx); }
         ui::panel(c, cx, R::new(6.0, 6.0, w - 12.0, h - 12.0), 30.0);
 
         // navigation rail
@@ -514,16 +586,16 @@ impl View for Settings {
         // page: measure (card heights, content height), then draw what is on screen
         let r = R::new(246.0, 22.0, w - 268.0, h - 44.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
-        let (cards, ch) = {
+        let (cards, ch, heads) = {
             let mut dry = Pen::new(c, cx, r.x, r.y, r.w - 6.0, r.y, r.y + r.h);
             dry.dry = true;
             self.page(&mut dry);
-            (std::mem::take(&mut dry.measured), dry.y - r.y)
+            (std::mem::take(&mut dry.measured), dry.y - r.y, dry.heads)
         };
         (self.content_h, self.view_h) = (ch, r.h);
         let mut acts = nav_acts;
         let mut sc = std::mem::take(&mut self.scroll);
-        sc.ease();
+        if let Some((_, y)) = goto.and_then(|(_, s)| heads.into_iter().find(|h| h.0 == s)) { sc = Scroll::default(); sc.y = y - r.y - 6.0; }
         sc.region(c, cx, r, ch, |c, top| {
             let mut pen = Pen::new(c, cx, r.x, top, r.w - 6.0, r.y, r.y + r.h);
             pen.cards = cards;
@@ -564,11 +636,11 @@ impl View for Settings {
             Input::Click(..) => {}
             Input::Drag(id, x, y, Phase::Start) => {
                 let a = self.act_at(id);
-                if !matches!(&a, Some(Act::Field(k, _)) if self.focus.as_deref() == Some(k)) { self.blur(cx); }
+                if !matches!(&a, Some(Act::Field(k)) if self.focus.as_deref() == Some(k)) { self.blur(cx); }
                 if !matches!(&a, Some(Act::Do("bl", _))) { self.bl_focus = None; }
                 self.active = true;
                 match a {
-                    Some(Act::Field(k, _)) => {
+                    Some(Act::Field(k)) => {
                         self.focus = Some(k.clone());
                         if let Some(f) = self.fields.get_mut(&k) { if f.kind != Kind::Secret { f.tb.press(x, y); } else { f.tb.caret = f.tb.text.len(); } }
                     }
@@ -653,6 +725,41 @@ fn menu_dims(m: &Menu, win_h: f32) -> (f32, f32) {
 }
 
 impl Settings {
+    pub(crate) fn query(&self) -> String { self.fields.get(SEARCH).map(|f| f.tb.text.trim().to_lowercase()).unwrap_or_default() }
+
+    /// Lays every page out once without drawing, to learn its labels.
+    fn build_index(&mut self, c: &mut Canvas, cx: &Ctx) {
+        let keep = self.page;
+        for i in 0..PAGES.len() {
+            self.page = i;
+            let mut dry = Pen::new(c, cx, 0.0, 0.0, 600.0, 0.0, 0.0);
+            dry.dry = true;
+            self.body(&mut dry);
+            self.index.extend(dry.index.into_iter().map(|(s, l, sub)| (i, s, l, sub)));
+        }
+        self.page = keep;
+    }
+
+    /// The page area while a search is typed: matching controls and sections.
+    pub(crate) fn results(&mut self, p: &mut Pen) {
+        let words: Vec<String> = self.query().split_whitespace().map(String::from).collect();
+        let hits: Vec<_> = self.index.iter().filter(|(i, s, l, sub)| {
+            let hay = format!("{} {s} {l} {sub}", PAGES[*i].2).to_lowercase();
+            words.iter().all(|w| hay.contains(w))
+        }).take(40).cloned().collect();
+        p.h2("search", "Search results", "");
+        p.card(|p| {
+            if hits.is_empty() { return p.note("Nothing matches.", 13.0); }
+            for (i, sect, label, sub) in hits {
+                let Some(r) = p.row(44.0) else { continue };
+                let sub = if sub.is_empty() { PAGES[i].2.to_string() } else { format!("{} > {sub}", PAGES[i].2) };
+                let id = p.act(Act::Goto(i, sect));
+                if p.c.hit(r, id) { p.c.rect(r, 12.0, alpha(p.col("onSurface"), 0.08)); }
+                p.left(r, "", &label, &sub, 0.0);
+            }
+        });
+    }
+
     fn nav(&mut self, p: &mut Pen) {
         let (x, y0, w) = (p.x, p.y, p.w);
         let name = match p.cx.cfg.str("userName") { "" => "You", n => n }.to_string();
@@ -674,6 +781,9 @@ impl Settings {
         p.c.icon("edit", R::new(x + 16.0, y, 20.0, 48.0), ico(20.0, false), p.col("onSecondaryContainer"));
         p.c.text("Config file", R::new(x + 46.0, y, w - 60.0, 48.0), txt(14.0, 400), p.col("onSecondaryContainer"), Align::Left);
         y += 48.0 + 10.0 + 4.0;
+        let sb = R::new(x, y, w, 40.0);
+        self.field_ui(p, SEARCH, None, Kind::Plain, sb, "Search settings", 20.0, false);
+        y += 40.0 + 10.0;
         for (i, (_, ic, label)) in PAGES.iter().enumerate() {
             self.nav_item(p, R::new(x, y, w, 46.0), ic, label, Act::Page(i), i == self.page);
             y += 50.0;
@@ -735,6 +845,11 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_settings_widget_is_ported() {
+        for (id, _) in DESKTOP_WIDGETS.iter() { assert!(crate::desk::PORTED.contains(id), "{id}"); }
+    }
+
     use super::*;
 
     fn s() -> Settings { Settings::new((1200.0, 800.0)) }
@@ -803,6 +918,16 @@ mod tests {
         assert_eq!(st.drop_target(5.0, 70.0, "a"), Some(("left".into(), 1))); // the dragged part doesn't count
         assert_eq!(st.drop_target(500.0, 5.0, "x"), None);
         
+    }
+
+    #[test]
+    fn search_query_is_trimmed_and_lowercase() {
+        let mut st = s();
+        assert_eq!(st.query(), "");
+        let mut f = Field::new(false);
+        f.tb.set("  Dock ");
+        st.fields.insert(SEARCH.into(), f);
+        assert_eq!(st.query(), "dock");
     }
 
     #[test]

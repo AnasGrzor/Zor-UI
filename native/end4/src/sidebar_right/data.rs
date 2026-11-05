@@ -33,6 +33,8 @@ pub struct Shared {
     pub mixer: Vec<Mix>,
     pub mixer_open: bool,
     pub os: String,
+    /// The default output device ("Speakers (Realtek)"); empty until read.
+    pub out_name: String,
     pub busy: HashSet<String>,
 }
 pub type Sh = Arc<Mutex<Shared>>;
@@ -63,6 +65,14 @@ pub fn parse_plan(v: &Value) -> Option<String> {
     v["plans"].as_array()?.iter().find(|p| p["active"].as_bool() == Some(true))?["name"].as_str().map(String::from)
 }
 
+/// Empties the list and dismisses exactly the ids that were showing. "all" would re-read Windows'
+/// toast database first, and when that read fails or is slow nothing is saved and the list refills.
+pub fn clear_notifs(cfg: Option<Arc<Config>>, sh: &Sh) {
+    let ids: Vec<String> = { let mut s = lock(sh); let ids = s.notifs.iter().map(|n| n.id.clone()).collect(); s.notifs.clear(); ids };
+    if ids.is_empty() { return; }
+    if let Some(cfg) = cfg { std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); proc::bridge(&cfg, "notifications-dismiss", &a); }); }
+}
+
 pub fn load_notifs(cfg: &Config, sh: &Sh) {
     let (items, err) = parse_notifs(&proc::bridge(cfg, "notifications", &[]));
     let mut s = lock(sh);
@@ -77,6 +87,7 @@ pub fn start(cfg: Arc<Config>, sh: Sh, alive: Arc<AtomicBool>) {
     let (c, s) = (cfg.clone(), sh.clone());
     std::thread::spawn(move || {
         let r = proc::bridge(&c, "nightlight", &["status"]);
+        lock(&s).out_name = crate::media::output_name().unwrap_or_default();
         lock(&s).night = r["on"].as_bool() == Some(true);
         let p = parse_plan(&proc::run(&c, "toggles", &["-Action", "powerplan"]));
         { let mut g = lock(&s); g.plan = p; g.plan_loaded = true; }
@@ -106,6 +117,7 @@ pub fn start(cfg: Arc<Config>, sh: Sh, alive: Arc<AtomicBool>) {
         while alive.load(Ordering::Relaxed) {
             if n % 10 == 0 { load_notifs(&cfg, &sh); repaint(); }
             if n % 6 == 0 && lock(&sh).mixer_open { load_mixer(&cfg, &sh); repaint(); }
+            if n % 6 == 0 { let o = crate::media::output_name().unwrap_or_default(); if o != lock(&sh).out_name { lock(&sh).out_name = o; repaint(); } }
             std::thread::sleep(Duration::from_millis(500));
             n = n.wrapping_add(1);
         }
@@ -168,6 +180,8 @@ pub fn defs(i: &DefIn) -> Vec<Def> {
         d("bluetooth", if s.bluetooth == Some(true) { "bluetooth" } else { "bluetooth_disabled" }, "Bluetooth", s.bluetooth == Some(true), on_off(s.loaded, s.bluetooth), "bluetooth"),
         d("sound", if a.is_some_and(|a| a.muted) { "volume_off" } else { "volume_up" }, "Sound", a.is_some_and(|a| !a.muted),
             match a { Some(a) if a.muted => "Muted".into(), Some(a) => format!("{}%", a.volume.round()), None => "No device".into() }, "sound"),
+        d("output", if ["headphone", "headset"].iter().any(|k| s.out_name.to_lowercase().contains(k)) { "headphones" } else { "speaker" }, "Output", false,
+            if s.out_name.is_empty() { "No device".into() } else { s.out_name.clone() }, "sound"),
         d("mic", if mic == Some(true) { "mic_off" } else { "mic" }, "Microphone", mic == Some(false),
             match mic { Some(true) => "Muted".into(), Some(false) => "Listening".into(), None => "No device".into() }, "sound"),
         d("dark", if i.dark { "dark_mode" } else { "light_mode" }, "Dark mode", i.dark, (if i.dark { "Dark" } else { "Light" }).into(), "personalization-colors"),
@@ -178,6 +192,7 @@ pub fn defs(i: &DefIn) -> Vec<Def> {
             if !s.night_err.is_empty() { s.night_err.clone() } else if s.night { format!("{}K", i.kelvin) } else { "Off".into() }, "nightlight"),
         d("snip", "screenshot_region", "Screen snip", false, "Region capture".into(), ""),
         d("osk", "keyboard", "Keyboard", false, "On-screen".into(), ""),
+        d("gamemode", "sports_esports", "Game mode", false, "Stops the shell".into(), ""),
         d("power", if plan.contains("saver") { "energy_savings_leaf" } else if plan.contains("perform") { "bolt" } else { "balance" }, "Power plan",
             s.plan.is_some() && !plan.contains("saver"), if !s.plan_loaded { "…".into() } else { s.plan.clone().unwrap_or_else(|| "Unavailable".into()) }, "powersleep"),
         d("colorpick", "colorize", "Color picker", false, "Copies the hex".into(), ""),
@@ -323,6 +338,13 @@ pub fn save_todos(t: &[Value]) { hub::set("zor-ui.todo", Some(Value::Array(t.to_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clear_empties_the_list_without_a_config() {
+        let sh = Sh::default();
+        lock(&sh).notifs = vec![Notif { id: "1".into(), app: "a".into(), title: "t".into(), body: String::new(), time: 0.0 }];
+        super::clear_notifs(None, &sh);
+        assert!(lock(&sh).notifs.is_empty());
+    }
     use super::*;
 
     fn cfg() -> Config { Config::parse("{}") }
@@ -335,7 +357,9 @@ mod tests {
     fn toggle_subtitles() {
         let mut s = Shared::default();
         let d = defs(&input(&s));
-        assert_eq!(d.len(), 14);
+        assert_eq!(d.len(), 16);
+        assert_eq!(sub(&d, "output"), "No device");
+        assert_eq!(sub(&d, "gamemode"), "Stops the shell");
         assert_eq!((sub(&d, "wifi"), sub(&d, "power"), sub(&d, "sound"), sub(&d, "tiling")), ("…".into(), "…".into(), "No device".into(), "GlazeWM".into()));
         s.loaded = true; s.plan_loaded = true; s.wifi = Some(true); s.bluetooth = None; s.night = true; s.plan = Some("Power saver".into());
         let mut i = input(&s);

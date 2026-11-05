@@ -185,6 +185,25 @@ impl Gfx {
         }
     }
 
+    /// Every installed font family, for the Font setting's list.
+    pub fn families(&self) -> Vec<String> {
+        unsafe {
+            let mut v: Vec<String> = (0..self.coll.GetFontFamilyCount()).filter_map(|i| {
+                let names = self.coll.GetFontFamily(i).ok()?.GetFamilyNames().ok()?;
+                let (mut at, mut found) = (0u32, BOOL(0));
+                let _ = names.FindLocaleName(windows::core::w!("en-us"), &mut at, &mut found);
+                if !found.as_bool() { at = 0; }
+                let len = names.GetStringLength(at).ok()? as usize;
+                let mut buf = vec![0u16; len + 1];
+                names.GetString(at, &mut buf).ok()?;
+                Some(String::from_utf16_lossy(&buf[..len]))
+            }).collect();
+            v.sort_by_key(|s| s.to_lowercase());
+            v.dedup();
+            v
+        }
+    }
+
     /// Settings > Appearance > Font. Returns true if anything changed (windows must repaint).
     pub fn set_font(&self, family: &str, scale: f32, shift: i32) -> bool {
         let installed = |name: &str| unsafe {
@@ -450,15 +469,18 @@ impl<'a> Canvas<'a> {
     /// Something static drawn first (a window's panel, with its blurred shadow): `draw` renders it once into
     /// a bitmap kept under `key` (one entry; put everything it depends on in the key), later frames blit that.
     pub fn backdrop(&mut self, key: &[u32], draw: impl FnOnce(&mut Canvas)) {
-        thread_local! { static KEPT: std::cell::RefCell<Option<(Vec<u32>, Pixmap)>> = Default::default(); }
+        // a few entries, so two open windows (settings + overview) don't evict each other every frame
+        thread_local! { static KEPT: std::cell::RefCell<Vec<(Vec<u32>, Pixmap)>> = Default::default(); }
         let (pw, ph) = self.size_px();
-        if !KEPT.with(|k| k.borrow().as_ref().is_some_and(|e| e.0 == key)) {
+        if !KEPT.with(|k| k.borrow().iter().any(|e| e.0 == key)) {
             let Some(mut pm) = Pixmap::new(pw, ph) else { return draw(self) };
             if let Some(mut sc) = Canvas::new(self.g, pm.data_mut(), pw, ph, self.scale, 0) { draw(&mut sc); }
-            KEPT.with(|k| *k.borrow_mut() = Some((key.to_vec(), pm)));
+            KEPT.with(|k| { let mut k = k.borrow_mut(); if k.len() >= 4 { k.remove(0); } k.push((key.to_vec(), pm)); });
         }
-        KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().as_ref(), &mut self.surf) {
-            px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref());
+        KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().iter().find(|e| e.0 == key), &mut self.surf) {
+            // a backdrop goes on a fresh (cleared) canvas, so a plain copy equals source-over and skips the blend pipeline
+            if self.clip.is_none() && px.data_mut().len() == pm.data().len() { px.data_mut().copy_from_slice(pm.data()); }
+            else { px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref()); }
         });
     }
 
@@ -562,7 +584,16 @@ impl<'a> Canvas<'a> {
         let (pw, ph) = self.size_px();
         let ts = self.ts();
         let m = match &self.clip {
-            Some(old) => { let mut m = old.clone(); m.intersect_path(&p, FillRule::Winding, true, ts); Some(m) }
+            Some(old) => Mask::new(pw, ph).map(|mut m| {
+                // the new path alone, then times the old clip, only inside the path's bounds (intersect_path walks the whole mask)
+                m.fill_path(&p, FillRule::Winding, true, ts);
+                let b = p.bounds();
+                let (x0, x1) = (((b.left() * self.scale).floor() as i32 - 1).max(0) as usize, ((b.right() * self.scale).ceil() as i32 + 1).clamp(0, pw as i32) as usize);
+                let (y0, y1) = ((((b.top() + self.dy) * self.scale).floor() as i32 - 1).max(0) as usize, (((b.bottom() + self.dy) * self.scale).ceil() as i32 + 1).clamp(0, ph as i32) as usize);
+                let (o, d) = (old.data(), m.data_mut());
+                for y in y0..y1.max(y0) { for i in y * pw as usize + x0..y * pw as usize + x1.max(x0) { d[i] = (d[i] as u32 * o[i] as u32 / 255) as u8; } }
+                m
+            }),
             None => Mask::new(pw, ph).map(|mut m| { m.fill_path(&p, FillRule::Winding, true, ts); m }),
         };
         let old = std::mem::replace(&mut self.clip, m);
@@ -571,6 +602,33 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn clip_round(&mut self, r: R, radius: f32, draw: impl FnOnce(&mut Self)) { self.clip(round_rect(r, radius), draw) }
+
+    /// A square-cornered clip that costs almost nothing: draws unclipped, then puts back what was outside `r`
+    /// (a mask clip slows every fill and glyph in the closure). Only the strips around `r` are saved: the full
+    /// height above and below, but sideways just 24 px. shortcut: drawing more than 24 px past the left or
+    /// right edge leaks, use clip_round for that. Falls back to a mask inside another clip.
+    pub fn scissor(&mut self, r: R, draw: impl FnOnce(&mut Self)) {
+        let (pw, ph) = self.size_px();
+        let (pw, ph) = (pw as usize, ph as usize);
+        if self.clip.is_some() || !matches!(self.surf, Surface::Pix(_)) { return self.clip_round(r, 0.0, draw); }
+        let side = (24.0 * self.scale) as usize;
+        let (x0, x1) = (((r.x * self.scale).floor().max(0.0) as usize).min(pw), (((r.x + r.w) * self.scale).ceil().max(0.0) as usize).min(pw));
+        let (y0, y1) = (((r.y * self.scale).floor().max(0.0) as usize).min(ph), (((r.y + r.h) * self.scale).ceil().max(0.0) as usize).min(ph));
+        let (x1, y1) = (x1.max(x0), y1.max(y0));
+        let (xa, xb) = (x0.saturating_sub(side), (x1 + side).min(pw));
+        // x, y, w, h in device px
+        let strips = [(xa, 0, xb - xa, y0), (xa, y1, xb - xa, ph - y1), (xa, y0, x0 - xa, y1 - y0), (x1, y0, xb - x1, y1 - y0)];
+        let copy = |d: &[u8], (x, y, w, h): (usize, usize, usize, usize)| -> Vec<u8> {
+            (y..y + h).flat_map(|row| d[(row * pw + x) * 4..(row * pw + x + w) * 4].iter().copied()).collect()
+        };
+        let saved: Vec<Vec<u8>> = match &mut self.surf { Surface::Pix(px) => strips.iter().map(|&st| copy(px.data_mut(), st)).collect(), _ => vec![] };
+        draw(self);
+        let Surface::Pix(px) = &mut self.surf else { return };
+        let d = px.data_mut();
+        for (&(x, y, w, h), bytes) in strips.iter().zip(&saved) {
+            for (i, row) in (y..y + h).enumerate() { d[(row * pw + x) * 4..(row * pw + x + w) * 4].copy_from_slice(&bytes[i * w * 4..(i + 1) * w * 4]); }
+        }
+    }
 
     /// A picture decoded at its drawn size (Gfx::load_image), top-left at `r`.
     pub fn image(&mut self, img: &Pixmap, r: R, opacity: f32) {

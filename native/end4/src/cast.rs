@@ -129,6 +129,74 @@ pub static CASTS: std::sync::LazyLock<Vec<Cast>> = std::sync::LazyLock::new(|| {
 /// The cast with this id; Gojo for anything unknown.
 pub fn get(id: &str) -> &'static Cast { CASTS.iter().find(|c| c.id == id).unwrap_or(&CASTS[0]) }
 
+/// Hairstyle drawn behind and on top of the head. Chosen per buddy in Settings; Spiky is the original.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Hair { #[default] Spiky, Short, Long, Mohawk }
+
+/// (config value, name) for the Settings picker.
+pub const HAIR_STYLES: [(&str, &str); 4] = [("spiky", "Spiky"), ("short", "Short"), ("long", "Long"), ("mohawk", "Mohawk")];
+
+impl Hair {
+    /// None for empty or unknown, so the buddy keeps its own style.
+    pub fn parse(s: &str) -> Option<Hair> {
+        Some(match s { "spiky" => Hair::Spiky, "short" => Hair::Short, "long" => Hair::Long, "mohawk" => Hair::Mohawk, _ => return None })
+    }
+}
+
+/// Casts need 'static names; each distinct custom name is leaked once, not once per config read.
+fn intern(s: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut v) = NAMES.lock() else { return "Buddy" };
+    if let Some(n) = v.iter().find(|n| **n == s) { return n; }
+    let n: &'static str = Box::leak(s.to_string().into_boxed_str());
+    v.push(n);
+    n
+}
+
+/// The buddy with this id: a built-in one, or one saved with "Save as new buddy" (config buddies.custom).
+/// A saved buddy keeps the lines of the character it was made from.
+pub fn pick(cfg: &conf::Config, id: &str) -> (Cast, Hair) {
+    let Some(e) = cfg.get("buddies.custom").as_array().and_then(|a| a.iter().find(|e| e["id"] == id)) else { return (get(id).clone(), Hair::default()) };
+    let s = |f: &str| e[f].as_str().unwrap_or("");
+    let mut c = get(s("base")).clone();
+    c.id = intern(id);
+    c.label = intern(s("name"));
+    c.dress(s("hair"), s("shirt"), s("pants"), s("eyes"), s("bun"));
+    (c, Hair::parse(s("style")).unwrap_or_default())
+}
+
+/// The buddies.custom entry for a new buddy made from the character `cur` (built-in or already saved in `list`)
+/// plus the non-empty `look` fields (hair, shirt, pants, eyes, bun, style) the slot had set.
+pub fn save(list: &[serde_json::Value], cur: &str, look: &[(&str, &str)], name: &str, id: &str) -> serde_json::Value {
+    let mut e = list.iter().find(|e| e["id"] == cur).cloned().unwrap_or_else(|| serde_json::json!({ "base": if cur.is_empty() { "gojo" } else { cur } }));
+    for (f, v) in look.iter().filter(|(_, v)| !v.is_empty()) { e[*f] = serde_json::json!(v); }
+    e["id"] = id.into();
+    e["name"] = if name.trim().is_empty() { format!("My buddy {}", list.len() + 1) } else { name.trim().to_string() }.into();
+    e
+}
+
+/// Gives the saved buddy `id` a new name; false if there is no such buddy or the name is blank.
+pub fn rename(list: &mut [serde_json::Value], id: &str, name: &str) -> bool {
+    let name = name.trim();
+    match list.iter_mut().find(|e| e["id"] == id) {
+        Some(e) if !name.is_empty() => { e["name"] = name.into(); true }
+        _ => false,
+    }
+}
+
+/// Drops the saved buddy `id`; false if there was none.
+pub fn remove(list: &mut Vec<serde_json::Value>, id: &str) -> bool {
+    let n = list.len();
+    list.retain(|e| e["id"] != id);
+    list.len() != n
+}
+
+/// (id, name) of every buddy that can be picked: built-in ones, then saved ones.
+pub fn all(cfg: &conf::Config) -> Vec<(String, String)> {
+    let saved = cfg.get("buddies.custom").as_array().into_iter().flatten().filter_map(|e| Some((e["id"].as_str()?.to_string(), e["name"].as_str()?.to_string())));
+    CASTS.iter().map(|c| (c.id.to_string(), c.label.to_string())).chain(saved).collect()
+}
+
 /// Each channel scaled by `f`; above 1.0 it brightens, but only up to white.
 fn shade(c: Color, f: f32) -> Color {
     let ch = |s: u32| ((((c >> s) & 0xFF) as f32 * f).min(255.0)) as u32;
@@ -159,6 +227,37 @@ mod tests {
             assert!(c.blindfold || !c.right.is_empty(), "{} needs right-click lines without Infinity", c.id);
             assert!(c.to.iter().all(|(_, l)| l.contains("{p}")), "{} should name the partner", c.id);
         }
+    }
+
+    #[test]
+    fn saved_buddy_keeps_base_lines_and_own_look() {
+        let cfg = conf::Config::parse(r##"{"buddies":{"custom":[{"id":"mine1","name":"Rin","base":"yuji","hair":"#102030","style":"long","bun":"yes"}]}}"##);
+        let (c, h) = pick(&cfg, "mine1");
+        assert_eq!((c.label, c.id, c.hair, h, c.bun), ("Rin", "mine1", 0xFF10_2030, Hair::Long, true));
+        assert_eq!(c.greet, get("yuji").greet);
+        assert_eq!(pick(&cfg, "geto").1, Hair::Spiky, "built-in buddies start spiky");
+        assert_eq!(all(&cfg).last().unwrap(), &("mine1".to_string(), "Rin".to_string()));
+        assert_eq!(Hair::parse("mohawk"), Some(Hair::Mohawk));
+        assert_eq!(Hair::parse(""), None);
+    }
+
+    #[test]
+    fn save_folds_the_slot_look_into_a_new_entry() {
+        let first = save(&[], "yuji", &[("hair", "#FF0000"), ("style", "")], " Rin ", "c1");
+        assert_eq!((first["base"].as_str(), first["name"].as_str(), first["hair"].as_str(), first.get("style")), (Some("yuji"), Some("Rin"), Some("#FF0000"), None));
+        let second = save(&[first], "c1", &[("style", "mohawk")], "", "c2");
+        assert_eq!((second["id"].as_str(), second["base"].as_str(), second["hair"].as_str(), second["style"].as_str(), second["name"].as_str()),
+            (Some("c2"), Some("yuji"), Some("#FF0000"), Some("mohawk"), Some("My buddy 2")), "keeps what the first one had");
+    }
+
+    #[test]
+    fn rename_and_remove_saved_buddies() {
+        let mut l = vec![save(&[], "geto", &[], "A", "c1"), save(&[], "yuji", &[], "B", "c2")];
+        assert!(rename(&mut l, "c2", " Zed "));
+        assert_eq!(l[1]["name"], "Zed");
+        assert!(!rename(&mut l, "c2", "  ") && !rename(&mut l, "nope", "X"), "blank or unknown changes nothing");
+        assert!(remove(&mut l, "c1") && !remove(&mut l, "c1"));
+        assert_eq!(l.len(), 1);
     }
 
     #[test]

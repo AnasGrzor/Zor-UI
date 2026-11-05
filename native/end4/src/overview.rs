@@ -24,6 +24,9 @@ const BODIES: u32 = 3000; // + workspace index
 const CLIPS: u32 = 4000; // + index in the filtered clipboard list
 const CLIP_LIST: u32 = 3999;
 
+/// Workspace columns for a grid area: five on a wide screen, fewer on a tall one so cells keep a usable shape.
+fn columns(w: f32, h: f32) -> usize { if w > h * 1.3 { 5 } else if w > h * 0.9 { 3 } else { 2 } }
+
 pub struct Overview {
     area: (f32, f32),
     q: TextBox,
@@ -313,11 +316,12 @@ impl Overview {
         }
         let flat: Vec<GWin> = list.iter().flat_map(|w| w.wins.clone()).collect();
         self.sel = self.sel.min(flat.len().saturating_sub(1));
-        let rows = list.len().div_ceil(5);
-        let (cw, ch) = ((g.w - 4.0 * GAP) / 5.0, (g.h - (rows - 1) as f32 * GAP) / rows as f32);
+        let cols = columns(g.w, g.h);
+        let rows = list.len().div_ceil(cols);
+        let (cw, ch) = ((g.w - (cols - 1) as f32 * GAP) / cols as f32, (g.h - (rows - 1) as f32 * GAP) / rows as f32);
         let mut n = 0;
         for (k, ws) in list.iter().enumerate() {
-            let cell = R::new(g.x + (k % 5) as f32 * (cw + GAP), g.y + (k / 5) as f32 * (ch + GAP), cw, ch);
+            let cell = R::new(g.x + (k % cols) as f32 * (cw + GAP), g.y + (k / cols) as f32 * (ch + GAP), cw, ch);
             let cur = ws.name == wm.workspace;
             let drop = self.drag.as_ref().is_some_and(|d| d.moving && cell.contains(d.at.0, d.at.1));
             self.cells.push((cell, ws.name.clone()));
@@ -398,6 +402,11 @@ mod tests {
     use super::*;
 
     fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, ws: ws.into() } }
+
+    #[test]
+    fn tall_screens_get_fewer_columns() {
+        assert_eq!([columns(1574.0, 799.0), columns(900.0, 800.0), columns(1015.0, 1536.0)], [5, 3, 2]);
+    }
 
     #[test]
     fn slots_match_core_js() {

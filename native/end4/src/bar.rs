@@ -13,7 +13,55 @@ use std::{collections::HashMap, time::Instant};
 
 const LH: f32 = 1.252;
 const BAR_H: f32 = 56.0;
+const BAR_W: f32 = 68.0; // a bar on the left or right edge
 const GH: f32 = 34.0; // .group height
+
+/// Which monitor edge the bar sits on (config "bar.position").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Edge { Top, Bottom, Left, Right }
+
+impl Edge {
+    pub fn parse(s: &str) -> Edge { match s { "bottom" => Edge::Bottom, "left" => Edge::Left, "right" => Edge::Right, _ => Edge::Top } }
+    pub fn vertical(self) -> bool { matches!(self, Edge::Left | Edge::Right) }
+    /// How much of the monitor the bar takes, in CSS px.
+    pub fn thick(self) -> f32 { if self.vertical() { BAR_W } else { BAR_H } }
+    pub fn abe(self) -> u32 {
+        use windows::Win32::UI::Shell::{ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP};
+        match self { Edge::Top => ABE_TOP, Edge::Bottom => ABE_BOTTOM, Edge::Left => ABE_LEFT, Edge::Right => ABE_RIGHT }
+    }
+}
+
+/// The `h` px thick strip along `edge` of `area`.
+pub fn strip(area: windows::Win32::Foundation::RECT, edge: Edge, h: i32) -> windows::Win32::Foundation::RECT {
+    let mut r = area;
+    match edge { Edge::Top => r.bottom = r.top + h, Edge::Bottom => r.top = r.bottom - h, Edge::Left => r.right = r.left + h, Edge::Right => r.left = r.right - h }
+    r
+}
+
+/// Where a popup `size` px big goes next to the bar group `r` (CSS px in a bar window at `bar`): under it, over it, or beside it.
+pub fn popup_spot(edge: Edge, bar: (i32, i32), r: R, s: f32, size: (i32, i32)) -> (i32, i32) {
+    let at = |v: f32, o: i32| (o as f32 + v * s).round() as i32;
+    let (cx, cy) = (at(r.x + r.w / 2.0, bar.0), at(r.y + r.h / 2.0, bar.1));
+    let gap = (4.0 * s).round() as i32;
+    match edge {
+        Edge::Top => ((cx - size.0 / 2).max(bar.0), at(r.y + r.h, bar.1) + gap),
+        Edge::Bottom => ((cx - size.0 / 2).max(bar.0), at(r.y, bar.1) - gap - size.1),
+        Edge::Left => (at(r.x + r.w, bar.0) + gap, (cy - size.1 / 2).max(bar.1)),
+        Edge::Right => (at(r.x, bar.0) - gap - size.0, (cy - size.1 / 2).max(bar.1)),
+    }
+}
+
+/// The point a panel hangs from (physical px): the middle of the group's face that looks into the screen.
+pub fn anchor(edge: Edge, bar: (i32, i32), r: R, s: f32) -> (i32, i32) {
+    let at = |v: f32, o: i32| (o as f32 + v * s).round() as i32;
+    let gap = 2.0;
+    match edge {
+        Edge::Top => (at(r.x + r.w / 2.0, bar.0), at(r.y + r.h + gap, bar.1)),
+        Edge::Bottom => (at(r.x + r.w / 2.0, bar.0), at(r.y - gap, bar.1)),
+        Edge::Left => (at(r.x + r.w + gap, bar.0), at(r.y + r.h / 2.0, bar.1)),
+        Edge::Right => (at(r.x - gap, bar.0), at(r.y + r.h / 2.0, bar.1)),
+    }
+}
 
 // Clickable spots (hit ids). Lists (workspaces, tray, ...) add the item index.
 pub const LAUNCHER: u32 = 1; const WINDOW: u32 = 2; pub const RES: u32 = 3; const MEDIA: u32 = 4; const ISLAND: u32 = 5;
@@ -112,8 +160,11 @@ struct Pill { id: u32, els: Vec<El>, pad: (f32, f32), gap: f32, bg: Option<Color
 enum Kind { Group, Plain, Aw }
 
 pub struct Bar {
-    /// This bar's monitor (physical px): x, y, width.
-    pub mon: (i32, i32, i32),
+    /// This bar's monitor (physical px): x, y, width, height.
+    pub mon: (i32, i32, i32, i32),
+    pub edge: Edge,
+    /// Top-left of the bar window (physical px).
+    pub origin: (i32, i32),
     island: Spring,
     di_hover: bool,
     di_focus: String,
@@ -133,8 +184,8 @@ pub struct Bar {
 }
 
 impl Bar {
-    pub fn new(mon: (i32, i32, i32)) -> Bar {
-        Bar { mon, island: Spring::default(), di_hover: false, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
+    pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
+        Bar { mon, edge, origin, island: Spring::default(), di_hover: false, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
             art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], utils: vec![], pulsing: false }
     }
 
@@ -421,8 +472,10 @@ impl Bar {
     }
 
     /// All groups for one side, in the configured order.
-    fn pills(&mut self, c: &mut Canvas, cx: &Ctx, side: &str) -> Vec<Pill> {
+    /// `fit`: the width a group's content gets on a vertical bar (None on a horizontal one).
+    fn pills(&mut self, c: &mut Canvas, cx: &Ctx, side: &str, fit: Option<f32>) -> Vec<Pill> {
         let t = &cx.theme;
+        let v = fit.is_some();
         let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
         let lay = layout(&cx.cfg);
         let on_bar = |id: &str| lay.iter().any(|m| m.0 == id && m.1 != "hidden");
@@ -433,6 +486,7 @@ impl Bar {
         for (id, _) in lay.iter().filter(|m| m.1 == side) {
             match id.as_str() {
                 "launcher" => out.push(Pill { kind: Kind::Plain, ..group(LAUNCHER, vec![btn(LAUNCHER, 34.0, "auto_awesome", 22.0, true, t.c("primary"))], (0.0, 0.0), 0.0) }),
+                "window" if v => {} // a title doesn't fit a side bar
                 "window" => {
                     let (app, title) = match &cx.wm.window {
                         Some((title, process)) => (pretty_app(process), if title.is_empty() { pretty_app(process) } else { title.clone() }),
@@ -486,7 +540,9 @@ impl Bar {
                     out.push(group(WS, els, (4.0, 4.0), 0.0));
                 }
                 "clock" => {
-                    out.push(group(CLOCK, vec![El::Txt(sys::luxon(cx.cfg.str("clockFormat"), &util::now()), txt(13.5, 400), fg, 400.0)], (10.0, 10.0), 6.0));
+                    let now = util::now();
+                    let text = if v { util::clock(now.wHour, now.wMinute, cx.cfg.get("use24h").as_bool() != Some(false)) } else { sys::luxon(cx.cfg.str("clockFormat"), &now) };
+                    out.push(group(CLOCK, vec![El::Txt(text, txt(13.5, 400), fg, 400.0)], (10.0, 10.0), 6.0));
                     if !island_has("timer") {
                         if let Some((done, icon, text)) = Self::timer_chip(cx) {
                             let f = if done { t.c("onPrimary") } else { fg };
@@ -515,13 +571,14 @@ impl Bar {
                     if cx.wm.paused {
                         self.wm_cmds.push("wm-toggle-pause".into());
                         let f = t.c("onError");
-                        let label = El::Row(vec![El::Ico("pause_circle", 20.0, false, f), El::Txt("Tiling paused".into(), txt(13.0, 400), f, 200.0)], 6.0);
-                        els.push(El::Btn { id: WMC, w: el_w(c.g, &label) + 28.0, h: 32.0, label: Box::new(label), bg: Some(t.c("error")), round: 16.0 });
+                        let label = if v { El::Ico("pause_circle", 20.0, false, f) } else { El::Row(vec![El::Ico("pause_circle", 20.0, false, f), El::Txt("Tiling paused".into(), txt(13.0, 400), f, 200.0)], 6.0) };
+                        els.push(El::Btn { id: WMC, w: el_w(c.g, &label) + if v { 12.0 } else { 28.0 }, h: 32.0, label: Box::new(label), bg: Some(t.c("error")), round: 16.0 });
                     }
                     for (name, display) in &cx.wm.modes {
                         let i = self.wm_cmds.len() as u32;
                         self.wm_cmds.push(format!("wm-disable-binding-mode --name {name}"));
-                        els.push(El::Btn { id: WMC + i, w: c.g.measure(display, txt(13.0, 400)).0.ceil() + 28.0, h: 32.0, label: Box::new(El::Txt(display.clone(), txt(13.0, 400), fg, 200.0)),
+                        let shown = if v { display.chars().take(1).collect() } else { display.clone() }; // the mode's initial on a side bar
+                        els.push(El::Btn { id: WMC + i, w: c.g.measure(&shown, txt(13.0, 400)).0.ceil() + if v { 12.0 } else { 28.0 }, h: 32.0, label: Box::new(El::Txt(shown, txt(13.0, 400), fg, 200.0)),
                             bg: Some(t.c("surfaceContainer")), round: 16.0 });
                     }
                     if !els.is_empty() { out.push(group(WMC, els, (10.0, 10.0), 6.0)); }
@@ -557,8 +614,63 @@ impl Bar {
                 _ => {}
             }
         }
+        if let Some(w) = fit { for p in &mut out { fit_column(p, w); } }
         out
     }
+}
+
+/// Makes a group's content fit a side bar: no text beside the media ring or island icons, nothing wider than `w`.
+fn fit_column(p: &mut Pill, w: f32) {
+    if matches!(p.id, MEDIA | ISLAND) && p.els.iter().any(|e| !matches!(e, El::Txt(..))) { p.els.retain(|e| !matches!(e, El::Txt(..))); }
+    p.fixed = None;
+    p.gap = p.gap.max(3.0);
+    for e in &mut p.els { squeeze(e, w); }
+}
+
+fn squeeze(e: &mut El, w: f32) {
+    match e {
+        El::Txt(_, _, _, max) | El::Col(_, max) => *max = max.min(w),
+        El::Meter(mw, _) => *mw = mw.min(w),
+        El::Btn { w: bw, .. } => *bw = bw.min(w),
+        El::Row(items, _) => for i in items { squeeze(i, w) },
+        _ => {}
+    }
+}
+
+fn el_h(e: &El) -> f32 {
+    match e {
+        El::Ico(_, s, ..) | El::IcoS(_, s, ..) | El::Ring { size: s, .. } => *s,
+        El::Txt(_, f, ..) => (f.size * 1.3).ceil(),
+        El::Btn { h, .. } => *h,
+        El::Row(items, _) => items.iter().map(el_h).fold(0.0, f32::max),
+        El::Dot(s, _) => s.max(10.0),
+        El::Meter(..) => 8.0,
+        El::Img(_, _, s) => *s + 6.0,
+        El::Col(lines, _) => lines.iter().map(|(_, f, _)| f.size * 1.15).sum(),
+    }
+}
+
+/// A group on a side bar: its content stacked top to bottom.
+fn pill_h(p: &Pill) -> f32 {
+    let inner: f32 = p.els.iter().map(el_h).sum::<f32>() + p.gap * p.els.len().saturating_sub(1) as f32;
+    inner + 2.0 * vpad(p)
+}
+fn vpad(p: &Pill) -> f32 { if p.kind == Kind::Plain { 0.0 } else { p.pad.0.clamp(3.0, 8.0) } }
+
+/// Where each group goes on a side bar: left-side groups from the top, centre ones in the middle, right-side ones at the bottom.
+fn place_column(heights: &[Vec<f32>; 3], x: f32, w: f32, top: f32, len: f32, tight: bool) -> Vec<(usize, usize, R)> {
+    let gaps = if tight { [2.0; 3] } else { [6.0, 5.0, 6.0] };
+    let sum = |h: &[f32], gap: f32| h.iter().sum::<f32>() + gap * h.len().saturating_sub(1) as f32;
+    // the middle never starts above the end of the top groups
+    let mid = (top + (len - sum(&heights[1], gaps[1])) / 2.0).max(top + sum(&heights[0], gaps[0]) + gaps[0]);
+    let starts = [top, mid, top + len - sum(&heights[2], gaps[2])];
+    let mut out = vec![];
+    for (si, hs) in heights.iter().enumerate() {
+        let gap = gaps[si];
+        let mut y = starts[si];
+        for (pi, h) in hs.iter().enumerate() { out.push((si, pi, R::new(x, y, w, *h))); y += h + gap; }
+    }
+    out
 }
 
 /// Fill, border and shadow of one group for the bar style (bar.html's #bar.<style> / .g-<groups> rules).
@@ -577,7 +689,9 @@ fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) {
 }
 
 impl View for Bar {
-    fn size(&self, _g: &Gfx, _cx: &Ctx, scale: f32) -> (f32, f32) { (self.mon.2 as f32 / scale, BAR_H) }
+    fn size(&self, _g: &Gfx, _cx: &Ctx, scale: f32) -> (f32, f32) {
+        if self.edge.vertical() { (BAR_W, self.mon.3 as f32 / scale) } else { (self.mon.2 as f32 / scale, BAR_H) }
+    }
 
     fn key(&self, cx: &Ctx) -> String {
         let st = util::now();
@@ -592,52 +706,81 @@ impl View for Bar {
         let style = cx.cfg.str("bar.style");
         let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
         let flat = style == "flat";
-        let (bx, by, bw, bh) = if flat { (0.0, 0.0, c.w, BAR_H) } else { (6.0, 6.0, c.w - 12.0, 44.0) };
+        let (v, edge) = (self.edge.vertical(), self.edge);
+        let (bx, by, bw, bh) = match (flat, v) {
+            (true, false) => (0.0, 0.0, c.w, BAR_H),
+            (true, true) => (0.0, 0.0, c.w, c.h),
+            (false, false) => (6.0, 6.0, c.w - 12.0, 44.0),
+            (false, true) => (6.0, 6.0, c.w - 12.0, c.h - 12.0),
+        };
         let pad = if flat { 10.0 } else { 5.0 };
-        let cy = by + bh / 2.0;
+        let (cx_, cy) = (bx + bw / 2.0, by + bh / 2.0);
         if style != "islands" {
             let bar = R::new(bx, by, bw, bh);
-            if !flat { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { c.rect(bar, 23.0, col) }); }
-            c.rect(bar, if flat { 0.0 } else { 23.0 }, alpha(t.c("outlineVariant"), 0.45));
-            c.rect(if flat { R::new(0.0, 0.0, c.w, BAR_H - 1.0) } else { R::new(bx + 1.0, by + 1.0, bw - 2.0, bh - 2.0) }, if flat { 0.0 } else { 22.0 }, layer0);
+            let round = if flat { 0.0 } else { 23.0 };
+            if !flat { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { c.rect(bar, round, col) }); }
+            c.rect(bar, round, alpha(t.c("outlineVariant"), 0.45));
+            // flat: the border is the 1px edge facing the screen
+            let inner = if !flat { R::new(bx + 1.0, by + 1.0, bw - 2.0, bh - 2.0) } else { match edge {
+                Edge::Top => R::new(0.0, 0.0, c.w, c.h - 1.0), Edge::Bottom => R::new(0.0, 1.0, c.w, c.h - 1.0),
+                Edge::Left => R::new(0.0, 0.0, c.w - 1.0, c.h), Edge::Right => R::new(1.0, 0.0, c.w - 1.0, c.h),
+            } };
+            c.rect(inner, if flat { 0.0 } else { 22.0 }, layer0);
         }
         let hover = self.hover;
-        let mut sides = [self.pills(c, cx, "left"), self.pills(c, cx, "center"), self.pills(c, cx, "right")];
-        let mut widths: Vec<Vec<f32>> = sides.iter().map(|s| s.iter().map(|p| pill_w(c.g, p)).collect()).collect();
-        let sum = |w: &[f32], gap: f32| w.iter().sum::<f32>() + gap * w.len().saturating_sub(1) as f32;
-        let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
-        let cw = sum(&widths[1], 5.0);
-        // grid 1fr auto 1fr: a side gets half of what the centre leaves, and a long window title
-        // shrinks (ellipsis) to fit it instead of running under the centre groups
-        let room = (inner_w - cw) / 2.0 - 8.0;
-        for si in [0, 2] {
-            let Some(pi) = sides[si].iter().position(|p| p.id == WINDOW) else { continue };
-            let p = &mut sides[si][pi];
-            let Some(w) = fit(&widths[si], pi, 6.0, room, p.pad.0 + p.pad.1 + 40.0) else { continue };
-            if let Some(El::Col(_, max) | El::Txt(_, _, _, max)) = p.els.first_mut() { *max = w - p.pad.0 - p.pad.1; }
-            widths[si][pi] = pill_w(c.g, p);
-        }
-        let total = |i: usize, gap: f32| sum(&widths[i], gap);
-        let starts = [inner_x, inner_x + (inner_w - cw) / 2.0, inner_x + inner_w - total(2, 6.0)];
-        let mut placed: Vec<(usize, usize, R)> = vec![];
-        for (si, s) in sides.iter().enumerate() {
-            let gap = if si == 1 { 5.0 } else { 6.0 };
-            let mut x = starts[si];
-            for (pi, p) in s.iter().enumerate() {
-                let w = widths[si][pi];
-                let h = if p.kind == Kind::Plain { 34.0 } else { GH };
-                placed.push((si, pi, R::new(x, cy - h / 2.0, w, h)));
-                x += w + gap;
+        let pw = bw - 2.0 * pad; // a group's width on a side bar
+        let fit_w = v.then_some(pw - 8.0);
+        let mut sides = [self.pills(c, cx, "left", fit_w), self.pills(c, cx, "center", fit_w), self.pills(c, cx, "right", fit_w)];
+        let placed: Vec<(usize, usize, R)> = if v {
+            let (avail, gaps) = (bh - 2.0 * pad, [6.0, 5.0, 6.0]);
+            let heights = |sides: &[Vec<Pill>; 3]| [0, 1, 2].map(|i| sides[i].iter().map(pill_h).collect::<Vec<f32>>());
+            let mut hs = heights(&sides);
+            let need = |hs: &[Vec<f32>; 3], g: [f32; 3]| hs.iter().zip(g).map(|(h, g)| h.iter().sum::<f32>() + g * h.len().saturating_sub(1) as f32).sum::<f32>();
+            // too many groups for the monitor's height: tighten the padding and gaps
+            let tight = need(&hs, gaps) > avail;
+            if tight {
+                for p in sides.iter_mut().flatten() { p.gap = p.gap.min(2.0); if p.kind != Kind::Plain { p.pad = (3.0, 3.0); } }
+                hs = heights(&sides);
             }
-        }
+            place_column(&hs, bx + pad, pw, by + pad, avail, tight)
+        } else {
+            let mut widths: Vec<Vec<f32>> = sides.iter().map(|s| s.iter().map(|p| pill_w(c.g, p)).collect()).collect();
+            let sum = |w: &[f32], gap: f32| w.iter().sum::<f32>() + gap * w.len().saturating_sub(1) as f32;
+            let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
+            let cw = sum(&widths[1], 5.0);
+            // grid 1fr auto 1fr: a side gets half of what the centre leaves, and a long window title
+            // shrinks (ellipsis) to fit it instead of running under the centre groups
+            let room = (inner_w - cw) / 2.0 - 8.0;
+            for si in [0, 2] {
+                let Some(pi) = sides[si].iter().position(|p| p.id == WINDOW) else { continue };
+                let p = &mut sides[si][pi];
+                let Some(w) = fit(&widths[si], pi, 6.0, room, p.pad.0 + p.pad.1 + 40.0) else { continue };
+                if let Some(El::Col(_, max) | El::Txt(_, _, _, max)) = p.els.first_mut() { *max = w - p.pad.0 - p.pad.1; }
+                widths[si][pi] = pill_w(c.g, p);
+            }
+            let total = |i: usize, gap: f32| sum(&widths[i], gap);
+            let starts = [inner_x, inner_x + (inner_w - cw) / 2.0, inner_x + inner_w - total(2, 6.0)];
+            let mut placed = vec![];
+            for (si, s) in sides.iter().enumerate() {
+                let gap = if si == 1 { 5.0 } else { 6.0 };
+                let mut x = starts[si];
+                for (pi, p) in s.iter().enumerate() {
+                    let w = widths[si][pi];
+                    let h = if p.kind == Kind::Plain { 34.0 } else { GH };
+                    placed.push((si, pi, R::new(x, cy - h / 2.0, w, h)));
+                    x += w + gap;
+                }
+            }
+            placed
+        };
         // one shadow pass for every group (islands style)
         let shadowed: Vec<R> = placed.iter().filter(|(si, pi, _)| group_look(cx, &sides[*si][*pi]).2).map(|p| p.2).collect();
-        if !shadowed.is_empty() { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { for r in &shadowed { c.rect(*r, r.h / 2.0, col); } }); }
+        if !shadowed.is_empty() { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { for r in &shadowed { c.rect(*r, r.h.min(r.w) / 2.0, col); } }); }
         self.pills.clear();
         for (si, pi, r) in placed {
             let p = &sides[si][pi];
             let (fill, border, _) = group_look(cx, p);
-            let rad = r.h / 2.0;
+            let rad = r.h.min(r.w) / 2.0;
             if let Some(b) = border { c.rect(r, rad, b); }
             if let Some(f) = fill { c.rect(if border.is_some() { R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0) } else { r }, rad - 1.0, f); }
             let hovers_group = p.hover || matches!(cx.cfg.str("bar.groups"), "outlined" | "none") && p.kind == Kind::Group;
@@ -645,6 +788,15 @@ impl View for Bar {
             if over && hovers_group { c.rect(r, rad, alpha(t.c("onSurface"), 0.08)); }
             self.pills.push((p.id, r));
             let draw = |c: &mut Canvas| {
+                if v {
+                    let mut y = r.y + vpad(p);
+                    for e in &p.els {
+                        let h = el_h(e);
+                        draw_el(c, cx, e, cx_ - el_w(c.g, e) / 2.0, y + h / 2.0, hover);
+                        y += h + p.gap;
+                    }
+                    return;
+                }
                 let mut x = r.x + p.pad.0;
                 for e in &p.els {
                     draw_el(c, cx, e, x, cy, hover);
@@ -745,9 +897,9 @@ impl Bar {
         cx.notif = None;
         let Some((_, r)) = self.pills.iter().find(|p| p.0 == ISLAND) else { return };
         let s = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
-        let (ax, ay) = (self.mon.0 as f32 + (r.x + r.w / 2.0) * s, self.mon.1 as f32 + (r.y + r.h + 2.0) * s);
+        let (ax, ay) = anchor(self.edge, self.origin, *r, s);
         if cx.native("island-panel") {
-            cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax.round() as i32, ay.round() as i32)) });
+            cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)) });
             return;
         }
         let at = json!({ "x": ax, "y": ay });
@@ -885,6 +1037,60 @@ mod tests {
         assert_eq!(l.len(), 13);
         assert_eq!(l.iter().find(|m| m.0 == "netspeed").unwrap().1, "hidden");
     }
+    #[test]
+    fn bar_edges() {
+        use windows::Win32::Foundation::RECT;
+        let m = RECT { left: 1920, top: 0, right: 3000, bottom: 1920 };
+        let r = |e| { let r = strip(m, e, 56); (r.left, r.top, r.right, r.bottom) };
+        assert_eq!(r(Edge::Top), (1920, 0, 3000, 56));
+        assert_eq!(r(Edge::Bottom), (1920, 1864, 3000, 1920));
+        assert_eq!(r(Edge::Left), (1920, 0, 1976, 1920));
+        assert_eq!(r(Edge::Right), (2944, 0, 3000, 1920));
+        assert_eq!([Edge::parse("left"), Edge::parse("bottom"), Edge::parse("right"), Edge::parse(""), Edge::parse("nonsense")],
+            [Edge::Left, Edge::Bottom, Edge::Right, Edge::Top, Edge::Top]);
+        assert!(Edge::Left.vertical() && !Edge::Bottom.vertical());
+    }
+
+    #[test]
+    fn popups_open_into_the_screen() {
+        let g = R::new(100.0, 10.0, 80.0, 34.0); // centre (140, 27)
+        assert_eq!(popup_spot(Edge::Top, (0, 0), g, 1.0, (200, 100)), (40, 48));
+        assert_eq!(popup_spot(Edge::Bottom, (0, 1000), g, 1.0, (200, 100)), (40, 1010 - 4 - 100));
+        // a group at the bar's start can't push the popup off the monitor
+        assert_eq!(popup_spot(Edge::Top, (0, 0), R::new(0.0, 10.0, 40.0, 34.0), 1.0, (200, 100)).0, 0);
+        let v = R::new(6.0, 100.0, 46.0, 40.0); // centre y 120
+        assert_eq!(popup_spot(Edge::Left, (0, 0), v, 1.0, (200, 100)), (56, 70));
+        assert_eq!(popup_spot(Edge::Right, (1000, 0), v, 1.0, (200, 100)), (1006 - 4 - 200, 70));
+        assert_eq!(anchor(Edge::Top, (0, 0), g, 1.0), (140, 46));
+        assert_eq!(anchor(Edge::Bottom, (0, 1000), g, 1.0), (140, 1008));
+        assert_eq!(anchor(Edge::Left, (0, 0), v, 1.0), (54, 120));
+        assert_eq!(anchor(Edge::Right, (1000, 0), v, 1.0), (1004, 120));
+    }
+
+    #[test]
+    fn side_bar_columns() {
+        // top group from the top, centre group in the middle, bottom group against the bottom
+        let p = place_column(&[vec![34.0, 40.0], vec![100.0], vec![60.0]], 5.0, 46.0, 5.0, 500.0, false);
+        let at = |si, pi| p.iter().find(|x| x.0 == si && x.1 == pi).unwrap().2;
+        assert_eq!((at(0, 0).y, at(0, 1).y), (5.0, 45.0));
+        assert_eq!(at(1, 0).y, 5.0 + (500.0 - 100.0) / 2.0);
+        assert_eq!(at(2, 0).y + at(2, 0).h, 505.0);
+        // not enough room: gaps shrink and the middle group stays clear of the top ones
+        let t = place_column(&[vec![200.0, 200.0], vec![150.0], vec![100.0]], 0.0, 46.0, 0.0, 600.0, true);
+        let y = |si, pi| t.iter().find(|x| x.0 == si && x.1 == pi).unwrap().2.y;
+        assert_eq!((y(0, 1), y(1, 0)), (202.0, 404.0));
+        assert!(p.iter().all(|x| x.2.x == 5.0 && x.2.w == 46.0));
+        // text next to the media ring is dropped, long text and meters are cut to the column
+        let f = txt(13.0, 400);
+        let mut m = Pill { id: MEDIA, els: vec![El::Ico("music_note", 20.0, true, Color::default()), El::Txt("Some long song".into(), f, Color::default(), 230.0)], pad: (5.0, 10.0), gap: 6.0, bg: None, hover: false, fixed: Some(90.0), kind: Kind::Group };
+        fit_column(&mut m, 38.0);
+        assert_eq!((m.els.len(), m.fixed), (1, None));
+        let mut t = Pill { id: CLOCK, els: vec![El::Txt("12:34".into(), f, Color::default(), 400.0), El::Meter(110.0, 50.0)], ..m };
+        fit_column(&mut t, 38.0);
+        assert!(matches!(&t.els[0], El::Txt(_, _, _, 38.0)) && matches!(&t.els[1], El::Meter(38.0, _)));
+        assert!(pill_h(&t) > 2.0 * 8.0);
+    }
+
     #[test]
     fn long_titles_shrink_to_their_side() {
         // launcher 34, title 600, clock 150 with 6px gaps = 796 in a 500px side

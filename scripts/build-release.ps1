@@ -24,6 +24,7 @@ Get-ChildItem $pay -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurs
 Get-ChildItem (Join-Path $pay 'scripts') -Filter 'test_*.py' | Remove-Item -Force
 Copy-Item (Join-Path $Repo 'native\end4\target\release\zorui.exe') $pay
 Compress-Archive -Path "$pay\*" -DestinationPath (Join-Path $Stage 'payload.zip')
+Copy-Item (Join-Path $Stage 'payload.zip') $Out   # upload this too: the in-app updater downloads it
 
 # Runs the installer from a temp folder; the window stays open so errors can be read.
 Set-Content (Join-Path $Stage 'setup.cmd') -Encoding ascii -Value @'

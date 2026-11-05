@@ -78,11 +78,13 @@ fn main() {
         for kind in ["--bridge", "--script"] {
             if let Some(i) = arg(kind) { std::process::exit(bridge::cli(kind, &args[i + 1..])); }
         }
+        if arg("--update").is_some() { std::process::exit(bridge::update::cli()); }
         if let Some(i) = arg("--render") { return render::run(&args[i + 1..]); }
         // one copy only: a second start (login + manual) would stack duplicate widgets
         let _single = CreateMutexW(None, true, w!("zor-ui-native"));
         if GetLastError() == ERROR_ALREADY_EXISTS { return; }
         if app::App::start(arg("--all").is_some()).is_err() { return; }
+        bridge::update::spawn();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);

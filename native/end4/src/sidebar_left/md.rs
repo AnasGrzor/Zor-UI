@@ -95,8 +95,6 @@ pub enum Op {
     Pill(R),
     Bar(R),
     Code { r: R, lang: String, code: String },
-    /// Plain wrapped text (user messages, notes).
-    Para { r: R, s: String, size: f32, col: Col, center: bool },
 }
 
 #[derive(Default)]
@@ -226,7 +224,7 @@ pub fn draw(c: &mut Canvas, cx: &Ctx, l: &Laid, ox: f32, oy: f32, sink: &mut Sin
     sink.links.extend(l.links.iter().cloned());
     let t = &cx.theme;
     for op in &l.ops {
-        let (top, h) = match op { Op::Word { y, h, .. } => (*y, *h), Op::Pill(r) | Op::Bar(r) => (r.y, r.h), Op::Code { r, .. } | Op::Para { r, .. } => (r.y, r.h) };
+        let (top, h) = match op { Op::Word { y, h, .. } => (*y, *h), Op::Pill(r) | Op::Bar(r) => (r.y, r.h), Op::Code { r, .. } => (r.y, r.h) };
         let id = if let Op::Code { code, .. } = op { sink.copies.push(code.clone()); COPY0 + sink.copies.len() as u32 - 1 } else { 0 };
         if oy + top + h < view.0 || oy + top > view.1 { continue; }
         match op {
@@ -240,7 +238,6 @@ pub fn draw(c: &mut Canvas, cx: &Ctx, l: &Laid, ox: f32, oy: f32, sink: &mut Sin
             }
             Op::Pill(r) => c.rect(R::new(ox + r.x, oy + r.y, r.w, r.h), 5.0, t.c("surfaceContainerHigh")),
             Op::Bar(r) => c.rect(R::new(ox + r.x, oy + r.y, r.w, r.h), 1.5, t.c("outlineVariant")),
-            Op::Para { r, s, size, col, center } => c.para(s, R::new(ox + r.x, oy + r.y, r.w, r.h), txt(*size, 400), colour(cx, *col), if *center { Align::Center } else { Align::Left }),
             Op::Code { r, lang, code } => {
                 let r = R::new(ox + r.x, oy + r.y, r.w, r.h);
                 c.rect(r, 17.0, t.c("surfaceContainerLowest"));

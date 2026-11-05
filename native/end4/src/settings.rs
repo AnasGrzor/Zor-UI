@@ -294,6 +294,7 @@ impl Settings {
             Kind::Plain | Kind::Secret if submit => match key {
                 "save-name" => self.act(cx, Act::Do("save-preset", String::new())),
                 "seed" => self.act(cx, Act::Do("seed", String::new())),
+                k if k.starts_with("bname-") => { let slot = &k[6..]; let id = self.gs(cx, &format!("buddies.{slot}.character")); self.act(cx, Act::Do("rename-buddy", format!("{slot}:{id}"))) }
                 k if k.starts_with("key-") => self.act(cx, Act::Do("save-key", k[4..].to_string())),
                 _ => {}
             },
@@ -416,6 +417,39 @@ impl Settings {
                 let v: Vec<&str> = DESKTOP_WIDGETS.iter().map(|w| w.0).filter(|w| cur.iter().any(|c| c == w)).collect();
                 self.set("desktop.widgets", json!(v));
                 if !was && !self.native[0] { proc::zebar_preset(&format!("desk-{arg}")); } // turned-off cards close themselves
+            }
+            "new-buddy" => {
+                let key = |f: &str| format!("buddies.{arg}.{f}");
+                let cur = self.gs(cx, &key("character"));
+                let look: Vec<(&str, String)> = ["hair", "shirt", "pants", "eyes", "bun", "style"].iter().map(|f| (*f, self.gs(cx, &key(f)))).collect();
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                let id = format!("custom{}", hub::now_ms() as i64);
+                let e = crate::cast::save(&list, &cur, &look.iter().map(|(f, v)| (*f, v.as_str())).collect::<Vec<_>>(), &self.gs(cx, &key("name")), &id);
+                let name = e["name"].as_str().unwrap_or("").to_string();
+                list.push(e);
+                self.set("buddies.custom", json!(list));
+                // the slot now shows the new buddy, whose look already has what its own fields held
+                for (f, _) in &look { self.set(&key(f), json!("")); }
+                self.set(&key("character"), json!(id));
+                self.toast(&format!("Created {name}"));
+            }
+            "rename-buddy" => {
+                let Some((slot, id)) = arg.split_once(':') else { return };
+                let Some(f) = self.fields.get(&format!("bname-{slot}")) else { return };
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                if crate::cast::rename(&mut list, id, &f.tb.text) { self.set("buddies.custom", json!(list)); }
+            }
+            "remove-buddy" => {
+                let mut list = self.get(cx, "buddies.custom").as_array().cloned().unwrap_or_default();
+                if crate::cast::remove(&mut list, &arg) {
+                    self.set("buddies.custom", json!(list));
+                    // a slot still showing it goes back to the first built-in character
+                    for k in ["a", "b"] {
+                        let path = format!("buddies.{k}.character");
+                        if self.gs(cx, &path) == arg { self.set(&path, json!("gojo")); }
+                    }
+                    self.toast("Buddy removed");
+                }
             }
             "reset-desk" => {
                 // native cards keep their spots in state.json; Zebar's are in the webview's localStorage (not reachable from here)
@@ -590,11 +624,11 @@ impl View for Settings {
             Input::Click(..) => {}
             Input::Drag(id, x, y, Phase::Start) => {
                 let a = self.act_at(id);
-                if !matches!(&a, Some(Act::Field(k, _)) if self.focus.as_deref() == Some(k)) { self.blur(cx); }
+                if !matches!(&a, Some(Act::Field(k)) if self.focus.as_deref() == Some(k)) { self.blur(cx); }
                 if !matches!(&a, Some(Act::Do("bl", _))) { self.bl_focus = None; }
                 self.active = true;
                 match a {
-                    Some(Act::Field(k, _)) => {
+                    Some(Act::Field(k)) => {
                         self.focus = Some(k.clone());
                         if let Some(f) = self.fields.get_mut(&k) { if f.kind != Kind::Secret { f.tb.press(x, y); } else { f.tb.caret = f.tb.text.len(); } }
                     }

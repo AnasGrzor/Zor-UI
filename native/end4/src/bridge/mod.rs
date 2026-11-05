@@ -21,6 +21,7 @@ mod screen_translate;
 pub(crate) mod sys;
 mod theme;
 mod toggles;
+pub(crate) mod update;
 mod we;
 mod web;
 

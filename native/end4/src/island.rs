@@ -203,6 +203,7 @@ impl Island {
         let msg = |c: &mut Canvas, s: &str| c.text(s, r, txt(12.5, 400), t.c("onSurfaceVariant"), Align::Center);
         let found = match lyrics::get(&Track { title: &m.title, artist: &m.artist, album: &m.album, dur: m.duration }) {
             Lyr::Searching => return msg(c, "Searching lyrics…"),
+            l @ Lyr::Missing if l.hidden_for(m) => return,
             Lyr::Missing => return msg(c, "No lyrics found"),
             Lyr::Found(l) => l,
         };
@@ -423,9 +424,9 @@ impl View for Island {
                 TIMER_A => timer_act(cx, if self.tkind.1 { "next" } else { "toggle" }, self.tkind.0),
                 TIMER_B => timer_act(cx, "reset", self.tkind.0),
                 CLEAR => {
-                    if let Ok(mut n) = self.notifs.lock() { n.clear(); }
+                    let ids: Vec<String> = self.notifs.lock().map(|mut n| n.drain(..).filter_map(|i| i["id"].as_str().map(String::from)).collect()).unwrap_or_default();
                     let cfg = Config(cx.cfg.0.clone());
-                    std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &["all"]); });
+                    std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); crate::proc::bridge(&cfg, "notifications-dismiss", &a); });
                 }
                 i if i >= NOTIF => {
                     hub::set("zor-ui.rightTab", Some("notif".into()));

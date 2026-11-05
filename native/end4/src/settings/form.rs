@@ -22,7 +22,7 @@ pub enum Act {
     Step(String, i64, i64, i64),
     Slider(String, Sl, R),
     Select(String, R, Rc<Vec<(Value, String)>>),
-    Field(String, R),
+    Field(String),
     /// A named button: ("bu", "snip"), ("apply-local", id)...; settings.rs matches on the name.
     Do(&'static str, String),
     /// A search hit: page index, section title.
@@ -335,7 +335,7 @@ impl Settings {
         f.kind = kind;
         if let Some(init) = init { if self.focus.as_deref() != Some(key) && f.tb.text != init { f.tb.set(init); f.orig = init.to_string(); } }
         p.field_box(r, self.focus.as_deref() == Some(key), radius);
-        let id = p.act(Act::Field(key.into(), r));
+        let id = p.act(Act::Field(key.into()));
         p.c.hit(r, id);
         let font = txt(14.0, 400);
         let area = if multi { R::new(r.x + 14.0, r.y + 10.0, r.w - 28.0, r.h - 20.0) } else { R::new(r.x + 14.0, r.y + 1.0, r.w - 28.0, r.h - 2.0) };

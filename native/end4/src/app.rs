@@ -59,8 +59,6 @@ pub enum Action {
     Close(String),
     /// Pinned popups stay open when focus moves elsewhere.
     TogglePin(String),
-    /// A view's size changed outside a paint (rare): repaint and re-place every popup.
-    Relayout,
     /// A right-click menu at a point (physical px).
     Menu(Vec<menu::Item>, (i32, i32)),
     CloseMenu,
@@ -85,6 +83,8 @@ impl Ctx {
 
     /// True if this app, not Zebar, draws `part` ("desktop", "bar", ...).
     pub fn native(&self, part: &str) -> bool { self.all || self.cfg.bool(&format!("native.{part}")) }
+    /// The edge the native bar sits on (the Zebar bar is always on top).
+    pub fn bar_edge(&self) -> bar::Edge { if self.native("bar") { bar::Edge::parse(self.cfg.str("bar.position")) } else { bar::Edge::Top } }
     fn island_shown(&self) -> bool { bar::layout(&self.cfg).iter().any(|m| m.0 == "island" && m.1 != "hidden") }
 }
 
@@ -103,6 +103,8 @@ pub struct App {
     pub cx: Ctx,
     pub wins: Vec<Win>,
     bars: Vec<Win>,
+    /// The edge `bars` were built for.
+    bars_edge: bar::Edge,
     /// Open sidebars / overview / island panel / settings.
     pops: Vec<Pop>,
     /// The right-click menu (and when it opened).
@@ -128,8 +130,18 @@ pub struct App {
     frame: u32,
     /// timeBeginPeriod(1) is active: without it a 16 ms timer fires every 15.6 or 31 ms.
     hires: bool,
+    /// Game mode: the windows that were showing when a full-screen app took over (None = shell is live).
+    game: Option<Vec<HWND>>,
+    /// Consecutive ticks that disagreed with `game`.
+    game_votes: u8,
     started: bool,
     _streams: Vec<proc::Stream>,
+}
+
+/// Switching needs two ticks in a row (about 2 s) so a flicker of the foreground window doesn't hide the shell.
+fn game_vote(suspended: bool, want: bool, votes: u8) -> (bool, u8) {
+    if suspended == want { return (false, 0); }
+    if votes + 1 >= 2 { (true, 0) } else { (false, votes + 1) }
 }
 
 thread_local!(pub static APP: RefCell<Option<App>> = const { RefCell::new(None) });
@@ -152,11 +164,11 @@ impl App {
         let mut app = App {
             g,
             cx: Ctx::new(all),
-            wins: vec![], bars: vec![], pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
+            wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
             ws_main: None,
             theme_file: Watched::new(pack.join("theme.json")),
-            cpu: util::Cpu::new(), netmon: sys::NetMon::default(), ticks: 0, msg, frame: 0, hires: false, started: false, _streams: vec![],
+            cpu: util::Cpu::new(), netmon: sys::NetMon::default(), ticks: 0, msg, frame: 0, hires: false, game: None, game_votes: 0, started: false, _streams: vec![],
         };
         app.reload();
         desk::sync(&mut app);
@@ -224,23 +236,29 @@ impl App {
         let want = self.cx.native("bar");
         if !want { self.bars.clear(); self.popup = None; return; }
         let (mons, _) = util::monitors();
-        let have: Vec<(i32, i32, i32)> = self.bars.iter().map(|b| b.pos()).map(|(x, y)| (x, y, 0)).collect();
-        if have.len() == mons.len() && mons.iter().all(|m| have.iter().any(|h| h.0 == m.left && h.1 == m.top)) { return; }
+        // The tray's stand-in Shell_TrayWnd swallows app bar messages once it runs, so a bar built
+        // now (moved edge, new monitor) could not reserve its strip: start over in a fresh process.
+        if self.started { return restart(); }
+        let edge = self.cx.bar_edge();
+        let spot = |m: RECT| { let r = bar::strip(m, edge, (edge.thick() * dpi_scale(m)).round() as i32); (r.left, r.top) };
+        let have: Vec<(i32, i32)> = self.bars.iter().map(|b| b.pos()).collect();
+        if self.bars_edge == edge && have.len() == mons.len() && mons.iter().all(|m| have.contains(&spot(*m))) { return; }
+        self.bars_edge = edge;
         self.bars.clear();
         for m in mons {
-            let Ok(mut w) = Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left))), "Zor UI / bar", m.left, m.top, Z::Normal, false) else { continue };
+            let (x, y) = spot(m);
+            let Ok(mut w) = Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left, m.bottom - m.top), edge, (x, y))), "Zor UI / bar", x, y, Z::Normal, false) else { continue };
             w.update(&self.g, &self.cx, true);
-            w.move_to(m.left, m.top);
+            w.move_to(x, y);
             w.show();
-            let h = (56.0 * w.scale()).round() as i32;
-            w.dock_top(m, h); // after show: the shell ignores app bars that aren't visible yet
-            w.move_to(m.left, m.top); // in case the shell moved it while docking
+            let h = (edge.thick() * w.scale()).round() as i32;
+            w.dock(m, edge, h); // after show: the shell ignores app bars that aren't visible yet
+            w.move_to(x, y); // in case the shell moved it while docking
             w.pin();
             self.bars.push(w);
         }
         // After docking: the tray's stand-in Shell_TrayWnd (systray-util) catches SHAppBarMessage,
         // and Explorer ignores the app bar messages it forwards. Zebar docks first for the same reason.
-        // shortcut: bars rebuilt later (monitor change) can't reserve their strip until a restart
         self.start_bar_sources();
     }
 
@@ -275,7 +293,7 @@ impl App {
             let px = p.win.size_px();
             if px != p.px {
                 p.px = px;
-                let (x, y) = popup::spot(&p.name, p.mon, p.win.scale(), px, p.at);
+                let (x, y) = popup::spot(&p.name, p.mon, p.win.scale(), px, p.at, self.cx.bar_edge());
                 p.win.move_to(x, y);
             }
         }
@@ -283,6 +301,7 @@ impl App {
 
     /// Keeps a fast timer running while any view animates.
     fn frames(&mut self) {
+        if self.game.is_some() { return; }
         let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).filter(|&m| m > 0).min().unwrap_or(0);
         let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding);
         if glide != self.hires {
@@ -295,7 +314,46 @@ impl App {
         }
     }
 
+    /// Hides the shell while a game (any full-screen app) is in front, and restores it after.
+    fn game_check(&mut self) {
+        // With a second monitor only the bar on the covered one hides (bars_for_fullscreen); the other keeps working.
+        let want = self.cx.cfg.bool("autoGameMode") && gojo::fullscreen_monitor().is_some() && util::monitors().0.len() < 2;
+        let (flip, votes) = game_vote(self.game.is_some(), want, self.game_votes);
+        self.game_votes = votes;
+        if !flip { return; }
+        if want { self.suspend() } else { self.resume() }
+    }
+
+    fn suspend(&mut self) {
+        let names: Vec<String> = self.pops.iter().map(|p| p.name.clone()).collect();
+        for n in names { self.close(&n); }
+        (self.menu, self.popup, self.pending, self.shown) = (None, None, None, None);
+        let hid = self.bars.iter().chain(self.wins.iter()).filter(|w| w.visible()).map(|w| { w.hide(); w.hwnd }).collect();
+        self.game = Some(hid);
+        unsafe { let _ = KillTimer(self.msg, FRAME); }
+        self.frame = 0;
+    }
+
+    fn resume(&mut self) {
+        let hid = self.game.take().unwrap_or_default();
+        for w in self.bars.iter().chain(self.wins.iter()).filter(|w| hid.contains(&w.hwnd)) { w.show(); }
+        self.cx.ver += 1;
+        self.frames();
+    }
+
+    /// Setting "bar.hideFullscreen": a bar hides while an app covers its monitor and comes back after.
+    fn bars_for_fullscreen(&mut self) {
+        let fs = if self.cx.cfg.bool("bar.hideFullscreen") || self.cx.cfg.bool("autoGameMode") { gojo::fullscreen_monitor() } else { None };
+        for b in &self.bars {
+            let hide = fs.is_some_and(|m| on_monitor(m, b.rect()));
+            if hide == b.visible() { if hide { b.hide() } else { b.show() } }
+        }
+    }
+
     fn tick(&mut self) {
+        self.game_check();
+        if self.game.is_some() { return; }
+        self.bars_for_fullscreen();
         self.ticks += 1;
         let n = self.ticks;
         if n % 2 == 0 && self.reload() {
@@ -363,15 +421,14 @@ impl App {
         let Some((bi, id, r)) = self.pending.take() else { return };
         let Some(bar) = self.bars.get(bi) else { return };
         if bar.view.hover_popup().map(|p| p.0) != Some(id) { return; }
-        let (bx, by) = bar.pos();
         let s = bar.scale();
+        let origin = bar.pos();
         if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
         let Some(p) = self.popup.as_mut() else { return };
         p.view = Box::new(Popup { id });
         p.update(&self.g, &self.cx, true);
-        let (w, _) = p.view.size(&self.g, &self.cx, s);
-        let x = (bx as f32 + (r.x + r.w / 2.0) * s - w * s / 2.0).max(bx as f32);
-        p.move_to(x.round() as i32, (by as f32 + (r.y + r.h + 4.0) * s).round() as i32);
+        let (x, y) = bar::popup_spot(self.cx.bar_edge(), origin, r, s, p.size_px());
+        p.move_to(x, y);
         p.show();
         self.shown = Some((bi, id));
     }
@@ -396,13 +453,13 @@ impl App {
         let pt = mon.or_else(|| self.cx.wm.monitors.iter().find(|m| m.focus).map(|m| (m.x, m.y))).unwrap_or((0, 0));
         let Some(rect) = mons.iter().copied().find(|m| pt.0 >= m.left && pt.0 < m.right && pt.1 >= m.top && pt.1 < m.bottom).or(mons.first().copied()) else { return };
         let s = dpi_scale(rect);
-        let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s);
+        let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s, self.cx.bar_edge());
         let Some(view) = popup::make(name, area) else { return };
         let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
         w.update(&self.g, &self.cx, true);
         let px = w.size_px();
-        let (x, y) = popup::spot(name, rect, s, px, at);
+        let (x, y) = popup::spot(name, rect, s, px, at, self.cx.bar_edge());
         w.move_to(x, y);
         w.show();
         w.focus();
@@ -427,7 +484,6 @@ impl App {
                     Action::Open { name, mon, at } => self.open(&name, mon, at),
                     Action::Close(n) => self.close(&n),
                     Action::TogglePin(n) => if let Some(p) = self.pops.iter_mut().find(|p| p.name == n) { p.pinned = !p.pinned; },
-                    Action::Relayout => {}
                     Action::Menu(items, at) => self.show_menu(items, at),
                     Action::CloseMenu => { self.menu = None; self.frames(); }
                 }
@@ -631,6 +687,27 @@ fn osd(cx: &mut Ctx, a: media::Audio) {
 }
 
 /// DPI scale of the monitor `r` is (GetDpiForMonitor, so it's right before any window exists there).
+/// PowerShell command that starts `exe` again after the old process has gone.
+fn restart_script(exe: &str) -> String { format!("Start-Sleep 1; Start-Process -FilePath '{}' -WindowStyle Hidden", exe.replace('\'', "''")) }
+
+/// Starts a new zorui and exits this one (once, however many messages ask).
+fn restart() {
+    use std::{os::windows::process::CommandExt, sync::atomic::AtomicBool};
+    static GOING: AtomicBool = AtomicBool::new(false);
+    if GOING.swap(true, Ordering::SeqCst) { return; }
+    let Ok(exe) = std::env::current_exe() else { GOING.store(false, Ordering::SeqCst); return };
+    let spawned = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &restart_script(&exe.to_string_lossy())])
+        .creation_flags(0x0800_0000).spawn();
+    if spawned.is_ok() { std::process::exit(0); }
+    GOING.store(false, Ordering::SeqCst);
+}
+
+/// True if the middle of `w` is on monitor `m`.
+fn on_monitor(m: RECT, w: RECT) -> bool {
+    let (x, y) = ((w.left + w.right) / 2, (w.top + w.bottom) / 2);
+    x >= m.left && x < m.right && y >= m.top && y < m.bottom
+}
+
 fn dpi_scale(r: RECT) -> f32 {
     let (mut x, mut y) = (96u32, 96u32);
     unsafe {
@@ -658,4 +735,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         if ours(msg) { return LRESULT(0); }
     }
     DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn game_mode_needs_two_agreeing_ticks() {
+        assert_eq!(super::game_vote(false, true, 0), (false, 1));
+        assert_eq!(super::game_vote(false, true, 1), (true, 0));
+        assert_eq!(super::game_vote(false, true, 1).0 && super::game_vote(false, false, 1) == (false, 0), true, "a flicker resets the count");
+        assert_eq!(super::game_vote(true, false, 1), (true, 0));
+        assert_eq!(super::game_vote(true, true, 1), (false, 0));
+    }
+
+    #[test]
+    fn a_bar_belongs_to_the_monitor_it_sits_on() {
+        let r = |l, t, rt, b| windows::Win32::Foundation::RECT { left: l, top: t, right: rt, bottom: b };
+        let (left, right) = (r(-1920, 0, 0, 1080), r(0, 0, 1080, 1920));
+        assert!(super::on_monitor(left, r(-1920, 1024, 0, 1080)));
+        assert!(!super::on_monitor(right, r(-1920, 1024, 0, 1080)));
+        assert!(super::on_monitor(right, r(1012, 0, 1080, 1920)));
+    }
+
+    #[test]
+    fn restart_command_quotes_the_path() {
+        assert_eq!(super::restart_script(r"C:\Users\O'Neil\zorui.exe"), r"Start-Sleep 1; Start-Process -FilePath 'C:\Users\O''Neil\zorui.exe' -WindowStyle Hidden");
+    }
 }

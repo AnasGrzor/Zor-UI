@@ -8,7 +8,7 @@ use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
 fn defaults() -> Value {
     serde_json::from_str(r#"{
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
-        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "pythonPath": "", "bridgePath": "",
+        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "pythonPath": "", "bridgePath": "",
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
         "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
         "translator": { "source": "auto", "target": "en" },

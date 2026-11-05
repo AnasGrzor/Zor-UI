@@ -365,6 +365,9 @@ impl Settings {
         });
         p.h2("dashboard_customize", "Bar layout", "");
         p.card(|p| {
+            self.seg(p, "bar.position", &[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], "Bar position", "vertical_align_top");
+            self.sw(p, "bar.hideFullscreen", "Hide in full screen", "The bar hides on a monitor while an app (a game, a video) covers it", "fullscreen");
+            p.note("Side bars show icons and short text only (no window title). Moving the bar frees or takes screen space for windows after zorui restarts.", 12.0);
             self.seg(p, "bar.style", &[("float", "Float"), ("flat", "Flat"), ("islands", "Islands")], "Bar style", "style");
             self.seg(p, "bar.groups", &[("filled", "Filled"), ("outlined", "Outlined"), ("none", "None")], "Group backgrounds", "rounded_corner");
             self.slider(p, "bar.titleWidth", "Window title width", Sl { min: 10.0, max: 40.0, step: 1.0, fmt: Fmt::PctInt }, "width");
@@ -459,7 +462,7 @@ impl Settings {
 
     /// Two buddy slots on the bar. Slot 1 is the original `native.gojo` flag, slot 2 is `buddies.b.on`.
     fn buddies(&mut self, p: &mut Pen) {
-        let casts: Vec<(Value, String)> = crate::cast::CASTS.iter().map(|c| (json!(c.id), c.label.to_string())).collect();
+        let casts: Vec<(Value, String)> = crate::cast::all(&p.cx.cfg).into_iter().map(|(id, name)| (json!(id), name)).collect();
         let chatty = [("quiet", "Quiet"), ("normal", "Normal"), ("chatty", "Chatty")];
         for (k, title, on) in [("a", "Buddy 1", "native.gojo"), ("b", "Buddy 2", "buddies.b.on")] {
             p.h2("pets", title, "");
@@ -475,6 +478,23 @@ impl Settings {
                 }
                 let bun = vec![(json!(""), "Character's own".to_string()), (json!("yes"), "Yes".to_string()), (json!("no"), "No".to_string())];
                 self.pick(p, &format!("buddies.{k}.bun"), bun, "Bun", "Hair tied up on top", "face_3", 190.0);
+                let mut styles = vec![(json!(""), "Character's own".to_string())];
+                styles.extend(crate::cast::HAIR_STYLES.iter().map(|(v, n)| (json!(v), n.to_string())));
+                self.pick(p, &format!("buddies.{k}.style"), styles, "Hairstyle", "Spiky, short, long or a mohawk", "content_cut", 190.0);
+                if let Some(r) = p.row(40.0) {
+                    let w = chip_w(p.c, "Create", false);
+                    p.left(r, "person_add", "Create new buddy", "Saves this buddy's look and name as a new character you can pick for either slot", w);
+                    p.chip_right(r, None, "Create", Act::Do("new-buddy", k.into()));
+                }
+                let cur = self.gs(p.cx, &format!("buddies.{k}.character"));
+                let saved = self.get(p.cx, "buddies.custom").as_array().and_then(|a| a.iter().find(|e| e["id"] == cur.as_str()).map(|e| e["name"].as_str().unwrap_or("").to_string()));
+                if let (Some(name), Some(r)) = (saved, p.row(40.0)) {
+                    let (wr, wn) = (chip_w(p.c, "Remove", false), chip_w(p.c, "Rename", false));
+                    p.left(r, "edit", "Saved buddy", "Rename it, or remove it from the list", 200.0 + wr + wn + 24.0);
+                    p.chip_right(r, None, "Remove", Act::Do("remove-buddy", cur.clone()));
+                    p.chip_right(R::new(r.x, r.y, r.w - wr - 12.0, r.h), None, "Rename", Act::Do("rename-buddy", format!("{k}:{cur}")));
+                    self.field_ui(p, &format!("bname-{k}"), Some(&name), super::Kind::Plain, R::new(r.x + r.w - wr - wn - 24.0 - 200.0, r.y, 200.0, 40.0), "Buddy name", 17.0, false);
+                }
             });
         }
         p.h2("mic", "Voice commands", "");
@@ -559,6 +579,8 @@ impl Settings {
             let cur = self.garr(p.cx, "football.leagues");
             p.chips(LEAGUES.iter().map(|(id, n)| (n.to_string(), None, cur.iter().any(|c| c == id), Act::Do("league", id.to_string()))).collect());
         });
+        p.h2("sports_esports", "Games", "");
+        p.card(|p| self.sw(p, "autoGameMode", "Pause while a game is full screen", "Hides the bars and windows and stops polling, then brings them back", "sports_esports"));
         p.h2("lyrics", "Media", "");
         p.card(|p| self.sw(p, "lyrics", "Synced lyrics", "From lrclib.net, in the left sidebar", "lyrics"));
     }

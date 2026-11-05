@@ -86,10 +86,7 @@ impl SidebarRight {
                 lock(&sh).notifs.retain(|n| n.app != app);
                 if let Some(cfg) = cfg { std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); proc::bridge(&cfg, "notifications-dismiss", &a); }); }
             }),
-            Item::new("clear_all", "Clear all", { let (sh, cfg) = (self.sh.clone(), self.cfg.clone()); move |_| {
-                lock(&sh).notifs.clear();
-                if let Some(cfg) = cfg { std::thread::spawn(move || { proc::bridge(&cfg, "notifications-dismiss", &["all"]); }); }
-            } }),
+            Item::new("clear_all", "Clear all", { let (sh, cfg) = (self.sh.clone(), self.cfg.clone()); move |_| clear_notifs(cfg.clone(), &sh) }),
         ]
     }
 
@@ -98,10 +95,7 @@ impl SidebarRight {
         let now = hub::now_ms();
         match id {
             ID_CENTER => proc::run_bg(cfg, "toggles", &["-Action", "actioncenter"]),
-            ID_CLEAR => {
-                lock(&self.sh).notifs.clear();
-                if let Some(cfg) = self.cfg.clone() { std::thread::spawn(move || { proc::bridge(&cfg, "notifications-dismiss", &["all"]); }); }
-            }
+            ID_CLEAR => clear_notifs(self.cfg.clone(), &self.sh),
             i if (ID_DISMISS..ID_DISMISS + 100).contains(&i) => {
                 let ids: Vec<String> = {
                     let mut s = lock(&self.sh);

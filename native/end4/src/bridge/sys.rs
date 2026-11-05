@@ -26,7 +26,7 @@ use windows::{
 };
 
 /// One-shot command `name`; None if this module doesn't port it (or got arguments the script would reject).
-pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
+pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
     Some(match (name, args) {
         ("config-set", [k, v]) => config_set(&pack().join("config.json"), &pack().parent()?.join("settings.json"), k, v),
         ("open", [url]) => open(url),
@@ -188,7 +188,8 @@ fn app_icons(names: &[&str]) -> Value {
 
 /// The PowerShell that extracts each exe's icon to `<folder>\<name>.png`.
 fn icon_script(todo: &[(&String, &String)], folder: &Path) -> String {
-    let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    // PowerShell also takes the curly single quotes as quote characters
+    let q = |s: &str| format!("'{}'", s.replace(['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "''"));
     let saves: Vec<String> = todo.iter().map(|(n, e)| format!("try {{ [Drawing.Icon]::ExtractAssociatedIcon({}).ToBitmap().Save({}) }} catch {{ }}", q(e), q(&folder.join(format!("{n}.png")).to_string_lossy()))).collect();
     format!("Add-Type -AssemblyName System.Drawing; {}", saves.join("; "))
 }
@@ -447,6 +448,12 @@ mod tests {
         assert_eq!(int_of(" 12.7 "), Some(12));
         assert_eq!(int_of("x"), None);
         assert!(truthy(&json!("a")) && !truthy(&json!(0)) && !truthy(&json!({})));
+    }
+
+    #[test]
+    fn icon_script_curly_quotes() {
+        let (n, e) = ("a\u{2019}b".to_string(), "C:/x.exe".to_string());
+        assert!(icon_script(&[(&n, &e)], Path::new("C:/i")).contains("a''b.png'"));
     }
 
     #[test]

@@ -293,7 +293,11 @@ pub fn listen(cfg: &Config) {
     let s = proc::stream(cfg, "buddy-listen", &args, move |line| {
         let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
         if let Some(l) = v["level"].as_f64() { crate::pill::level(l as f32); }
-        if v["state"] == "thinking" { crate::pill::set(crate::pill::THINKING); }
+        match v["state"].as_str() {
+            Some("listening") => crate::pill::set(crate::pill::LISTENING),
+            Some("thinking") => crate::pill::set(crate::pill::THINKING),
+            _ => {}
+        }
         if let Some(e) = v["error"].as_str() { crate::pill::set(0); say_later(&short(e, 110), 8.0); }
         if let Some(t) = v["text"].as_str() {
             crate::pill::set(0);

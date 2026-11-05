@@ -11,7 +11,7 @@ use crate::{
     app::{App, Ctx},
     assist,
     bar::pretty_app,
-    cast::{self, Cast},
+    cast::{self, Cast, Hair},
     desk::greeting,
     gfx::{alpha, polygon, txt, Align, Canvas, Color, Gfx, R},
     util,
@@ -68,6 +68,8 @@ const FX: f32 = W / 2.0;
 const FY: f32 = 56.0;
 /// The bar's height (bar.rs docks 56 px).
 const BAR: f32 = 56.0;
+/// The bar is on the top edge, so the buddies walk along its bottom; on any other edge they walk along the monitor's top.
+static BAR_ON_TOP: AtomicBool = AtomicBool::new(true);
 const SPEED: f32 = 28.0;
 
 /// One look at the desktop around him: the bar's data sources, reduced to what he comments on.
@@ -185,6 +187,7 @@ pub fn sync(app: &mut App) {
     let wants = [app.cx.native("gojo"), app.cx.native("buddyB") || app.cx.cfg.bool("buddies.b.on")];
     ON.store(wants.iter().any(|&w| w), Ordering::Relaxed);
     TALK.store(app.cx.cfg.bool("native.gojoVoice"), Ordering::Relaxed);
+    BAR_ON_TOP.store(app.cx.bar_edge() == crate::bar::Edge::Top, Ordering::Relaxed);
     PRIMARY.store((app.cx.cfg.str("buddies.primary") == "b") as usize, Ordering::Relaxed);
     for (slot, want) in wants.into_iter().enumerate() {
         let at = app.wins.iter().position(|w| w.hwnd.0 as isize == HWNDS[slot].load(Ordering::Relaxed));
@@ -277,6 +280,7 @@ pub struct Gojo {
     /// 0 or 1: which window and which "buddies" config slot ("a" or "b") this is.
     slot: usize,
     cast: Cast,
+    style: Hair,
     /// Empty: the cast's own name.
     name: String,
     walk: bool,
@@ -306,13 +310,13 @@ impl Gojo {
 
     fn slot(slot: usize) -> Gojo {
         let seed = unsafe { GetTickCount() } as u64 | 1;
-        let mut g = Gojo {
+        let g = Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false,
             mon: RECT::default(), scale: 1.0,
-            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
+            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
             work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true,
         };
         g
@@ -321,9 +325,10 @@ impl Gojo {
     /// Reads this buddy's settings from config (once a second, so Settings changes show at once).
     fn tune(&mut self, cx: &Ctx) {
         let k = ["a", "b"][self.slot];
-        self.cast = cast::get(cx.cfg.str(&format!("buddies.{k}.character"))).clone();
+        (self.cast, self.style) = cast::pick(&cx.cfg, cx.cfg.str(&format!("buddies.{k}.character")));
         let s = |f: &str| cx.cfg.str(&format!("buddies.{k}.{f}")).to_string();
         self.cast.dress(&s("hair"), &s("shirt"), &s("pants"), &s("eyes"), &s("bun"));
+        if let Some(h) = Hair::parse(&s("style")) { self.style = h; }
         self.name = cx.cfg.str(&format!("buddies.{k}.name")).trim().to_string();
         self.walk = cx.cfg.get(&format!("buddies.{k}.walk")).as_bool().unwrap_or(true);
         self.chatty = match cx.cfg.str(&format!("buddies.{k}.chatty")) { "quiet" => 0.0, "chatty" => 2.0, _ => 1.0 };
@@ -387,7 +392,7 @@ impl Gojo {
     fn pick(&mut self, lines: &[&str]) -> String { lines[(self.rand() * lines.len() as f32) as usize % lines.len()].to_string() }
     fn say(&mut self, s: &str, secs: f32) { self.bubble = Some((s.to_string(), self.t + secs)); speak(s); }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
-    fn line(&self) -> f32 { self.mon.top as f32 + (BAR * self.scale).round() }
+    fn line(&self) -> f32 { self.mon.top as f32 + if BAR_ON_TOP.load(Ordering::Relaxed) { (BAR * self.scale).round() } else { 0.0 } }
 
     /// Looks at what's going on around him and comments on a change: at most one line every ~20-35 s, and
     /// never over one he's already saying (the newest change waits for its turn).
@@ -703,7 +708,7 @@ const SHOE: Color = 0xFF09090D;
 const MOUTH: Color = 0xFF9A5050;
 
 /// What the drawing needs from the state for one frame.
-struct Look<'c> { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, c: &'c Cast }
+struct Look<'c> { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, style: Hair, c: &'c Cast }
 
 /// The chibi, feet at the pose origin, y up is negative. Colours are replaced by `over` in the
 /// shadow pass.
@@ -738,13 +743,23 @@ fn figure(k: &mut Ink, l: &Look<'_>) {
     if l.arm > 0.05 { k.fill(&ell(hx + 0.8, hy - 0.4, 1.8, 1.8), SKIN); }
     // hair behind the head: the spikes the blindfold pushes up
     let b = l.hair;
-    let spikes = [
-        (-10.4, -29.0), (-13.4, -35.5), (-10.2, -35.0), (-12.0, -41.5 + b), (-7.2, -38.6), (-6.4, -45.5 + b), (-2.6, -40.4),
-        (0.6, -48.0 + b), (3.2, -40.8), (7.2, -45.8 + b), (7.8, -39.4), (12.4, -41.8 + b), (10.6, -35.4), (13.8, -34.6), (10.6, -29.0),
-    ];
-    let spikes: Vec<_> = spikes.iter().map(|&(x, y)| (x, y + u)).collect();
-    k.fill(&spikes, l.c.hair);
-    for (x0, x1, y1) in [(-6.0, -9.5, -39.0), (-1.0, -4.5, -42.5), (3.5, 5.5, -42.0), (7.5, 10.0, -38.5)] {
+    let behind: Vec<(f32, f32)> = match l.style {
+        Hair::Spiky => vec![
+            (-10.4, -29.0), (-13.4, -35.5), (-10.2, -35.0), (-12.0, -41.5 + b), (-7.2, -38.6), (-6.4, -45.5 + b), (-2.6, -40.4),
+            (0.6, -48.0 + b), (3.2, -40.8), (7.2, -45.8 + b), (7.8, -39.4), (12.4, -41.8 + b), (10.6, -35.4), (13.8, -34.6), (10.6, -29.0),
+        ],
+        Hair::Short => vec![],
+        Hair::Long => rr(-11.6, -37.0 + u, 11.6, -13.0 + u, 4.5),
+        Hair::Mohawk => vec![(-3.4, -38.0), (-3.0, -45.0 + b), (-1.4, -42.0), (0.6, -49.5 + b), (2.2, -42.0), (3.6, -45.0 + b), (3.8, -38.0)],
+    };
+    let behind: Vec<_> = behind.iter().map(|&(x, y)| (x, y + u)).collect();
+    if !behind.is_empty() { k.fill(&behind, l.c.hair); }
+    let streaks: &[(f32, f32, f32)] = match l.style {
+        Hair::Spiky => &[(-6.0, -9.5, -39.0), (-1.0, -4.5, -42.5), (3.5, 5.5, -42.0), (7.5, 10.0, -38.5)],
+        Hair::Long => &[(-8.0, -9.0, -18.0), (8.0, 9.0, -18.0)],
+        _ => &[],
+    };
+    for &(x0, x1, y1) in streaks {
         k.line((x0, -36.0 + u), (x1, y1 + u + b * 0.6), 0.7, l.c.hair_sh);
     }
     // head, hair cap, blindfold, face (features nudged 1.2 px towards where he faces)
@@ -832,7 +847,7 @@ impl View for Gojo {
         let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
         let look = Look {
             walk, sit: self.sitting(), swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
-            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, c: &self.cast,
+            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, style: self.style, c: &self.cast,
         };
 
         if self.infinity > t {
@@ -954,15 +969,22 @@ fn window_top(mon: RECT, x: f32, line: f32) -> Option<f32> {
 /// A full-screen app (game, video) in front on `mon`: he hides so he isn't drawn over it.
 fn fullscreen_on(mon: RECT) -> bool { fullscreen_monitor() == Some(mon) }
 
+/// True when window rect `r` fills `mon`: it may overhang by the invisible resize border (7 px on Windows 11).
+fn covers(r: RECT, mon: RECT) -> bool {
+    const SLACK: i32 = 16;
+    r.left <= mon.left && r.top <= mon.top && r.right >= mon.right && r.bottom >= mon.bottom
+        && r.left >= mon.left - SLACK && r.top >= mon.top - SLACK && r.right <= mon.right + SLACK && r.bottom <= mon.bottom + SLACK
+}
+
 /// The monitor that the foreground window covers completely, if any.
-fn fullscreen_monitor() -> Option<RECT> {
+pub fn fullscreen_monitor() -> Option<RECT> {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() { return None; }
         let mut r = RECT::default();
         if GetWindowRect(fg, &mut r).is_err() { return None; }
         let mon = monitor(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }, false);
-        if r != mon { return None; }
+        if !covers(r, mon) { return None; }
         let mut cls = [0u16; 32];
         let n = GetClassNameW(fg, &mut cls) as usize;
         (!matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW")).then_some(mon)
@@ -972,6 +994,14 @@ fn fullscreen_monitor() -> Option<RECT> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fullscreen_may_overhang_by_its_border() {
+        let m = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+        assert!(covers(m, m));
+        assert!(covers(RECT { left: -1927, top: 0, right: 7, bottom: 1087 }, m));
+        assert!(!covers(RECT { left: -1920, top: 56, right: 0, bottom: 1080 }, m)); // tiled below the bar
+        assert!(!covers(RECT { left: -3840, top: 0, right: 0, bottom: 1080 }, m)); // spans two monitors
+    }
     #[test]
     fn pose_mirrors_and_tilts() {
         let p = Pose { ox: 10.0, oy: 20.0, dir: -1.0, rot: 0.0 };

@@ -4,7 +4,7 @@
 
 use crate::{
     app::{App, Ctx},
-    gfx::{alpha, ico, Canvas, Gfx, R},
+    gfx::{alpha, ico, txt, Align, Canvas, Gfx, R},
     win::{View, Win, Z},
 };
 use std::{
@@ -26,6 +26,8 @@ static SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub const LISTENING: u8 = 1;
 pub const THINKING: u8 = 2;
+/// The microphone is still opening.
+pub const STARTING: u8 = 3;
 
 pub fn set(state: u8) {
     STATE.store(state, Ordering::Relaxed);
@@ -35,17 +37,22 @@ pub fn active() -> bool { STATE.load(Ordering::Relaxed) != 0 }
 pub fn level(rms: f32) { LEVEL.store(rms.to_bits(), Ordering::Relaxed); }
 
 /// Window size (CSS px): the pill plus room for its shadow.
-const W: f32 = 254.0;
+const W: f32 = 354.0;
 const H: f32 = 76.0;
-const PILL: R = R { x: 12.0, y: 12.0, w: 230.0, h: 52.0 };
+const PILL: R = R { x: 12.0, y: 12.0, w: 330.0, h: 52.0 };
 const BARS: usize = 26;
 
 /// Bar height 0..1 for a voice level: speech sits around 0.02 to 0.2, the noise floor near 0.003.
 pub fn bar(rms: f32) -> f32 { (rms.max(0.0) * 9.0).sqrt().min(1.0) }
 
-/// Shows the pill at the bottom centre of the screen the pointer is on, listening.
+/// The word next to the waveform.
+pub fn label(state: u8) -> &'static str {
+    match state { STARTING => "Starting mic", LISTENING => "Listening", THINKING => "Processing", _ => "" }
+}
+
+/// Shows the pill at the bottom centre of the screen the pointer is on, starting the mic.
 pub fn open(app: &mut App) {
-    set(LISTENING);
+    set(STARTING);
     level(0.0);
     let at = HWND_PILL.load(Ordering::Relaxed);
     if app.wins.iter().any(|w| w.hwnd.0 as isize == at) { return; }
@@ -55,7 +62,7 @@ pub fn open(app: &mut App) {
         let _ = GetMonitorInfoW(MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST), &mut mi);
     }
     let m = mi.rcMonitor;
-    let Ok(mut w) = Win::new(Box::new(Pill::new()), "Zor UI / listen", m.left + (m.right - m.left) / 2, m.bottom - 120, Z::Top, true) else { return };
+    let Ok(mut w) = Win::new(Box::new(Pill::new()), "Zor UI / listen", m.left + (m.right - m.left) / 2, m.bottom - 120, Z::Top, true) else { set(0); return };
     HWND_PILL.store(w.hwnd.0 as isize, Ordering::Relaxed);
     w.update(&app.g, &app.cx, true);
     let s = w.scale();
@@ -107,7 +114,10 @@ impl View for Pill {
         let state = STATE.load(Ordering::Relaxed);
         if state == 0 { return; }
         let t = self.t0.elapsed().as_secs_f32();
-        if state == LISTENING {
+        if state == STARTING {
+            // mic still opening: a flat line with a dot travelling along it
+            for (i, b) in self.bars.iter_mut().enumerate() { *b = if ((t * 14.0) as usize % BARS) == i { 0.3 } else { 0.0 }; }
+        } else if state == LISTENING {
             // a new bar about every 60 ms, from the smoothed loudness
             let target = bar(f32::from_bits(LEVEL.load(Ordering::Relaxed)));
             self.smooth += (target - self.smooth) * 0.6;
@@ -131,6 +141,8 @@ impl View for Pill {
             let h = 4.0 + v.clamp(0.0, 1.0) * (PILL.h - 22.0);
             c.rect(R::new(x0 + i as f32 * 6.5, mid - h / 2.0, 3.5, h), 1.75, alpha(if state == LISTENING { fg } else { dim }, fade));
         }
+        let lx = x0 + BARS as f32 * 6.5 + 4.0;
+        c.text(label(state), R::new(lx, PILL.y, PILL.x + PILL.w - lx - 12.0, PILL.h), txt(13.0, 500), alpha(if state == LISTENING { fg } else { dim }, fade), Align::Left);
     }
 }
 
@@ -145,6 +157,14 @@ mod tests {
         assert!(bar(0.05) > 0.5 && bar(0.05) < 0.8, "speech is clearly up: {}", bar(0.05));
         assert_eq!(bar(5.0), 1.0, "loud is capped");
         assert_eq!(bar(-1.0), 0.0);
+    }
+
+    #[test]
+    fn every_stage_has_a_label() {
+        assert_eq!(label(STARTING), "Starting mic");
+        assert_eq!(label(LISTENING), "Listening");
+        assert_eq!(label(THINKING), "Processing");
+        assert_eq!(label(0), "");
     }
 
     #[test]

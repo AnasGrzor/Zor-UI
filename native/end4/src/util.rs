@@ -79,10 +79,14 @@ pub fn local_offset() -> i32 {
 }
 
 /// GET through Windows' curl.exe: no TLS stack in this process, nothing resident between calls.
+/// Only http(s) goes to curl, and after `--`, so a URL from a remote API can't become an option.
+pub fn web_url(url: &str) -> bool { url.starts_with("http://") || url.starts_with("https://") }
+
 pub fn http_get(url: &str) -> Option<String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if !web_url(url) { return None; }
     let out = std::process::Command::new("curl.exe")
-        .args(["-s", "-f", "-L", "--max-time", "20", url])
+        .args(["-s", "-f", "-L", "--max-time", "20", "--", url])
         .creation_flags(CREATE_NO_WINDOW)
         .output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -91,7 +95,8 @@ pub fn http_get(url: &str) -> Option<String> {
 /// (HTTP status, body) of a GET; status 0 when the request itself failed (offline, timeout).
 pub fn http_status(url: &str) -> (u16, String) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let Ok(out) = std::process::Command::new("curl.exe").args(["-s", "-L", "--max-time", "20", "-w", "\n%{http_code}", url]).creation_flags(CREATE_NO_WINDOW).output() else { return (0, String::new()) };
+    if !web_url(url) { return (0, String::new()); }
+    let Ok(out) = std::process::Command::new("curl.exe").args(["-s", "-L", "--max-time", "20", "-w", "\n%{http_code}", "--", url]).creation_flags(CREATE_NO_WINDOW).output() else { return (0, String::new()) };
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     match text.rsplit_once('\n') { Some((body, code)) => (code.trim().parse().unwrap_or(0), body.to_string()), None => (0, String::new()) }
 }
@@ -195,6 +200,12 @@ pub fn disk_usage() -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_web_urls_reach_curl() {
+        assert!(web_url("https://a.b/c") && web_url("http://a.b"));
+        assert!(!web_url("-o x") && !web_url("file:///c:/x") && !web_url(""));
+        assert_eq!(http_get("--config x"), None);
+    }
     use super::*;
     #[test]
     fn calendar_maths() {

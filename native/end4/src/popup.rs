@@ -2,13 +2,12 @@
 //! (the zpack.json presets) and the open window's bookkeeping. App::open does the opening.
 
 use crate::{
+    bar::Edge,
     island::Island, overview::Overview, settings::Settings, sidebar_left::SidebarLeft, sidebar_right::SidebarRight,
     win::{View, Win},
 };
 use windows::Win32::Foundation::RECT;
 
-/// Names `App::open` / `zorui.exe --open` handle natively when config "native" has them.
-pub const NAMES: [&str; 6] = ["island-panel", "overview", "sidebar-left", "sidebar-right", "settings", "keybinds"];
 
 /// An open popup.
 pub struct Pop {
@@ -38,27 +37,46 @@ pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
     })
 }
 
-/// zpack.json preset sizes for a monitor of `w` x `h` CSS px.
-pub fn area(name: &str, w: f32, h: f32) -> (f32, f32) {
+/// zpack.json preset sizes for a monitor of `w` x `h` CSS px with the bar on `edge`.
+pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
+    let (bar_w, bar_h) = if edge.vertical() { (edge.thick(), 0.0) } else { (0.0, edge.thick()) };
+    let portrait = h > w;
     match name {
-        "sidebar-left" | "sidebar-right" => (480.0, (h - 56.0).max(200.0)),
-        "overview" => ((w * 0.82).round(), (h * 0.74).round()),
-        "settings" | "keybinds" => ((w * 0.64).round(), (h * 0.8).round()),
+        "sidebar-left" | "sidebar-right" => (480.0_f32.min(w - bar_w), (h - bar_h).max(200.0)),
+        // a tall screen has room for rows, not for a wider window
+        "overview" => ((w * if portrait { 0.94 } else { 0.82 }).round(), (h * if portrait { 0.8 } else { 0.74 }).round()),
+        // the pages need about 900 px; a narrow screen gets all it has
+        "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).round()),
         "island-panel" => (424.0, 560.0),
         _ => (400.0, 300.0),
     }
 }
 
-/// Top-left (physical px) of a window `px` big on monitor `mon` at DPI scale `s`.
-pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)>) -> (i32, i32) {
-    let top = mon.top + (56.0 * s).round() as i32;
+/// Top-left (physical px) of a window `px` big on monitor `mon` at DPI scale `s`, with the bar on `edge`.
+/// `at` is where the island panel hangs from.
+pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)>, edge: Edge) -> (i32, i32) {
+    let free = {
+        let t = (edge.thick() * s).round() as i32;
+        match edge {
+            Edge::Top => RECT { top: mon.top + t, ..mon },
+            Edge::Bottom => RECT { bottom: mon.bottom - t, ..mon },
+            Edge::Left => RECT { left: mon.left + t, ..mon },
+            Edge::Right => RECT { right: mon.right - t, ..mon },
+        }
+    };
     let centre = (mon.left + (mon.right - mon.left - px.0) / 2, mon.top + (mon.bottom - mon.top - px.1) / 2);
+    let within = |v: i32, lo: i32, hi: i32| v.clamp(lo, hi.max(lo));
     match name {
-        "sidebar-left" => (mon.left, top),
-        "sidebar-right" => (mon.right - px.0, top),
+        "sidebar-left" => (free.left, free.top),
+        "sidebar-right" => (free.right - px.0, free.top),
         "island-panel" => {
-            let (ax, ay) = at.unwrap_or(((mon.left + mon.right) / 2, top));
-            ((ax - px.0 / 2).clamp(mon.left, (mon.right - px.0).max(mon.left)), ay)
+            let (ax, ay) = at.unwrap_or(((free.left + free.right) / 2, free.top));
+            match edge {
+                Edge::Top => (within(ax - px.0 / 2, mon.left, mon.right - px.0), ay),
+                Edge::Bottom => (within(ax - px.0 / 2, mon.left, mon.right - px.0), ay - px.1),
+                Edge::Left => (ax, within(ay - px.1 / 2, mon.top, mon.bottom - px.1)),
+                Edge::Right => (ax - px.0, within(ay - px.1 / 2, mon.top, mon.bottom - px.1)),
+            }
         }
         _ => centre,
     }
@@ -71,12 +89,35 @@ mod tests {
 
     #[test]
     fn presets() {
-        assert_eq!(area("sidebar-left", 1920.0, 1080.0), (480.0, 1024.0));
-        assert_eq!(area("overview", 1920.0, 1080.0), (1574.0, 799.0));
-        assert_eq!(spot("sidebar-right", MON, 1.0, (480, 1000), None), (-480, 56));
-        assert_eq!(spot("settings", MON, 1.0, (1000, 800), None), (-1460, 140));
+        assert_eq!(area("sidebar-left", 1920.0, 1080.0, Edge::Top), (480.0, 1024.0));
+        assert_eq!(area("overview", 1920.0, 1080.0, Edge::Top), (1574.0, 799.0));
+        assert_eq!(spot("sidebar-right", MON, 1.0, (480, 1000), None, Edge::Top), (-480, 56));
+        assert_eq!(spot("settings", MON, 1.0, (1000, 800), None, Edge::Top), (-1460, 140));
         // centred under the island but kept on the monitor
-        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-960, 60))), (-1172, 60));
-        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-1900, 60))), (-1920, 60));
+        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-960, 60)), Edge::Top), (-1172, 60));
+        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-1900, 60)), Edge::Top), (-1920, 60));
+    }
+
+    #[test]
+    fn follows_the_bar_edge() {
+        // sidebars use what the bar leaves
+        assert_eq!(area("sidebar-left", 1920.0, 1080.0, Edge::Bottom), (480.0, 1024.0));
+        assert_eq!(area("sidebar-left", 1920.0, 1080.0, Edge::Left), (480.0, 1080.0));
+        assert_eq!(spot("sidebar-left", MON, 1.0, (480, 1000), None, Edge::Bottom), (-1920, 0));
+        assert_eq!(spot("sidebar-left", MON, 1.0, (480, 1000), None, Edge::Left), (-1852, 0));
+        assert_eq!(spot("sidebar-right", MON, 1.0, (480, 1000), None, Edge::Right), (-548, 0));
+        // the island panel hangs off whichever face of the bar looks into the screen
+        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-960, 1020)), Edge::Bottom), (-1172, 520));
+        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-1850, 400)), Edge::Left), (-1850, 150));
+        assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-70, 100)), Edge::Right), (-494, 0));
+    }
+
+    #[test]
+    fn tall_screens_get_wider_windows() {
+        // a 1080 x 1920 monitor: settings keeps its 900 px, the overview uses nearly all the width
+        assert_eq!(area("settings", 1080.0, 1920.0, Edge::Top).0, 900.0);
+        assert_eq!(area("overview", 1080.0, 1920.0, Edge::Top), (1015.0, 1536.0));
+        assert_eq!(area("sidebar-left", 500.0, 1000.0, Edge::Left).0, 432.0);
+        assert_eq!(area("settings", 800.0, 1280.0, Edge::Top).0, 776.0);
     }
 }

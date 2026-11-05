@@ -350,6 +350,7 @@ impl Np {
             return Some(Lyr::Found(Arc::new(Lyrics::Synced(l))));
         }
         cx.cfg.bool("lyrics").then(|| lyrics::get(&Track { title: &m.title, artist: &m.artist, album: &m.album, dur: m.duration }))
+            .filter(|l| !l.hidden_for(m))
     }
 
     fn paint_lyrics(&mut self, c: &mut Canvas, cx: &Ctx, m: &Media) {

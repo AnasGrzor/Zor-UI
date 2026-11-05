@@ -2,12 +2,13 @@
 
 Records from the default microphone until you stop talking (or 12 s), then transcribes it on this PC
 with the Parakeet model that Orca downloads (sherpa-onnx). Prints JSON lines:
-  {"state": "listening"} then {"state": "thinking"} then {"text": "..."} or {"error": "..."}.
+  {"state": "starting"} (mic opening), {"state": "listening"} (mic open) then {"state": "thinking"} then {"text": "..."} or {"error": "..."}.
 The model folder is --model (config.json buddies.model), or Orca's own copy under %APPDATA%\\orca\\speech-models.
 """
 import json
 import os
 import sys
+import threading
 import wave
 
 RATE = 16000
@@ -52,16 +53,24 @@ def pick_mic(devices, name):
 
 def threshold(noise):
     """Loudness that counts as speech: 3x the quietest of the first chunks (the mic's own noise), at least 0.006."""
-    return max(0.006, 3 * min(noise)) if noise else 0.015
+    # capped: starting to talk during the first 0.3 s must not raise the bar above speech itself, but a
+    # steadily noisy room (floor above 0.02) still gets a bar above its own noise
+    if not noise:
+        return 0.015
+    low = min(noise)
+    return min(max(0.03, 1.5 * low), max(0.006, 3 * low))
 
 
-def record(wait=6.0, quiet=1.0, longest=12.0, mic=""):
-    """Mono 16 kHz float32 audio: waits up to `wait` s for speech, stops after `quiet` s of silence."""
+def record(wait=6.0, quiet=1.0, longest=12.0, mic="", on_open=None):
+    """Mono 16 kHz float32 audio: waits up to `wait` s for speech, stops after `quiet` s of silence.
+    `on_open` is called once the microphone is open. The chunk before the first loud one is kept so word starts survive."""
     import numpy as np
     import sounddevice as sd
     chunk = RATE // 10
-    got, silent, heard, n, noise, level = [], 0.0, False, 0, [], 0.015
+    got, silent, heard, n, noise, level, prev = [], 0.0, False, 0, [], 0.015, None
     with sd.InputStream(device=pick_mic(sd.query_devices(), mic), samplerate=RATE, channels=1, dtype="float32") as stream:
+        if on_open:
+            on_open()
         while True:
             a = stream.read(chunk)[0][:, 0]
             n += 1
@@ -72,11 +81,14 @@ def record(wait=6.0, quiet=1.0, longest=12.0, mic=""):
             out({"level": round(rms, 4)})  # the pill's waveform
             loud = rms > level and len(noise) >= 3
             if loud:
+                if not heard and prev is not None:
+                    got.append(prev)
                 heard, silent = True, 0.0
             elif heard:
                 silent += 0.1
             if heard:
                 got.append(a)
+            prev = a
             if (not heard and n * 0.1 >= wait) or (heard and (silent >= quiet or len(got) * 0.1 >= longest)):
                 break
     return np.concatenate(got) if got else None
@@ -88,12 +100,27 @@ def main(argv):
     if not d:
         return out({"error": "Parakeet model not found. Open Orca once and enable voice dictation, or set buddies.model."})
     try:
-        rec = recognizer(d)
-        out({"state": "listening"})
-        audio = read_wav(wav) if wav else record(mic=argv[argv.index("--mic") + 1] if "--mic" in argv else "")
+        out({"state": "starting"})
+        # the model takes seconds to load: do it while the microphone is already recording
+        box = {}
+
+        def load():
+            try:
+                box["rec"] = recognizer(d)
+            except Exception as e:
+                box["err"] = e
+        loader = threading.Thread(target=load, daemon=True)
+        loader.start()
+        if wav:
+            out({"state": "listening"})
+        audio = read_wav(wav) if wav else record(mic=argv[argv.index("--mic") + 1] if "--mic" in argv else "", on_open=lambda: out({"state": "listening"}))
         if audio is None:
             return out({"text": ""})
         out({"state": "thinking"})
+        loader.join()
+        if "err" in box:
+            raise box["err"]
+        rec = box["rec"]
         s = rec.create_stream()
         s.accept_waveform(RATE, audio)
         rec.decode_stream(s)

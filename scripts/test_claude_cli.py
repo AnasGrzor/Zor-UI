@@ -49,7 +49,8 @@ class Mic(unittest.TestCase):
         import buddy_listen as b
         self.assertAlmostEqual(b.threshold([0.0002, 0.0003, 0.0002]), 0.006, msg="dead mic: the minimum")
         self.assertAlmostEqual(b.threshold([0.004, 0.003, 0.005]), 0.009, msg="3x the quietest chunk")
-        self.assertAlmostEqual(b.threshold([0.02, 0.03, 0.025]), 0.06)
+        self.assertAlmostEqual(b.threshold([0.02, 0.03, 0.025]), 0.03, msg="capped: talking early must not hide your voice")
+        self.assertAlmostEqual(b.threshold([0.035, 0.04, 0.036]), 0.0525, msg="noisy room: bar stays above the noise")
         self.assertEqual(b.threshold([]), 0.015)
 
     def test_picks_a_microphone_by_name(self):

@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -56,13 +56,20 @@ fn allowed(origin: &str) -> bool {
 }
 
 /// Widgets connected over WebSocket; each gets the whole state after every change.
-static SUBS: Mutex<Vec<TcpStream>> = Mutex::new(Vec::new());
+/// Each socket sits behind its own lock so a ping reply never lands in the middle of a state frame.
+type Sub = Arc<Mutex<TcpStream>>;
+static SUBS: Mutex<Vec<Sub>> = Mutex::new(Vec::new());
+const MAX_SUBS: usize = 32;
+const MAX_MSG: usize = 1 << 20;
 
 fn snapshot() -> String { state().lock().map(|m| Value::Object(m.clone()).to_string()).unwrap_or_default() }
 
 fn broadcast() {
     let text = snapshot();
-    if let Ok(mut subs) = SUBS.lock() { subs.retain_mut(|s| ws_send(s, &text).is_ok()); }
+    let subs: Vec<Sub> = SUBS.lock().map(|g| g.clone()).unwrap_or_default();
+    // written outside the SUBS lock: a client that stopped reading only costs its own write timeout
+    let dead: Vec<Sub> = subs.into_iter().filter(|s| !s.lock().is_ok_and(|mut g| ws_send(&mut g, &text).is_ok())).collect();
+    if !dead.is_empty() { if let Ok(mut g) = SUBS.lock() { g.retain(|s| !dead.iter().any(|d| Arc::ptr_eq(s, d))); } }
 }
 
 /// Serves ws://127.0.0.1:6133/state (and a plain GET for debugging), a thread per connection.
@@ -98,12 +105,19 @@ fn handle(mut s: TcpStream, changed: &dyn Fn()) -> std::io::Result<()> {
         let _ = s.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return Ok(());
     }
+    if header("host").is_some_and(|h| !host_ok(&h)) {
+        let _ = s.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return Ok(());
+    }
     if let Some(key) = header("sec-websocket-key") {
+        if SUBS.lock().map_or(true, |g| g.len() >= MAX_SUBS) { return Ok(()); }
         write!(s, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept(&key))?;
-        ws_send(&mut s, &snapshot())?;
         s.set_read_timeout(None)?;
-        if let Ok(mut subs) = SUBS.lock() { subs.push(s.try_clone()?); }
-        while let Some(msg) = ws_read(&mut s) {
+        s.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let out: Sub = Arc::new(Mutex::new(s.try_clone()?));
+        if let Ok(mut g) = out.lock() { ws_send(&mut g, &snapshot())?; }
+        if let Ok(mut subs) = SUBS.lock() { subs.push(out.clone()); }
+        while let Some(msg) = ws_read(&mut s, &out) {
             let Ok(Value::Object(o)) = serde_json::from_str::<Value>(&msg) else { continue };
             if apply(&o) { broadcast(); changed(); }
         }
@@ -111,6 +125,11 @@ fn handle(mut s: TcpStream, changed: &dyn Fn()) -> std::io::Result<()> {
     }
     let body = snapshot();
     write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+}
+
+/// Browsers send the page's own host; a DNS-rebinding page arrives with its attacker's name instead.
+fn host_ok(host: &str) -> bool {
+    ["127.0.0.1", "localhost"].iter().any(|h| host.eq_ignore_ascii_case(&format!("{h}:{PORT}")) || host.eq_ignore_ascii_case(h))
 }
 
 /// Sets or removes (non-string values) shared keys; true if anything changed.
@@ -160,7 +179,7 @@ fn ws_send(s: &mut TcpStream, text: &str) -> std::io::Result<()> {
 }
 
 /// Client frames are masked. Joins fragments, answers pings; None when the socket closes.
-fn ws_read(s: &mut TcpStream) -> Option<String> {
+fn ws_read(s: &mut TcpStream, out: &Mutex<TcpStream>) -> Option<String> {
     let mut msg = Vec::new();
     loop {
         let mut h = [0u8; 2];
@@ -169,7 +188,7 @@ fn ws_read(s: &mut TcpStream) -> Option<String> {
         let mut len = (h[1] & 0x7F) as u64;
         if len == 126 { let mut b = [0u8; 2]; s.read_exact(&mut b).ok()?; len = u16::from_be_bytes(b) as u64; }
         if len == 127 { let mut b = [0u8; 8]; s.read_exact(&mut b).ok()?; len = u64::from_be_bytes(b); }
-        if len > 1 << 20 { return None; }
+        if len > MAX_MSG as u64 { return None; }
         let mut mask = [0u8; 4];
         if h[1] & 0x80 != 0 { s.read_exact(&mut mask).ok()?; }
         let mut p = vec![0u8; len as usize];
@@ -177,8 +196,8 @@ fn ws_read(s: &mut TcpStream) -> Option<String> {
         for (i, b) in p.iter_mut().enumerate() { *b ^= mask[i % 4]; }
         match op {
             8 => return None,
-            9 => { let mut f = vec![0x8A, p.len().min(125) as u8]; f.extend_from_slice(&p[..p.len().min(125)]); s.write_all(&f).ok()?; }
-            0 | 1 => { msg.extend_from_slice(&p); if fin { return Some(String::from_utf8_lossy(&msg).into_owned()); } }
+            9 => { let mut f = vec![0x8A, p.len().min(125) as u8]; f.extend_from_slice(&p[..p.len().min(125)]); out.lock().ok()?.write_all(&f).ok()?; }
+            0 | 1 => { if msg.len() + p.len() > MAX_MSG { return None; } msg.extend_from_slice(&p); if fin { return Some(String::from_utf8_lossy(&msg).into_owned()); } }
             _ => {}
         }
     }
@@ -248,6 +267,28 @@ mod tests {
     fn websocket_accept() {
         assert_eq!(accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="); // RFC 6455 example
         assert_eq!(base64(b"ab"), "YWI=");
+    }
+    #[test]
+    fn hosts() {
+        assert!(host_ok("127.0.0.1:6133") && host_ok("LOCALHOST:6133") && host_ok("localhost"));
+        assert!(!host_ok("evil.example:6133") && !host_ok("127.0.0.1.evil.example"));
+    }
+    #[test]
+    fn a_runaway_fragmented_message_is_dropped() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut srv, _) = l.accept().unwrap();
+        let out = Mutex::new(srv.try_clone().unwrap());
+        let w = std::thread::spawn(move || {
+            // masked text frame without FIN, then continuation frames of 512 KiB
+            let mut frame = vec![0x01u8, 0x80 | 127];
+            frame.extend_from_slice(&(512u64 * 1024).to_be_bytes());
+            frame.extend_from_slice(&[0; 4]);
+            frame.extend(std::iter::repeat(b'a').take(512 * 1024));
+            for _ in 0..4 { if c.write_all(&frame).is_err() { break; } frame[0] = 0x00; }
+        });
+        assert_eq!(ws_read(&mut srv, &out), None);
+        let _ = w.join();
     }
     #[test]
     fn origins() {

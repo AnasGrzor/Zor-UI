@@ -4,7 +4,7 @@
 
 use crate::{
     app::Ctx,
-    gfx::{alpha, ico, txt, Align, Canvas, Color, Font, Gfx, R},
+    gfx::{alpha, ico, txt, Align, Canvas, Color, Font, R},
     hub, util,
 };
 
@@ -28,13 +28,6 @@ pub fn panel(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) {
 
 /// `.card`: `--layer1` (surfaceContainerLow) fill, radius 23 by default (--round-lg).
 pub fn card(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) { c.rect(r, radius, cx.theme.c("surfaceContainerLow")); }
-
-/// Titled placeholder for views that aren't ported yet.
-pub fn stub(c: &mut Canvas, cx: &Ctx, name: &str) {
-    let r = R::new(6.0, 6.0, (c.w - 12.0).max(1.0), (c.h - 12.0).max(1.0));
-    panel(c, cx, r, 23.0);
-    c.text(&format!("{name}: not ported yet"), R::new(r.x + 20.0, r.y + 14.0, r.w - 40.0, 24.0), txt(15.0, 500), cx.theme.c("onSurface"), Align::Left);
-}
 
 fn hover_bg(c: &mut Canvas, cx: &Ctx, r: R, radius: f32, over: bool) { if over { c.rect(r, radius, alpha(cx.theme.c("onSurface"), 0.08)); } }
 

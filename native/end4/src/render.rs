@@ -37,10 +37,11 @@ pub fn run(args: &[String]) {
     g.set_font(cx.cfg.str("font.family"), cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32, cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
     sample(&mut cx);
     let scale = num(4).unwrap_or(1.0);
-    let area = match (num(2), num(3)) { (Some(w), Some(h)) => (w, h), _ => popup::area(part, 1920.0, 1080.0) };
+    let area = match (num(2), num(3)) { (Some(w), Some(h)) => (w, h), _ => popup::area(part, 1920.0, 1080.0, crate::bar::Edge::Top) };
     let mon = (0, 0, (1920.0 * scale) as i32);
     let mut view: Box<dyn View> = match part.as_str() {
-        "bar" => Box::new(Bar::new(mon)),
+        // END4_BAR_EDGE=left|right|bottom previews a bar on another edge (a 1080 px tall monitor)
+        "bar" => Box::new(Bar::new((0, 0, mon.2, (1080.0 * scale) as i32), crate::bar::Edge::parse(&std::env::var("END4_BAR_EDGE").unwrap_or_default()), (0, 0))),
         "dock" => Box::new(Dock::new([0, 0, mon.2, (1080.0 * scale) as i32], cx.cfg.str("dock.side") == "right")),
         "visualizer" => Box::new(Viz::new(mon)),
         "gojo" => Box::new(gojo::Gojo::new()),

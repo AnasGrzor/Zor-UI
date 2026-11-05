@@ -178,12 +178,12 @@ impl Win {
         unsafe { let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); }
     }
 
-    /// Reserves `h` physical px at the top of the monitor for this window (Zebar's dockToEdge), so
-    /// maximised windows and GlazeWM's tiling stay below it.
-    pub fn dock_top(&mut self, mon: RECT, h: i32) {
+    /// Reserves `h` physical px along `edge` of the monitor for this window (Zebar's dockToEdge), so
+    /// maximised windows and GlazeWM's tiling stay clear of it.
+    pub fn dock(&mut self, mon: RECT, edge: crate::bar::Edge, h: i32) {
         unsafe {
-            let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, uCallbackMessage: WM_APPBAR, uEdge: ABE_TOP,
-                rc: RECT { left: mon.left, top: mon.top, right: mon.right, bottom: mon.top + h }, ..Default::default() };
+            let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, uCallbackMessage: WM_APPBAR, uEdge: edge.abe(),
+                rc: crate::bar::strip(mon, edge, h), ..Default::default() };
             if !self.appbar {
                 // Explorer leaves tool windows out when it lays out app bars; WS_EX_NOACTIVATE alone
                 // keeps the bar off the taskbar and out of Alt+Tab.
@@ -193,7 +193,7 @@ impl Win {
                 self.appbar = true;
             }
             SHAppBarMessage(ABM_QUERYPOS, &mut d);
-            d.rc.bottom = d.rc.top + h;
+            d.rc = crate::bar::strip(d.rc, edge, h); // the shell may have moved the edge in, past other app bars
             SHAppBarMessage(ABM_SETPOS, &mut d);
         }
     }

@@ -11,7 +11,7 @@ use std::{
 };
 
 #[derive(Clone, Default, Debug)]
-pub struct Notif { pub id: String, pub app: String, pub title: String, pub body: String, pub time: f64 }
+pub struct Notif { pub id: String, pub app: String, pub title: String, pub body: String, pub time: f64, pub open: String }
 
 #[derive(Clone, Default, Debug)]
 pub struct Mix { pub app: String, pub volume: f32, pub muted: bool }
@@ -51,7 +51,7 @@ pub fn repaint() { app::post(Box::new(|_| {})); }
 pub fn parse_notifs(v: &Value) -> (Vec<Notif>, String) {
     let s = |i: &Value, k: &str| i[k].as_str().unwrap_or("").to_string();
     let items: Vec<Notif> = v["items"].as_array().map(|a| a.iter().map(|i| Notif {
-        id: s(i, "id"), app: s(i, "app"), title: s(i, "title"), body: s(i, "body"), time: i["time"].as_f64().unwrap_or(0.0),
+        id: s(i, "id"), app: s(i, "app"), title: s(i, "title"), body: s(i, "body"), time: i["time"].as_f64().unwrap_or(0.0), open: s(i, "open"),
     }).collect()).unwrap_or_default();
     let err = if items.is_empty() { v["error"].as_str().unwrap_or("").to_string() } else { String::new() };
     (items, err)
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn a_stale_load_cannot_refill_cleared_notifications() {
         let sh = Sh::default();
-        let n = |id: &str| Notif { id: id.into(), app: "a".into(), title: "t".into(), body: String::new(), time: 0.0 };
+        let n = |id: &str| Notif { id: id.into(), app: "a".into(), title: "t".into(), ..Default::default() };
         lock(&sh).notifs = vec![n("1"), n("2")];
         super::clear_notifs(None, &sh);
         assert_eq!(lock(&sh).gone, ["1", "2"]);
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn clear_empties_the_list_without_a_config() {
         let sh = Sh::default();
-        lock(&sh).notifs = vec![Notif { id: "1".into(), app: "a".into(), title: "t".into(), body: String::new(), time: 0.0 }];
+        lock(&sh).notifs = vec![Notif { id: "1".into(), app: "a".into(), title: "t".into(), ..Default::default() }];
         super::clear_notifs(None, &sh);
         assert!(lock(&sh).notifs.is_empty());
     }
@@ -402,8 +402,8 @@ mod tests {
         let n = |id: &str, app: &str| Notif { id: id.into(), app: app.into(), ..Default::default() };
         let g = group(&[n("1", "Mail"), n("2", "Chat"), n("3", "Mail")]);
         assert_eq!(g.iter().map(|g| (g.app.as_str(), g.items.len())).collect::<Vec<_>>(), [("Mail", 2), ("Chat", 1)]);
-        let (items, err) = parse_notifs(&json!({ "items": [{ "id": "7", "app": "A", "title": "T", "body": "", "time": 5 }] }));
-        assert_eq!((items[0].id.as_str(), items[0].time, err.as_str()), ("7", 5.0, ""));
+        let (items, err) = parse_notifs(&json!({ "items": [{ "id": "7", "app": "A", "title": "T", "body": "", "time": 5, "open": "ms-phone:x" }] }));
+        assert_eq!((items[0].id.as_str(), items[0].time, items[0].open.as_str(), err.as_str()), ("7", 5.0, "ms-phone:x", ""));
         assert_eq!(parse_notifs(&json!({ "error": "no db" })).1, "no db");
         assert_eq!(ago(30.0, 0.0), Ok("now".into()));
         assert_eq!(ago(300.0, 0.0), Ok("5m".into()));

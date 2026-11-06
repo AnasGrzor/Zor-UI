@@ -167,6 +167,42 @@ pub fn monitors() -> (Vec<RECT>, RECT) {
     (v.into_iter().map(|m| m.0).collect(), work)
 }
 
+/// A monitor's top-left corner on the desktop: unique per monitor, and the same however the monitor is rotated
+/// (a rotated one can report its unrotated size).
+type Spot = (i32, i32);
+
+/// The name each active monitor reports (its EDID, e.g. "DELL U2723QE"), with the monitor's top-left corner
+/// in desktop pixels so callers can match it to a monitor rectangle. A monitor with no name is left out.
+pub fn monitor_names() -> Vec<(Spot, String)> {
+    use windows::Win32::{Devices::Display::*, Foundation::WIN32_ERROR};
+    let (mut np, mut nm) = (0u32, 0u32);
+    unsafe {
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) != WIN32_ERROR(0) { return vec![]; }
+        let (mut paths, mut modes) = (vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize], vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize]);
+        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), None) != WIN32_ERROR(0) { return vec![]; }
+        paths.truncate(np as usize);
+        modes.truncate(nm as usize);
+        paths.iter().filter_map(|p| {
+            let src = modes.iter().find(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE && m.id == p.sourceInfo.id && m.adapterId.LowPart == p.sourceInfo.adapterId.LowPart && m.adapterId.HighPart == p.sourceInfo.adapterId.HighPart)?;
+            let s = src.Anonymous.sourceMode;
+            let mut t = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+            t.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: p.targetInfo.adapterId, id: p.targetInfo.id };
+            if DisplayConfigGetDeviceInfo(&mut t.header) != 0 { return None; }
+            let n = t.monitorFriendlyDeviceName;
+            let name = String::from_utf16_lossy(&n[..n.iter().position(|c| *c == 0).unwrap_or(n.len())]).trim().to_string();
+            (!name.is_empty()).then_some(((s.position.x, s.position.y), name))
+        }).collect()
+    }
+}
+
+/// The name of the monitor at `spot` from `monitor_names`, else "Display {n}" (n counts from 0 here, from 1 on screen).
+/// Two monitors with the same name get " 1" / " 2" so they can be told apart.
+pub fn monitor_label(names: &[(Spot, String)], spot: Spot, n: usize) -> String {
+    let Some((_, name)) = names.iter().find(|(s, _)| *s == spot) else { return format!("Display {}", n + 1) };
+    let same: Vec<&Spot> = names.iter().filter(|(_, o)| o == name).map(|(s, _)| s).collect();
+    match same.iter().position(|s| **s == spot) { Some(i) if same.len() > 1 => format!("{name} {}", i + 1), _ => name.clone() }
+}
+
 /// CPU busy fraction since the previous call.
 pub struct Cpu { last: (u64, u64) }
 impl Cpu {
@@ -207,6 +243,15 @@ mod tests {
         assert_eq!(http_get("--config x"), None);
     }
     use super::*;
+    #[test]
+    fn monitor_labels() {
+        let names = vec![((0, 0), "DELL A".to_string()), ((-1080, 0), "DELL A".to_string()), ((1920, 0), "LG B".to_string())];
+        assert_eq!(monitor_label(&names, (1920, 0), 2), "LG B");
+        assert_eq!(monitor_label(&names, (0, 0), 0), "DELL A 1");
+        assert_eq!(monitor_label(&names, (-1080, 0), 1), "DELL A 2");
+        assert_eq!(monitor_label(&names, (5, 5), 3), "Display 4");
+        assert_eq!(monitor_label(&[], (0, 0), 0), "Display 1");
+    }
     #[test]
     fn calendar_maths() {
         assert_eq!(days_in_month(2024, 2), 29);

@@ -296,7 +296,7 @@ impl Np {
         });
     }
 
-    pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx, id: &str) {
+    pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx, id: &str, back: Option<&Pixmap>) {
         let t = &cx.theme;
         self.anim = 0;
         let h = c.h;
@@ -314,12 +314,43 @@ impl Np {
         let scale = c.scale;
         match id {
             "media" => {
-                let card = R::new(4.0, 4.0, W - 8.0, 92.0);
-                c.rect(card, 23.0, alpha(t.c("surfaceContainerLow"), 0.88));
-                let px = (92.0 * scale).round() as u32;
+                let ah = c.h - 8.0; // 92 by default, a preset size (1 row) makes it taller
+                let card = R::new(4.0, 4.0, c.w - 8.0, ah);
+                match back { Some(b) => c.image(b, R::new(0.0, 0.0, 0.0, 0.0), 1.0), None => c.rect(card, 23.0, alpha(t.c("surfaceContainerLow"), 0.88)) }
+                // two rows or more: the picture on top, title and controls in a strip below; one cell: picture only
+                let (tall, tiny) = (ah > 140.0, c.w < 160.0);
+                let px = ((if tall { c.w - 8.0 } else if tiny { c.w - 8.0 } else { ah }) * scale).round() as u32;
                 let art = self.art_for(c.g, &m, px).cloned();
+                if tall || tiny {
+                    let strip = if tall { 92.0 } else { 0.0 };
+                    let region = R::new(4.0, 4.0, c.w - 8.0, ah - strip);
+                    let aw = c.w - 8.0; // the decoded picture is a square this wide, centred in the region
+                    c.clip_round(card, 23.0, |c| {
+                        c.clip(crate::gfx::polygon(&[(region.x, region.y), (region.x + region.w, region.y), (region.x + region.w, region.y + region.h), (region.x, region.y + region.h)]), |c| match &art {
+                            Some(a) => c.image(a, R::new(4.0, 4.0 - (aw - region.h) / 2.0, aw, aw), 1.0),
+                            None => {
+                                c.rect(region, 0.0, mix(t.c("primaryContainer"), t.c("tertiaryContainer"), 0.5));
+                                c.icon("music_note", region, ico(34.0, true), alpha(t.c("onPrimaryContainer"), 0.6));
+                            }
+                        });
+                        let (right, bottom) = (4.0 + c.w - 8.0 - 12.0, 4.0 + ah - 10.0);
+                        let pp = R::new(right - 38.0, bottom - 38.0, 38.0, 38.0);
+                        if tall {
+                            let w = c.w - 8.0 - 24.0 - 38.0 * 3.0;
+                            c.text(&m.title, R::new(18.0, 4.0 + ah - strip + 12.0, w, 14.0 * LH), txt(14.0, 500), t.c("onSurface"), Align::Left);
+                            c.text(&m.artist, R::new(18.0, 4.0 + ah - strip + 12.0 + 14.0 * LH, w, 11.5 * LH), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
+                            let tint = alpha(t.c("onSurface"), 0.08);
+                            round_btn(c, R::new(pp.x - 4.0 - 30.0 - 4.0 - 30.0, pp.y + 4.0, 30.0, 30.0), PREV, "skip_previous", 18.0, t.c("onSurface"), tint);
+                            round_btn(c, R::new(pp.x - 4.0 - 30.0, pp.y + 4.0, 30.0, 30.0), NEXT, "skip_next", 18.0, t.c("onSurface"), tint);
+                        }
+                        c.rect(pp, 12.0, t.c("primary"));
+                        if c.hit(pp, PP) { c.rect(pp, 12.0, alpha(t.c("onPrimary"), 0.08)); }
+                        c.icon(if m.playing { "pause" } else { "play_arrow" }, pp, ico(18.0, true), t.c("onPrimary"));
+                    });
+                    return;
+                }
                 c.clip_round(card, 23.0, |c| {
-                    let r = R::new(4.0, 4.0, 92.0, 92.0);
+                    let r = R::new(4.0, 4.0, ah, ah);
                     match &art {
                         Some(a) => c.image(a, r, 1.0),
                         None => {
@@ -329,12 +360,12 @@ impl Np {
                             c.icon("music_note", r, ico(34.0, true), alpha(t.c("onPrimaryContainer"), 0.6));
                         }
                     }
-                    let x = 4.0 + 92.0 + 12.0;
-                    let w = W - 8.0 - 92.0 - 24.0;
+                    let x = 4.0 + ah + 12.0;
+                    let w = c.w - 8.0 - ah - 24.0;
                     c.text(&m.title, R::new(x, 14.0, w, 14.0 * LH), txt(14.0, 500), t.c("onSurface"), Align::Left);
                     c.text(&m.artist, R::new(x, 14.0 + 14.0 * LH, w, 11.5 * LH), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
                     let tint = alpha(t.c("onSurface"), 0.08);
-                    let (cy, right) = (4.0 + 92.0 - 10.0 - 19.0, 4.0 + W - 8.0 - 12.0);
+                    let (cy, right) = (4.0 + ah - 10.0 - 19.0, 4.0 + c.w - 8.0 - 12.0);
                     round_btn(c, R::new(right - 30.0, cy - 15.0, 30.0, 30.0), NEXT, "skip_next", 18.0, t.c("onSurface"), tint);
                     let pp = R::new(right - 30.0 - 4.0 - 38.0, cy - 19.0, 38.0, 38.0);
                     c.rect(pp, 12.0, t.c("primary"));

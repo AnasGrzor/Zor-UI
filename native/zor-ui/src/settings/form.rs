@@ -26,7 +26,25 @@ pub enum Act {
     /// A named button: ("bu", "snip"), ("apply-local", id)...; settings.rs matches on the name.
     Do(&'static str, String),
     /// A search hit: page index, section title.
-    Goto(usize, String),
+    Goto(usize, String, String),
+}
+
+impl Act {
+    /// What the log says about this action (a value is left out: a field may hold a key).
+    pub fn label(&self) -> String {
+        match self {
+            Act::Page(i) => format!("page {i}"),
+            Act::Switch(p) => format!("switch {p}"),
+            Act::Seg(p, v) => format!("set {p} = {v}"),
+            Act::Step(p, d, ..) => format!("step {p} {d:+}"),
+            Act::Slider(p, ..) => format!("slider {p}"),
+            Act::Select(p, ..) => format!("select {p}"),
+            Act::Field(p) => format!("field {p}"),
+            Act::Do(n, _) if matches!(*n, "save-name" | "seed") || n.contains("key") => format!("do {n}"),
+            Act::Do(n, a) => format!("do {n} {a}"),
+            Act::Goto(i, t, l) => format!("goto {i} {t} {l}"),
+        }
+    }
 }
 
 /// A range slider: min, max, step and how its value reads.
@@ -84,6 +102,11 @@ pub struct Pen<'p, 'a> {
     pub heads: Vec<(String, f32)>,
     /// Search index (measuring pass): (section, label, sub text) of every control and title.
     pub index: Vec<(String, String, String)>,
+    /// Each control's (section, label, y) (measuring pass), so a search hit can scroll to the exact control.
+    pub tags: Vec<(String, String, f32)>,
+    /// The control a search hit just opened: (section, label, strength 0..1). Its row gets a fading highlight.
+    pub flash: Option<(String, String, f32)>,
+    flash_row: Option<f32>,
     sect: String,
     /// Where this pen started, so the first section title on a page gets no extra gap above it.
     y0: f32,
@@ -91,10 +114,13 @@ pub struct Pen<'p, 'a> {
 
 impl<'p, 'a> Pen<'p, 'a> {
     pub fn new(c: &'p mut Canvas<'a>, cx: &'p Ctx, x: f32, y: f32, w: f32, lo: f32, hi: f32) -> Pen<'p, 'a> {
-        Pen { c, cx, x, w, y, lo, hi, dry: false, cards: vec![], ci: 0, measured: vec![], acts: vec![], first: true, heads: vec![], index: vec![], sect: String::new(), y0: y, t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
+        Pen { c, cx, x, w, y, lo, hi, dry: false, cards: vec![], ci: 0, measured: vec![], acts: vec![], first: true, heads: vec![], index: vec![], tags: vec![], flash: None, flash_row: None, sect: String::new(), y0: y, t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
     }
     /// Records a control for search (before `row`, which hides rows in the measuring pass).
-    pub fn tag(&mut self, label: &str, sub: &str) { if self.dry { self.index.push((self.sect.clone(), label.into(), sub.into())); } }
+    pub fn tag(&mut self, label: &str, sub: &str) {
+        if self.dry { self.index.push((self.sect.clone(), label.into(), sub.into())); self.tags.push((self.sect.clone(), label.into(), self.y)); }
+        else if let Some((s, l, a)) = &self.flash { if *s == self.sect && l == label { self.flash_row = Some(*a); } }
+    }
     pub fn col(&self, name: &str) -> Color { self.cx.theme.c(name) }
     pub fn show(&self, h: f32) -> bool { !self.dry && self.y + h > self.lo && self.y < self.hi }
     pub fn act(&mut self, a: Act) -> u32 { self.acts.push(a); ACT0 + self.acts.len() as u32 - 1 }
@@ -137,7 +163,8 @@ impl<'p, 'a> Pen<'p, 'a> {
     /// `h2`: a 32 px round icon and a 17 px title.
     pub fn h2(&mut self, icon: &str, title: &str, extra: &str) {
         self.y += if self.y > self.y0 + 1.0 { 20.0 } else { 6.0 };
-        if self.dry { self.heads.push((title.to_string(), self.y)); self.index.push((title.into(), title.into(), String::new())); self.sect = title.into(); }
+        self.sect = title.into();
+        if self.dry { self.heads.push((title.to_string(), self.y)); self.index.push((title.into(), title.into(), String::new())); }
         if self.show(32.0) {
             let (x, y) = (self.x, self.y);
             self.c.circle(x + 16.0, y + 16.0, 16.0, self.col("secondaryContainer"));
@@ -153,6 +180,7 @@ impl<'p, 'a> Pen<'p, 'a> {
     pub fn row(&mut self, h: f32) -> Option<R> {
         self.lead();
         let r = self.show(h).then(|| R::new(self.x, self.y, self.w, h));
+        if let (Some(a), Some(r)) = (self.flash_row.take(), r) { self.c.rect(R::new(r.x - 6.0, r.y - 4.0, r.w + 12.0, r.h + 8.0), 14.0, alpha(self.col("primary"), 0.35 * a)); }
         self.y += h;
         r
     }
@@ -333,6 +361,30 @@ impl Settings {
         let Some(r) = p.row(40.0) else { return };
         p.left(r, ic, label, sub, w);
         self.select_box(p, path, opts, R::new(r.x + r.w - w, r.y, w, 40.0));
+    }
+
+    /// The color a visualizer setting gives right now (pending edits included): its own, else the shared one, else the theme's.
+    pub fn viz_color(&self, cx: &crate::app::Ctx, own: &str) -> crate::gfx::Color {
+        let hex = |p: &str| crate::conf::parse_hex(&self.gs(cx, p));
+        hex(own).or_else(|| hex("visualizer.color")).unwrap_or_else(|| cx.theme.c("primary"))
+    }
+
+    /// `color`: a swatch that opens the picker for config `path` (a "#RRGGBB" string; "" means unset), and Reset when set.
+    pub fn color(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str) {
+        p.tag(label, sub);
+        let Some(r) = p.row(40.0) else { return };
+        let cur = self.gs(p.cx, path);
+        let rw = chip_w(p.c, "Reset", false);
+        p.left(r, ic, label, sub, 48.0 + 8.0 + rw);
+        let ax = r.x + r.w - rw;
+        if !cur.is_empty() {
+            let id = p.act(Act::Do("clearcolor", path.into()));
+            ui::chip(p.c, p.cx, ax, r.y + 4.0, id, None, "Reset", false);
+        }
+        let sw = R::new(ax - 8.0 - 48.0, r.y + 2.0, 48.0, 36.0);
+        p.c.rect(sw, 6.0, self.viz_color(p.cx, path));
+        let id = p.act(Act::Do("pickcolor", path.into()));
+        if p.c.hit(sw, id) { p.c.rect(sw, 6.0, alpha(p.col("onSurface"), 0.12)); }
     }
 
     /// The closed `<select>`: its current choice and a chevron.

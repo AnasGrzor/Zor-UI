@@ -95,7 +95,7 @@ impl Overview {
     }
 
     fn focus_window(&self, cx: &mut Ctx, id: &str) {
-        glaze::command(&format!("focus --container-id {id}"));
+        glaze::focus(id, self.flat.iter().any(|w| w.id == id && w.minimized));
         cx.actions.push(Action::Close("overview".into()));
     }
 
@@ -144,7 +144,7 @@ pub fn build(wm: &Wm, count: usize, query: &str) -> Vec<WsView> {
 /// What --render shows without GlazeWM: a few windows (only with ZORUI_RENDER_SAMPLE set).
 fn sample() -> Wm {
     use glaze::{Monitor, Ws};
-    let w = |id: &str, t: &str, p: &str, ws: &str, focus: bool, floating: bool| GWin { id: id.into(), title: t.into(), process: p.into(), focus, floating, ws: ws.into() };
+    let w = |id: &str, t: &str, p: &str, ws: &str, focus: bool, floating: bool| GWin { id: id.into(), title: t.into(), process: p.into(), focus, floating, minimized: false, ws: ws.into() };
     let ws = |n: &str| Ws { name: n.into(), display: n.into(), displayed: n == "1", occupied: true };
     Wm {
         monitors: vec![Monitor { id: "m".into(), focus: true, workspaces: ["1", "2", "3"].map(ws).to_vec(), ..Default::default() }],
@@ -201,9 +201,9 @@ impl View for Overview {
         if !(TILES..HEADS).contains(&id) { return vec![]; }
         self.rows(cx);
         let Some(w) = self.flat.get((id - TILES) as usize) else { return vec![] };
-        let (a, b) = (w.id.clone(), w.id.clone());
+        let (a, b, m) = (w.id.clone(), w.id.clone(), w.minimized);
         vec![
-            Item::new("open_in_new", "Focus window", move |cx| { glaze::command(&format!("focus --container-id {a}")); cx.actions.push(Action::Close("overview".into())); }),
+            Item::new("open_in_new", "Focus window", move |cx| { glaze::focus(&a, m); cx.actions.push(Action::Close("overview".into())); }),
             Item::new("close", "Close window", move |_| glaze::command_on(&b, "close")),
         ]
     }
@@ -401,7 +401,7 @@ impl Overview {
 mod tests {
     use super::*;
 
-    fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, ws: ws.into() } }
+    fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, minimized: false, ws: ws.into() } }
 
     #[test]
     fn tall_screens_get_fewer_columns() {

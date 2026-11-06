@@ -11,7 +11,7 @@ use windows::{
     Win32::{
         Devices::Display::{DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness, PHYSICAL_MONITOR},
         Foundation::{BOOL, HANDLE, LPARAM, RECT},
-        Graphics::Gdi::{EnumDisplayMonitors, MonitorFromWindow, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST},
+        Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST},
         UI::WindowsAndMessaging::GetForegroundWindow,
     },
     Devices::Radios::{Radio, RadioKind, RadioState},
@@ -45,9 +45,13 @@ pub fn run(cfg: &Config, args: &[&str]) -> Option<Value> {
         "monitors" => {
             // Every monitor with a brightness: DDC/CI ones, and the laptop panel (WMI) on the first one without DDC.
             let mut panel = wmi_brightness();
+            let names = crate::util::monitor_names();
             let list: Vec<Value> = hmonitors().into_iter().enumerate().filter_map(|(i, m)| {
                 let b = ddc_brightness(Some(m)).or_else(|| panel.take())?;
-                Some(json!({ "name": format!("Display {}", i + 1), "i": i, "brightness": b }))
+                let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let r = if unsafe { GetMonitorInfoW(m, &mut mi) }.as_bool() { mi.rcMonitor } else { RECT::default() };
+                let name = crate::util::monitor_label(&names, (r.left, r.top), i);
+                Some(json!({ "name": name, "i": i, "brightness": b }))
             }).collect();
             Some(json!({ "monitors": list }))
         }

@@ -18,7 +18,7 @@ use windows::{
         Foundation::{GENERIC_READ, GENERIC_WRITE, HWND, LPARAM, WPARAM},
         Graphics::Imaging::*,
         System::{
-            Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
+            Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
             Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
             Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ},
         },
@@ -34,6 +34,15 @@ use windows::{
 
 mod palette;
 use palette::*;
+
+/// The colours (name -> 0xAARRGGBB) `seed` would give with the scheme the user has (what Settings' colour picker
+/// previews). Same maths as run_theme, nothing is written.
+pub(crate) fn preview(seed: u32, dark: bool, scheme: &str) -> std::collections::HashMap<String, u32> {
+    let rgb = Rgb::new((seed >> 16) as u8, (seed >> 8) as u8, seed as u8);
+    let smart = scheme == "auto";
+    let (colors, _, _) = generate(rgb, dark, if smart { "tonal-spot" } else { scheme }, smart);
+    colors.into_iter().filter_map(|(k, v)| Some((k, crate::conf::parse_hex(&v)?))).collect()
+}
 
 const VIDEO_EXT: &[&str] = &["mp4", "webm", "mkv", "mov", "avi", "wmv", "m4v"];
 const BEGIN: &str = "# >>> zor-ui colors (managed by end4_theme.py)";
@@ -87,25 +96,151 @@ fn write_thumbnail(pack_dir: &Path, image: &Path) {
             let conv = f.CreateFormatConverter().ok()?;
             conv.Initialize(&scale, &GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
             let _ = std::fs::create_dir_all(pack_dir);
-            let (tmp, dest) = (pack_dir.join("wallpaper.jpg.tmp"), pack_dir.join("wallpaper.jpg"));
-            let stream = f.CreateStream().ok()?;
-            stream.InitializeFromFilename(&HSTRING::from(tmp.as_path()), GENERIC_WRITE.0).ok()?;
-            let enc = f.CreateEncoder(&GUID_ContainerFormatJpeg, std::ptr::null()).ok()?;
-            enc.Initialize(&stream, WICBitmapEncoderNoCache).ok()?;
-            let (mut out, mut opts) = (None, None);
-            enc.CreateNewFrame(&mut out, &mut opts).ok()?;
-            let out = out?;
-            out.Initialize(opts.as_ref()).ok()?;
-            out.SetSize(nw, nh).ok()?;
-            let mut fmt = GUID_WICPixelFormat24bppBGR;
-            out.SetPixelFormat(&mut fmt).ok()?;
-            out.WriteSource(&conv, std::ptr::null()).ok()?;
-            out.Commit().ok()?;
-            enc.Commit().ok()?;
-            drop((out, enc, stream));
-            std::fs::rename(&tmp, &dest).ok()
+            encode_jpeg(&f, &conv, nw, nh, &pack_dir.join("wallpaper.jpg"))
         }
     })();
+}
+
+/// `src` (24bpp BGR, nw x nh) as a JPEG at `dest`, through a temp file so a reader never sees half of it.
+fn encode_jpeg(f: &IWICImagingFactory, src: &IWICFormatConverter, nw: u32, nh: u32, dest: &Path) -> Option<()> {
+    let tmp = dest.with_extension("jpg.tmp");
+    unsafe {
+        let stream = f.CreateStream().ok()?;
+        stream.InitializeFromFilename(&HSTRING::from(tmp.as_path()), GENERIC_WRITE.0).ok()?;
+        let enc = f.CreateEncoder(&GUID_ContainerFormatJpeg, std::ptr::null()).ok()?;
+        enc.Initialize(&stream, WICBitmapEncoderNoCache).ok()?;
+        let (mut out, mut opts) = (None, None);
+        enc.CreateNewFrame(&mut out, &mut opts).ok()?;
+        let out = out?;
+        out.Initialize(opts.as_ref()).ok()?;
+        out.SetSize(nw, nh).ok()?;
+        let mut fmt = GUID_WICPixelFormat24bppBGR;
+        out.SetPixelFormat(&mut fmt).ok()?;
+        out.WriteSource(src, std::ptr::null()).ok()?;
+        out.Commit().ok()?;
+        enc.Commit().ok()?;
+        drop((out, enc, stream));
+    }
+    std::fs::rename(&tmp, dest).ok()
+}
+
+/// RGB bytes (w x h) saved as a JPEG.
+fn write_rgb_jpeg(w: usize, h: usize, rgb: &[u8], dest: &Path) -> Option<()> {
+    let f = factory()?;
+    unsafe {
+        let bmp = f.CreateBitmapFromMemory(w as u32, h as u32, &GUID_WICPixelFormat24bppRGB, (w * 3) as u32, rgb).ok()?;
+        let conv = f.CreateFormatConverter().ok()?;
+        conv.Initialize(&bmp, &GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        encode_jpeg(&f, &conv, w as u32, h as u32, dest)
+    }
+}
+
+// ------------------------------------------------------------------ per-monitor fit
+
+/// Start of the `len`-long window over `scores` with the biggest sum; a tie goes to the one nearest the middle.
+fn best_window(scores: &[f64], len: usize) -> usize {
+    let len = len.clamp(1, scores.len().max(1));
+    let n = scores.len().saturating_sub(len);
+    let mut sum: f64 = scores.iter().take(len).sum();
+    let (mut best, mut at) = (sum, 0usize);
+    let nearer = |a: usize, b: usize| a.abs_diff(n / 2) < b.abs_diff(n / 2);
+    for s in 1..=n {
+        sum += scores[s + len - 1] - scores[s - 1];
+        if sum > best + 1e-9 || (sum > best - 1e-9 && nearer(s, at)) { (best, at) = (sum, s); }
+    }
+    at
+}
+
+/// The part (x, y, w, h) of a w x h RGB picture that fills a screen of `aspect` (width / height) and holds the
+/// most to look at: bright, detailed columns (or rows) win over a plain middle. The whole picture when the
+/// shapes already match. shortcut: "interesting" is brightness plus edge strength, not face detection; a bright
+/// empty sky can win over a dim subject. Upgrade by letting the user pin a focus point.
+fn focus_crop(w: usize, h: usize, rgb: &[u8], aspect: f64) -> (usize, usize, usize, usize) {
+    if w == 0 || h == 0 || rgb.len() < w * h * 3 || !(aspect.is_finite() && aspect > 0.0) { return (0, 0, w, h); }
+    let (cw, ch) = if w as f64 / h as f64 > aspect { (((h as f64 * aspect).round() as usize).clamp(1, w), h) } else { (w, ((w as f64 / aspect).round() as usize).clamp(1, h)) };
+    if (cw, ch) == (w, h) { return (0, 0, w, h); }
+    let luma = |x: usize, y: usize| { let i = (y * w + x) * 3; 0.299 * rgb[i] as f64 + 0.587 * rgb[i + 1] as f64 + 0.114 * rgb[i + 2] as f64 };
+    let step = (w.max(h) / 400).max(1);
+    if cw < w {
+        let scores: Vec<f64> = (0..w).map(|x| (0..h).step_by(step).map(|y| luma(x, y) + 3.0 * (luma(x, y) - luma((x + 1).min(w - 1), y)).abs()).sum()).collect();
+        (best_window(&scores, cw), 0, cw, ch)
+    } else {
+        let scores: Vec<f64> = (0..h).map(|y| (0..w).step_by(step).map(|x| luma(x, y) + 3.0 * (luma(x, y) - luma(x, (y + 1).min(h - 1))).abs()).sum()).collect();
+        (0, best_window(&scores, ch), cw, ch)
+    }
+}
+
+/// Which picture a monitor shows: its own pick (config `wallpaperMonitors`, by monitor number) when that is a
+/// picture that exists, else the main wallpaper. shortcut: monitors are numbered in Windows' order, so
+/// re-plugging them in another order moves the picks; upgrade by keying on the device path.
+fn monitor_source(own: &Value, i: usize, main: &str) -> (String, bool) {
+    let pick = own[i.to_string()].as_str().filter(|p| {
+        let q = Path::new(p);
+        q.is_file() && !q.extension().is_some_and(|e| VIDEO_EXT.contains(&e.to_string_lossy().to_lowercase().as_str()))
+    });
+    (pick.unwrap_or(main).to_string(), pick.is_some())
+}
+
+/// What one monitor shows: `file` is its picture already cut to the monitor's shape.
+struct Plan { id: HSTRING, w: i32, h: i32, name: String, file: String, custom: bool }
+
+/// The monitors IDesktopWallpaper knows (attached ones only), each with the picture to give it. Pictures that
+/// don't match the monitor's shape are cut to it with `focus_crop` and saved in the pack folder.
+fn plan(dw: &IDesktopWallpaper, main: &str, own: &Value) -> windows::core::Result<Vec<Plan>> {
+    let (mut out, names) = (vec![], crate::util::monitor_names());
+    for i in 0..unsafe { dw.GetMonitorDevicePathCount()? } {
+        let id = unsafe {
+            let p = dw.GetMonitorDevicePathAt(i)?;
+            let s = p.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(p.0 as *const _));
+            HSTRING::from(s)
+        };
+        // a monitor Windows can't measure still gets the picture, just uncut
+        let r = unsafe { dw.GetMonitorRECT(&id) }.unwrap_or_default();
+        let (n, w, h) = (out.len(), r.right - r.left, r.bottom - r.top);
+        let (src, custom) = monitor_source(own, n, main);
+        let file = if w > 0 && h > 0 { fit_file(&src, n, w, h) } else { None }.unwrap_or(src);
+        let name = crate::util::monitor_label(&names, (r.left, r.top), n);
+        out.push(Plan { id, w, h, name, file, custom });
+    }
+    Ok(out)
+}
+
+/// `src` cut to the shape of a `w` x `h` monitor, saved as pack/wp-<n>-<hash>.jpg; None when it already fits (or can't be read).
+fn fit_file(src: &str, n: usize, w: i32, h: i32) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let (pw, ph, px) = load_rgb(Path::new(src))?;
+    let (x, y, cw, ch) = focus_crop(pw, ph, &px, w as f64 / h.max(1) as f64);
+    let dir = pack();
+    let stale = |keep: &str| if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&format!("wp-{n}-")) && name != keep { let _ = std::fs::remove_file(e.path()); }
+        }
+    };
+    if (cw, ch) == (pw, ph) { stale(""); return None; }
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    (src, std::fs::metadata(src).and_then(|m| m.modified()).ok(), x, y, cw, ch).hash(&mut hs);
+    let name = format!("wp-{n}-{:x}.jpg", hs.finish());
+    let dest = dir.join(&name);
+    if !dest.exists() {
+        let rows: Vec<u8> = (y..y + ch).flat_map(|r| px[(r * pw + x) * 3..(r * pw + x + cw) * 3].iter().copied()).collect();
+        write_rgb_jpeg(cw, ch, &rows, &dest)?;
+    }
+    stale(&name);
+    Some(dest.to_string_lossy().into_owned())
+}
+
+/// bridge `wall-monitors`: each monitor as { i, w, h, name, file, custom } with the picture it shows, for Settings.
+pub fn call(_cfg: &Config, name: &str, _args: &[&str]) -> Option<Value> {
+    if name != "wall-monitors" { return None; }
+    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    let main = load_json(&Paths::live().state, json!({}))["image"].as_str().unwrap_or("").to_string();
+    let own = load_json(&pack().join("config.json"), Value::Null)["wallpaperMonitors"].clone();
+    let list = unsafe { CoCreateInstance::<_, IDesktopWallpaper>(&DesktopWallpaper, None, CLSCTX_LOCAL_SERVER) }
+        .and_then(|dw| plan(&dw, &main, &own))        .map(|v| v.iter().enumerate().map(|(i, m)| json!({ "i": i, "w": m.w, "h": m.h, "name": m.name, "file": m.file, "custom": m.custom })).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Some(json!({ "monitors": list }))
 }
 
 // ------------------------------------------------------------------ writers
@@ -330,16 +465,25 @@ fn pick_file() -> Option<String> {
     .flatten()
 }
 
-/// Sets the picture on every monitor: IDesktopWallpaper (it crossfades, like end4's), else the instant SPI call.
+/// Sets each monitor's picture (its own pick, else `image`) cut to the monitor's shape: IDesktopWallpaper
+/// (it crossfades, like end4's), else the instant SPI call with the whole picture.
 fn set_wallpaper(image: &str) {
     reg_str(w!(r"Control Panel\Desktop"), w!("WallpaperStyle"), "10"); // Fill
     reg_str(w!(r"Control Panel\Desktop"), w!("TileWallpaper"), "0");
     let fade = || -> windows::core::Result<()> {
-        let dw: IDesktopWallpaper = unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_INPROC_SERVER)? };
-        unsafe {
-            dw.SetPosition(DWPOS_FILL)?;
-            dw.SetWallpaper(PCWSTR::null(), &HSTRING::from(image))
+        let dw: IDesktopWallpaper = unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_LOCAL_SERVER)? };
+        let own = load_json(&pack().join("config.json"), Value::Null)["wallpaperMonitors"].clone();
+        unsafe { dw.SetPosition(DWPOS_FILL)? };
+        let plans = plan(&dw, image, &own)?;
+        if plans.is_empty() { return unsafe { dw.SetWallpaper(PCWSTR::null(), &HSTRING::from(image)) }; }
+        // every monitor is tried; one that refuses is logged and does not stop the rest
+        let mut failed = 0;
+        for (i, m) in plans.iter().enumerate().filter(|(_, m)| !m.file.is_empty()) {
+            let r = unsafe { dw.SetWallpaper(&m.id, &HSTRING::from(m.file.as_str())) };
+            crate::log::line(&format!("wallpaper: monitor {i} ({}x{}) <- {} {}", m.w, m.h, m.file, r.as_ref().map_or_else(|e| format!("failed: {e}"), |_| "ok".into())));
+            failed += r.is_err() as usize;
         }
+        if failed > 0 { Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL)) } else { Ok(()) }
     };
     if fade().is_err() {
         let mut p: Vec<u16> = image.encode_utf16().chain(Some(0)).collect();
@@ -389,7 +533,8 @@ pub fn switchwall(cfg: &Config, args: &[&str]) -> Option<Value> {
 
 fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String> {
     let (mut image, mut color, mut mode, mut scheme, mut live) = (String::new(), String::new(), String::new(), String::new(), String::new());
-    let (mut toggle, mut pick, mut theme_only) = (false, false, false);
+    let (mut toggle, mut pick, mut theme_only, mut clear) = (false, false, false, false);
+    let mut monitor = String::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let name = a.trim_start_matches('-').to_lowercase();
@@ -403,6 +548,8 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
             "togglemode" => toggle = true,
             "pick" => pick = true,
             "themeonly" => theme_only = true,
+            "monitor" => monitor = val()?,
+            "clear" => clear = true,
             _ => return Err(format!("A parameter cannot be found that matches parameter name '{name}'.")),
         }
     }
@@ -410,6 +557,17 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
     if !scheme.is_empty() && scheme != "auto" && !SCHEMES.contains(&scheme.as_str()) { return Err(format!("Cannot validate argument on parameter 'Scheme'. The argument \"{scheme}\" is not a known scheme.")); }
 
     let state = load_json(&paths.state, Value::Null);
+    if !monitor.is_empty() {
+        // -Monitor N [-Image file | -Clear]: that monitor gets its own picture (or goes back to the main one); the theme stays
+        let n: usize = monitor.parse().map_err(|_| format!("Cannot validate argument on parameter 'Monitor'. \"{monitor}\" is not a monitor number."))?;
+        let file = if clear { String::new() } else {
+            let f = if image.is_empty() { match pick_file() { Some(f) => f, None => return Ok(json!({ "ok": false, "cancelled": true })) } } else { image };
+            resolve(&f)?
+        };
+        bridge_json(cfg, "config-set", &[&format!("wallpaperMonitors.{n}"), &json!(file).to_string()]).ok_or("Couldn't save the choice")?;
+        if let Some(main) = state["image"].as_str().filter(|i| !i.is_empty() && Path::new(i).exists()) { set_wallpaper(main); }
+        return Ok(json!({ "ok": true, "monitor": n, "file": file }));
+    }
     let retheme = toggle || !mode.is_empty() || !scheme.is_empty();
     if pick || (image.is_empty() && color.is_empty() && !retheme) {
         match pick_file() { Some(f) => image = f, None => return Ok(json!({ "ok": false, "cancelled": true })) }
@@ -467,6 +625,20 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_matches_what_apply_would_generate_and_follows_mode_and_scheme() {
+        let seed = hex_rgb("#4F46E5").unwrap();
+        let p = preview(0xFF4F_46E5, true, "tonal-spot");
+        let (want, ..) = generate(seed, true, "tonal-spot", false);
+        assert_eq!(p["primary"], crate::conf::parse_hex(&want["primary"]).unwrap());
+        assert!(p.len() > 40 && p.contains_key("surfaceContainerHigh") && p.contains_key("onPrimary"));
+        assert_ne!(p["background"], preview(0xFF4F_46E5, false, "tonal-spot")["background"]);
+        assert_ne!(p["primary"], preview(0xFF4F_46E5, true, "fruit-salad")["primary"]);
+        // "auto" is tonal-spot with the grey fallback, like run_theme
+        assert_eq!(preview(0xFF4F_46E5, true, "auto")["primary"], p["primary"]);
+        assert_eq!(preview(0xFF80_8080, true, "auto")["primary"], crate::conf::parse_hex(&generate(hex_rgb("#808080").unwrap(), true, "tonal-spot", true).0["primary"]).unwrap());
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("zor-ui-theme-{}-{name}", std::process::id()));
@@ -560,6 +732,74 @@ mod tests {
         assert_eq!((tw, th), (960, 480));
     }
 
+    /// A w x h picture, dark except a bright block over columns/rows `lit` (x range, y range).
+    fn lit_picture(w: usize, h: usize, lit: (std::ops::Range<usize>, std::ops::Range<usize>)) -> Vec<u8> {
+        (0..w * h).flat_map(|i| { let v = if lit.0.contains(&(i % w)) && lit.1.contains(&(i / w)) { 220 } else { 5 }; [v, v, v] }).collect()
+    }
+
+    #[test]
+    fn focus_crop_follows_the_bright_part_and_stays_inside() {
+        // 1600x900 landscape for a 9:16 screen: the window is 506 wide; the lit block sits at the right
+        let px = lit_picture(1600, 900, (1100..1400, 0..900));
+        let (x, y, w, h) = focus_crop(1600, 900, &px, 9.0 / 16.0);
+        assert_eq!((y, w, h), (0, 506, 900));
+        assert!(x >= 1100 - 506 && x + w <= 1600 && x + w > 1100, "x={x}");
+        // lit in the middle: stays the middle
+        let mid = lit_picture(1600, 900, (700..900, 0..900));
+        let (x, ..) = focus_crop(1600, 900, &mid, 9.0 / 16.0);
+        assert!(x + 506 > 700 && x < 900, "x={x}");
+        // a tall picture for a wide screen slides along the rows
+        let tall = lit_picture(900, 1600, (0..900, 1000..1200));
+        let (x, y, w, h) = focus_crop(900, 1600, &tall, 16.0 / 9.0);
+        assert_eq!((x, w, h), (0, 900, 506));
+        assert!(y <= 1200 && y + h > 1000, "y={y}");
+    }
+
+    #[test]
+    fn focus_crop_keeps_a_picture_that_already_fits_and_ignores_bad_input() {
+        let px = lit_picture(160, 90, (0..10, 0..10));
+        assert_eq!(focus_crop(160, 90, &px, 16.0 / 9.0), (0, 0, 160, 90));
+        assert_eq!(focus_crop(160, 90, &px, 0.0), (0, 0, 160, 90));
+        assert_eq!(focus_crop(160, 90, &px, f64::NAN), (0, 0, 160, 90));
+        assert_eq!(focus_crop(160, 90, &px[..10], 0.5), (0, 0, 160, 90));
+        assert_eq!(focus_crop(0, 0, &[], 0.5), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn best_window_prefers_the_middle_on_a_tie() {
+        assert_eq!(best_window(&[1.0; 10], 4), 3);
+        assert_eq!(best_window(&[0.0, 0.0, 5.0, 5.0, 0.0, 0.0], 2), 2);
+        assert_eq!(best_window(&[1.0, 2.0], 5), 0);
+    }
+
+    #[test]
+    fn a_monitor_uses_its_own_picture_only_when_it_is_a_picture_that_exists() {
+        let d = tmp("mon");
+        let (png, clip) = (d.join("a.png"), d.join("b.mp4"));
+        std::fs::write(&png, "x").unwrap();
+        std::fs::write(&clip, "x").unwrap();
+        let own = json!({ "1": png.to_string_lossy(), "2": clip.to_string_lossy(), "3": "C:/gone.png", "4": "" });
+        assert_eq!(monitor_source(&own, 1, "main.jpg"), (png.to_string_lossy().into_owned(), true));
+        for i in [0, 2, 3, 4] { assert_eq!(monitor_source(&own, i, "main.jpg"), ("main.jpg".into(), false), "{i}"); }
+        assert_eq!(monitor_source(&Value::Null, 1, "main.jpg"), ("main.jpg".into(), false));
+    }
+
+    #[test]
+    fn fit_file_cuts_a_wide_picture_for_a_portrait_monitor() {
+        unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+        let d = tmp("fit");
+        let (w, h) = (1600, 900);
+        let src = d.join("wide.jpg");
+        write_rgb_jpeg(w, h, &lit_picture(w, h, (1100..1400, 0..900)), &src).unwrap();
+        // the pack folder is the real one, so use a monitor number nothing else uses
+        let out = fit_file(&src.to_string_lossy(), 97, 1080, 1920).expect("cut");
+        let (cw, ch, _) = load_rgb(Path::new(&out)).unwrap();
+        assert_eq!(ch, 900);
+        assert!((cw as i64 - 506).abs() <= 1, "{cw}");
+        assert_eq!(fit_file(&src.to_string_lossy(), 97, 1600, 900), None);
+        assert!(!Path::new(&out).exists(), "an old cut is removed once the picture fits");
+    }
+
     #[test]
     fn switchwall_rejects_bad_arguments() {
         let cfg = Config::parse("{}");
@@ -569,5 +809,6 @@ mod tests {
         assert!(switch(&cfg, &a(&["-Scheme", "nope"]), &p).is_err());
         assert!(switch(&cfg, &a(&["-Bogus"]), &p).is_err());
         assert!(switch(&cfg, &a(&["-Image"]), &p).is_err());
+        assert!(switch(&cfg, &a(&["-Monitor", "left"]), &p).is_err());
     }
 }

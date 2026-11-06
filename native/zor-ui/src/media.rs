@@ -66,6 +66,26 @@ fn send(m: Msg) { if let Some(Ok(t)) = MEDIA.get().map(|m| m.lock()) { let _ = t
 pub fn control(what: &'static str) { send(Msg::Control(None, what)); }
 /// The same on the session `id` (`Media::id`).
 pub fn control_of(id: &str, what: &'static str) { send(Msg::Control(Some(id.into()), what)); }
+/// What a skip button does for `m`: Windows' skip when the app offers it; otherwise "previous"
+/// restarts the track (what players do on a first press) and "next" does nothing.
+#[derive(Debug, PartialEq)]
+pub enum Skip { Control(&'static str), Restart, Nothing }
+pub fn skip_step(m: &Media, forward: bool) -> Skip {
+    match (forward, if forward { m.can_next } else { m.can_prev }) {
+        (true, true) => Skip::Control("next"),
+        (false, true) => Skip::Control("previous"),
+        (false, false) => Skip::Restart,
+        (true, false) => Skip::Nothing,
+    }
+}
+/// Skips session `m` forward or back, see `skip_step`.
+pub fn skip(m: &Media, forward: bool) {
+    match skip_step(m, forward) {
+        Skip::Control(c) => control_of(&m.id, c),
+        Skip::Restart => seek(&m.id, 0.0),
+        Skip::Nothing => {}
+    }
+}
 /// Jumps session `id` to `secs`.
 pub fn seek(id: &str, secs: f64) { send(Msg::Seek(id.into(), secs)); }
 
@@ -371,6 +391,16 @@ mod tests {
 
     fn at(position: f64, at: f64, snap: (f64, f64)) -> Media {
         Media { id: "MSEdge".into(), title: "Video".into(), playing: true, current: true, duration: 100.0, position, at, snap, ..Default::default() }
+    }
+
+    #[test]
+    fn skip_falls_back_to_restarting_the_track() {
+        let m = |prev, next| Media { can_prev: prev, can_next: next, ..Default::default() };
+        assert_eq!((skip_step(&m(true, true), false), skip_step(&m(true, true), true)), (Skip::Control("previous"), Skip::Control("next")));
+        // a lone YouTube video: previous restarts it, next has nothing to do
+        assert_eq!((skip_step(&m(false, false), false), skip_step(&m(false, false), true)), (Skip::Restart, Skip::Nothing));
+        assert_eq!(skip_step(&m(false, true), false), Skip::Restart);
+        assert_eq!(skip_step(&m(true, false), true), Skip::Nothing);
     }
 
     #[test]

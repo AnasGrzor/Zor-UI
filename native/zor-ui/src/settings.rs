@@ -11,6 +11,7 @@ mod form;
 mod layout;
 mod pages;
 pub(crate) mod store;
+mod picker;
 
 use crate::{
     app::{Action, Ctx},
@@ -57,6 +58,23 @@ struct Info { mode: String, scheme: String, seed: String, live: bool, stamp: Opt
 
 /// hub key a desk card sets before opening Settings: "<page key>|<section title>".
 pub const GOTO: &str = "zor-ui.settingsGoto";
+/// How long the highlight on a control opened from search stays visible.
+const FLASH_MS: f64 = 1800.0;
+
+/// `/` jumps to the search box unless a text field is being typed in (the picker has its own Char arm above).
+fn slash_focuses_search(typing: bool, menu_open: bool) -> bool { !typing && !menu_open }
+
+/// "<page>|<section>|<label>" (the label is optional) as the GOTO hub value.
+fn parse_goto(g: &str) -> Option<(String, String, String)> {
+    let mut it = g.splitn(3, '|');
+    let (p, s) = (it.next()?, it.next()?);
+    Some((p.into(), s.into(), it.next().unwrap_or("").into()))
+}
+
+/// Where to scroll for a section and control label: the control's y, else the section heading's.
+fn goto_y(heads: &[(String, f32)], tags: &[(String, String, f32)], sect: &str, label: &str) -> Option<f32> {
+    tags.iter().find(|t| t.0 == sect && t.1 == label).map(|t| t.2).or_else(|| heads.iter().find(|h| h.0 == sect).map(|h| h.1))
+}
 const SEARCH: &str = "search";
 
 pub struct Settings {
@@ -70,16 +88,25 @@ pub struct Settings {
     cfgc: Config,
     /// Values written but not yet seen in config.json: path -> (value, written at ms).
     over: HashMap<String, (Value, f64)>,
+    /// The glass preview picture and what it was made from.
+    glass_prev: Option<(String, crate::gfx::Pixmap)>,
     acts: Vec<Act>,
     fields: HashMap<String, Field>,
     focus: Option<String>,
     /// The window has keyboard focus (else no caret).
     active: bool,
     menu: Option<Menu>,
+    /// The open colour picker ("Theme from a color"). While it is open, every window painted on this thread
+    /// (conf::set_preview) shows the palette the picked colour would give.
+    picker: Option<picker::Picker>,
+    /// Set while the picker edits a config color (the visualizer's) instead of the theme seed.
+    pick_path: Option<String>,
     /// A slider being dragged: path, spec, track rect.
     sl: Option<(String, Sl, R)>,
     drag_val: Option<(String, f64)>,
     toast: Option<(String, f64)>,
+    /// The control a search hit opened: (section, label, when the highlight ends in ms).
+    flash: Option<(String, String, f64)>,
     busy: String,
     info: Info,
     online: Load<Value>,
@@ -88,6 +115,8 @@ pub struct Settings {
     we_list: Load<Vec<Value>>,
     keys: Load<Value>,
     mons: Load<Vec<String>>,
+    /// What each monitor shows ({ i, w, h, file, custom } from the `wall-monitors` bridge command).
+    wmons: Load<Vec<Value>>,
     models: Load<Vec<(String, String)>>,
     we_type: String,
     imgs: HashMap<String, Option<tiny_skia::Pixmap>>,
@@ -108,6 +137,8 @@ pub fn preview_path(name: &str) -> PathBuf {
 fn default_for(path: &str) -> Value {
     match path {
         "desktop.greet.date" => json!(true),
+        "desktop.glass.tint" => json!("transparent"),
+        p if p.starts_with("desktop.glass.") => json!(crate::glass::default_of(&p["desktop.glass.".len()..])),
         p if p.starts_with("desktop.greet.") => json!(""),
         p if p.ends_with(".shape") && p.starts_with("desktop.images.") => json!("cookie"),
         p if p.ends_with(".size") && p.starts_with("desktop.images.") => json!(280),
@@ -116,18 +147,42 @@ fn default_for(path: &str) -> Value {
     }
 }
 
+/// Smallest and largest window, CSS px (the pages need about 720 x 480).
+const MIN_SIZE: (f32, f32) = (720.0, 480.0);
+const MAX_SIZE: (f32, f32) = (4000.0, 3000.0);
+/// shared.json key holding the size the user dragged the window to, "w,h".
+const SIZE_KEY: &str = "settings.size";
+
+/// The error of a preset's switchwall answer, None when the wallpaper / theme step worked (or gave no answer).
+fn theme_failed(theme: &Value) -> Option<String> {
+    (theme["ok"] == false).then(|| theme["error"].as_str().unwrap_or("it gave no reason").to_string())
+}
+
+fn clamp_size((w, h): (f32, f32)) -> (f32, f32) {
+    (w.clamp(MIN_SIZE.0, MAX_SIZE.0), h.clamp(MIN_SIZE.1, MAX_SIZE.1))
+}
+
+/// The saved "w,h" clamped to the limits, if it parses.
+fn parse_size(s: &str) -> Option<(f32, f32)> {
+    let (w, h) = s.split_once(',')?;
+    Some(clamp_size((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+}
+
 impl Settings {
-    /// `area`: the CSS-px size the popup placement gives the view (popup::area).
+    /// `area`: the CSS-px size the popup placement gives the view (popup::area); a size the user dragged to wins.
     pub fn new(area: (f32, f32)) -> Settings {
+        let area = hub::get(SIZE_KEY).and_then(|s| parse_size(&s)).unwrap_or(area);
         let env = std::env::var("ZORUI_RENDER_PAGE").ok();
         let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or(0);
         let mut s = Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""),
-            over: HashMap::new(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, sl: None, drag_val: None, toast: None,
-            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle,
+            over: HashMap::new(), glass_prev: None, acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
+            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle, wmons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
         };
         if std::env::var("ZORUI_RENDER_DEMO").is_ok() { s.demo(); }
+        // `--render settings` has no pointer, so this opens the colour picker for the picture
+        if let Some(c) = std::env::var("ZORUI_RENDER_PICKER").ok().and_then(|h| conf::parse_hex(&h)) { s.picker = Some(picker::Picker::new(c, area)); s.update_preview(); }
         s
     }
 
@@ -234,15 +289,21 @@ impl Settings {
                     store::bridge(cx, &self.inbox, "we-list", vec![], |s, r| s.we_list = Load::Ready(r["items"].as_array().cloned().unwrap_or_default()));
                 }
             }
-            "quick" => if matches!(self.mons, Load::Idle) {
-                self.mons = Load::Loading;
-                store::script(cx, &self.inbox, "toggles", vec!["-Action".into(), "monitors".into()], |s, r| {
-                    let list = r["monitors"].as_array().cloned().unwrap_or_default();
-                    // pinned in `over` (far-future stamp) so the sliders show the hardware value
-                    for m in &list { s.over.insert(format!("monitor.{}", m["i"]), (m["brightness"].clone(), 1e18)); }
-                    s.mons = Load::Ready(list.iter().map(|m| format!("{}|{}", m["i"], m["name"].as_str().unwrap_or(""))).collect());
-                });
-            },
+            "quick" => {
+                if matches!(self.wmons, Load::Idle) {
+                    self.wmons = Load::Loading;
+                    store::bridge(cx, &self.inbox, "wall-monitors", vec![], |s, r| s.wmons = Load::Ready(r["monitors"].as_array().cloned().unwrap_or_default()));
+                }
+                if matches!(self.mons, Load::Idle) {
+                    self.mons = Load::Loading;
+                    store::script(cx, &self.inbox, "toggles", vec!["-Action".into(), "monitors".into()], |s, r| {
+                        let list = r["monitors"].as_array().cloned().unwrap_or_default();
+                        // pinned in `over` (far-future stamp) so the sliders show the hardware value
+                        for m in &list { s.over.insert(format!("monitor.{}", m["i"]), (m["brightness"].clone(), 1e18)); }
+                        s.mons = Load::Ready(list.iter().map(|m| format!("{}|{}", m["i"], m["name"].as_str().unwrap_or(""))).collect());
+                    });
+                }
+            }
             "services" => {
                 if matches!(self.keys, Load::Idle) {
                     self.keys = Load::Loading;
@@ -314,6 +375,7 @@ impl Settings {
         self.busy = label.into();
         store::script(cx, &self.inbox, "switchwall", args.iter().map(|a| a.to_string()).collect(), |s, r| {
             s.busy.clear();
+            if s.picker.is_none() { conf::set_preview(None); } // the applied theme has landed
             if let Some(e) = store::failure(&r) { s.toast(&e); }
         });
     }
@@ -328,6 +390,7 @@ impl Settings {
     }
 
     fn act(&mut self, cx: &mut Ctx, a: Act) {
+        crate::log::line(&format!("settings: {}", a.label()));
         match a {
             Act::Page(i) => { self.page = i; self.menu = None; self.bl_focus = None; }
             Act::Switch(path) => {
@@ -343,10 +406,10 @@ impl Settings {
             Act::Select(path, anchor, opts) => {
                 self.menu = if self.menu.as_ref().is_some_and(|m| m.path == path) { None } else { Some(Menu { path, anchor, opts, scroll: Scroll::default() }) };
             }
-            Act::Goto(i, sect) => {
+            Act::Goto(i, sect, label) => {
                 if let Some(f) = self.fields.get_mut(SEARCH) { f.tb.set(""); }
                 self.focus = None;
-                hub::set(GOTO, Some(format!("{}|{sect}", PAGES[i].0)));
+                hub::set(GOTO, Some(format!("{}|{sect}|{label}", PAGES[i].0)));
                 self.page = i;
             }
             Act::Slider(..) | Act::Field(..) => {}
@@ -357,12 +420,36 @@ impl Settings {
     fn do_named(&mut self, cx: &mut Ctx, name: &'static str, arg: String) {
         let inbox = self.inbox.clone();
         match name {
-            "wall" => self.retheme(cx, &[], "wall"),
+            "wall" => { self.wmons = Load::Idle; self.retheme(cx, &[], "wall") }
+            // a picture (or back to the main one) for one monitor; the monitor list is read again afterwards
+            "mon-wall" | "mon-clear" => {
+                self.busy = "wall".into();
+                let mut args = vec!["-Monitor".to_string(), arg];
+                if name == "mon-clear" { args.push("-Clear".into()); }
+                store::script(cx, &inbox, "switchwall", args, |s, r| {
+                    s.busy.clear();
+                    s.wmons = Load::Idle;
+                    if r["cancelled"] != true { if let Some(e) = store::failure(&r) { s.toast(&e); } }
+                });
+            }
             "mode" => self.retheme(cx, &["-Mode", &arg], "mode"),
             "scheme" => self.retheme(cx, &["-Scheme", &arg], "scheme"),
+            "clearcolor" => self.set(&arg, json!("")),
+            "pickcolor" => {
+                let start = conf::parse_hex(&self.gs(cx, &arg)).or_else(|| conf::parse_hex(&self.gs(cx, "visualizer.color"))).unwrap_or_else(|| cx.theme.c("primary"));
+                self.menu = None;
+                self.pick_path = Some(arg);
+                self.picker = Some(picker::Picker::new(start, self.area));
+            }
+            "picker" => {
+                let hex = self.fields.get("seed").map(|f| f.tb.text.trim().to_string()).unwrap_or_default();
+                self.menu = None;
+                self.picker = Some(picker::Picker::new(conf::parse_hex(&hex).or_else(|| conf::parse_hex(&self.info.seed)).unwrap_or(0xFF67_50A4), self.area));
+                self.update_preview();
+            }
             "seed" => {
                 let hex = self.fields.get("seed").map(|f| f.tb.text.trim().to_string()).unwrap_or_default();
-                if conf::parse_hex(&hex).is_some_and(|_| hex.len() == 7) { self.retheme(cx, &["-Color", &hex], "seed"); }
+                if conf::parse_hex(&hex).is_some_and(|_| hex.len() == 7) { self.info.seed = hex.clone(); self.retheme(cx, &["-Color", &hex], "seed"); }
                 else { self.toast("Enter a color like #6750a4"); }
             }
             "random-online" => {
@@ -478,7 +565,10 @@ impl Settings {
                 store::bridge(cx, &inbox, "preset-apply-online", vec![arg.clone()], move |s, r| {
                     s.busy.clear();
                     s.local = Load::Idle;
-                    let m = if r["ok"] == true { format!("Applied {}", arg.replace('_', " ")) } else { r["error"].as_str().unwrap_or("Failed").to_string() };
+                    let left_out: Vec<&str> = r["unsupported"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+                    let m = if r["ok"] == true && theme_failed(&r["theme"]).is_some() { format!("Applied {}, but the wallpaper / theme failed: {}", arg.replace('_', " "), theme_failed(&r["theme"]).unwrap_or_default()) }
+                        else if r["ok"] == true && !left_out.is_empty() { format!("Applied {} (no card for {})", arg.replace('_', " "), left_out.join(", ")) }
+                        else if r["ok"] == true { format!("Applied {}", arg.replace('_', " ")) } else { r["error"].as_str().unwrap_or("Failed").to_string() };
                     s.toast(&m);
                 });
             }
@@ -486,7 +576,8 @@ impl Settings {
                 self.busy = arg.clone();
                 store::bridge(cx, &inbox, "preset-apply-local", vec![arg], |s, r| {
                     s.busy.clear();
-                    let m = if r["ok"] == true { "Preset applied".to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() };
+                    let m = if let (true, Some(e)) = (r["ok"] == true, theme_failed(&r["theme"])) { format!("Preset applied, but the wallpaper / theme failed: {e}") }
+                        else if r["ok"] == true { "Preset applied".to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() };
                     s.toast(&m);
                 });
             }
@@ -552,6 +643,28 @@ impl Settings {
 
     fn layout_now(&self) -> layout::Layout { layout::bar_layout(&self.lookup(&self.cfgc, "bar.modules"), self.cfgc.bool("showNetSpeed")) }
 
+    /// The palette the picked colour would give, painted over the whole window until the picker closes (nothing is written).
+    fn update_preview(&mut self) {
+        if self.pick_path.is_some() { return; } // a visualizer color changes no theme
+        conf::set_preview(self.picker.as_ref().map(|p| crate::bridge::theme::preview(p.color(), self.info.mode != "light", &self.info.scheme)));
+        // the seed field is what Apply reads, and what the row shows
+        if let Some(hex) = self.picker.as_ref().map(|p| p.hex()) { self.fields.entry("seed".into()).or_insert_with(|| Field::new(false)).tb.set(&hex); }
+    }
+
+    fn close_picker(&mut self) { self.picker = None; self.pick_path = None; conf::set_preview(None); }
+
+    /// Apply: re-theme with the picked colour. The preview stays on until the real theme has landed.
+    /// A config color (`pick_path`) is just written.
+    fn apply_picked(&mut self, cx: &mut Ctx) {
+        if let Some(path) = self.pick_path.take() {
+            if let Some(p) = self.picker.take() { self.set(&path, json!(p.hex())); }
+            return;
+        }
+        self.update_preview();
+        self.picker = None;
+        self.do_named(cx, "seed", String::new());
+    }
+
     fn slider_to(&mut self, x: f32) {
         if let Some((path, sl, r)) = &self.sl { self.drag_val = Some((path.clone(), snap(sl, ui::slider_value(*r, x) as f64))); }
     }
@@ -565,35 +678,49 @@ impl Settings {
     fn act_at(&self, id: u32) -> Option<Act> { id.checked_sub(ACT0).and_then(|i| self.acts.get(i as usize)).cloned() }
 }
 
+impl Drop for Settings {
+    /// Closing Settings with the picker open must not leave the whole desktop in a preview palette.
+    fn drop(&mut self) { if self.picker.is_some() { conf::set_preview(None); } }
+}
+
 impl View for Settings {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
 
     fn key(&self, _: &Ctx) -> String {
         // the Usage page redraws every second
         let tick = if PAGES[self.page].0 == "usage" { (hub::now_ms() / 1000.0) as u64 } else { 0 };
-        format!("{}{}{tick}", self.toast.is_some(), self.busy)
+        format!("{}{}{tick}{}", self.toast.is_some(), self.busy, self.flash.is_some())
     }
 
     fn frame_ms(&self) -> u32 {
         if self.rendering { 0 }
         else if self.scroll.moving() { 16 }
-        else if self.toast.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
+        else if self.toast.is_some() || self.flash.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
         else if PAGES[self.page].0 == "usage" { 1000 }
-        else if self.focus.is_some() && self.active { 500 }
+        else if (self.focus.is_some() && self.active) || self.picker.is_some() { 500 }
         else { 0 }
     }
 
     /// Any empty spot drags the window (the JS: the rail's empty space or the window's edge).
     fn movable(&self) -> f32 { self.area.1 }
 
-    fn captures_esc(&self) -> bool { self.menu.is_some() }
+    fn captures_esc(&self) -> bool { self.menu.is_some() || self.picker.is_some() }
+
+    fn limits(&self) -> Option<((f32, f32), (f32, f32))> { Some((MIN_SIZE, MAX_SIZE)) }
+
+    fn resize(&mut self, w: f32, h: f32) {
+        self.area = clamp_size((w, h));
+        self.index.clear(); // search results are laid out for the old width
+    }
+
+    fn resize_end(&mut self) { hub::set(SIZE_KEY, Some(format!("{},{}", self.area.0.round(), self.area.1.round()))); }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.sync(cx);
         self.ensure_loaded(cx);
         // a desk card's "Customize in Settings": "<page>|<section title>"
-        let goto = hub::get(GOTO).and_then(|g| g.split_once('|').map(|(p, s)| (p.to_string(), s.to_string())));
-        if let Some((page, _)) = &goto {
+        let goto = hub::get(GOTO).and_then(|g| parse_goto(&g));
+        if let Some((page, _, _)) = &goto {
             hub::set(GOTO, None);
             if let Some(i) = PAGES.iter().position(|p| p.0 == page) { self.page = i; }
         }
@@ -610,19 +737,26 @@ impl View for Settings {
         // page: measure (card heights, content height), then draw what is on screen
         let r = R::new(246.0, 22.0, w - 268.0, h - 44.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
-        let (cards, ch, heads) = {
+        let (cards, ch, heads, tags) = {
             let mut dry = Pen::new(c, cx, r.x, r.y, r.w - SCROLL_GAP, r.y, r.y + r.h);
             dry.dry = true;
             self.page(&mut dry);
-            (std::mem::take(&mut dry.measured), dry.y - r.y, dry.heads)
+            (std::mem::take(&mut dry.measured), dry.y - r.y, dry.heads, dry.tags)
         };
         (self.content_h, self.view_h) = (ch, r.h);
         let mut acts = nav_acts;
         let mut sc = std::mem::take(&mut self.scroll);
-        if let Some((_, y)) = goto.and_then(|(_, s)| heads.into_iter().find(|h| h.0 == s)) { sc = Scroll::default(); sc.y = y - r.y - 6.0; }
+        let now = hub::now_ms();
+        if let Some((_, s, l)) = goto {
+            if let Some(y) = goto_y(&heads, &tags, &s, &l) { sc = Scroll::default(); sc.y = y - r.y - 6.0; }
+            self.flash = (!l.is_empty()).then(|| (s, l, now + FLASH_MS));
+        }
+        if self.flash.as_ref().is_some_and(|f| f.2 < now) { self.flash = None; }
+        let flash = self.flash.as_ref().map(|(s, l, end)| (s.clone(), l.clone(), ((end - now) / FLASH_MS).clamp(0.0, 1.0) as f32));
         sc.region(c, cx, r, ch, |c, top| {
             let mut pen = Pen::new(c, cx, r.x, top, r.w - SCROLL_GAP, r.y, r.y + r.h);
             pen.cards = cards;
+            pen.flash = flash;
             pen.acts = std::mem::take(&mut acts);
             self.page(&mut pen);
             acts = pen.acts;
@@ -631,6 +765,7 @@ impl View for Settings {
         self.acts = acts;
 
         self.paint_menu(c, cx);
+        if let Some(p) = &mut self.picker { picker::paint(c, cx, p); }
         self.paint_ghost(c, cx);
         if let Some((msg, _)) = &self.toast {
             let tw = c.g.measure(msg, txt(13.0, 400)).0.ceil() + 36.0;
@@ -650,7 +785,17 @@ impl View for Settings {
                 None => self.scroll.glide(d, self.content_h, self.view_h),
             },
             Input::Click(id, Btn::Left) => {
-                if id == MENU_BG { self.menu = None; }
+                if self.picker.is_some() {
+                    match id {
+                        picker::BG | picker::CANCEL => self.close_picker(),
+                        picker::OK => self.apply_picked(cx),
+                        i if (picker::PRESET0..picker::PRESET0 + picker::PRESETS.len() as u32).contains(&i) => {
+                            if let Some(p) = &mut self.picker { p.set_color(picker::PRESETS[(i - picker::PRESET0) as usize]); }
+                            self.update_preview();
+                        }
+                        _ => {}
+                    }
+                } else if id == MENU_BG { self.menu = None; }
                 else if (MENU0..MENU0 + 980).contains(&id) {
                     if let Some(m) = self.menu.take() {
                         if let Some((v, _)) = m.opts.get((id - MENU0) as usize) { self.set(&m.path, v.clone()); self.toast("Saved"); }
@@ -658,6 +803,18 @@ impl View for Settings {
                 } else if let Some(a) = self.act_at(id) { self.act(cx, a); }
             }
             Input::Click(..) => {}
+            Input::Drag(id, x, y, Phase::Start) if self.picker.is_some() => {
+                if let Some(p) = &mut self.picker {
+                    if id == picker::HEX { p.tb.press(x, y); }
+                    p.start(id, x, y);
+                }
+                self.update_preview();
+            }
+            Input::Drag(_, x, y, Phase::Move) if self.picker.is_some() => {
+                if let Some(p) = &mut self.picker { p.drag(x, y); }
+                self.update_preview();
+            }
+            Input::Drag(_, _, _, Phase::End) if self.picker.is_some() => { if let Some(p) = &mut self.picker { p.grab = 0; } }
             Input::Drag(id, x, y, Phase::Start) => {
                 let a = self.act_at(id);
                 if !matches!(&a, Some(Act::Field(k)) if self.focus.as_deref() == Some(k)) { self.blur(cx); }
@@ -686,7 +843,9 @@ impl View for Settings {
             }
             Input::Drag(_, _, _, Phase::End) => {
                 if let Some((path, sl, _)) = self.sl.take() {
-                    if let (Some((_, v)), Some(i)) = (self.drag_val.take(), path.strip_prefix("monitor.")) {
+                    // peek: taking drag_val here would leave nothing for the config write below
+                    if let (Some((_, v)), Some(i)) = (self.drag_val.clone(), path.strip_prefix("monitor.")) {
+                        self.drag_val = None;
                         self.over.insert(path.clone(), (json!(v), 1e18));
                         store::script(cx, &self.inbox, "toggles", ["-Action", "brightness", "-Value", &(v as i64).to_string(), "-Monitor", i].map(String::from).to_vec(), |_, _| {});
                     } else if let Some((_, v)) = self.drag_val.take() {
@@ -707,6 +866,17 @@ impl View for Settings {
                     }
                 }
             }
+            Input::Char(ch) if self.picker.is_some() => {
+                if let Some(p) = &mut self.picker { p.tb.ch(ch); p.typed(); }
+                self.update_preview();
+            }
+            Input::Char('/') if slash_focuses_search(self.focus.is_some(), self.menu.is_some()) => {
+                self.blur(cx);
+                self.bl_focus = None;
+                self.active = true;
+                self.focus = Some(SEARCH.into());
+                if let Some(f) = self.fields.get_mut(SEARCH) { f.tb.caret = f.tb.text.len(); }
+            }
             Input::Char(ch) => {
                 if let Some(f) = self.focus.as_ref().and_then(|k| self.fields.get_mut(k)) { f.tb.ch(ch); }
             }
@@ -715,7 +885,14 @@ impl View for Settings {
                 if !on { if let Some(k) = self.focus.clone() { self.commit(cx, &k, false); } }
             }
             Input::Key { vk, ctrl, shift, alt } => {
-                if ctrl && (vk == 0x21 || vk == 0x22) {
+                if self.picker.is_some() {
+                    if vk == 0x1B { self.close_picker(); }
+                    else {
+                        let e = self.picker.as_mut().map(|p| { let e = p.tb.key(vk, ctrl, shift, alt); p.typed(); e });
+                        self.update_preview();
+                        if e == Some(Edit::Submit) { self.apply_picked(cx); }
+                    }
+                } else if ctrl && (vk == 0x21 || vk == 0x22) {
                     let n = PAGES.len();
                     self.page = (self.page + if vk == 0x22 { 1 } else { n - 1 }) % n;
                     self.menu = None;
@@ -777,7 +954,8 @@ impl Settings {
             for (i, sect, label, sub) in hits {
                 let Some(r) = p.row(44.0) else { continue };
                 let sub = if sub.is_empty() { PAGES[i].2.to_string() } else { format!("{} > {sub}", PAGES[i].2) };
-                let id = p.act(Act::Goto(i, sect));
+                let want = if label == sect { String::new() } else { label.clone() }; // a section title has no control to flash
+                let id = p.act(Act::Goto(i, sect, want));
                 if p.c.hit(r, id) { p.c.rect(r, 12.0, alpha(p.col("onSurface"), 0.08)); }
                 p.left(r, "", &label, &sub, 0.0);
             }
@@ -806,7 +984,7 @@ impl Settings {
         p.c.text("Config file", R::new(x + 46.0, y, w - 60.0, 48.0), txt(14.0, 400), p.col("onSecondaryContainer"), Align::Left);
         y += 48.0 + 10.0 + 4.0;
         let sb = R::new(x, y, w, 40.0);
-        self.field_ui(p, SEARCH, None, Kind::Plain, sb, "Search settings", 20.0, false);
+        self.field_ui(p, SEARCH, None, Kind::Plain, sb, "Search settings (/)", 20.0, false);
         y += 40.0 + 10.0;
         for (i, (_, ic, label)) in PAGES.iter().enumerate() {
             self.nav_item(p, R::new(x, y, w, 46.0), ic, label, Act::Page(i), i == self.page);
@@ -870,6 +1048,24 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_failed_theme_step_is_reported() {
+        assert_eq!(super::theme_failed(&serde_json::json!({ "ok": false, "error": "no image" })).as_deref(), Some("no image"));
+        assert_eq!(super::theme_failed(&serde_json::json!({ "ok": false })).as_deref(), Some("it gave no reason"));
+        assert_eq!(super::theme_failed(&serde_json::json!({ "ok": true, "mode": "dark" })), None);
+        assert_eq!(super::theme_failed(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn saved_size_is_parsed_and_clamped() {
+        assert_eq!(super::parse_size("1000,700"), Some((1000.0, 700.0)));
+        assert_eq!(super::parse_size(" 1000 , 700 "), Some((1000.0, 700.0)));
+        assert_eq!(super::parse_size("10,10"), Some(super::MIN_SIZE));
+        assert_eq!(super::parse_size("99999,99999"), Some(super::MAX_SIZE));
+        assert_eq!(super::parse_size("wide"), None);
+        assert_eq!(super::parse_size("1000,x"), None);
+    }
+
+    #[test]
     fn every_settings_widget_is_ported() {
         for (id, _) in DESKTOP_WIDGETS.iter() { assert!(crate::desk::PORTED.contains(id), "{id}"); }
     }
@@ -904,6 +1100,46 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_visualizer_color_is_written_without_retheming() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        st.do_named(&mut cx, "pickcolor", "island.eqColor".into());
+        assert!(st.picker.is_some() && st.pick_path.as_deref() == Some("island.eqColor"));
+        st.picker.as_mut().unwrap().set_color(0xFF12_3456);
+        st.update_preview();
+        assert!(conf::set_preview(None).is_none()); // no theme preview was painted
+        st.apply_picked(&mut cx);
+        assert_eq!(st.over["island.eqColor"].0, json!("#123456"));
+        assert!(st.picker.is_none() && st.pick_path.is_none() && st.busy.is_empty());
+        st.do_named(&mut cx, "clearcolor", "island.eqColor".into());
+        assert_eq!(st.over["island.eqColor"].0, json!(""));
+    }
+
+    /// What the preview paints: an override, else the shared color, else the theme's; edits not yet in config.json count.
+    #[test]
+    fn visualizer_preview_colors_follow_pending_edits() {
+        let mut st = s();
+        let cx = Ctx::new(false);
+        let theme = cx.theme.c("primary");
+        assert_eq!(st.viz_color(&cx, "island.eqColor"), theme);
+        st.over.insert("visualizer.color".into(), (json!("#112233"), hub::now_ms()));
+        assert_eq!(st.viz_color(&cx, "island.eqColor"), 0xFF11_2233);
+        st.over.insert("island.eqColor".into(), (json!("#445566"), hub::now_ms()));
+        assert_eq!((st.viz_color(&cx, "island.eqColor"), st.viz_color(&cx, "visualizer.barColor")), (0xFF44_5566, 0xFF11_2233));
+        st.over.insert("island.eqColor".into(), (json!("nope"), hub::now_ms()));
+        assert_eq!(st.viz_color(&cx, "island.eqColor"), 0xFF11_2233);
+    }
+
+    #[test]
+    fn cancelling_the_picker_forgets_its_config_path() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        st.do_named(&mut cx, "pickcolor", "visualizer.color".into());
+        st.close_picker();
+        assert!(st.picker.is_none() && st.pick_path.is_none() && !st.over.contains_key("visualizer.color"));
+    }
+
+    #[test]
     fn number_fields_clamp_and_zero_means_minimum() {
         let mut st = s();
         let mut cx = Ctx::new(false);
@@ -933,6 +1169,18 @@ mod tests {
     }
 
     #[test]
+    fn finishing_a_slider_drag_keeps_the_value() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        let sl = Sl { min: 0.0, max: 20.0, step: 1.0, fmt: form::Fmt::Px };
+        st.sl = Some(("desktop.glass.haze".into(), sl, R::new(0.0, 0.0, 100.0, 10.0)));
+        st.drag_val = Some(("desktop.glass.haze".into(), 12.0));
+        st.input(Input::Drag(0, 0.0, 0.0, Phase::End), &mut cx);
+        assert_eq!(st.over["desktop.glass.haze"].0, json!(12));
+        assert!(st.drag_val.is_none() && st.sl.is_none());
+    }
+
+    #[test]
     fn drop_target_counts_items_above_the_pointer() {
         let mut st = s();
         let col = R::new(0.0, 0.0, 100.0, 300.0);
@@ -944,6 +1192,38 @@ mod tests {
         
     }
 
+    #[test]
+    fn slash_only_focuses_search_when_nothing_is_being_typed() {
+        assert!(slash_focuses_search(false, false));
+        assert!(!slash_focuses_search(true, false));
+        assert!(!slash_focuses_search(false, true));
+    }
+    #[test]
+    fn slash_key_focuses_search_without_typing_it() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        st.fields.insert(SEARCH.into(), Field::new(false));
+        st.input(Input::Char('/'), &mut cx);
+        assert_eq!(st.focus.as_deref(), Some(SEARCH));
+        assert_eq!(st.fields[SEARCH].tb.text, "");
+        st.input(Input::Char('/'), &mut cx); // now typing: a slash is text
+        assert_eq!(st.fields[SEARCH].tb.text, "/");
+    }
+    #[test]
+    fn goto_value_parses_with_or_without_a_label() {
+        assert_eq!(parse_goto("bar|Look|Corner | radius"), Some(("bar".into(), "Look".into(), "Corner | radius".into())));
+        assert_eq!(parse_goto("bar|Look"), Some(("bar".into(), "Look".into(), String::new())));
+        assert_eq!(parse_goto("bar"), None);
+    }
+    #[test]
+    fn goto_lands_on_the_control_then_the_heading() {
+        let heads = vec![("Look".to_string(), 100.0)];
+        let tags = vec![("Look".to_string(), "Radius".to_string(), 340.0), ("Other".to_string(), "Radius".to_string(), 900.0)];
+        assert_eq!(goto_y(&heads, &tags, "Look", "Radius"), Some(340.0));
+        assert_eq!(goto_y(&heads, &tags, "Look", ""), Some(100.0));
+        assert_eq!(goto_y(&heads, &tags, "Look", "Missing"), Some(100.0));
+        assert_eq!(goto_y(&heads, &tags, "Nope", "Radius"), None);
+    }
     #[test]
     fn search_query_is_trimmed_and_lowercase() {
         let mut st = s();

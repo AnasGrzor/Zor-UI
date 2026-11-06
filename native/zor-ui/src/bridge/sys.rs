@@ -77,6 +77,35 @@ pub(crate) fn shell_open(target: &str) {
     unsafe { ShellExecuteW(HWND::default(), windows::core::w!("open"), PCWSTR(t.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL); }
 }
 
+/// Where the pointer should jump: the center of the window that took the foreground, unless the
+/// user already moved the pointer more than 40 px from where the click left it.
+fn point_target(start: (i32, i32), now: (i32, i32), win: (i32, i32, i32, i32)) -> Option<(i32, i32)> {
+    let moved = (now.0 - start.0).abs() > 40 || (now.1 - start.1).abs() > 40;
+    (!moved).then_some(((win.0 + win.2) / 2, (win.1 + win.3) / 2))
+}
+
+/// `shell_open`, then moves the pointer to the center of the window that comes to the front (waits up to 3 s).
+pub(crate) fn open_and_point(target: &str) {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowRect, IsIconic, SetCursorPos}};
+    let before = unsafe { GetForegroundWindow() }.0 as isize; // HWND isn't Send
+    let mut p = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut p); }
+    shell_open(target);
+    std::thread::spawn(move || {
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            unsafe {
+                let fg = GetForegroundWindow();
+                if fg.0 as isize == before || fg.0.is_null() || IsIconic(fg).as_bool() { continue; }
+                let (mut now, mut r) = (POINT::default(), RECT::default());
+                if GetCursorPos(&mut now).is_err() || GetWindowRect(fg, &mut r).is_err() { return; }
+                if let Some((x, y)) = point_target((p.x, p.y), (now.x, now.y), (r.left, r.top, r.right, r.bottom)) { let _ = SetCursorPos(x, y); }
+                return;
+            }
+        }
+    });
+}
+
 fn open(url: &str) -> Value {
     if !(url.starts_with("http://") || url.starts_with("https://")) { return err("only http(s) links"); }
     shell_open(url);
@@ -292,6 +321,13 @@ fn mixer(action: &str, app: &str, value: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_jumps_to_the_window_center_unless_moved() {
+        assert_eq!(point_target((100, 20), (100, 20), (0, 0, 1000, 600)), Some((500, 300)));
+        assert_eq!(point_target((100, 20), (130, 50), (-1920, 0, 0, 1080)), Some((-960, 540))); // small jiggle, second monitor
+        assert_eq!(point_target((100, 20), (400, 20), (0, 0, 1000, 600)), None); // user moved away
+    }
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("zor-ui-sys-{}-{name}", std::process::id()));

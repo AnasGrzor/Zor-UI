@@ -19,6 +19,18 @@ const ID_GROUP: u32 = 700; // a notification card's body, for its right-click me
 const ID_MODE: u32 = 240; // pomodoro, stopwatch
 const ID_T: u32 = 242; // reset, toggle, skip / lap
 
+/// hub key: "<ms>:<id>", the notification the island asked the sidebar to scroll to and when.
+const FOCUS: &str = "zor-ui.notifFocus";
+
+/// The id in a FOCUS value, unless it is older than 3 s (the sidebar was never opened for it).
+fn focus_id(v: &str, now_ms: f64) -> Option<&str> {
+    let (at, id) = v.split_once(':')?;
+    (now_ms - at.parse::<f64>().ok()? < 3000.0).then_some(id)
+}
+
+/// Scroll offset of group `gi` when the groups are `heights` tall with a 6 px gap.
+fn group_top(heights: &[f32], gi: usize) -> f32 { heights[..gi].iter().map(|h| h + 6.0).sum() }
+
 /// Wrapped text height snapped to whole CSS lines (`line` px each, at most `max` of them).
 fn lines_h(g: &Gfx, s: &str, f: Font, w: f32, line: f32, max: usize) -> f32 {
     if s.is_empty() { return 0.0; }
@@ -50,13 +62,16 @@ impl SidebarRight {
         (if self.sw_mode { &t["sw"]["running"] } else { &t["running"] }).as_bool() == Some(true)
     }
 
-    pub(super) fn wheel_tab(&mut self, d: i32) {
-        match self.tab {
-            0 => self.sc_notif.wheel(d),
-            1 => self.sc_page.wheel(d),
-            2 => self.sc_todo.wheel(d),
-            _ => if self.sw_mode { self.sc_laps.wheel(d) } else { self.sc_page.wheel(d) },
-        }
+    /// Scrolls the selected page; false when it has nothing to scroll (the panel takes the wheel).
+    pub(super) fn wheel_tab(&mut self, d: i32) -> bool {
+        let sc = match self.tab {
+            0 => &mut self.sc_notif,
+            1 => &mut self.sc_page,
+            2 => &mut self.sc_todo,
+            _ => if self.sw_mode { &mut self.sc_laps } else { &mut self.sc_page },
+        };
+        if sc.scrolls() { sc.wheel(d); }
+        sc.scrolls()
     }
 
     pub(super) fn add_todo(&mut self) {
@@ -96,6 +111,11 @@ impl SidebarRight {
         match id {
             ID_CENTER => proc::run_bg(cfg, "toggles", &["-Action", "actioncenter"]),
             ID_CLEAR => clear_notifs(self.cfg.clone(), &self.sh),
+            // a click on a card opens what its newest notification points at
+            i if (ID_GROUP..ID_GROUP + 100).contains(&i) => {
+                let open = group(&lock(&self.sh).notifs).into_iter().nth((i - ID_GROUP) as usize).map(|g| g.items[0].open.clone()).unwrap_or_default();
+                if !open.is_empty() { crate::bridge::sys::open_and_point(&open); }
+            }
             i if (ID_DISMISS..ID_DISMISS + 100).contains(&i) => {
                 let ids: Vec<String> = {
                     let mut s = lock(&self.sh);
@@ -215,6 +235,14 @@ impl SidebarRight {
         }).collect();
         let content = layout.iter().map(|l| l.0).sum::<f32>() + 6.0 * (layout.len() - 1) as f32;
         let mut sc = std::mem::take(&mut self.sc_notif);
+        // the island sends the id of the notification that was clicked
+        if let Some(v) = hub::get(FOCUS) {
+            hub::set(FOCUS, None);
+            let id = focus_id(&v, hub::now_ms()).unwrap_or_default();
+            if let Some(gi) = groups.iter().position(|g| g.items.iter().any(|n| n.id == id)) {
+                sc.s.to(group_top(&layout.iter().map(|l| l.0).collect::<Vec<_>>(), gi), content, list.h);
+            }
+        }
         sc.region(c, cx, list, content, |c, top| {
             let mut y = top;
             for (gi, (g, (gh, rows))) in groups.iter().zip(&layout).enumerate() {
@@ -393,5 +421,21 @@ impl SidebarRight {
             }
         });
         self.sc_laps = sc;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn focus_expires() {
+        assert_eq!(super::focus_id("1000:42", 2000.0), Some("42"));
+        assert_eq!(super::focus_id("1000:42", 4500.0), None);
+        assert_eq!(super::focus_id("garbage", 0.0), None);
+    }
+
+    #[test]
+    fn group_top_adds_heights_and_gaps() {
+        let h = [50.0, 80.0, 40.0];
+        assert_eq!((super::group_top(&h, 0), super::group_top(&h, 1), super::group_top(&h, 2)), (0.0, 56.0, 142.0));
     }
 }

@@ -46,7 +46,7 @@ pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
         // a tall screen has room for rows, not for a wider window
         "overview" => ((w * if portrait { 0.94 } else { 0.82 }).round(), (h * if portrait { 0.8 } else { 0.74 }).round()),
         // the pages need about 900 px; a narrow screen gets all it has
-        "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).round()),
+        "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).min(900.0).round()), // a portrait screen would stretch it into a tall empty column
         "island-panel" => (424.0, 560.0),
         _ => (400.0, 300.0),
     }
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn tall_screens_get_wider_windows() {
         // a 1080 x 1920 monitor: settings keeps its 900 px, the overview uses nearly all the width
-        assert_eq!(area("settings", 1080.0, 1920.0, Edge::Top).0, 900.0);
+        assert_eq!(area("settings", 1080.0, 1920.0, Edge::Top), (900.0, 900.0));
         assert_eq!(area("overview", 1080.0, 1920.0, Edge::Top), (1015.0, 1536.0));
         assert_eq!(area("sidebar-left", 500.0, 1000.0, Edge::Left).0, 432.0);
         assert_eq!(area("settings", 800.0, 1280.0, Edge::Top).0, 776.0);

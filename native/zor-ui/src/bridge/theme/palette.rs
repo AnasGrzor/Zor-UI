@@ -123,7 +123,8 @@ fn build(name: &str, hct: Hct, dark: bool) -> DynamicScheme {
     match name {
         "content" => SchemeContent::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
         "expressive" => SchemeExpressive::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
-        "fidelity" => SchemeFidelity::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
+        // In the 2025 spec Fidelity builds the same palette as Content, so lift the seed's chroma to make it the punchier one.
+        "fidelity" => SchemeFidelity::with_spec(Hct::from(hct.get_hue(), hct.get_chroma().max(60.0), hct.get_tone()), dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
         "fruit-salad" => SchemeFruitSalad::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
         "monochrome" => SchemeMonochrome::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
         "neutral" => SchemeNeutral::with_spec(hct, dark, c, SpecVersion::Spec2025, Platform::Phone).scheme,
@@ -167,6 +168,30 @@ mod tests {
     fn hex_round_trip_and_rejects_junk() {
         assert_eq!(rgb_hex(hex_rgb("#6750A4").unwrap()), "#6750A4");
         assert!(hex_rgb("#67").is_none() && hex_rgb("zzzzzz").is_none() && hex_rgb("é12345").is_none());
+    }
+
+    fn hue_gap(a: f64, b: f64) -> f64 { difference(a, b) }
+
+    #[test]
+    fn every_scheme_is_complete_and_the_faithful_ones_keep_the_seed_hue() {
+        for seed in ["#E53935", "#6750A4", "#2E7D32", "#1E88E5", "#FDD835"] {
+            let seed = hex_rgb(seed).unwrap();
+            let sh = Hct::new(seed).get_hue();
+            for dark in [true, false] {
+                let mut prim = BTreeMap::new();
+                for name in SCHEMES {
+                    let (c, t, used) = generate(seed, dark, name, false);
+                    assert_eq!(&used, name);
+                    assert!(c.len() > 40 && t.len() == 16, "{name}");
+                    assert!(c.values().chain(t.values()).all(|v| v.len() == 7 && hex_rgb(v).is_some()), "{name} {seed:?}");
+                    prim.insert(*name, hex_rgb(&c["primary"]).unwrap());
+                }
+                for name in ["content", "fidelity", "tonal-spot", "vibrant"] {
+                    assert!(hue_gap(Hct::new(prim[name]).get_hue(), sh) < 30.0, "{name} drifted from {seed:?}");
+                }
+                assert_ne!(generate(seed, dark, "content", false).0, generate(seed, dark, "fidelity", false).0, "fidelity equals content");
+            }
+        }
     }
 
     #[test]

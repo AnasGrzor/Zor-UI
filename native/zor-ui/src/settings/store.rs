@@ -58,9 +58,16 @@ pub fn bridge(cx: &Ctx, inbox: &Inbox, name: &str, args: Vec<String>, then: impl
     let (cfg, inbox, name) = (bcfg(cx), inbox.clone(), name.to_string());
     std::thread::spawn(move || {
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
+        crate::log::line(&format!("bridge {name} started"));
         let r = proc::bridge(&cfg, &name, &a);
+        crate::log::line(&format!("bridge {name} done: {}", outcome(&r)));
         inbox.send(move |s| then(s, r));
     });
+}
+
+/// "ok", or the error text of a bridge / script answer, for the log.
+fn outcome(r: &Value) -> String {
+    match (r["ok"].as_bool(), r["error"].as_str()) { (_, Some(e)) => format!("error: {e}"), (Some(false), None) => "not ok".into(), _ => "ok".into() }
 }
 
 /// run(script, ...args) (PowerShell helper) on a thread, then `then` on the view.
@@ -68,7 +75,9 @@ pub fn script(cx: &Ctx, inbox: &Inbox, name: &str, args: Vec<String>, then: impl
     let (cfg, inbox, name) = (bcfg(cx), inbox.clone(), name.to_string());
     std::thread::spawn(move || {
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
+        crate::log::line(&format!("script {name} {} started", a.join(" ")));
         let r = proc::run(&cfg, &name, &a);
+        crate::log::line(&format!("script {name} done: {}", outcome(&r)));
         inbox.send(move |s| then(s, r));
     });
 }
@@ -76,6 +85,15 @@ pub fn script(cx: &Ctx, inbox: &Inbox, name: &str, args: Vec<String>, then: impl
 /// openUrl() in core.js: the default browser.
 pub fn open_url(url: &str) {
     let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).creation_flags(0x0800_0000).spawn();
+}
+
+/// The GitHub page of a community preset folder.
+pub fn preset_url(name: &str) -> String {
+    let enc: String = name.bytes().map(|b| match b {
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' => (b as char).to_string(),
+        _ => format!("%{b:02X}"),
+    }).collect();
+    format!("https://github.com/pctrade/end4-pCpresets/tree/main/presets/{enc}")
 }
 
 /// A GET's bytes through curl.exe (util::http_get only returns text), for preset previews.
@@ -88,6 +106,11 @@ pub fn curl_bytes(url: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preset_page_urls() {
+        assert_eq!(preset_url("Zed"), "https://github.com/pctrade/end4-pCpresets/tree/main/presets/Zed");
+        assert_eq!(preset_url("a b/ü"), "https://github.com/pctrade/end4-pCpresets/tree/main/presets/a%20b%2F%C3%BC");
+    }
     #[test]
     fn failures() {
         assert_eq!(failure(&json!({ "ok": true })), None);

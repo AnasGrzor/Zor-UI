@@ -576,18 +576,33 @@ fn preset_names(tree: &Value) -> (Vec<String>, HashSet<String>) {
     (names, paths.iter().map(|p| p.to_string()).collect())
 }
 
+/// Gallery entries for `names` (sorted case-insensitively) with author/updated from the index. `has_preview` says
+/// whether a name has a preview.png; the index alone can't tell, so index-only entries assume yes (a 404 is skipped).
+fn preset_entries(names: &[String], index: &Value, has_preview: impl Fn(&str) -> bool) -> Vec<Value> {
+    let mut names = names.to_vec();
+    names.sort_by_key(|n| (n.to_lowercase(), n.clone()));
+    names.iter().map(|n| json!({
+        "name": n, "author": or(&index[n]["author"], &json!("")), "updated": or(&index[n]["updated"], &json!("")),
+        "preview": if has_preview(n) { format!("{RAW}/main/presets/{}/preview.png", enc(n, false)) } else { String::new() },
+    })).collect()
+}
+
+/// The repo tree call is a big recursive listing that GitHub sometimes answers with a 504, so the static
+/// gallery-data/index.json (raw host) is the primary list and the tree is only the fallback.
 fn presets_online() -> Value {
-    let tree = match get_json_e(&format!("https://api.github.com/repos/{PRESET_REPO}/git/trees/main?recursive=1"), &[("Accept", "application/vnd.github+json")], 20) {
+    let index = get_json_e(&format!("{RAW}/gallery-data/index.json"), &[], 20).ok().and_then(|v| v.get("presets").cloned()).unwrap_or(json!({}));
+    if let Some(m) = index.as_object().filter(|m| !m.is_empty()) {
+        let names: Vec<String> = m.keys().cloned().collect();
+        return json!({ "presets": preset_entries(&names, &index, |_| true) });
+    }
+    let url = format!("https://api.github.com/repos/{PRESET_REPO}/git/trees/main?recursive=1");
+    let hdr = [("Accept", "application/vnd.github+json")];
+    let tree = match get_json_e(&url, &hdr, 20).or_else(|_| get_json_e(&url, &hdr, 20)) {
         Ok(t) => t,
         Err(e) => return json!({ "error": format!("GitHub: {e}"), "presets": [] }),
     };
-    let index = get_json_e(&format!("{RAW}/gallery-data/index.json"), &[], 20).ok().and_then(|v| v.get("presets").cloned()).unwrap_or(json!({}));
     let (names, files) = preset_names(&tree);
-    let presets: Vec<Value> = names.iter().map(|n| json!({
-        "name": n, "author": or(&index[n]["author"], &json!("")), "updated": or(&index[n]["updated"], &json!("")),
-        "preview": if files.contains(&format!("presets/{n}/preview.png")) { format!("{RAW}/main/presets/{}/preview.png", enc(n, false)) } else { String::new() },
-    })).collect();
-    json!({ "presets": presets })
+    json!({ "presets": preset_entries(&names, &index, |n| files.contains(&format!("presets/{n}/preview.png"))) })
 }
 
 /// Python int(x or default) for a JSON number or numeric string.
@@ -601,6 +616,24 @@ const CARD_IDS: [(&str, &str); 15] = [("clock", "clock"), ("weather", "weather")
     ("worldClock", "worldclock"), ("todo", "todo"), ("notes", "notes"), ("timers", "timer"), ("customText", "text"), ("imageCard", "image1"), ("customImage", "image2"),
     ("images", "image3"), ("sticker", "sticker")];
 
+/// Enabled desktop widgets in a preset that this app has no card for (`visualizer` is handled separately).
+fn unsupported_from_end4(preset: &Value) -> Vec<String> {
+    let Some(w) = preset["background"]["widgets"].as_object() else { return vec![] };
+    let mut out: Vec<String> = w.iter().filter(|(k, v)| truthy(&v["enable"]) && !matches!(k.as_str(), "visualizer" | "glass") && !CARD_IDS.iter().any(|(c, _)| c == k)).map(|(k, _)| k.clone()).collect();
+    out.sort();
+    out
+}
+
+/// The pictures a preset's image cards use: (card id, file in the preset's folder, shape, size px).
+fn preset_images(pw: &Value) -> Vec<(&'static str, String, String, Option<i64>)> {
+    [("imageCard", "image1"), ("customImage", "image2"), ("sticker", "sticker")].iter().filter_map(|(k, id)| {
+        let w = &pw[*k];
+        let file = w["path"].as_str().filter(|f| truthy(&w["enable"]) && !f.is_empty() && !f.contains(['/', '\\']))?;
+        let size = w["size"].as_f64().map(|s| s.round().clamp(120.0, 800.0) as i64);
+        Some((*id, file.to_string(), w["shape"].as_str().unwrap_or("cookie").to_lowercase(), size))
+    }).collect()
+}
+
 /// Where the preset puts each enabled card: id -> { x, y } (state.json "deskPos").
 fn positions_from_end4(pw: &Value) -> Value {
     let mut out = serde_json::Map::new();
@@ -611,10 +644,46 @@ fn positions_from_end4(pw: &Value) -> Value {
     Value::Object(out)
 }
 
-/// The native bar style for a preset's `bar`: segmented groups are islands; otherwise corner style 1 floats and 0/2 sit flat.
+/// The native bar style for a preset's `bar`: `borderless` picks it (pills, separated and segmented groups are
+/// islands, "transparent" draws nothing behind the contents); otherwise corner style 1 floats and 0/2 sit flat.
 fn bar_style_from_end4(b: &Value) -> Option<&'static str> {
-    if b["borderless"] == "segmented" { return Some("islands"); }
+    match b["borderless"].as_str() {
+        Some("pills" | "separated" | "segmented") => return Some("islands"),
+        Some("transparent") => return Some("clear"),
+        _ => {}
+    }
     match b["cornerStyle"].as_i64()? { 1 => Some("float"), 0 | 2 => Some("flat"), _ => None }
+}
+
+/// A preset's bar module name -> this app's module id (modules with no native twin are left out).
+const BAR_MODULE_IDS: [(&str, &str); 12] = [("activeWindow", "window"), ("leftSidebarButton", "launcher"), ("launcherButton", "launcher"), ("clockWidget", "clock"),
+    ("resources", "resources"), ("media", "media"), ("dynamicIsland", "island"), ("workspaces", "workspaces"), ("utilButtons", "utils"), ("weatherBar", "weather"),
+    ("networkSpeed", "netspeed"), ("sysTray", "tray")];
+
+/// `bar.modules` from a preset's left / middle / right layouts: the listed modules in their order on their side. A
+/// module the preset doesn't list keeps the side it has in `current` (so a preset can't hide the island); one that
+/// `current` doesn't place either is hidden. None when the preset lists no layout.
+fn modules_from_end4(layouts: &Value, current: &Value) -> Option<Value> {
+    let mut out: Vec<(String, &str)> = vec![];
+    for (key, side) in [("leftLayout", "left"), ("middleLayout", "center"), ("rightLayout", "right")] {
+        for name in layouts[key].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            // a preset module with no native twin (battery, bluetooth, divider...) is skipped
+            let Some(id) = (if name == "systemIcons" { Some("system") } else { BAR_MODULE_IDS.iter().find(|(k, _)| *k == name).map(|m| m.1) }) else { continue };
+            if !out.iter().any(|(i, _)| i == id) { out.push((id.to_string(), side)); }
+        }
+    }
+    if out.is_empty() { return None; }
+    let all = ["launcher", "window", "resources", "media", "island", "workspaces", "clock", "utils", "weather", "wm", "netspeed", "tray", "system"]; // settings::layout::BAR_MODULES
+    let side_now = |id: &str| current.as_array().into_iter().flatten().find(|m| m[0] == id).and_then(|m| m[1].as_str().map(str::to_string));
+    let kept: Vec<Value> = all.into_iter().filter(|id| !out.iter().any(|(i, _)| i == id)).map(|id| json!([id, side_now(id).unwrap_or_else(|| "hidden".into())])).collect();
+    Some(Value::Array(out.iter().map(|(i, s)| json!([i, s])).chain(kept).collect()))
+}
+
+/// `bar.utils` from the preset's `utilButtons` switches; None when it has none of them.
+fn utils_from_end4(u: &Value) -> Option<Value> {
+    let map = [("showScreenSnip", "snip"), ("showColorPicker", "pick"), ("showWallpaperToggle", "wall"), ("showDarkModeToggle", "mode")];
+    if !map.iter().any(|(k, _)| u.get(*k).is_some()) { return None; }
+    Some(json!(map.iter().filter(|(k, _)| truthy(&u[*k])).map(|(_, id)| *id).collect::<Vec<_>>()))
 }
 
 /// Dock, notification/OSD timeouts and night light from a preset, merged over the current `cfg` sections.
@@ -637,9 +706,13 @@ fn extras_from_end4(preset: &Value, cfg: &Value) -> serde_json::Map<String, Valu
         out.insert("dock".into(), dock);
     }
     let mut bar = cfg["bar"].clone();
-    if let (true, Some(style)) = (bar.is_object(), bar_style_from_end4(&preset["bar"])) {
-        bar["style"] = json!(style);
-        out.insert("bar".into(), bar);
+    if bar.is_object() {
+        let mut changed = false;
+        if let Some(style) = bar_style_from_end4(&preset["bar"]) { bar["style"] = json!(style); changed = true; }
+        // the bar's edge is the user's choice: a preset never moves it
+        if let Some(m) = modules_from_end4(&preset["bar"]["layouts"], &cfg["bar"]["modules"]) { bar["modules"] = m; changed = true; }
+        if let Some(u) = utils_from_end4(&preset["bar"]["utilButtons"]) { bar["utils"] = u; changed = true; }
+        if changed { out.insert("bar".into(), bar); }
     }
     let mut frame = cfg["frame"].clone();
     if frame.is_object() && preset["bar"].get("showFrame").is_some() {
@@ -663,6 +736,25 @@ fn desktop_from_end4(pw: &Value, mut desktop: Value) -> Value {
         if let Some(st) = pw["clock"]["style"].as_str().filter(|s| ["cookie", "digital", "pixel"].contains(s)) { desktop["clock"] = json!(st); }
         if let Some(t) = pw["customText"]["content"].as_str() { desktop["text"] = json!(t); }
         if let Some(v) = pw["clock"]["digital"]["vertical"].as_bool() { desktop["clockVertical"] = json!(v); }
+        // "<rows>x<cols>" cell sizes of the cards that have a big layout
+        // resources has no size in a preset: it is always a row of three tiles
+        let sizes: serde_json::Map<String, Value> = CARD_IDS.iter().filter(|(k, _)| truthy(&pw[*k]["enable"]))
+            .filter_map(|(k, id)| Some((id.to_string(), if *k == "resources" { "1x3".into() } else { pw[*k]["sizeMode"].as_str().filter(|m| m.len() == 3 && m.contains('x'))?.into() }))).collect();
+        desktop["sizes"] = Value::Object(sizes);
+        // world clock cities
+        let zones: Vec<&str> = pw["worldClock"]["timezones"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        if !zones.is_empty() && truthy(&pw["worldClock"]["enable"]) {
+            let n = pw["worldClock"]["clockCount"].as_u64().filter(|n| *n > 0).unwrap_or(zones.len() as u64) as usize;
+            desktop["worldClocks"] = json!(zones.iter().take(n).collect::<Vec<_>>());
+        }
+        let g = &pw["glass"];
+        desktop["glass"] = if truthy(&g["enable"]) {
+            let mut m = serde_json::Map::new();
+            for k in ["haze", "pull", "rimWidth", "sheen", "split", "tintStrength", "vividness"] { if let Some(n) = g[k].as_f64() { m.insert(k.into(), json!(n)); } }
+            if let Some(t) = g["tint"].as_str() { m.insert("tint".into(), json!(t)); }
+            m.insert("enable".into(), json!(true));
+            Value::Object(m)
+        } else { json!({ "enable": false }) };
     }
     desktop
 }
@@ -720,9 +812,21 @@ fn save_positions(pos: &Value) {
     save_json(&path, &st);
 }
 
+/// Preset card positions are in a 1920 px wide screen's coordinates; this puts them on the primary monitor's
+/// work area (`left`, `top`, `width` physical px).
+fn place_positions(pos: &Value, left: i32, top: i32, width: i32) -> Value {
+    let k = width as f64 / 1920.0;
+    let Some(m) = pos.as_object() else { return json!({}) };
+    Value::Object(m.iter().filter_map(|(id, p)| Some((id.clone(), json!({ "x": left + (p["x"].as_f64()? * k).round() as i64 as i32, "y": top + (p["y"].as_f64()? * k).round() as i64 as i32 })))).collect())
+}
+
 fn apply_settings(cfg: &Config, mapped: &Value, wallpaper: Option<&str>, mode: Option<&str>) -> Value {
-    save_positions(&mapped["positions"]);
+    // the preset's coordinates start at the monitor's corner, not under the bar
+    let (mons, work) = crate::util::monitors();
+    let mon = mons.iter().find(|m| m.left <= work.left && m.top <= work.top && m.right >= work.right && m.bottom >= work.bottom).copied().unwrap_or(work);
+    save_positions(&place_positions(&mapped["positions"], mon.left, mon.top, mon.right - mon.left));
     merge_config(&mapped["config"]);
+    crate::log::line(&format!("preset: config merged, switchwall {}", wallpaper.unwrap_or("(no wallpaper)")));
     let mut args: Vec<&str> = Vec::new();
     if let Some(w) = wallpaper { args.extend(["-Image", w]); }
     args.extend(["-Scheme", mapped["scheme"].as_str().unwrap_or("auto")]);
@@ -731,24 +835,40 @@ fn apply_settings(cfg: &Config, mapped: &Value, wallpaper: Option<&str>, mode: O
 }
 
 fn preset_apply_online(cfg: &Config, name: &str) -> Value {
+    crate::log::line(&format!("preset {name}: apply online"));
     if name.is_empty() || name.contains(['/', '\\']) { return err("bad name"); }
     let q = enc(name, false);
     let res: Result<Value, String> = (|| {
         let preset = get_json_e(&format!("{RAW}/main/presets/{q}/{q}.json"), &[], 20)?;
+        crate::log::line(&format!("preset {name}: json fetched"));
         let mapped = windows_settings_from_end4(&preset, &raw_config()["visualizer"]);
         let mut wall = None;
         if let Some(w) = mapped["wallpaper"].as_str().filter(|w| !w.is_empty()) {
             let file = w.rsplit(['/', '\\']).next().unwrap_or(w);
             wall = Some(download(&format!("{RAW}/main/presets/{q}/{}", enc(file, false)), &wallpapers_dir().join("end4-presets").join(safe_id(name)))?);
         }
+        let mut mapped = mapped;
+        // the preset's own pictures for its image cards; one that fails to download leaves the card as it was
+        for (id, file, shape, size) in preset_images(&preset["background"]["widgets"]) {
+            let dir = pack().join("images").join(safe_id(name));
+            let Ok(path) = download(&format!("{RAW}/main/presets/{q}/{}", enc(&file, false)), &dir) else { continue };
+            let Some(stored) = path.file_name().map(|f| format!("{}/{}", safe_id(name), f.to_string_lossy())) else { continue };
+            let mut img = json!({ "file": stored, "shape": shape });
+            if let Some(s) = size { img["size"] = json!(s); }
+            if mapped["config"]["desktop"]["images"].is_object() || mapped["config"]["desktop"].is_object() {
+                mapped["config"]["desktop"]["images"][id] = img;
+            }
+        }
         let wall_s = wall.map(|p| p.display().to_string());
+        crate::log::line(&format!("preset {name}: wallpaper {}", wall_s.as_deref().unwrap_or("none")));
         let mut saved = mapped.clone();
         saved["name"] = json!(name);
         saved["from"] = json!("online");
         saved["wallpaper"] = json!(wall_s.clone().unwrap_or_default());
         save_json(&root().join("presets").join(safe_id(name)).join("preset.json"), &saved);
-        Ok(json!({ "ok": true, "name": name, "theme": apply_settings(cfg, &mapped, wall_s.as_deref(), None) }))
+        Ok(json!({ "ok": true, "name": name, "unsupported": unsupported_from_end4(&preset), "theme": apply_settings(cfg, &mapped, wall_s.as_deref(), None) }))
     })();
+    if let Err(e) = &res { crate::log::line(&format!("preset {name}: failed: {e}")); }
     res.unwrap_or_else(err)
 }
 
@@ -780,6 +900,7 @@ fn preset_save(name: &str) -> Value {
 }
 
 fn preset_apply_local(cfg: &Config, pid: &str) -> Value {
+    crate::log::line(&format!("preset {pid}: apply local"));
     let p = load_json(&root().join("presets").join(safe_id(pid)).join("preset.json"), Value::Null);
     if !truthy(&p) { return err("preset not found"); }
     let wall = p["wallpaper"].as_str().filter(|w| !w.is_empty() && Path::new(w).exists());
@@ -885,6 +1006,26 @@ mod tests {
     }
 
     #[test]
+    fn preset_positions_land_on_the_primary_monitor() {
+        let p = json!({ "calendar": { "x": 228, "y": 324 }, "bad": { "x": "no" } });
+        assert_eq!(place_positions(&p, 0, 0, 1920)["calendar"], json!({ "x": 228, "y": 324 }));
+        assert_eq!(place_positions(&p, 10, 20, 3840)["calendar"], json!({ "x": 466, "y": 668 }));
+        assert!(place_positions(&p, 0, 0, 1920).get("bad").is_none());
+    }
+
+    #[test]
+    fn preset_entries_from_index() {
+        let index = json!({ "Zed": { "author": "z" }, "abc": { "author": "a", "updated": "d" } });
+        let names: Vec<String> = index.as_object().unwrap().keys().cloned().collect();
+        let e = preset_entries(&names, &index, |_| true);
+        assert_eq!(e[0]["name"], "abc");
+        assert_eq!(e[0]["author"], "a");
+        assert_eq!(e[1]["updated"], "");
+        assert_eq!(e[1]["preview"], format!("{RAW}/main/presets/Zed/preview.png"));
+        assert_eq!(preset_entries(&names, &index, |_| false)[0]["preview"], "");
+    }
+
+    #[test]
     fn end4_mapping() {
         let p = json!({ "appearance": { "palette": { "type": "scheme-tonal-spot" }, "transparency": { "enable": true, "backgroundTransparency": 0.12345 } },
             "bar": { "workspaces": { "shown": 7, "numberMap": ["a"], "alwaysShowNumbers": true } },
@@ -897,6 +1038,61 @@ mod tests {
         assert_eq!(m["wallpaper"], "C:/x/y.png");
         let d = windows_settings_from_end4(&json!({}), &Value::Null);
         assert_eq!((d["scheme"].clone(), d["config"]["workspaces"].clone(), d["config"]["transparency"].clone()), (json!("auto"), json!(10), json!(0)));
+    }
+
+    #[test]
+    fn unsupported_widgets_are_reported() {
+        let p = json!({ "background": { "widgets": { "clock": { "enable": true }, "glass": { "enable": true }, "visualizer": { "enable": true },
+            "mystery": { "enable": true }, "todo": { "enable": false }, "weather": { "enable": false } } } });
+        assert_eq!(unsupported_from_end4(&p), ["mystery"]);
+        assert!(unsupported_from_end4(&json!({})).is_empty());
+    }
+
+    /// Network: every preset in the community repo maps without panicking, and the widgets we drop are only the known ones.
+    /// `cargo test -- --ignored every_community_preset` to run it.
+    #[test]
+    #[ignore]
+    fn every_community_preset_maps() {
+        let index = get_json_e(&format!("{RAW}/gallery-data/index.json"), &[], 30).expect("index");
+        let mut dropped = std::collections::BTreeMap::<String, usize>::new();
+        for name in index["presets"].as_object().expect("presets").keys() {
+            let q = enc(name, false);
+            let Ok(p) = get_json_e(&format!("{RAW}/main/presets/{q}/{q}.json"), &[], 30) else { continue };
+            let m = windows_settings_from_end4(&p, &json!({}));
+            assert!(m["config"].is_object(), "{name}");
+            for k in unsupported_from_end4(&p) { *dropped.entry(k).or_default() += 1; }
+        }
+        println!("widgets with no native card: {dropped:?}");
+        assert!(dropped.is_empty(), "{dropped:?}");
+    }
+
+    #[test]
+    fn preset_pictures_and_clocks() {
+        let pw = json!({ "imageCard": { "enable": true, "path": "a b.jpg" }, "customImage": { "enable": true, "path": "x.jpg", "shape": "Flower", "size": 180.7 },
+            "sticker": { "enable": false, "path": "s.png" }, "images": { "enable": true, "path": "../evil.png" },
+            "worldClock": { "enable": true, "clockCount": 2, "timezones": ["Asia/Tokyo", "Asia/Seoul", "Asia/Manila"] } });
+        let p = preset_images(&pw);
+        assert_eq!(p.iter().map(|x| x.0).collect::<Vec<_>>(), ["image1", "image2"]);
+        assert_eq!((p[1].2.as_str(), p[1].3), ("flower", Some(181)));
+        assert_eq!(p[0].3, None);
+        assert!(preset_images(&json!({ "imageCard": { "enable": true, "path": "a/b.jpg" } })).is_empty(), "no path tricks");
+        assert_eq!(desktop_from_end4(&pw, json!({}))["worldClocks"], json!(["Asia/Tokyo", "Asia/Seoul"]));
+    }
+
+    #[test]
+    fn preset_glass_is_kept() {
+        let pw = json!({ "glass": { "enable": true, "haze": 6, "pull": 80, "tint": "black", "tintStrength": 0.35, "junk": 1 } });
+        let d = desktop_from_end4(&pw, json!({}));
+        assert_eq!(d["glass"], json!({ "enable": true, "haze": 6.0, "pull": 80.0, "tint": "black", "tintStrength": 0.35 }));
+        assert_eq!(desktop_from_end4(&json!({ "glass": { "enable": false, "haze": 6 } }), json!({}))["glass"], json!({ "enable": false }));
+    }
+
+    #[test]
+    fn preset_card_sizes_are_kept() {
+        let pw = json!({ "calendar": { "enable": true, "sizeMode": "2x3" }, "weather": { "enable": true, "sizeMode": "huge" }, "media": { "enable": false, "sizeMode": "1x2" } });
+        let d = desktop_from_end4(&pw, json!({}));
+        assert_eq!(d["sizes"], json!({ "calendar": "2x3" }));
+        assert_eq!(desktop_from_end4(&json!({ "resources": { "enable": true } }), json!({}))["sizes"], json!({ "resources": "1x3" }));
     }
 
     #[test]
@@ -935,8 +1131,29 @@ mod tests {
         assert_eq!((bar_style_from_end4(&json!({ "borderless": "segmented", "cornerStyle": 1 })), bar_style_from_end4(&json!({ "cornerStyle": 1 })),
             bar_style_from_end4(&json!({ "cornerStyle": 2 })), bar_style_from_end4(&json!({ "cornerStyle": 9 })), bar_style_from_end4(&json!({}))),
             (Some("islands"), Some("float"), Some("flat"), None, None));
+        assert_eq!((bar_style_from_end4(&json!({ "borderless": "pills", "cornerStyle": 0 })), bar_style_from_end4(&json!({ "borderless": "transparent", "cornerStyle": 3 })),
+            bar_style_from_end4(&json!({ "borderless": "separated" }))), (Some("islands"), Some("clear"), Some("islands")));
         let b = extras_from_end4(&json!({ "bar": { "cornerStyle": 2 } }), &json!({ "bar": { "style": "float", "groups": "filled" } }));
         assert_eq!(b["bar"], json!({ "style": "flat", "groups": "filled" }));
+        let l = json!({ "leftLayout": ["activeWindow"], "middleLayout": ["workspaces", "media", "systemIcons", "mystery"], "rightLayout": [] });
+        let m = modules_from_end4(&l, &json!([])).unwrap();
+        assert_eq!((m[0].clone(), m[1].clone(), m[3].clone()), (json!(["window", "left"]), json!(["workspaces", "center"]), json!(["system", "center"]))); // "mystery" is skipped
+        let l = json!({ "leftLayout": [], "middleLayout": ["workspaces", "media", "weatherBar", "clockWidget", "utilButtons", "systemIcons", "networkSpeed"], "rightLayout": [] });
+        let m = modules_from_end4(&l, &json!([])).unwrap();
+        assert_eq!(m[0], json!(["workspaces", "center"]));
+        assert_eq!(m[5], json!(["system", "center"]));
+        assert!(m.as_array().unwrap().contains(&json!(["launcher", "hidden"])));
+        assert_eq!(m.as_array().unwrap().len(), 13);
+        assert_eq!(modules_from_end4(&json!({}), &json!([])), None);
+        // a module the preset leaves out keeps its place: the island stays shown
+        let m = modules_from_end4(&l, &json!([["island", "center"], ["launcher", "hidden"]])).unwrap();
+        assert!(m.as_array().unwrap().contains(&json!(["island", "center"])) && m.as_array().unwrap().contains(&json!(["launcher", "hidden"])));
+        assert_eq!(m.as_array().unwrap().len(), 13);
+        // a preset never moves the bar
+        let b = extras_from_end4(&json!({ "bar": { "bottom": true, "vertical": true, "cornerStyle": 2 } }), &json!({ "bar": { "position": "top", "style": "float" } }));
+        assert_eq!(b["bar"]["position"], "top");
+        assert_eq!(utils_from_end4(&json!({ "showScreenSnip": false, "showColorPicker": true, "showWallpaperToggle": true })), Some(json!(["pick", "wall"])));
+        assert_eq!(utils_from_end4(&json!({})), None);
         let cfg2 = json!({ "frame": { "enabled": false, "thickness": 5, "radius": 20 } });
         let f = extras_from_end4(&json!({ "bar": { "showFrame": true, "frameThickness": 8 }, "appearance": { "fakeScreenRounding": 1 } }), &cfg2);
         assert_eq!(f["frame"], json!({ "enabled": true, "thickness": 8, "radius": 20 }));

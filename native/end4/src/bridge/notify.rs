@@ -324,7 +324,7 @@ fn or_empty(v: &Value) -> Value { if v.is_null() { json!("") } else { v.clone() 
 
 /// One entry per agent: the session that needs you (if any), what's running, and usage windows.
 /// Deletes session files whose agent quit without a SessionEnd (12 h old).
-fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
+pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
     let mut res = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else { return res };
     let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();

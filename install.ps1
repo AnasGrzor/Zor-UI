@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Installs Zor UI (GlazeWM + Zebar + Flow Launcher + Material You theming).
+  Installs Zor UI (GlazeWM + Flow Launcher + the native zorui.exe shell + Material You theming).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -38,7 +38,7 @@ $Scripts = Join-Path $Root 'scripts'
 $Glzr = Join-Path $env:USERPROFILE '.glzr'
 $Pack = Join-Path $Glzr 'zebar\zor-ui'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$Utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM: Zebar's JSON parser rejects it
+$Utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Info($msg) { Write-Host "    $msg" -ForegroundColor DarkGray }
@@ -58,11 +58,6 @@ function Invoke-Native([scriptblock]$block) {
 function Refresh-Path {
   $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
 }
-# Escape a path for a Rust regex (Zebar's shell privileges). Spaces and '-' stay literal.
-function ConvertTo-RustRegex([string]$s) {
-  ($s.ToCharArray() | ForEach-Object { if ('\.^$|?*+()[]{}'.Contains([string]$_)) { '\' + $_ } else { [string]$_ } }) -join ''
-}
-
 if ([Environment]::OSVersion.Version.Major -lt 10) { throw 'Zor UI needs Windows 10 or 11.' }
 
 # ------------------------------------------------------------------ 0. the old name
@@ -104,9 +99,7 @@ if (-not $SkipDeps) {
   }
   $apps = [ordered]@{
     'glzr-io.glazewm'             = 'GlazeWM (tiling window manager)'
-    'glzr-io.zebar'               = 'Zebar (bar and widgets)'
     'Flow-Launcher.Flow-Launcher' = 'Flow Launcher (app launcher)'
-    'Python.Python.3.12'          = 'Python 3.12 (wallpaper colors)'
     'DEVCOM.JetBrainsMonoNerdFont' = 'JetBrains Mono Nerd Font'
   }
   if ($WithLively) { $apps['rocksdanister.LivelyWallpaper'] = 'Lively Wallpaper (live/video wallpapers)' }
@@ -120,38 +113,19 @@ if (-not $SkipDeps) {
   Refresh-Path
 }
 
-# ------------------------------------------------------------------ 2. scripts + python
-Step "Copying scripts to $Root"
+# ------------------------------------------------------------------ 2. files
+Step "Copying files to $Root"
 New-Item -ItemType Directory -Force -Path $Scripts | Out-Null
-Copy-Item -Recurse -Force (Join-Path $Repo 'scripts\*') $Scripts
+Copy-Item -Recurse -Force (Join-Path $Repo 'scripts\terminal') $Scripts
 Copy-Item -Recurse -Force (Join-Path $Repo 'flowlauncher') $Root
-
-Step 'Setting up the Python environment for Material You colors'
-$py = $null
-foreach ($cand in @('py', 'python')) {
-  $cmd = Get-Command $cand -ErrorAction SilentlyContinue
-  if ($cmd -and $cmd.Source -notlike '*WindowsApps*') { $py = $cmd.Source; break }
-}
-if (-not $py) {
-  $guess = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
-  if ($guess) { $py = $guess.FullName }
-}
-if (-not $py) { throw 'Python 3 not found. Install it (winget install Python.Python.3.12) and re-run.' }
-$venv = Join-Path $Root 'venv'
-$venvPy = Join-Path $venv 'Scripts\python.exe'
-if (-not (Test-Path $venvPy)) {
-  if ((Split-Path $py -Leaf) -eq 'py.exe') { Invoke-Native { & $py -3 -m venv $venv } } else { Invoke-Native { & $py -m venv $venv } }
-  if (-not (Test-Path $venvPy)) { throw "Couldn't create the Python venv at $venv." }
-}
-# pillow + materialyoucolor: colors. numpy + soundcard: visualizer. imageio-ffmpeg: live wallpaper frames,
-# screen recording. pycaw: per-app volume.
-Invoke-Native { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pillow materialyoucolor numpy 'soundcard>=0.4.3' imageio-ffmpeg psutil pycaw sherpa-onnx sounddevice 2>&1 | ForEach-Object { Info $_ } }
-if ($LASTEXITCODE -ne 0) { throw 'pip install failed (pillow, materialyoucolor, numpy, soundcard, imageio-ffmpeg, psutil, pycaw, sherpa-onnx, sounddevice).' }
-
-# ------------------------------------------------------------------ 3. zebar widget pack
-Step "Installing the Zebar widget pack to $Pack"
 New-Item -ItemType Directory -Force -Path $Pack | Out-Null
-Copy-Item -Recurse -Force (Join-Path $Repo 'zebar\zor-ui\*') $Pack
+Copy-Item -Recurse -Force (Join-Path $Repo 'assets') $Pack
+# The Zebar widget pack and Python helpers of older versions are gone: remove what they left behind.
+Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+foreach ($old in 'lib', 'we-thumbs') { Remove-Item -Recurse -Force (Join-Path $Pack $old) -ErrorAction SilentlyContinue }
+foreach ($pat in '*.html', '*.js', 'zpack.json') { Remove-Item -Force (Join-Path $Pack $pat) -ErrorAction SilentlyContinue }
+Remove-Item -Recurse -Force (Join-Path $Root 'venv') -ErrorAction SilentlyContinue
+Get-ChildItem (Join-Path $Scripts '*') -Include *.py, *.ps1 -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Fonts for offline use (Google Fonts is the fallback if this fails).
 $fontDir = Join-Path $Pack 'assets\fonts'
@@ -167,38 +141,32 @@ foreach ($f in $fonts.Keys) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -UseBasicParsing -Uri $fonts[$f] -OutFile $dest
     Info "downloaded $f"
-  } catch { Write-Warning "Couldn't download $f; widgets will load it from Google Fonts instead." }
+  } catch { Write-Warning "Couldn't download $f; the shell falls back to Segoe UI." }
 }
 
-$scriptsRe = (ConvertTo-RustRegex $Scripts).Replace('\', '\\')   # JSON-escape too
-$zpack = [IO.File]::ReadAllText((Join-Path $Repo 'zebar\zor-ui\zpack.json')).Replace('{{SCRIPTS_RE}}', $scriptsRe).Replace('{{PYTHON}}', $venvPy.Replace('\', '\\'))
-Write-Text (Join-Path $Pack 'zpack.json') $zpack
-
-# Native widgets (native/end4): one small process instead of a browser window per widget. Built
-# when Rust is installed; config "native" tells Zebar which parts it now draws.
+# The native shell (native/end4): one small process draws the bar, sidebars, overview and desktop cards.
 $native = Join-Path $Root 'zorui.exe'
 $prebuilt = Join-Path $Repo 'zorui.exe'   # the one-click release ships it built; no Rust needed
 $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
 if (Test-Path $prebuilt) {
-  Step 'Installing the native widgets'
+  Step 'Installing the shell'
   Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 1
   Copy-Item -Force $prebuilt $native
 } elseif ($cargo) {
-  Step 'Building the native widgets (native\end4)'
+  Step 'Building the shell (native\end4)'
   Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\end4\Cargo.toml') 2>&1 | Out-Null }
   $built = Join-Path $Repo 'native\end4\target\release\zorui.exe'
-  if (Test-Path $built) {
-    Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
-    Copy-Item -Force $built $native
-  } else { Write-Warning 'The native widgets failed to build; Zebar draws everything.' }
-} else { Info 'Rust not found (rustup.rs): Zebar draws every widget.' }
+  if (-not (Test-Path $built)) { throw 'The shell failed to build.' }
+  Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
+  Copy-Item -Force $built $native
+} else { throw 'No prebuilt zorui.exe next to install.ps1 and Rust is not installed (rustup.rs).' }
 
 $cfgPath = Join-Path $Pack 'config.json'
 $modKey = if ($Mod -eq 'win') { 'lwin' } else { 'alt' }
 # Non-ASCII as char codes: Windows PowerShell 5.1 reads BOM-less scripts as ANSI.
 $cfg = [ordered]@{
-  scriptsDir = $Scripts; pythonPath = $venvPy; bridgePath = (Join-Path $Scripts 'end4_bridge.py'); modKey = $modKey
+  scriptsDir = $Scripts; modKey = $modKey
   userName = $(if ($UserName) { $UserName } else { $env:USERNAME }); workspaces = $Workspaces
   clockFormat = "EEE, dd/MM '$([char]0x2022)' HH:mm"; tempUnit = 'C'; showKeyboardLayout = $false; lyrics = $true
   workspaceLabels = @(); alwaysShowNumbers = $false; transparency = 0; desktopWidgets = $true; syncLockScreen = $true
@@ -210,7 +178,7 @@ $cfg = [ordered]@{
   nightLight = [ordered]@{ kelvin = 4500 }
   wallpaperEngine = [ordered]@{ follow = $true; path = '' }
 }
-$paths = @('scriptsDir', 'pythonPath', 'bridgePath', 'modKey')
+$paths = @('scriptsDir', 'pythonPath', 'bridgePath', 'modKey')   # the Python paths are dropped from old configs
 if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add new options
   $old = Get-Content $cfgPath -Raw | ConvertFrom-Json
   foreach ($p in $old.PSObject.Properties) {
@@ -218,25 +186,19 @@ if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add 
     $cfg[$p.Name] = $p.Value
   }
 }
-if (Test-Path $native) {   # every native part not yet listed is on; the user's own choices stay
-  $nat = [ordered]@{}
-  if ($cfg.Contains('native') -and $cfg['native']) { foreach ($q in $cfg['native'].PSObject.Properties) { $nat[$q.Name] = $q.Value } }
-  foreach ($k in 'desktop', 'bar', 'visualizer', 'dock', 'island-panel', 'overview', 'sidebar-left', 'sidebar-right', 'settings', 'theme') { if (-not $nat.Contains($k)) { $nat[$k] = $true } }
-  $cfg['native'] = $nat
-}
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
 
+# Zebar (if still installed) must not start the removed widgets: drop zor-ui from its startup list.
 $zebarSettings = Join-Path $Glzr 'zebar\settings.json'
-Backup $zebarSettings
-$settings = [ordered]@{
-  '$schema' = 'https://github.com/glzr-io/zebar/raw/v3.0.0/resources/settings-schema.json'
-  startupConfigs = @(
-    [ordered]@{ pack = 'zor-ui'; widget = 'bar'; preset = 'default' },
-    [ordered]@{ pack = 'zor-ui'; widget = 'desktop'; preset = 'default' },
-    [ordered]@{ pack = 'zor-ui'; widget = 'visualizer'; preset = 'default' }
-  ) + @(if ($cfg.dock -and $cfg.dock.enabled) { [ordered]@{ pack = 'zor-ui'; widget = 'dock'; preset = 'default' } })
+if (Test-Path $zebarSettings) {
+  try {
+    $zs = Get-Content $zebarSettings -Raw | ConvertFrom-Json
+    if ($zs.startupConfigs) {
+      $zs.startupConfigs = @($zs.startupConfigs | Where-Object { $_.pack -ne 'zor-ui' })
+      Write-Text $zebarSettings ($zs | ConvertTo-Json -Depth 6)
+    }
+  } catch { Info "couldn't update $zebarSettings" }
 }
-Write-Text $zebarSettings ($settings | ConvertTo-Json -Depth 5)
 
 # ------------------------------------------------------------------ 4. glazewm config
 Step 'Writing the GlazeWM config'
@@ -250,13 +212,8 @@ Add-Type -AssemblyName System.Windows.Forms
 $screens = @([System.Windows.Forms.Screen]::AllScreens | Sort-Object { $_.Bounds.X }, { $_.Bounds.Y })
 $mainIdx = [Math]::Max(0, [array]::IndexOf($screens, ($screens | Where-Object Primary | Select-Object -First 1)))
 $secondIdx = if ($screens.Count -gt 1) { @(0..($screens.Count - 1) | Where-Object { $_ -ne $mainIdx })[0] } else { 1 }
-$yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview).Replace('{{SCRIPTS}}', $Scripts)
+$yaml = $yaml.Replace('{{MOD}}', $modKey).Replace('{{OVERVIEW}}', $overview)
 $yaml = $yaml.Replace('{{MAIN}}', $mainIdx).Replace('{{SECOND}}', $secondIdx)
-if (Test-Path $native) {   # the keys open the native popups (zorui.exe --open falls back to Zebar when a part isn't native)
-  $yaml = [regex]::Replace($yaml, "shell-exec zebar start-widget --pack zor-ui --widget-name (sidebar-left|sidebar-right|overview|settings|keybinds) [^']*", [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --open ' + $m.Groups[1].Value })
-  # wallpaper / mode / game mode keys run the Rust ports (zorui.exe falls back to the script for anything not ported)
-  $yaml = [regex]::Replace($yaml, 'shell-exec --hide-window powershell -NoProfile -ExecutionPolicy Bypass -File "[^"]*\\(switchwall|toggles)\.ps1"', [Text.RegularExpressions.MatchEvaluator]{ param($m) 'shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --script ' + $m.Groups[1].Value })
-}
 Write-Text $glazeCfg $yaml
 Info "modifier key: $modKey"
 
@@ -290,12 +247,11 @@ if (-not $Wallpaper) {
   $current = (Get-ItemProperty 'HKCU:\Control Panel\Desktop' -ErrorAction SilentlyContinue).WallPaper
   if ($current -and (Test-Path $current)) { $Wallpaper = $current }
 }
-$switch = Join-Path $Scripts 'switchwall.ps1'
-$r = Invoke-Native { if ($Wallpaper) { & $switch -Image $Wallpaper } else { & $switch -Color '#6750A4' -Mode dark } }
+$r = Invoke-Native { if ($Wallpaper) { & $native --script switchwall -Image $Wallpaper } else { & $native --script switchwall -Color '#6750A4' -Mode dark } }
 Info ($r | Out-String).Trim()
 
 # ------------------------------------------------------------------ 6b. Wallpaper Engine
-$weStatus = Invoke-Native { & $venvPy -X utf8 (Join-Path $Scripts 'end4_bridge.py') we-status 2>$null | Select-Object -Last 1 }
+$weStatus = Invoke-Native { & $native --bridge we-status 2>$null | Select-Object -Last 1 }
 try { $we = $weStatus | ConvertFrom-Json } catch { $we = $null }
 if ($we -and $we.installed) {
   Info "Wallpaper Engine found: $($we.exe)"
@@ -303,10 +259,10 @@ if ($we -and $we.installed) {
 }
 
 # ------------------------------------------------------------------ 6c. AI agents -> Dynamic Island
-# Hooks (and Claude Code's status line, for usage limits) report to end4_agent.py. Other agents can
-# pipe the same JSON into it; see the top of scripts\end4_agent.py.
+# Hooks (and Claude Code's status line, for usage limits) report to `zorui.exe --agent <name>`. Other
+# agents can pipe the same JSON into it; see the top of native\end4\src\bridge\agent_hook.rs.
 Info 'AI agents (Claude Code, Codex): adding end4 hooks'
-Invoke-Native { & $venvPy -X utf8 (Join-Path $Scripts 'end4_agent.py') --install 2>&1 | ForEach-Object { Info "  $_" } }
+Invoke-Native { & $native --install-agents 2>&1 | ForEach-Object { Info "  $_" } }
 
 # ------------------------------------------------------------------ 7. taskbar
 if ($HideTaskbar) {
@@ -319,7 +275,7 @@ if ($HideTaskbar) {
 }
 
 # ------------------------------------------------------------------ 8. start
-Step 'Starting GlazeWM (it launches Zebar)'
+Step 'Starting GlazeWM (it launches the shell)'
 $pf = Join-Path $env:ProgramFiles 'glzr.io\GlazeWM'
 $glaze = @((Join-Path $pf 'glazewm.exe'), (Get-Command glazewm -ErrorAction SilentlyContinue).Source) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if (-not $glaze) {
@@ -332,9 +288,7 @@ if (-not $glaze) {
     Info 'added GlazeWM to startup'
   }
   if (Get-Process glazewm -ErrorAction SilentlyContinue) {
-    Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
     Invoke-Native { & $glaze command wm-reload-config 2>&1 | Out-Null }
-    Start-Process zebar
   } else {
     Start-Process $glaze   # its startup_commands also start Flow Launcher
   }

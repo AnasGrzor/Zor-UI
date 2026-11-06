@@ -1,6 +1,6 @@
 //! The listening pill: while the primary buddy records you (Alt+B), a small pill floats at the bottom
 //! of the screen with a waveform that follows your voice, then a calm wave while it works out what you
-//! said. The recorder (scripts/buddy_listen.py) sends the loudness; assist.rs passes it here.
+//! said. The recorder (bridge/listen.rs) sends the loudness; assist.rs passes it here.
 
 use crate::{
     app::{App, Ctx},

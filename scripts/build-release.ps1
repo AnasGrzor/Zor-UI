@@ -16,22 +16,23 @@ $env:ZORUI_PUBLIC = '1'   # build.rs then leaves the private buddies (cast_perso
 & cargo build --release --manifest-path (Join-Path $Repo 'native\end4\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
-$pay = Join-Path $Out 'payload'
+$pay = Join-Path $Out 'app'
 New-Item -ItemType Directory -Force $pay | Out-Null
 foreach ($f in 'install.ps1', 'uninstall.ps1', 'LICENSE') { Copy-Item (Join-Path $Repo $f) $pay }
-foreach ($d in 'scripts', 'flowlauncher', 'glazewm', 'zebar') { Copy-Item -Recurse (Join-Path $Repo $d) $pay }
-Get-ChildItem $pay -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
-Get-ChildItem (Join-Path $pay 'scripts') -Filter 'test_*.py' | Remove-Item -Force
+foreach ($d in 'scripts', 'flowlauncher', 'glazewm', 'assets') { Copy-Item -Recurse (Join-Path $Repo $d) $pay }
 Copy-Item (Join-Path $Repo 'native\end4\target\release\zorui.exe') $pay
-Compress-Archive -Path "$pay\*" -DestinationPath (Join-Path $Stage 'payload.zip')
-Copy-Item (Join-Path $Stage 'payload.zip') $Out   # upload this too: the in-app updater downloads it
+Compress-Archive -Path "$pay\*" -DestinationPath (Join-Path $Stage 'zorui-app.zip')
+Copy-Item (Join-Path $Stage 'zorui-app.zip') $Out   # upload this too: the in-app updater downloads it
+# Builds up to 0.1.2 look for an asset named payload.zip, so this release carries the same zip under that name.
+# Delete this line (and "payload.zip" in ASSETS in native/end4/src/bridge/update.rs) in the release after.
+Copy-Item (Join-Path $Stage 'zorui-app.zip') (Join-Path $Out 'payload.zip')
 
 # Runs the installer from a temp folder; the window stays open so errors can be read.
 Set-Content (Join-Path $Stage 'setup.cmd') -Encoding ascii -Value @'
 @echo off
 set "D=%TEMP%\zorui-setup"
 rmdir /s /q "%D%" 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Force payload.zip $env:TEMP\zorui-setup"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Force zorui-app.zip $env:TEMP\zorui-setup"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%D%\install.ps1"
 pause
 '@
@@ -68,7 +69,7 @@ SourceFiles0=$Stage\
 %FILE1%=
 [Strings]
 FILE0="setup.cmd"
-FILE1="payload.zip"
+FILE1="zorui-app.zip"
 "@
 Start-Process iexpress -ArgumentList '/N', '/Q', $sed -Wait
 if (-not (Test-Path $exe)) { throw 'iexpress did not produce the exe' }

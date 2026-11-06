@@ -32,8 +32,6 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         "secret-set" => secret_set(a(0), a(1)),
         "secret-status" => key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter", "wallhaven"]),
         "translate" => translate(a(0), a(1), &args.iter().skip(2).copied().collect::<Vec<_>>().join(" ")),
-        // shortcut: yande.re and danbooru reset curl.exe's Schannel TLS here, so they stay on Python
-        "booru" if matches!(a(0), "yandere" | "danbooru") => return None,
         "booru" => booru(a(0), a(1), args.get(2..).unwrap_or(&[])),
         "download-wallpaper" => download_wallpaper(cfg, a(0), args.get(1..).unwrap_or(&[])),
         "ai-models" => {
@@ -702,22 +700,6 @@ fn windows_settings_from_end4(preset: &Value, viz: &Value) -> Value {
     })
 }
 
-/// Keeps Zebar's startup list in line with the widgets enabled in config.
-fn sync_zebar_startup(cfg: &Value) {
-    let Some(dir) = pack().parent().map(Path::to_path_buf) else { return };
-    let path = dir.join("settings.json");
-    let mut s = load_json(&path, json!({}));
-    let widget = |w: &str| json!({ "pack": "zor-ui", "widget": w, "preset": "default" });
-    let mut list: Vec<Value> = Vec::new();
-    if !truthy(&cfg["native"]["bar"]) { list.push(widget("bar")); }
-    if cfg.get("desktopWidgets").map_or(true, truthy) { list.push(widget("desktop")); }
-    if cfg["visualizer"].get("desktop").map_or(true, truthy) { list.push(widget("visualizer")); }
-    if truthy(&cfg["dock"]["enabled"]) { list.push(widget("dock")); }
-    list.extend(s["startupConfigs"].as_array().into_iter().flatten().filter(|c| c["pack"] != "zor-ui").cloned());
-    s["startupConfigs"] = json!(list);
-    save_json(&path, &s);
-}
-
 /// Shallow-merges `extra` into config.json, saves it and returns the result.
 fn merge_config(extra: &Value) -> Value {
     let mut cfg = raw_config();
@@ -740,7 +722,7 @@ fn save_positions(pos: &Value) {
 
 fn apply_settings(cfg: &Config, mapped: &Value, wallpaper: Option<&str>, mode: Option<&str>) -> Value {
     save_positions(&mapped["positions"]);
-    sync_zebar_startup(&merge_config(&mapped["config"]));
+    merge_config(&mapped["config"]);
     let mut args: Vec<&str> = Vec::new();
     if let Some(w) = wallpaper { args.extend(["-Image", w]); }
     args.extend(["-Scheme", mapped["scheme"].as_str().unwrap_or("auto")]);

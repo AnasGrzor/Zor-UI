@@ -59,6 +59,8 @@ pub enum Z { Normal = 0, Bottom = 1, Top = 2 }
 
 pub struct Win {
     pub hwnd: HWND,
+    /// What Settings > Usage calls this window (see perf::group).
+    part: String,
     pub view: Box<dyn View>,
     /// Desk cards: drag anywhere that isn't a control, and remember the spot under this name.
     pub drag_key: Option<String>,
@@ -115,7 +117,7 @@ impl Win {
             let hwnd = CreateWindowExW(ex, CLASS, &windows::core::HSTRING::from(title), WS_POPUP, x, y, 1, 1, None, None, GetModuleHandleW(None)?, None)?;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
-            Ok(Win { hwnd, view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
+            Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
                 hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
         }
     }
@@ -225,12 +227,15 @@ impl Win {
                 self.old = SelectObject(self.dc, HGDIOBJ::from(dib));
                 self.bits = bits as *mut u8;
                 self.px = px;
+                crate::perf::buffer(self.hwnd.0 as isize, &self.part, (px.0.max(1) as u64) * (px.1.max(1) as u64) * 4);
             }
             let (pw, ph) = (px.0.max(1) as u32, px.1.max(1) as u32);
             let pixels = std::slice::from_raw_parts_mut(self.bits, (pw * ph * 4) as usize);
             let Some(mut c) = Canvas::new(g, pixels, pw, ph, s, self.hover) else { return };
             crate::ui::MOVING.with(|m| m.set(false));
+            let t0 = std::time::Instant::now();
             self.view.paint(&mut c, cx);
+            crate::perf::paint(&self.part, t0.elapsed().as_nanos() as u64);
             self.gliding = crate::ui::MOVING.with(|m| m.get());
             self.hits = std::mem::take(&mut c.hits);
             drop(c);
@@ -331,6 +336,7 @@ impl Win {
 
 impl Drop for Win {
     fn drop(&mut self) {
+        crate::perf::forget(self.hwnd.0 as isize);
         unsafe {
             if self.appbar {
                 let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, ..Default::default() };

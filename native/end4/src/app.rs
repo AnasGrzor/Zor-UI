@@ -179,6 +179,7 @@ impl App {
         app.sync_bars();
         APP.with_borrow_mut(|a| *a = Some(app));
         unsafe { SetTimer(msg, TICK, 1000, None); }
+        crate::appicon::add(msg);
 
         std::thread::spawn(|| loop {
             // Weather every 30 min like the Zebar provider; retry a minute after a failed fetch.
@@ -201,13 +202,12 @@ impl App {
     fn start_bar_sources(&mut self) {
         if self.started { return; }
         self.started = true;
-        hub::serve(|| post(Box::new(|_| {})));
         glaze::start(|wm| post(Box::new(move |cx| cx.wm = wm)));
         media::start_media(|m, all| post(Box::new(move |cx| { cx.media = m; cx.sessions = all; })));
         media::start_audio(|a| post(Box::new(move |cx| osd(cx, a))));
         tray::start(|icons| post(Box::new(move |cx| cx.tray = icons)));
         let cfg = &self.cx.cfg;
-        // These ran in the Zebar bar (bar.js); each is a bridge (Python) stream.
+        // These ran in the Zebar bar (bar.js); each is a bridge stream.
         if self.cx.island_shown() {
             self._streams.extend(proc::stream(cfg, "agents-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
@@ -356,6 +356,7 @@ impl App {
         self.bars_for_fullscreen();
         self.ticks += 1;
         let n = self.ticks;
+        if n % 30 == 0 { crate::appicon::add(self.msg); } // Explorer forgets it when it restarts
         if n % 2 == 0 && self.reload() {
             desk::sync(self);
             gojo::sync(self);
@@ -435,11 +436,10 @@ impl App {
 
     // ---- popups
 
-    /// Opens the popup `name` natively when config "native" has it (else Zebar's copy); open again closes it.
+    /// Opens the popup `name` natively open again closes it.
     pub fn open(&mut self, name: &str, mon: Option<(i32, i32)>, at: Option<(i32, i32)>) {
         // "keybinds" is the Settings window on its Keybinds page
         let is_settings = name == "settings" || name == "keybinds";
-        if !self.cx.native(if is_settings { "settings" } else { name }) { proc::zebar_widget(name); return; }
         if self.pops.iter().any(|p| p.name == name) {
             // a desk card asking Settings for a section while it's open: go there instead of closing it
             if !(is_settings && hub::get(crate::settings::GOTO).is_some()) { self.close(name); }
@@ -600,6 +600,20 @@ impl App {
                     self.frames();
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
+                (crate::appicon::CALLBACK, _) => match lp.0 as u32 & 0xFFFF {
+                    WM_LBUTTONUP => self.open("settings", None, None),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => {
+                        let mut p = POINT::default();
+                        unsafe { let _ = GetCursorPos(&mut p); }
+                        let hwnd = self.msg;
+                        self.show_menu(vec![
+                            menu::Item::new("settings", "Settings", |cx| cx.actions.push(Action::open("settings"))),
+                            menu::Item::new("restart_alt", "Restart", |_| restart()),
+                            menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); std::process::exit(0); }),
+                        ], (p.x, p.y));
+                    }
+                    _ => {}
+                },
                 (WM_APP, _) => {
                     while let Ok(job) = self.jobs.try_recv() { job(&mut self.cx); }
                     self.cx.ver += 1;
@@ -698,7 +712,7 @@ fn restart() {
     let Ok(exe) = std::env::current_exe() else { GOING.store(false, Ordering::SeqCst); return };
     let spawned = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &restart_script(&exe.to_string_lossy())])
         .creation_flags(0x0800_0000).spawn();
-    if spawned.is_ok() { std::process::exit(0); }
+    if spawned.is_ok() { crate::appicon::remove(HWND(MSG_HWND.load(Ordering::Relaxed) as *mut _)); std::process::exit(0); }
     GOING.store(false, Ordering::SeqCst);
 }
 
@@ -728,7 +742,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
     }
     const MOUSE: [u32; 10] = [WM_MOUSEMOVE, win::WM_MOUSELEAVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_LBUTTONDBLCLK, WM_MOUSEWHEEL];
-    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | win::WM_APPBAR | WM_KEYDOWN | WM_CHAR);
+    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
     if ours(msg) || matches!(msg, WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SYSKEYDOWN | WM_ACTIVATE) {
         // try_borrow: a call made while handling a message (SetWindowPos, DestroyWindow) can re-enter here
         APP.with(|a| if let Ok(mut a) = a.try_borrow_mut() { if let Some(app) = a.as_mut() { app.on(hwnd, msg, wp, lp); } });

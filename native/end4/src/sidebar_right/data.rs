@@ -19,6 +19,8 @@ pub struct Mix { pub app: String, pub volume: f32, pub muted: bool }
 /// Everything background threads fill in; the view clones it per paint.
 #[derive(Clone, Default)]
 pub struct Shared {
+    /// Ids just dismissed: a load that started before the dismiss was saved must not bring them back.
+    pub gone: Vec<String>,
     pub loaded: bool,
     pub wifi: Option<bool>,
     pub bluetooth: Option<bool>,
@@ -68,7 +70,7 @@ pub fn parse_plan(v: &Value) -> Option<String> {
 /// Empties the list and dismisses exactly the ids that were showing. "all" would re-read Windows'
 /// toast database first, and when that read fails or is slow nothing is saved and the list refills.
 pub fn clear_notifs(cfg: Option<Arc<Config>>, sh: &Sh) {
-    let ids: Vec<String> = { let mut s = lock(sh); let ids = s.notifs.iter().map(|n| n.id.clone()).collect(); s.notifs.clear(); ids };
+    let ids: Vec<String> = { let mut s = lock(sh); let ids: Vec<String> = s.notifs.iter().map(|n| n.id.clone()).collect(); s.notifs.clear(); s.gone.extend(ids.iter().cloned()); ids };
     if ids.is_empty() { return; }
     if let Some(cfg) = cfg { std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); proc::bridge(&cfg, "notifications-dismiss", &a); }); }
 }
@@ -76,6 +78,11 @@ pub fn clear_notifs(cfg: Option<Arc<Config>>, sh: &Sh) {
 pub fn load_notifs(cfg: &Config, sh: &Sh) {
     let (items, err) = parse_notifs(&proc::bridge(cfg, "notifications", &[]));
     let mut s = lock(sh);
+    // forget ids the database no longer lists (the dismiss was saved); hide the rest
+    let listed: Vec<String> = items.iter().map(|n| n.id.clone()).collect();
+    s.gone.retain(|g| listed.contains(g));
+    let mut items = items;
+    items.retain(|n| !s.gone.contains(&n.id));
     s.notifs = items;
     s.notif_err = err;
 }
@@ -338,6 +345,22 @@ pub fn save_todos(t: &[Value]) { hub::set("zor-ui.todo", Some(Value::Array(t.to_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stale_load_cannot_refill_cleared_notifications() {
+        let sh = Sh::default();
+        let n = |id: &str| Notif { id: id.into(), app: "a".into(), title: "t".into(), body: String::new(), time: 0.0 };
+        lock(&sh).notifs = vec![n("1"), n("2")];
+        super::clear_notifs(None, &sh);
+        assert_eq!(lock(&sh).gone, ["1", "2"]);
+        // what load_notifs does with a read that still lists them
+        let mut s = lock(&sh);
+        let mut items = vec![n("1"), n("2"), n("3")];
+        items.retain(|x| !s.gone.contains(&x.id));
+        assert_eq!(items.len(), 1);
+        s.gone.retain(|g| ["3"].contains(&g.as_str()));
+        assert!(s.gone.is_empty());
+    }
+
     #[test]
     fn clear_empties_the_list_without_a_config() {
         let sh = Sh::default();

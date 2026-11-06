@@ -30,16 +30,23 @@ the dock and the Claude usage watcher.
 
 - **Bar and Dynamic Island.** Workspaces, clock, weather, system icons, tray, media and the active window, with a
   layout you can rearrange by drag and drop. The island expands for the song, timer, notifications, screen
-  recording and AI agents.
+  recording and AI agents. On a monitor covered by a full-screen window the bar hides, and the other monitor's
+  bar stays.
 - **AI agents in the island.** Claude Code, Codex, Gemini CLI or anything that can pipe JSON to
-  `scripts/end4_agent.py` shows up when it needs a permission or an answer, with its usage limits in the panel.
-- **Sidebars.** Left: player with lyrics, AI chat (Gemini, Claude, OpenAI, Mistral, OpenRouter, Ollama), translator,
+  `zorui.exe --agent <name>` shows up when it needs a permission or an answer, with its usage limits in the panel.
+- **Sidebars.** Left: player with lyrics, AI chat (Gemini, Claude, OpenAI, Mistral, OpenRouter, Ollama, plus your
+  Gemini and ChatGPT subscriptions through their CLIs), translator,
   anime and wallpaper search, football. Right: toggles, brightness and volume sliders, per-app mixer,
   notifications, calendar, to-do, pomodoro and stopwatch.
 - **Buddies.** Small animated characters that walk on your bar, talk, comment on what your PC is doing and keep
   each other company. See [Buddies](#buddies).
-- **Settings app.** Every option, plus galleries for Wallpaper Engine wallpapers and community presets.
-- **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards, a dock, a window and clipboard
+- **Settings app.** Every option, galleries for Wallpaper Engine wallpapers and community presets, a Usage page
+  with the memory and CPU of Zor UI, each of its parts and its helper programs, and an About page with a
+  **Check for updates** button.
+- **Updates and installer.** Zor UI checks GitHub for a newer release once a day and installs it, keeping your
+  `config.json`. Set `"autoUpdate": false` to stop that. Releases also ship `ZorUI-Setup.exe`, a one-click
+  installer with `zorui.exe` prebuilt, so the target PC needs no Rust.
+- **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards, an auto-hiding dock, a window and clipboard
   overview, and an audio visualizer.
 - **Theming.** Material You colors generated from your wallpaper, applied to the bar, Windows light and dark mode,
   Windows Terminal and Flow Launcher.
@@ -86,15 +93,14 @@ Geto and Yuji belong to their rights holders. They are here as personal fan art.
 
 The first version put every widget in its own [Zebar](https://github.com/glzr-io/zebar) browser window. The bar on
 two monitors plus four desktop cards used about 1 GB of memory. The native shell draws the same widgets in one
-process and uses about 32 MB.
+process and uses about 32 MB. Zebar, Python and the PowerShell helpers are gone.
 
 | Part | Technology |
 |---|---|
 | Bar, island, sidebars, overview, settings, desktop cards, dock, visualizer, buddies | `zorui.exe` (Rust). CPU drawing with tiny-skia and DirectWrite, one layered window per widget. |
 | Tiling, workspaces, keybinds | [GlazeWM](https://github.com/glzr-io/glazewm) |
-| Material You colors | The same algorithm as end4's `generate_colors_material.py`, in Rust (`src/bridge/theme.rs`) and in `scripts/end4_theme.py` |
-| Fallback widgets | A [Zebar](https://github.com/glzr-io/zebar) widget pack (`zebar/zor-ui`). Any part not listed under `"native"` in `config.json` is drawn here instead. |
-| Helper commands (AI chat, translate, booru, football, notifications, Wallpaper Engine, media) | Rust modules in `native/end4/src/bridge`. A few still run as Python or PowerShell scripts. |
+| Material You colors | The same algorithm as end4's `generate_colors_material.py`, in Rust (`src/bridge/theme.rs`) |
+| Helper commands (AI chat, translate, booru, football, notifications, Wallpaper Engine, media) | Rust modules in `native/end4/src/bridge`, also callable from a terminal as `zorui.exe --bridge <command>`. |
 
 Developer notes, build steps and the list of ported parts are in [native/end4/README.md](native/end4/README.md).
 
@@ -106,8 +112,8 @@ Hyprland, PipeWire, BlueZ, UPower, NetworkManager and MPRIS. Zor UI rebuilds the
 | end4-pC on Hyprland | Zor UI on Windows |
 |---|---|
 | Hyprland tiling, workspaces, keybinds | [GlazeWM](https://github.com/glzr-io/glazewm) |
-| Quickshell bar, sidebars, overview, settings, desktop widgets | The native `zorui.exe`, with Zebar widgets as a fallback |
-| `switchwall.sh` | A Rust port of `scripts/switchwall.ps1` (wallpaper, colors, Windows light and dark, lock screen picture) |
+| Quickshell bar, sidebars, overview, settings, desktop widgets | The native `zorui.exe` |
+| `switchwall.sh` | A Rust port (`zorui.exe --script switchwall`) (wallpaper, colors, Windows light and dark, lock screen picture) |
 | mpvpaper live wallpapers | **Wallpaper Engine** (if installed through Steam) or [Lively Wallpaper](https://github.com/rocksdanister/lively), themed from a frame or preview |
 | cava | WASAPI loopback and FFT, drawn natively |
 | AI chat (Gemini, Mistral, Ollama…) | The same providers plus Claude, OpenAI and OpenRouter |
@@ -119,7 +125,7 @@ Hyprland, PipeWire, BlueZ, UPower, NetworkManager and MPRIS. Zor UI rebuilds the
 | Presets (end4-pCpresets) | The same gallery: wallpaper, scheme, workspace labels and transparency get applied |
 | Fuzzel / search launcher | [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher) with a generated theme |
 | Terminal colors | A Windows Terminal color scheme named `zor-ui` |
-| Google Sans Flex + Material Symbols Rounded | Same fonts, bundled in `zebar/zor-ui/assets/fonts` |
+| Google Sans Flex + Material Symbols Rounded | Same fonts, bundled in `assets/fonts` |
 
 ## Install
 
@@ -141,17 +147,15 @@ don't have Wallpaper Engine and want video wallpapers.
 | `-Wallpaper C:\path\wall.jpg` | Image (or video) to theme from. The default is your current wallpaper. |
 | `-UserName Anas` | Name shown in the greeting. |
 | `-Workspaces 10` | Number of workspace dots in the bar. |
-| `-SkipDeps` | Skip winget (if GlazeWM, Zebar, Flow Launcher and Python are already installed). |
+| `-SkipDeps` | Skip winget (if GlazeWM and Flow Launcher are already installed). |
 
 The installer:
-1. Installs GlazeWM, Zebar, Flow Launcher, Python 3.12, JetBrains Mono Nerd Font (and Lively with `-WithLively`) using winget.
-2. Copies the scripts to `%LOCALAPPDATA%\zor-ui` and creates a Python venv with `materialyoucolor`, `pillow`, `numpy`, `soundcard`, `imageio-ffmpeg` and `psutil`.
-3. Builds `zorui.exe` when `cargo` is on PATH, copies it to `%LOCALAPPDATA%\zor-ui` and turns on every native part. Without Rust it falls back to the Zebar widgets.
-4. Installs the Zebar widget pack to `~\.glzr\zebar\zor-ui`.
-5. Writes `~\.glzr\glazewm\config.yaml`. Your old config is backed up as `config.yaml.bak-<date>`.
-6. Selects the Zor UI Flow Launcher theme, generates colors from your wallpaper, and starts GlazeWM, which starts the shell.
+1. Installs GlazeWM, Flow Launcher, JetBrains Mono Nerd Font (and Lively with `-WithLively`) using winget.
+2. Copies `zorui.exe` (prebuilt in the release, built with `cargo` from a clone) to `%LOCALAPPDATA%\zor-ui` and the fonts to `~\.glzr\zebar\zor-ui`, where `config.json` and `theme.json` also live. It removes the old Zebar pack and Python environment if they are there.
+3. Writes `~\.glzr\glazewm\config.yaml`. Your old config is backed up as `config.yaml.bak-<date>`.
+4. Selects the Zor UI Flow Launcher theme, generates colors from your wallpaper, and starts GlazeWM, which starts the shell.
 
-Re-running `install.ps1` updates everything and keeps your `config.json` settings. If you installed it under its old name, `end4-pC`, it moves your settings, saved state and Python environment to the new `zor-ui` folders first.
+Re-running `install.ps1` updates everything and keeps your `config.json` settings. If you installed it under its old name, `end4-pC`, it moves your settings and saved state to the new `zor-ui` folders first.
 `uninstall.ps1` restores the backed-up configs, turns night light off, and removes everything it added.
 
 ## Keybinds
@@ -184,13 +188,16 @@ In the sidebars, `Ctrl+PageUp/PageDown` switches tabs, the pin button keeps a si
 
 **AI chat.** Add a key once, either in Settings > Services or by typing `/key gemini YOUR_KEY` in the chat
 (also `anthropic`, `openai`, `mistral` or `openrouter`). Keys are encrypted with Windows DPAPI for your
-account. If [Ollama](https://ollama.com) is running, its models show up automatically. Other commands:
+account. If [Ollama](https://ollama.com) is running, its models show up automatically. To use a subscription
+instead of a key, install the CLI (`npm i -g @google/gemini-cli` for **Gemini subscription**, `npm i -g @openai/codex`
+for **ChatGPT subscription**) and sign in once in a terminal. Both then appear in the model list, each using the
+model its account allows. Picking one without its CLI installed shows the install command. Other commands:
 `/model`, `/prompt`, `/temp`, `/clear`, `/help`.
 
-**AI agents.** Run `python scripts/end4_agent.py --install` to add the hooks and status line to Claude Code and the
+**AI agents.** Run `zorui.exe --install-agents` to add the hooks and status line to Claude Code and the
 hooks to Codex. It backs up the files it changes. After that, the island shows an agent that is waiting for you,
 and the island panel shows its 5-hour and 7-day usage. Any other agent can report by piping JSON into
-`end4_agent.py <agent>`. The format is described at the top of that script.
+`zorui.exe --agent <agent>`. The format is described at the top of `native/end4/src/bridge/agent_hook.rs`.
 
 **Anime and wallpapers.** Pick a source and search by tags. Hover an image to open its post, download it
 to `Pictures\Wallpapers`, or set it as your wallpaper (which also re-themes everything). Results are
@@ -220,12 +227,16 @@ that support DDC/CI.
 **Bar.** Hover the clock, CPU/RAM, weather, network speed or system icons for details. When the volume or
 microphone changes, the island shows the new level for a moment.
 
+**Updates.** Settings > About shows the version and a **Check for updates** button, which looks for a newer
+release right away. It downloads the release's `zorui-app.zip` and runs its `install.ps1`, which restarts the shell.
+
 **Overview.** Type `;` (or press the paste button) to see clipboard history (`Win+V` must be turned on) and
 copy an item back.
 
 **Dock.** Settings > Bar & desktop > Dock adds a dock along the bottom: pinned apps, then every app with an open
 window. Click focuses an app (again cycles its windows) or starts a pinned one; right-click pins or unpins it.
-It's off by default because Windows' taskbar does the same job.
+The dock appears when the pointer touches the bottom edge of its monitor, floats over windows and reserves no
+screen space. It's off by default because Windows' taskbar does the same job.
 
 **Wallpaper Engine.** Settings > Wallpapers lists everything you've subscribed to on the Workshop, plus your own
 projects. Search by name or tag, filter by type, and click one to set it. Colors come from a frame for video
@@ -256,11 +267,11 @@ setup and switch back later.
 ## Customize
 
 Everything is in **Settings** (`Mod+I`). It edits `~\.glzr\zebar\zor-ui\config.json`, which you can also open
-from Settings > Config file. The `"native"` section lists which parts the native shell draws. Command-line
+from Settings > Config file. Command-line
 equivalents for theming:
 
-- `switchwall.ps1 -Scheme expressive` (also `tonal-spot`, `vibrant`, `content`, `fidelity`, `fruit-salad`, `monochrome`, `neutral`, `rainbow`, `auto`)
-- `switchwall.ps1 -Color '#6750A4'` themes from a color and keeps your wallpaper
+- `zorui.exe --script switchwall -Scheme expressive` (also `tonal-spot`, `vibrant`, `content`, `fidelity`, `fruit-salad`, `monochrome`, `neutral`, `rainbow`, `auto`)
+- `zorui.exe --script switchwall -Color '#6750A4'` themes from a color and keeps your wallpaper
 - In Windows Terminal, pick the **zor-ui** color scheme once. It updates every time the colors change.
 
 ## Still not done
@@ -276,22 +287,19 @@ equivalents for theming:
 
 ## Requirements and notes
 
-- Windows 10 or 11. Zebar's fallback widgets need WebView2 (built into Windows 11; on Windows 10, install the
-  WebView2 runtime if Zebar fails to start).
+- Windows 10 or 11.
 - Building the native shell needs Rust. The GNU toolchain is enough.
-- The fallback widgets load Zebar's client library from esm.sh the first time they start. Zebar then caches it for a week.
-- Those widgets can only run four scripts: `toggles.ps1`, `switchwall.ps1`, `media-art.ps1` and `end4_bridge.py`,
-  and only from the paths `install.ps1` writes into `zpack.json`.
+- Voice listening downloads the sherpa-onnx speech engine (about 20 MB) from GitHub the first time you use it.
 
 ## Credits
 
 Zor UI is its own project, but these parts come from [end4-pC](https://github.com/pctrade/end4-pC) by pctrade
 (GPL-3.0, (c) end-4 / pctrade), which is based on [illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4:
 
-- `scripts/football.py` and its Rust port `native/end4/src/bridge/football.rs`, from `scripts/football/football.py`.
-- The color generation in `scripts/end4_theme.py` and `native/end4/src/bridge/theme/palette.rs`, adapted from
+- `native/end4/src/bridge/football.rs`, ported from `scripts/football/football.py`.
+- The color generation in `native/end4/src/bridge/theme/palette.rs`, adapted from
   `scripts/colors/generate_colors_material.py`.
-- `scripts/switchwall.ps1`, a port of end4's `switchwall.sh`.
+- `native/end4/src/bridge/theme.rs`, a port of end4's `switchwall.sh`.
 - The football sidebar page, which follows end4-pC's `FootballPage.qml`.
 - The Community gallery, which downloads presets from [end4-pCpresets](https://github.com/pctrade/end4-pCpresets).
 - The keybinds in `glazewm/config.template.yaml`, which mirror illogical-impulse on Hyprland.

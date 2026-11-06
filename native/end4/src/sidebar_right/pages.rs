@@ -83,7 +83,7 @@ impl SidebarRight {
         vec![
             Item::new("content_copy", "Copy text", move |_| crate::util::clipboard_set(&text)),
             Item::new("close", "Dismiss", move |_| {
-                lock(&sh).notifs.retain(|n| n.app != app);
+                { let mut s = lock(&sh); s.notifs.retain(|n| n.app != app); s.gone.extend(ids.iter().cloned()); }
                 if let Some(cfg) = cfg { std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); proc::bridge(&cfg, "notifications-dismiss", &a); }); }
             }),
             Item::new("clear_all", "Clear all", { let (sh, cfg) = (self.sh.clone(), self.cfg.clone()); move |_| clear_notifs(cfg.clone(), &sh) }),
@@ -100,8 +100,9 @@ impl SidebarRight {
                 let ids: Vec<String> = {
                     let mut s = lock(&self.sh);
                     let Some(app) = group(&s.notifs).get((i - ID_DISMISS) as usize).map(|g| g.app.clone()) else { return };
-                    let ids = s.notifs.iter().filter(|n| n.app == app).map(|n| n.id.clone()).collect();
+                    let ids: Vec<String> = s.notifs.iter().filter(|n| n.app == app).map(|n| n.id.clone()).collect();
                     s.notifs.retain(|n| n.app != app);
+                    s.gone.extend(ids.iter().cloned());
                     ids
                 };
                 if let Some(cfg) = self.cfg.clone() {

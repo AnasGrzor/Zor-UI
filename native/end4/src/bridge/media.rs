@@ -1,6 +1,5 @@
 //! Rust port of end4_bridge.py's visualizer (WASAPI loopback + FFT), record (ffmpeg gdigrab) and
-//! pick-image (file dialog). color-pick is in picker.rs; screen-translate is a full-screen overlay and is
-//! not ported (they still run the Python script).
+//! pick-image (file dialog). color-pick is in picker.rs; screen-translate in screen_translate.rs.
 
 use super::common::*;
 use super::*;

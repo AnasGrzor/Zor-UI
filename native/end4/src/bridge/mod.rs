@@ -18,6 +18,7 @@ mod media;
 mod sub_cli;
 mod notify;
 mod picker;
+pub(crate) mod rec_audio;
 mod screen_translate;
 pub(crate) mod sys;
 mod theme;
@@ -65,7 +66,7 @@ type Streamer = fn(&Config, &str, &[String], &str, &Sink);
 
 /// The module that streams `name` (a long-running bridge command), if any.
 fn streamer(name: &str) -> Option<Streamer> {
-    [(web::STREAMS, web::stream as Streamer), (notify::STREAMS, notify::stream), (we::STREAMS, we::stream), (media::STREAMS, media::stream), (listen::STREAMS, listen::stream)]
+    [(web::STREAMS, web::stream as Streamer), (notify::STREAMS, notify::stream), (we::STREAMS, we::stream), (media::STREAMS, media::stream), (listen::STREAMS, listen::stream), (rec_audio::STREAMS, rec_audio::stream)]
         .into_iter().find(|(names, _)| names.contains(&name)).map(|(_, f)| f)
 }
 

@@ -217,7 +217,7 @@ window: drag it anywhere, on either monitor, and it stays there. **Reset layout*
 column on the left.
 
 **Right sidebar tools.** **App volume** sets each app's volume and mute. **Screen record** records the primary
-monitor (video only) to `Videos\Recordings`; a red chip in the bar shows the time and stops it. **Screen
+monitor to `Videos\Recordings` with the sound you choose in Settings > Services > Screen recording (none, microphone, system sound or both; both is the default); a red chip in the bar shows the time and stops it. **Screen
 translate** freezes the screen: drag over some text, and Windows' OCR reads it and the translation (into the
 translator's language) is drawn on top and copied. Windows only reads languages added in Settings > Time &
 language > Language. **Color picker** copies the hex code of any pixel, and **Power plan** switches between

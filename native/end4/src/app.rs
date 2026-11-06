@@ -116,7 +116,7 @@ pub struct App {
     /// The bar's hover popup.
     popup: Option<Win>,
     /// Hovered group waiting out the 350 ms delay: (bar index, id, rect).
-    pending: Option<(usize, u32, R)>,
+    pending: Option<(usize, u32, R, String)>,
     shown: Option<(usize, u32)>,
     jobs: mpsc::Receiver<Job>,
     cfg_file: Watched,
@@ -401,10 +401,10 @@ impl App {
     fn popup_check(&mut self, bi: usize) {
         let hp = self.bars.get(bi).and_then(|b| b.view.hover_popup());
         match hp {
-            Some((id, r)) => {
-                if self.shown == Some((bi, id)) || self.pending.map(|p| (p.0, p.1)) == Some((bi, id)) { return; }
+            Some((id, r, tip)) => {
+                if self.shown == Some((bi, id)) || self.pending.as_ref().map(|p| (p.0, p.1)) == Some((bi, id)) { return; }
                 self.hide_popup();
-                self.pending = Some((bi, id, r));
+                self.pending = Some((bi, id, r, tip));
                 unsafe { SetTimer(self.msg, HOVER, 350, None); }
             }
             None => self.hide_popup(),
@@ -419,14 +419,14 @@ impl App {
 
     fn show_popup(&mut self) {
         unsafe { let _ = KillTimer(self.msg, HOVER); }
-        let Some((bi, id, r)) = self.pending.take() else { return };
+        let Some((bi, id, r, tip)) = self.pending.take() else { return };
         let Some(bar) = self.bars.get(bi) else { return };
         if bar.view.hover_popup().map(|p| p.0) != Some(id) { return; }
         let s = bar.scale();
         let origin = bar.pos();
-        if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
+        if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id, tip: tip.clone() }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
         let Some(p) = self.popup.as_mut() else { return };
-        p.view = Box::new(Popup { id });
+        p.view = Box::new(Popup { id, tip });
         p.update(&self.g, &self.cx, true);
         let (x, y) = bar::popup_spot(self.cx.bar_edge(), origin, r, s, p.size_px());
         p.move_to(x, y);

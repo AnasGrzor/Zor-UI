@@ -16,6 +16,7 @@ fn defaults() -> Value {
         "football": { "leagues": [] },
         "visualizer": { "desktop": true, "bar": false, "bars": 64 },
         "nightLight": { "kelvin": 4500 },
+        "record": { "audio": "both", "mic": "" },
         "wallpaperEngine": { "follow": true, "path": "" },
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
         "frame": { "enabled": false, "thickness": 5, "radius": 20 },

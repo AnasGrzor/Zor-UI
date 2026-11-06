@@ -162,7 +162,16 @@ thread_local! {
 
 /// Vertical scroll offset of a clipped list. Keep one per scrollable area.
 #[derive(Default)]
-pub struct Scroll { pub y: f32, tgt: Option<f32>, at: Option<std::time::Instant> }
+pub struct Scroll { pub y: f32, tgt: Option<f32>, at: Option<std::time::Instant>, pend: std::rc::Rc<std::cell::Cell<Option<f32>>> }
+
+/// A scrollbar drawn this frame: hit id, track rect, thumb height, scrollable range, and where a drag writes its target.
+pub struct Bar { pub id: u32, pub track: R, pub th: f32, pub range: f32, pub y: f32, pub pend: std::rc::Rc<std::cell::Cell<Option<f32>>> }
+/// First hit id of the scrollbars; `Win` handles these itself and never passes them to the view.
+pub const SBAR: u32 = 0xFFFF_0000;
+thread_local! {
+    /// Scrollbars registered during the current paint; `Win::update` takes them.
+    pub static BARS: std::cell::RefCell<Vec<Bar>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 impl Scroll {
     /// Wheel step: three lines per notch (`d` is Input::Wheel's delta, >0 up).
@@ -177,6 +186,10 @@ impl Scroll {
         self.tgt = Some(self.tgt.unwrap_or(self.y) - d as f32 / 120.0 * 48.0);
         self.clamp(content_h, view_h);
     }
+    /// Takes the position a scrollbar drag asked for, if any.
+    fn apply_drag(&mut self, content_h: f32, view_h: f32) {
+        if let Some(v) = self.pend.take() { self.y = v; self.tgt = None; self.at = None; self.clamp(content_h, view_h); }
+    }
     pub fn moving(&self) -> bool { self.tgt.is_some() }
     /// Moves `y` toward the target by elapsed time (about 70 ms time constant), so the glide takes
     /// the same time at any frame rate.
@@ -190,6 +203,7 @@ impl Scroll {
     /// (r.y - scroll), plus a thin scrollbar. Skip items outside the view yourself: hit spots ignore the clip.
     pub fn region(&mut self, c: &mut Canvas, cx: &Ctx, r: R, content_h: f32, body: impl FnOnce(&mut Canvas, f32)) {
         self.clamp(content_h, r.h);
+        self.apply_drag(content_h, r.h);
         self.ease();
         if self.moving() { MOVING.with(|m| m.set(true)); } // Win::update keeps frames coming until it settles
         let top = r.y - self.y;
@@ -197,7 +211,11 @@ impl Scroll {
         if content_h > r.h {
             let th = (r.h * r.h / content_h).max(24.0);
             let ty = r.y + self.y / (content_h - r.h) * (r.h - th);
-            c.rect(R::new(r.x + r.w - 4.0, ty, 3.0, th), 1.5, alpha(cx.theme.c("outline"), 0.6));
+            let hot = c.hover >= SBAR && c.hover == BARS.with(|b| SBAR + b.borrow().len() as u32);
+            c.rect(R::new(r.x + r.w - if hot { 6.0 } else { 4.0 }, ty, if hot { 5.0 } else { 3.0 }, th), 1.5, alpha(cx.theme.c("outline"), if hot { 0.9 } else { 0.6 }));
+            let id = BARS.with(|b| { let mut b = b.borrow_mut(); let id = SBAR + b.len() as u32;
+                b.push(Bar { id, track: R::new(r.x + r.w - 10.0, r.y, 10.0, r.h), th, range: content_h - r.h, y: self.y, pend: self.pend.clone() }); id });
+            c.hit(R::new(r.x + r.w - 10.0, r.y, 10.0, r.h), id);
         }
     }
 }
@@ -401,6 +419,18 @@ mod tests {
         s.wheel(-120, 40.0, 200.0); // content shorter than the view: clamped to 0, settles at once
         while s.moving() { s.ease() }
         assert_eq!(s.y, 0.0);
+    }
+
+    #[test]
+    fn scrollbar_drag_jumps_and_clamps() {
+        let mut s = Scroll::default();
+        s.wheel(-120, 500.0, 200.0);
+        s.pend.set(Some(250.0));
+        s.apply_drag(500.0, 200.0);
+        assert!(!s.moving() && s.y == 250.0);
+        s.pend.set(Some(900.0));
+        s.apply_drag(500.0, 200.0);
+        assert_eq!(s.y, 300.0);
     }
 
     #[test]

@@ -569,6 +569,14 @@ impl Settings {
         });
         p.h2("translate", "Translator", "");
         p.card(|p| self.pick(p, "translator.target", LANGS.iter().map(|(k, v)| (json!(k), v.to_string())).collect(), "Translate into", "", "language", 260.0));
+        p.h2("screen_record", "Screen recording", "");
+        p.card(|p| {
+            self.pick(p, "record.audio", crate::bridge::rec_audio::MODES.iter().map(|(k, v, _)| (json!(k), v.to_string())).collect(), "Record", "System sound is what your speakers play", "graphic_eq", 260.0);
+            let mut mics = vec![(json!(""), "Windows default".to_string())];
+            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
+            self.pick(p, "record.mic", mics, "Microphone", "Used when Record includes the microphone", "mic", 260.0);
+            p.note("The sound is joined to the video when you stop, so stopping a long recording takes a few seconds.", 12.0);
+        });
         p.h2("photo_library", "Anime & wallpapers", "");
         p.card(|p| {
             self.seg(p, "booru.source", &[("yandere", "yande.re"), ("konachan", "Konachan"), ("danbooru", "Danbooru"), ("wallhaven", "Wallhaven")], "Default source", "image_search");

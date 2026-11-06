@@ -123,7 +123,7 @@ fn friendly(d: &IMMDevice) -> String {
 }
 
 /// The first input device whose name contains `name` (any case); the Windows default for "" or no match.
-unsafe fn pick_mic(en: &IMMDeviceEnumerator, name: &str) -> windows::core::Result<IMMDevice> {
+pub(super) unsafe fn pick_mic(en: &IMMDeviceEnumerator, name: &str) -> windows::core::Result<IMMDevice> {
     let n = name.trim().to_lowercase();
     if !n.is_empty() {
         let list = en.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;

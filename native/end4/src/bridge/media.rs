@@ -18,7 +18,7 @@ use windows::{
         System::{
             Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
             SystemInformation::GetLocalTime,
-            Threading::{OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE},
+            Threading::{OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE},
         },
         UI::{
             Shell::{Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH},
@@ -32,9 +32,9 @@ use windows::{
 pub const STREAMS: &[&str] = &["visualizer"];
 
 /// One-shot command `name`; None if this module doesn't port it.
-pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
+pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
     match name {
-        "record" => Some(record(args.first().copied().unwrap_or("status"))),
+        "record" => Some(record(cfg, args.first().copied().unwrap_or("status"))),
         "pick-image" => Some(match args {
             [slot] => pick_image(slot),
             _ => json!({ "error": "bad arguments: pick-image takes 1 argument" }),
@@ -276,8 +276,34 @@ fn stamp() -> String {
     format!("end4-{:04}{:02}{:02}-{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
-/// record start | stop | status. Records the primary monitor (video only) to Videos\Recordings.
-fn record(action: &str) -> Value {
+/// Ends process `pid` and waits for it, but only when its exe path contains `part` (the pid may be reused).
+fn kill(pid: u64, part: &str) {
+    if !process_name(pid as u32).is_some_and(|n| n.contains(part)) { return; }
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid as u32) {
+            let _ = TerminateProcess(h, 1);
+            let _ = WaitForSingleObject(h, 3000);   // the video file must be closed before it is muxed
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+/// Puts the audio track from `pcm` (the 48 kHz stereo f32 file rec_audio writes) into `video` as `dest`
+/// and deletes both inputs. Without audio in the result (ffmpeg failed) the silent video becomes `dest`.
+/// shortcut: the audio starts a few tenths of a second before the first video frame; no offset is applied.
+fn mux(video: &Path, pcm: &Path, dest: &Path) {
+    let rate = super::rec_audio::RATE.to_string();
+    let ok = hidden(ffmpeg_exe()).args(["-nostdin", "-y", "-i"]).arg(video).args(["-f", "f32le", "-ar", &rate, "-ac", "2", "-i"]).arg(pcm)
+        .args(["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]).arg(dest)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().is_ok_and(|s| s.success());
+    if ok { let _ = std::fs::remove_file(video); } else { let _ = std::fs::rename(video, dest); }
+    let _ = std::fs::remove_file(pcm);
+}
+
+/// record start | stop | status. Records the primary monitor to Videos\Recordings, with the sound
+/// `record.audio` asks for (none, mic, system or both).
+fn record(cfg: &Config, action: &str) -> Value {
     let state = root().join("recording.json");
     let st = recording(&state);
     if action == "start" && st.is_none() {
@@ -288,28 +314,45 @@ fn record(action: &str) -> Value {
         let folder = home.join("Videos").join("Recordings");
         let _ = std::fs::create_dir_all(&folder);
         let dest = folder.join(format!("{}.mp4", stamp()));
+        let mode = cfg.str("record.audio");
+        let audio = super::rec_audio::wanted(mode) != (false, false);
+        // with sound, ffmpeg writes the video beside the final file and `mux` joins them on stop
+        let video = if audio { dest.with_extension("video.mp4") } else { dest.clone() };
         // Fragmented MP4 (1 s fragments): stopping kills ffmpeg, and the file still plays.
         let mut c = hidden(ffmpeg_exe());
         c.args(["-nostdin", "-y", "-f", "gdigrab", "-framerate", "30", "-draw_mouse", "1", "-offset_x", "0", "-offset_y", "0", "-video_size", &format!("{w}x{h}"), "-i", "desktop",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", "-g", "30", "-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
-            .arg(&dest).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            .arg(&video).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0000_0008 | 0x0000_0200 | NO_WINDOW);   // detached, own group: outlives the widget
         }
         let p = match c.spawn() { Ok(p) => p, Err(e) => return json!({ "error": format!("ffmpeg failed to start: {e}") }) };
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-        let st = json!({ "pid": p.id(), "file": dest.to_string_lossy(), "started": started });
+        let mut st = json!({ "pid": p.id(), "file": dest.to_string_lossy(), "started": started });
+        if audio {
+            let pcm = dest.with_extension("pcm");
+            let mut h = hidden(std::env::current_exe().unwrap_or_default());
+            h.args(["--bridge", "record-audio", "--mode", mode, "--mic", cfg.str("record.mic"), "--out"]).arg(&pcm)
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            {
+                use std::os::windows::process::CommandExt;
+                h.creation_flags(0x0000_0008 | 0x0000_0200 | NO_WINDOW);
+            }
+            st["video"] = json!(video.to_string_lossy());
+            st["pcm"] = json!(pcm.to_string_lossy());
+            if let Ok(hp) = h.spawn() { st["audioPid"] = json!(hp.id()); }   // no helper: stop keeps the silent video
+        }
         save_json(&state, &st);
         return recording_json(Some(st));
     }
     if action == "stop" {
         if let Some(st) = st {
-            if let Some(pid) = st["pid"].as_u64() {
-                unsafe { if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid as u32) { let _ = TerminateProcess(h, 1); let _ = CloseHandle(h); } }
-            }
+            if let Some(pid) = st["pid"].as_u64() { kill(pid, "ffmpeg"); }
+            if let Some(pid) = st["audioPid"].as_u64() { kill(pid, "zorui"); }
             let _ = std::fs::remove_file(&state);
             let file = st["file"].as_str().unwrap_or_default().to_string();
+            if let (Some(v), Some(p)) = (st["video"].as_str(), st["pcm"].as_str()) { mux(Path::new(v), Path::new(p), Path::new(&file)); }
             let _ = hidden("explorer").args(["/select,", &file]).spawn();
             return json!({ "recording": false, "file": file });
         }

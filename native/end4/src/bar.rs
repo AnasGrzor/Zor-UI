@@ -178,6 +178,7 @@ pub struct Bar {
     ws_names: Vec<String>,
     wm_cmds: Vec<String>,
     tray_ids: Vec<String>,
+    tray_tips: Vec<String>,
     utils: Vec<String>,
     /// A pulsing dot is showing (recording, an agent waiting).
     pulsing: bool,
@@ -186,7 +187,7 @@ pub struct Bar {
 impl Bar {
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
         Bar { mon, edge, origin, island: Spring::default(), di_hover: false, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
-            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], utils: vec![], pulsing: false }
+            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false }
     }
 
     fn monitor<'a>(&self, cx: &'a Ctx) -> Option<&'a crate::glaze::Monitor> { cx.wm.monitor_at(self.mon.0, self.mon.1) }
@@ -584,11 +585,13 @@ impl Bar {
                 "tray" => {
                     let px = (18.0 * c.scale).round() as u32;
                     self.tray_ids.clear();
+                    self.tray_tips.clear();
                     let mut els = vec![];
                     for i in cx.tray.clone() {
                         if let Some(img) = self.tray_icon(&i, px) {
                             els.push(El::Img(TRAY + self.tray_ids.len() as u32, img, 18.0));
                             self.tray_ids.push(i.id.clone());
+                            self.tray_tips.push(i.tooltip.clone());
                         }
                     }
                     if !els.is_empty() { out.push(group(TRAY, els, (6.0, 6.0), 2.0)); }
@@ -834,8 +837,13 @@ impl View for Bar {
         }
     }
 
-    fn hover_popup(&self) -> Option<(u32, R)> {
-        POPUPS.contains(&self.hover).then(|| self.pills.iter().find(|p| p.0 == self.hover).map(|p| (p.0, p.1))).flatten()
+    fn hover_popup(&self) -> Option<(u32, R, String)> {
+        if let Some(i) = self.hover.checked_sub(TRAY).filter(|&i| i < 0x100) {
+            let tip = self.tray_tips.get(i as usize).filter(|t| !t.is_empty())?;
+            let (_, r) = self.pills.iter().find(|p| p.0 == TRAY)?;
+            return Some((self.hover, R::new(r.x + 6.0 + i as f32 * 26.0, r.y, 24.0, r.h), tip.clone())); // El::Img is 24 wide, 2 gap, 6 pad
+        }
+        POPUPS.contains(&self.hover).then(|| self.pills.iter().find(|p| p.0 == self.hover).map(|p| (p.0, p.1, String::new()))).flatten()
     }
 }
 
@@ -899,7 +907,7 @@ impl Bar {
 
 // ------------------------------------------------------------------ hover popup (bar-popup.html)
 
-pub struct Popup { pub id: u32 }
+pub struct Popup { pub id: u32, pub tip: String }
 
 fn kv_rows(cx: &Ctx, id: u32) -> Option<(&'static str, String, Option<String>, Vec<(String, String, String)>)> {
     let kv = |i: &str, k: &str, v: String| (i.to_string(), k.to_string(), v);
@@ -945,11 +953,13 @@ fn kv_rows(cx: &Ctx, id: u32) -> Option<(&'static str, String, Option<String>, V
 
 impl Popup {
     fn content_h(&self, cx: &Ctx) -> f32 {
+        if !self.tip.is_empty() { return 13.0 * LH; }
         if self.id == CLOCK { return 13.0 * LH + 8.0 + 6.0 + 26.0 * (crate::desk::month_rows() as f32 + 1.0); }
         let Some((_, _, big, rows)) = kv_rows(cx, self.id) else { return 0.0 };
         13.0 * LH + 8.0 + if big.is_some() { 26.0 * LH } else { 0.0 } + rows.len() as f32 * (6.0 + 13.0 * LH)
     }
     fn content_w(&self, g: &Gfx, cx: &Ctx) -> f32 {
+        if !self.tip.is_empty() { return g.measure(&self.tip, txt(13.0, 500)).0; }
         if self.id == CLOCK { return 7.0 * 28.0; }
         let Some((_, title, _, rows)) = kv_rows(cx, self.id) else { return 220.0 };
         let row = rows.iter().map(|(_, k, v)| 22.0 + g.measure(k, txt(13.0, 400)).0 + 16.0 + g.measure(v, txt(13.0, 700)).0).fold(0.0, f32::max);
@@ -959,7 +969,7 @@ impl Popup {
 
 impl View for Popup {
     fn size(&self, g: &Gfx, cx: &Ctx, _scale: f32) -> (f32, f32) {
-        let w = (self.content_w(g, cx) + 28.0).clamp(220.0, 320.0);
+        let w = (self.content_w(g, cx) + 28.0).clamp(if self.tip.is_empty() { 220.0 } else { 0.0 }, 320.0);
         (w + 12.0, self.content_h(cx) + 24.0 + 12.0)
     }
     fn key(&self, _cx: &Ctx) -> String { util::now().wSecond.to_string() } // live numbers while open
@@ -977,6 +987,10 @@ impl View for Popup {
             c.icon(icon, R::new(x, y, 18.0, 13.0 * LH), ico(18.0, false), t.c("primary"));
             c.text(title, R::new(x + 24.0, y, w - 24.0, 13.0 * LH), txt(13.0, 500), fg, Align::Left);
         };
+        if !self.tip.is_empty() {
+            c.text(&self.tip, R::new(x, y, w, 13.0 * LH), txt(13.0, 500), fg, Align::Left);
+            return;
+        }
         if self.id == CLOCK {
             let st = util::now();
             h4(c, y, "calendar_month", &date_fmt(&st, "dddd, MMMM d, yyyy"));
@@ -1017,6 +1031,19 @@ mod tests {
         assert_eq!(split_workspaces(6, 2, false), [3, 4, 5, 6]);
     }
     use super::*;
+    #[test]
+    fn tray_icon_hover_shows_its_tooltip() {
+        let mut b = Bar::new((0, 0, 1920, 1080), Edge::Top, (0, 0));
+        b.pills = vec![(TRAY, R::new(100.0, 4.0, 60.0, 40.0))];
+        b.tray_tips = vec!["Discord".into(), String::new()];
+        b.hover = TRAY + 1;
+        assert!(b.hover_popup().is_none(), "no tooltip, no popup");
+        b.hover = TRAY;
+        let (id, r, tip) = b.hover_popup().unwrap();
+        assert_eq!((id, tip.as_str(), r.x), (TRAY, "Discord", 106.0));
+        b.hover = TRAY + 5;
+        assert!(b.hover_popup().is_none());
+    }
     #[test]
     fn layout_fills_in_defaults() {
         let cfg = crate::conf::Config::parse(r#"{"bar": {"modules": [["clock", "left"], ["bogus", "left"], ["clock", "right"]]}}"#);

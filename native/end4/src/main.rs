@@ -64,6 +64,15 @@ fn send_running(text: &str) -> bool {
 }
 
 fn main() {
+    // panic = "abort" ends the process with no message; this keeps the reason and line in crash.log
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let name = std::thread::current().name().unwrap_or("?").to_string();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(conf::data_dir().join("crash.log")) {
+            let _ = writeln!(f, "[unix {t}] thread {name}: {info}");
+        }
+    }));
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| args.iter().position(|a| a == flag);
     // agent hooks run on every tool call: answer before any window or COM setup

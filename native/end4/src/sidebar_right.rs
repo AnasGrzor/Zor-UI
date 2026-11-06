@@ -25,6 +25,7 @@ const ID_SETTINGS: u32 = 1;
 const ID_RELOAD: u32 = 2;
 const ID_POWER: u32 = 3;
 const ID_POWER_ITEM: u32 = 10; // + 0..5
+const ID_REC_MENU: u32 = 19; // the chevron on the Screen record tile
 const ID_TOGGLE: u32 = 20; // + 0..16
 const ID_SLIDER: u32 = 40; // volume, mic, brightness
 const ID_MIXER_BTN: u32 = 50;
@@ -139,6 +140,13 @@ impl SidebarRight {
 
     fn close(cx: &mut Ctx) { cx.actions.push(Action::Close(NAME.into())); }
 
+    /// The `record.audio` menu at the pointer.
+    fn record_menu(cx: &mut Ctx) {
+        let mut p = windows::Win32::Foundation::POINT::default();
+        unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p); }
+        cx.actions.push(Action::Menu(record_items(&cx.cfg), (p.x, p.y)));
+    }
+
     fn toggle(&mut self, id: &'static str, cx: &mut Ctx) {
         match id {
             "wifi" => self.exec(id, |cfg, sh| if let Some(b) = proc::run(cfg, "toggles", &["-Action", "wifi"])["wifi"].as_bool() { lock(sh).wifi = Some(b); }),
@@ -187,6 +195,9 @@ impl SidebarRight {
         match id {
             ID_SETTINGS if right => proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", ""]),
             ID_SETTINGS => { cx.actions.push(Action::open("settings")); Self::close(cx); }
+            // right-click on Screen record: pick what it records (microphone, system sound, both, none)
+            ID_REC_MENU => Self::record_menu(cx),
+            _ if right && (ID_TOGGLE..ID_TOGGLE + 16).contains(&id) && self.tg.get((id - ID_TOGGLE) as usize).is_some_and(|t| t.0 == "record") => Self::record_menu(cx),
             _ if right && (ID_TOGGLE..ID_TOGGLE + 16).contains(&id) => {
                 if let Some(&(_, page)) = self.tg.get((id - ID_TOGGLE) as usize).filter(|t| !t.1.is_empty()) { proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", page]); }
             }
@@ -293,7 +304,7 @@ impl SidebarRight {
         let i = DefIn {
             s, audio: cx.audio, ssid: cx.net.as_ref().filter(|n| n.kind == "wifi").map_or("", |n| n.ssid.as_str()), dark: cx.theme.dark,
             paused: if cx.wm.monitors.is_empty() { None } else { Some(cx.wm.paused) }, kelvin: cx.cfg.get("nightLight.kelvin").as_i64().unwrap_or(4500),
-            target: cx.cfg.str("translator.target"), rec: rec_started(), now: hub::now_ms(),
+            target: cx.cfg.str("translator.target"), sound: cx.cfg.str("record.audio"), rec: rec_started(), now: hub::now_ms(),
         };
         let defs = defs(&i);
         self.tg = defs.iter().map(|d| (d.id, d.settings)).collect();
@@ -312,8 +323,15 @@ impl SidebarRight {
             c.circle(r.x + 29.0, r.y + 29.0, 19.0, a(bub));
             c.icon(d.icon, R::new(r.x + 10.0, r.y + 9.0, 38.0, 40.0), ico(20.0, d.on), a(fg));
             let tx = r.x + 58.0;
-            c.text(d.label, R::new(tx, r.y + 14.0, r.w - 58.0 - 12.0, 16.2), txt(13.5, 500), a(fg), Align::Left);
-            c.text(&d.sub, R::new(tx, r.y + 30.2, r.w - 58.0 - 12.0, 13.8), txt(11.5, 400), a(sub), Align::Left);
+            let menu = d.id == "record";   // the tile with a chevron that opens its sound menu
+            let tw = r.w - 58.0 - if menu { 34.0 } else { 12.0 };
+            c.text(d.label, R::new(tx, r.y + 14.0, tw, 16.2), txt(13.5, 500), a(fg), Align::Left);
+            c.text(&d.sub, R::new(tx, r.y + 30.2, tw, 13.8), txt(11.5, 400), a(sub), Align::Left);
+            if menu {
+                let cr = R::new(r.x + r.w - 32.0, r.y + 13.0, 28.0, 32.0);
+                if c.hit(cr, ID_REC_MENU) { c.rect(cr, 14.0, a(bub)); }
+                c.icon("expand_more", cr, ico(20.0, false), a(fg));
+            }
         }
     }
 
@@ -373,6 +391,17 @@ fn output_items(devs: &[media::OutDev], sh: &Sh) -> Vec<crate::menu::Item> {
         let (id, name, sh) = (d.id.clone(), d.name.clone(), sh.clone());
         crate::menu::Item::new(if d.default { "check" } else { "speaker" }, &d.name, move |_| {
             std::thread::spawn(move || if media::set_output(&id) { lock(&sh).out_name = name; repaint(); });
+        })
+    }).collect()
+}
+
+/// One menu row per `record.audio` choice, the current one ticked; a row saves that choice for the next recording.
+fn record_items(cfg: &crate::conf::Config) -> Vec<crate::menu::Item> {
+    let cur = cfg.str("record.audio").to_string();
+    crate::bridge::rec_audio::MODES.iter().map(|&(key, label, icon)| {
+        let cfg = cfg.clone();
+        crate::menu::Item::new(if key == cur { "check" } else { icon }, label, move |_| {
+            std::thread::spawn(move || { proc::bridge(&cfg, "config-set", &["record.audio", &serde_json::json!(key).to_string()]); });
         })
     }).collect()
 }

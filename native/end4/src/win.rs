@@ -47,7 +47,7 @@ pub trait View {
     /// Repaint interval while something moves (16 for the island spring, 100 for pulsing dots), 0 when still.
     fn frame_ms(&self) -> u32 { 0 }
     /// The hovered spot that has a popup, and its rect (bar groups).
-    fn hover_popup(&self) -> Option<(u32, R)> { None }
+    fn hover_popup(&self) -> Option<(u32, R, String)> { None }
     /// Popups: height (CSS px) of a header strip that drags the window (settings). 0: not movable.
     fn movable(&self) -> f32 { 0.0 }
     /// Popups: true if Esc is the view's (clear a search box); it then closes itself with Action::Close.
@@ -71,6 +71,9 @@ pub struct Win {
     bits: *mut u8,
     px: (i32, i32),
     hits: Vec<(R, u32)>,
+    bars: Vec<crate::ui::Bar>,
+    /// Scrollbar being dragged: (bar id, pointer offset inside the thumb).
+    sdrag: Option<(u32, f32)>,
     hover: u32,
     press: u32,
     drag: Option<Drag>,
@@ -118,7 +121,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
+                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
         }
     }
 
@@ -233,11 +236,13 @@ impl Win {
             let pixels = std::slice::from_raw_parts_mut(self.bits, (pw * ph * 4) as usize);
             let Some(mut c) = Canvas::new(g, pixels, pw, ph, s, self.hover) else { return };
             crate::ui::MOVING.with(|m| m.set(false));
+            crate::ui::BARS.with(|b| b.borrow_mut().clear());
             let t0 = std::time::Instant::now();
             self.view.paint(&mut c, cx);
             crate::perf::paint(&self.part, t0.elapsed().as_nanos() as u64);
             self.gliding = crate::ui::MOVING.with(|m| m.get());
             self.hits = std::mem::take(&mut c.hits);
+            self.bars = crate::ui::BARS.with(|b| std::mem::take(&mut *b.borrow_mut()));
             drop(c);
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
             let src = POINT::default();
@@ -249,6 +254,14 @@ impl Win {
 
     fn hit_at(&self, x: f32, y: f32) -> u32 {
         self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map_or(0, |&(_, id)| id)
+    }
+    /// Moves the dragged scrollbar's thumb to pointer y (CSS px).
+    fn sbar_to(&self, y: f32) {
+        let Some((id, off)) = self.sdrag else { return };
+        if let Some(b) = self.bars.iter().find(|b| b.id == id) {
+            let free = (b.track.h - b.th).max(1.0);
+            b.pend.set(Some(((y - off - b.track.y) / free).clamp(0.0, 1.0) * b.range));
+        }
     }
     fn xy(&self, lp: LPARAM) -> (f32, f32) {
         let s = self.scale();
@@ -270,6 +283,7 @@ impl Win {
                         let _ = SetWindowPos(self.hwnd, None, d.from.x + dx, d.from.y + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                         return false;
                     }
+                    if self.sdrag.is_some() { let (_, y) = self.xy(lp); self.sbar_to(y); cx.ver += 1; return false; }
                     if self.held {
                         let (x, y) = self.xy(lp);
                         self.view.input(Input::Drag(self.press, x, y, Phase::Move), cx);
@@ -283,6 +297,17 @@ impl Win {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                     self.press = self.hit_lp(lp);
                     let (x, y) = self.xy(lp);
+                    if msg == WM_LBUTTONDOWN && self.press >= crate::ui::SBAR {
+                        if let Some(b) = self.bars.iter().find(|b| b.id == self.press) {
+                            let top = b.track.y + b.y / b.range.max(1.0) * (b.track.h - b.th);
+                            let off = if y >= top && y <= top + b.th { y - top } else { b.th / 2.0 };
+                            self.sdrag = Some((b.id, off));
+                            self.sbar_to(y); cx.ver += 1;
+                        }
+                        self.press = 0;
+                        SetCapture(self.hwnd);
+                        return false;
+                    }
                     if msg == WM_LBUTTONDOWN && self.press != 0 {
                         self.held = true;
                         self.view.input(Input::Drag(self.press, x, y, Phase::Start), cx);
@@ -297,6 +322,7 @@ impl Win {
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                     let _ = ReleaseCapture();
+                    if self.sdrag.take().is_some() { return false; }
                     if self.held && msg == WM_LBUTTONUP {
                         self.held = false;
                         let (x, y) = self.xy(lp);
@@ -325,6 +351,7 @@ impl Win {
                     let (x, y) = (((lp.0 & 0xFFFF) as i16 as i32 - r.left) as f32 / s, (((lp.0 >> 16) & 0xFFFF) as i16 as i32 - r.top) as f32 / s);
                     let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
                     let id = self.hit_at(x, y);
+                    let id = self.hits.iter().rev().find(|(r, i)| *i < crate::ui::SBAR && r.contains(x, y)).map_or(0, |&(_, i)| i);
                     if id != 0 { self.view.input(Input::Wheel(id, d), cx); }
                 }
                 _ => {}

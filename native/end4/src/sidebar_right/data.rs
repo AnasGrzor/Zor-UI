@@ -164,6 +164,8 @@ pub struct DefIn<'a> {
     pub paused: Option<bool>,
     pub kelvin: i64,
     pub target: &'a str,
+    /// `record.audio`: what Screen record captures besides the video.
+    pub sound: &'a str,
     /// Unix ms when screen recording started, 0 if not recording.
     pub rec: f64,
     pub now: f64,
@@ -205,7 +207,7 @@ pub fn defs(i: &DefIn) -> Vec<Def> {
         d("colorpick", "colorize", "Color picker", false, "Copies the hex".into(), ""),
         d("screentranslate", "translate", "Screen translate", false, format!("Into {}", i.target), ""),
         d("record", if rec { "stop_circle" } else { "screen_record" }, "Screen record", rec,
-            if rec { format!("Recording {}", hub::clock((i.now - i.rec) / 1000.0)) } else { "Primary monitor".into() }, ""),
+            if rec { format!("Recording {}", hub::clock((i.now - i.rec) / 1000.0)) } else { crate::bridge::rec_audio::short(i.sound).into() }, ""),
     ]
 }
 
@@ -372,7 +374,7 @@ mod tests {
 
     fn cfg() -> Config { Config::parse("{}") }
     fn input(s: &Shared) -> DefIn<'_> {
-        DefIn { s, audio: None, ssid: "", dark: true, paused: Some(false), kelvin: 4500, target: "en", rec: 0.0, now: 0.0 }
+        DefIn { s, audio: None, ssid: "", dark: true, paused: Some(false), kelvin: 4500, target: "en", sound: "both", rec: 0.0, now: 0.0 }
     }
     fn sub(d: &[Def], id: &str) -> String { d.iter().find(|d| d.id == id).unwrap().sub.clone() }
 

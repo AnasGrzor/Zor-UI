@@ -13,14 +13,14 @@ Remove-Item $Out -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $Stage | Out-Null
 
 $env:ZORUI_PUBLIC = '1'   # build.rs then leaves the private buddies (cast_personal.rs) out
-& cargo build --release --manifest-path (Join-Path $Repo 'native\zorui\Cargo.toml')
+& cargo build --release --manifest-path (Join-Path $Repo 'native\zor-ui\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
 $pay = Join-Path $Out 'app'
 New-Item -ItemType Directory -Force $pay | Out-Null
 foreach ($f in 'install.ps1', 'uninstall.ps1', 'LICENSE') { Copy-Item (Join-Path $Repo $f) $pay }
 foreach ($d in 'scripts', 'flowlauncher', 'glazewm', 'assets') { Copy-Item -Recurse (Join-Path $Repo $d) $pay }
-Copy-Item (Join-Path $Repo 'native\zorui\target\release\zorui.exe') $pay
+Copy-Item (Join-Path $Repo 'native\zor-ui\target\release\zorui.exe') $pay
 Compress-Archive -Path "$pay\*" -DestinationPath (Join-Path $Stage 'zorui-app.zip')
 Copy-Item (Join-Path $Stage 'zorui-app.zip') $Out   # upload this too: the in-app updater downloads it
 # Builds up to 0.1.2 look for an asset named payload.zip, so this release carries the same zip under that name.

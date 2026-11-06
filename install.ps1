@@ -154,9 +154,9 @@ if (Test-Path $prebuilt) {
   Start-Sleep -Seconds 1
   Copy-Item -Force $prebuilt $native
 } elseif ($cargo) {
-  Step 'Building the shell (native\zorui)'
-  Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\zorui\Cargo.toml') 2>&1 | Out-Null }
-  $built = Join-Path $Repo 'native\zorui\target\release\zorui.exe'
+  Step 'Building the shell (native\zor-ui)'
+  Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\zor-ui\Cargo.toml') 2>&1 | Out-Null }
+  $built = Join-Path $Repo 'native\zor-ui\target\release\zorui.exe'
   if (-not (Test-Path $built)) { throw 'The shell failed to build.' }
   Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
   Copy-Item -Force $built $native
@@ -260,7 +260,7 @@ if ($we -and $we.installed) {
 
 # ------------------------------------------------------------------ 6c. AI agents -> Dynamic Island
 # Hooks (and Claude Code's status line, for usage limits) report to `zorui.exe --agent <name>`. Other
-# agents can pipe the same JSON into it; see the top of native\zorui\src\bridge\agent_hook.rs.
+# agents can pipe the same JSON into it; see the top of native\zor-ui\src\bridge\agent_hook.rs.
 Info 'AI agents (Claude Code, Codex): adding Zor UI hooks'
 Invoke-Native { & $native --install-agents 2>&1 | ForEach-Object { Info "  $_" } }
 

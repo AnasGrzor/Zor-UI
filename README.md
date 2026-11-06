@@ -86,7 +86,7 @@ undocumented and could change.
 `"gojoVoice": true` under `"native"` in `config.json` to turn it on. It uses an English Windows voice, so it doesn't
 sound like any character, and each new line cuts off the one still playing.
 
-The characters are drawn from shapes in `native/end4/src/gojo.rs`, with palettes and lines in `cast.rs`. Gojo,
+The characters are drawn from shapes in `native/zor-ui/src/buddy.rs`, with palettes and lines in `cast.rs`. Gojo,
 Geto and Yuji belong to their rights holders. They are here as personal fan art.
 
 ## How it is built
@@ -100,9 +100,9 @@ process and uses about 32 MB. Zebar, Python and the PowerShell helpers are gone.
 | Bar, island, sidebars, overview, settings, desktop cards, dock, visualizer, buddies | `zorui.exe` (Rust). CPU drawing with tiny-skia and DirectWrite, one layered window per widget. |
 | Tiling, workspaces, keybinds | [GlazeWM](https://github.com/glzr-io/glazewm) |
 | Material You colors | The same algorithm as end4's `generate_colors_material.py`, in Rust (`src/bridge/theme.rs`) |
-| Helper commands (AI chat, translate, booru, football, notifications, Wallpaper Engine, media) | Rust modules in `native/end4/src/bridge`, also callable from a terminal as `zorui.exe --bridge <command>`. |
+| Helper commands (AI chat, translate, booru, football, notifications, Wallpaper Engine, media) | Rust modules in `native/zor-ui/src/bridge`, also callable from a terminal as `zorui.exe --bridge <command>`. |
 
-Developer notes, build steps and the list of ported parts are in [native/end4/README.md](native/end4/README.md).
+Developer notes, build steps and the list of ported parts are in [native/zor-ui/README.md](native/zor-ui/README.md).
 
 ## Relation to end4-pC
 
@@ -197,7 +197,7 @@ model its account allows. Picking one without its CLI installed shows the instal
 **AI agents.** Run `zorui.exe --install-agents` to add the hooks and status line to Claude Code and the
 hooks to Codex. It backs up the files it changes. After that, the island shows an agent that is waiting for you,
 and the island panel shows its 5-hour and 7-day usage. Any other agent can report by piping JSON into
-`zorui.exe --agent <agent>`. The format is described at the top of `native/end4/src/bridge/agent_hook.rs`.
+`zorui.exe --agent <agent>`. The format is described at the top of `native/zor-ui/src/bridge/agent_hook.rs`.
 
 **Anime and wallpapers.** Pick a source and search by tags. Hover an image to open its post, download it
 to `Pictures\Wallpapers`, or set it as your wallpaper (which also re-themes everything). Results are
@@ -217,7 +217,7 @@ window: drag it anywhere, on either monitor, and it stays there. **Reset layout*
 column on the left.
 
 **Right sidebar tools.** **App volume** sets each app's volume and mute. **Screen record** records the primary
-monitor (video only) to `Videos\Recordings`; a red chip in the bar shows the time and stops it. **Screen
+monitor to `Videos\Recordings` with the sound you choose in Settings > Services > Screen recording (none, microphone, system sound or both; both is the default); a red chip in the bar shows the time and stops it. **Screen
 translate** freezes the screen: drag over some text, and Windows' OCR reads it and the translation (into the
 translator's language) is drawn on top and copied. Windows only reads languages added in Settings > Time &
 language > Language. **Color picker** copies the hex code of any pixel, and **Power plan** switches between
@@ -296,10 +296,10 @@ equivalents for theming:
 Zor UI is its own project, but these parts come from [end4-pC](https://github.com/pctrade/end4-pC) by pctrade
 (GPL-3.0, (c) end-4 / pctrade), which is based on [illogical-impulse](https://github.com/end-4/dots-hyprland) by end-4:
 
-- `native/end4/src/bridge/football.rs`, ported from `scripts/football/football.py`.
-- The color generation in `native/end4/src/bridge/theme/palette.rs`, adapted from
+- `native/zor-ui/src/bridge/football.rs`, ported from `scripts/football/football.py`.
+- The color generation in `native/zor-ui/src/bridge/theme/palette.rs`, adapted from
   `scripts/colors/generate_colors_material.py`.
-- `native/end4/src/bridge/theme.rs`, a port of end4's `switchwall.sh`.
+- `native/zor-ui/src/bridge/theme.rs`, a port of end4's `switchwall.sh`.
 - The football sidebar page, which follows end4-pC's `FootballPage.qml`.
 - The Community gallery, which downloads presets from [end4-pCpresets](https://github.com/pctrade/end4-pCpresets).
 - The keybinds in `glazewm/config.template.yaml`, which mirror illogical-impulse on Hyprland.

@@ -1,4 +1,4 @@
 __pycache__/
 *.pyc
 dist/
-native/end4/src/cast_personal.rs
+native/zor-ui/src/cast_personal.rs

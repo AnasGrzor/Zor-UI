@@ -1,0 +1,78 @@
+[package]
+name = "zor-ui"
+version = "0.1.5"
+edition = "2021"
+description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
+
+[[bin]]
+name = "zorui"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# no "std": it pulls getrandom 0.3, which needs dlltool on this gnu toolchain
+material-colors = { version = "0.5", default-features = false, features = ["quantize", "libm"] }
+systray-util = "0.2"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync"] }
+windows-core = "0.58"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+windows = { version = "0.58", features = [
+  "implement",
+  "Foundation",
+  "Media_Control",
+  "Storage_Streams",
+  "Win32_Media",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_NetworkManagement_WiFi",
+  "Win32_Networking_WinSock",
+  "Win32_System_Power",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Devices_FunctionDiscovery",
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_System_Time",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_ColorSystem",
+  "System_UserProfile",
+  "Storage",
+  "Win32_UI_Shell_Common",
+  "Win32_System_Wmi",
+  "Win32_System_Registry",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+  "Foundation_Collections",
+  "Devices_Radios",
+  "ApplicationModel_DataTransfer",
+  "UI_Notifications",
+  "Win32_Devices_Display",
+  "Data_Xml_Dom",
+] }
+
+[profile.release]
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

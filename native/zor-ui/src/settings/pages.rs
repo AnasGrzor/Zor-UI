@@ -149,6 +149,7 @@ impl Settings {
         p.card(|p| {
             self.sw(p, "island.art", "Album art", "Otherwise a music note", "image");
             self.sw(p, "island.progress", "Progress ring", "Around the cover", "progress_activity");
+            self.sw(p, "island.eq", "Equalizer", "Moving bars next to the song while it plays", "equalizer");
             self.sw(p, "island.controls", "Controls on hover", "Previous, play / pause and next, with the artist", "play_pause");
             self.num(p, "island.trackSeconds", "Expand on a new song (seconds)", 0, 15, "expand");
         });

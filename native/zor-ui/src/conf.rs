@@ -26,7 +26,7 @@ fn defaults() -> Value {
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
             "agents": true, "agentWorking": true, "recording": true, "timer": true,
-            "media": true, "art": true, "progress": true, "controls": true, "trackSeconds": 3,
+            "media": true, "art": true, "progress": true, "eq": true, "controls": true, "trackSeconds": 3,
             "idle": "auto", "status": true, "badges": true, "textWidth": 170, "wideWidth": 280,
             "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
             "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3 }

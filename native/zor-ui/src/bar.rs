@@ -153,6 +153,19 @@ enum El {
     Meter(f32, f32), // width, value 0-100 (.osd-bar)
     Img(u32, Pixmap, f32), // hit id, picture, size
     Col(Vec<(String, Font, Color)>, f32), // stacked lines (active window, net speed), max width
+    Eq(Color, bool), // the island's equalizer bars, moving while `playing`
+}
+
+/// The island's equalizer (the marketing page's .island .eq): 4 bars 3px wide, 3px apart, up to 18px tall.
+const EQ_BARS: usize = 4;
+/// Height 0.4-1 of bar `i` at `ms`: each bar runs 40% -> 100% in 1 s and back (CSS `eq 1s ease-out infinite
+/// alternate`, offset per bar); still at 40% while paused.
+fn eq_level(ms: f64, i: usize, playing: bool) -> f32 {
+    if !playing { return 0.4; }
+    let off = [0.0, 0.3, 0.6, 0.15][i % EQ_BARS];
+    let p = ((ms / 1000.0 + off) % 2.0) as f32;
+    let x = if p < 1.0 { p } else { 2.0 - p }; // alternate: the way back replays the curve in reverse
+    0.4 + 0.6 * bezier(0.16, 1.0, 0.3, 1.0, x)
 }
 
 struct Pill { id: u32, els: Vec<El>, pad: (f32, f32), gap: f32, bg: Option<Color>, hover: bool, fixed: Option<f32>, kind: Kind }
@@ -182,12 +195,14 @@ pub struct Bar {
     utils: Vec<String>,
     /// A pulsing dot is showing (recording, an agent waiting).
     pulsing: bool,
+    /// The equalizer is moving (a song is playing in the island).
+    eq: bool,
 }
 
 impl Bar {
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
         Bar { mon, edge, origin, island: Spring::default(), di_hover: false, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
-            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false }
+            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false }
     }
 
     fn monitor<'a>(&self, cx: &'a Ctx) -> Option<&'a crate::glaze::Monitor> { cx.wm.monitor_at(self.mon.0, self.mon.1) }
@@ -249,6 +264,7 @@ fn el_w(g: &Gfx, e: &El) -> f32 {
         El::Meter(w, _) => *w,
         El::Img(_, _, s) => *s + 6.0,
         El::Col(lines, max) => lines.iter().map(|(t, f, _)| g.measure(t, *f).0).fold(0.0, f32::max).min(*max).ceil(),
+        El::Eq(..) => (EQ_BARS * 6 - 3) as f32,
     }
 }
 
@@ -296,6 +312,13 @@ fn draw_el(c: &mut Canvas, cx: &Ctx, e: &El, x: f32, cy: f32, hover: u32) {
             for (s, f, col) in lines {
                 c.text(s, R::new(x, y, w + 1.0, f.size * 1.15), *f, *col, Align::Left);
                 y += f.size * 1.15;
+            }
+        }
+        El::Eq(col, playing) => {
+            let now = hub::now_ms();
+            for i in 0..EQ_BARS {
+                let h = 18.0 * eq_level(now, i, *playing);
+                c.rect(R::new(x + i as f32 * 6.0, cy + 9.0 - h, 3.0, h), 1.5, *col);
             }
         }
     }
@@ -426,6 +449,7 @@ impl Bar {
                 els.push(El::Ring { size: 28.0, value: if flag("progress") { m.progress() } else { 0.0 }, icon: "music_note", isize: 14.0, fill: true, color: fg, art });
                 let title = if wide && !m.artist.is_empty() { format!("{} • {}", m.title, m.artist) } else { m.title.clone() };
                 els.push(El::Txt(title, txt(13.0, 400), fg, if wide { wide_w } else { text_w }));
+                if !wide && flag("eq") { els.push(El::Eq(fg, m.playing)); self.eq = m.playing; }
                 if wide && flag("controls") {
                     els.push(btn(CTL, 26.0, "skip_previous", 18.0, true, fg));
                     els.push(btn(CTL + 1, 26.0, if m.playing { "pause" } else { "play_arrow" }, 18.0, true, fg));
@@ -645,6 +669,7 @@ fn el_h(e: &El) -> f32 {
         El::Meter(..) => 8.0,
         El::Img(_, _, s) => *s + 6.0,
         El::Col(lines, _) => lines.iter().map(|(_, f, _)| f.size * 1.15).sum(),
+        El::Eq(..) => 18.0,
     }
 }
 
@@ -697,9 +722,10 @@ impl View for Bar {
         format!("{}{}{}{m}", st.wHour, st.wMinute, st.wSecond)
     }
 
-    fn frame_ms(&self) -> u32 { if self.island.moving() { 16 } else if self.pulsing { 100 } else { 0 } }
+    fn frame_ms(&self) -> u32 { if self.island.moving() { 16 } else if self.eq { 50 } else if self.pulsing { 100 } else { 0 } }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
+        self.eq = false; // island() turns it back on; off when the island isn't on this bar
         let t = &cx.theme;
         let style = cx.cfg.str("bar.style");
         let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
@@ -1022,6 +1048,23 @@ impl View for Popup {
 
 #[cfg(test)]
 mod tests {
+    /// Bars stay inside 40-100%, sit still while paused, move while playing, and start out of step.
+    #[test]
+    fn equalizer_levels() {
+        for ms in (0..4000).step_by(37) {
+            for i in 0..EQ_BARS {
+                let l = eq_level(ms as f64, i, true);
+                assert!((0.4..=1.0001).contains(&l), "bar {i} at {ms} ms: {l}");
+                assert_eq!(eq_level(ms as f64, i, false), 0.4);
+            }
+        }
+        assert!((eq_level(0.0, 0, true) - 0.4).abs() < 1e-3 && (eq_level(1000.0, 0, true) - 1.0).abs() < 1e-3);
+        assert!((eq_level(2000.0, 0, true) - 0.4).abs() < 1e-3, "back down after the reverse pass");
+        assert!(eq_level(250.0, 0, true) > eq_level(100.0, 0, true));
+        let first: Vec<f32> = (0..EQ_BARS).map(|i| eq_level(0.0, i, true)).collect();
+        assert!(first.windows(2).any(|w| (w[0] - w[1]).abs() > 0.1), "bars are out of step: {first:?}");
+    }
+
     #[test]
     fn workspaces_split_between_monitors() {
         assert_eq!(split_workspaces(10, 5, true), [1, 2, 3, 4, 5]);

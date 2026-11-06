@@ -8,18 +8,18 @@
 
 .PARAMETER Mod
   Modifier for all keybinds. 'alt' (default, never clashes with Windows) or
-  'win' (closest to end4's Super key; Windows may still grab a few combos like Win+L).
+  'win' (closest to Zor UI's Super key; Windows may still grab a few combos like Win+L).
 .PARAMETER SkipDeps
   Don't install/upgrade apps with winget (use when they're already installed).
 .PARAMETER HideTaskbar
-  Turn on taskbar auto-hide so only the end4 bar is visible.
+  Turn on taskbar auto-hide so only the Zor UI bar is visible.
 .PARAMETER Wallpaper
   Image to theme from. Defaults to your current Windows wallpaper.
 .PARAMETER UserName
   Name shown in the greeting and sidebar. Defaults to your Windows user name.
 .PARAMETER WithLively
   Also install Lively Wallpaper for video (live) wallpapers. Not needed if you have Wallpaper Engine:
-  end4 uses Wallpaper Engine automatically when it's installed through Steam.
+  Zor UI uses Wallpaper Engine automatically when it's installed through Steam.
 #>
 param(
   [ValidateSet('alt', 'win')][string]$Mod = 'alt',
@@ -144,7 +144,7 @@ foreach ($f in $fonts.Keys) {
   } catch { Write-Warning "Couldn't download $f; the shell falls back to Segoe UI." }
 }
 
-# The native shell (native/end4): one small process draws the bar, sidebars, overview and desktop cards.
+# The native shell (native/zor-ui): one small process draws the bar, sidebars, overview and desktop cards.
 $native = Join-Path $Root 'zorui.exe'
 $prebuilt = Join-Path $Repo 'zorui.exe'   # the one-click release ships it built; no Rust needed
 $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
@@ -154,9 +154,9 @@ if (Test-Path $prebuilt) {
   Start-Sleep -Seconds 1
   Copy-Item -Force $prebuilt $native
 } elseif ($cargo) {
-  Step 'Building the shell (native\end4)'
-  Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\end4\Cargo.toml') 2>&1 | Out-Null }
-  $built = Join-Path $Repo 'native\end4\target\release\zorui.exe'
+  Step 'Building the shell (native\zorui)'
+  Invoke-Native { & $cargo build --release --manifest-path (Join-Path $Repo 'native\zorui\Cargo.toml') 2>&1 | Out-Null }
+  $built = Join-Path $Repo 'native\zorui\target\release\zorui.exe'
   if (-not (Test-Path $built)) { throw 'The shell failed to build.' }
   Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
   Copy-Item -Force $built $native
@@ -255,13 +255,13 @@ $weStatus = Invoke-Native { & $native --bridge we-status 2>$null | Select-Object
 try { $we = $weStatus | ConvertFrom-Json } catch { $we = $null }
 if ($we -and $we.installed) {
   Info "Wallpaper Engine found: $($we.exe)"
-  Info '  live wallpapers use it, and end4 re-themes when you change wallpaper there (Settings > Wallpapers).'
+  Info '  live wallpapers use it, and Zor UI re-themes when you change wallpaper there (Settings > Wallpapers).'
 }
 
 # ------------------------------------------------------------------ 6c. AI agents -> Dynamic Island
 # Hooks (and Claude Code's status line, for usage limits) report to `zorui.exe --agent <name>`. Other
-# agents can pipe the same JSON into it; see the top of native\end4\src\bridge\agent_hook.rs.
-Info 'AI agents (Claude Code, Codex): adding end4 hooks'
+# agents can pipe the same JSON into it; see the top of native\zorui\src\bridge\agent_hook.rs.
+Info 'AI agents (Claude Code, Codex): adding Zor UI hooks'
 Invoke-Native { & $native --install-agents 2>&1 | ForEach-Object { Info "  $_" } }
 
 # ------------------------------------------------------------------ 7. taskbar

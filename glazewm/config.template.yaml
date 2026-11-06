@@ -129,7 +129,7 @@ binding_modes:
         bindings: ['escape', 'enter']
 
 keybindings:
-  # ---- end4 shell: sidebars, overview, wallpaper -------------------------
+  # ---- Zor UI shell: sidebars, overview, wallpaper -------------------------
   # Sidebars and overview open on the focused monitor; pressing again closes them
   - commands: ['shell-exec %LOCALAPPDATA%\zor-ui\zorui.exe --open sidebar-left']
     bindings: ['{{MOD}}+a']
@@ -148,7 +148,7 @@ keybindings:
   # Game mode: stop the bar, widgets, launcher and live wallpaper to free RAM; press again to restore.
   - commands: ['shell-exec --hide-window %LOCALAPPDATA%\zor-ui\zorui.exe --script toggles -Action gamemode']
     bindings: ['{{MOD}}+shift+g']
-  # Reload everything (end4: Ctrl+Super+R restarts the shell). One sequential command: shell-exec
+  # Reload everything (Zor UI: Ctrl+Super+R restarts the shell). One sequential command: shell-exec
   # doesn't wait, so a separate taskkill + start raced and could leave no shell running.
   - commands: ['wm-reload-config', 'shell-exec --hide-window powershell -NoProfile -Command "Stop-Process -Name zorui -Force -ErrorAction SilentlyContinue; Wait-Process -Name zorui -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 300; Start-Process $env:LOCALAPPDATA\zor-ui\zorui.exe"']
     bindings: ['{{MOD}}+ctrl+r']

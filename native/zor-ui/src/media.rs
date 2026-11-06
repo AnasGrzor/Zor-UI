@@ -100,6 +100,10 @@ fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f6
     }
 }
 
+/// Our own clock after a seek to `secs` at `now`; `anchor` keeps it while Windows' snapshot is unchanged
+/// or agrees with it, and follows the snapshot if the seek landed elsewhere.
+fn seeked(p: &mut Media, secs: f64, now: f64) { p.position = secs; p.at = now; }
+
 /// Whole-name match on the exe stem ("chrome.exe" or "Chrome"), so "ZenMusic" isn't a browser.
 fn is_browser(id: &str) -> bool {
     let id = id.to_lowercase();
@@ -209,7 +213,11 @@ pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
                     }
                 }
                 Ok(Msg::Seek(id, secs)) => {
-                    if let Some(s) = by_id(&all, &id) { let _ = s.TryChangePlaybackPositionAsync((secs * 1e7) as i64).and_then(|a| a.get()); }
+                    if let Some(s) = by_id(&all, &id) {
+                        let done = s.TryChangePlaybackPositionAsync((secs * 1e7) as i64).and_then(|a| a.get()).unwrap_or(false);
+                        // browsers refresh their timeline snapshot late, so move our own clock now (lyrics follow it)
+                        if done { if let Some(p) = prev.get_mut(&id) { seeked(p, secs, crate::hub::now_ms()); } }
+                    }
                 }
                 Ok(Msg::Changed) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return,
@@ -383,6 +391,15 @@ mod tests {
         assert_eq!(anchor((62.0, now + 3000.0), true, Some(&paused), now + 3000.0), (62.0, now + 3000.0));
         // a snapshot without a usable stamp anchors to our clock instead of 1601
         assert_eq!(anchor((5.0, 0.0), true, None, now), (5.0, now));
+    }
+
+    #[test]
+    fn a_seek_survives_a_stale_snapshot() {
+        let now = 10_000.0;
+        let mut p = at(30.0, now - 2000.0, (30.0, now - 2000.0));
+        seeked(&mut p, 62.0, now);
+        // the browser still reports the old snapshot: the anchor stays at the seek target
+        assert_eq!(anchor((30.0, now - 2000.0), true, Some(&p), now + 3000.0), (62.0, now));
     }
 
     #[test]

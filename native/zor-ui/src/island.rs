@@ -431,6 +431,8 @@ impl View for Island {
                 }
                 i if i >= NOTIF => {
                     hub::set("zor-ui.rightTab", Some("notif".into()));
+                    // the sidebar scrolls to this notification (see sidebar_right/pages.rs FOCUS)
+                    hub::set("zor-ui.notifFocus", self.notifs.lock().ok().and_then(|n| n.get((i - NOTIF) as usize).and_then(|n| n["id"].as_str().map(|id| format!("{}:{id}", hub::now_ms() as u64)))));
                     cx.actions.push(Action::open("sidebar-right"));
                     cx.actions.push(Action::Close("island-panel".into()));
                 }

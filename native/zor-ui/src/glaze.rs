@@ -17,7 +17,7 @@ pub struct Monitor { pub id: String, pub x: i32, pub y: i32, pub w: i32, pub foc
 
 /// A tiled / floating window (overview, dock): `ws` is the workspace name it sits on.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GWin { pub id: String, pub title: String, pub process: String, pub focus: bool, pub floating: bool, pub ws: String }
+pub struct GWin { pub id: String, pub title: String, pub process: String, pub focus: bool, pub floating: bool, pub minimized: bool, pub ws: String }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wm {
@@ -90,6 +90,24 @@ pub fn apply_split(main: u32) {
 /// The same on one container ("close" or "move --workspace 3" for window `id`, "focus" to focus it).
 /// shortcut: `command --id <id> <cmd>` is GlazeWM's CLI syntax; not tried against a live GlazeWM.
 pub fn command_on(id: &str, c: &str) { command(&format!("--id {id} {c}")) }
+
+/// "focus --container-id" only switches the workspace for a minimized window; set-tiling restores it.
+pub fn focus_cmds(id: &str, minimized: bool) -> Vec<String> {
+    let mut v = vec![format!("focus --container-id {id}")];
+    if minimized { v.push(format!("--id {id} set-tiling")); }
+    v
+}
+
+pub fn focus(id: &str, minimized: bool) { for c in focus_cmds(id, minimized) { command(&c); } }
+
+#[cfg(test)]
+mod focus_tests {
+    #[test]
+    fn restores_minimized_only() {
+        assert_eq!(super::focus_cmds("a", false), vec!["focus --container-id a"]);
+        assert_eq!(super::focus_cmds("a", true), vec!["focus --container-id a", "--id a set-tiling"]);
+    }
+}
 
 fn send(s: &mut TcpStream, text: &str) -> std::io::Result<()> {
     // client frames are masked (RFC 6455); a zero mask leaves the bytes as they are
@@ -189,7 +207,7 @@ fn collect(v: &Value, ws: &str, out: &mut Vec<GWin>) {
     for c in v["children"].as_array().into_iter().flatten() {
         if c["type"] == "window" {
             out.push(GWin { id: s(&c["id"]), title: s(&c["title"]), process: s(&c["processName"]), focus: c["hasFocus"].as_bool() == Some(true),
-                floating: c["state"]["type"] == "floating", ws: ws.into() });
+                floating: c["state"]["type"] == "floating", minimized: c["state"]["type"] == "minimized", ws: ws.into() });
         } else { collect(c, ws, out); }
     }
 }
@@ -231,7 +249,7 @@ mod tests {
         apply(&mut wm, "query monitors", &d);
         assert_eq!(wm.monitors[0].workspaces[0], Ws { name: "1".into(), display: "1".into(), displayed: true, occupied: true });
         assert_eq!(wm.monitors[0].workspaces[1].display, "Web");
-        assert_eq!(wm.windows, vec![GWin { id: "w1".into(), title: "A".into(), process: "code".into(), focus: true, floating: true, ws: "1".into() }]);
+        assert_eq!(wm.windows, vec![GWin { id: "w1".into(), title: "A".into(), process: "code".into(), focus: true, floating: true, minimized: false, ws: "1".into() }]);
         assert_eq!(wm.workspace, "1");
         apply(&mut wm, "query focused", &serde_json::json!({"focused": {"type": "window", "title": "T", "processName": "code"}}));
         assert_eq!(wm.window, Some(("T".into(), "code".into())));

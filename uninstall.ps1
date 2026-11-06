@@ -34,6 +34,7 @@ Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'zor-ui') -ErrorAction 
 
 $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
 if (Test-Path $startup) { Remove-Item $startup; Write-Host 'removed GlazeWM from startup' }
+if (Get-ScheduledTask -TaskName 'GlazeWM' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'GlazeWM' -Confirm:$false; Write-Host 'removed GlazeWM login task' }
 
 if (Get-Process glazewm -ErrorAction SilentlyContinue) { glazewm command wm-reload-config 2>$null | Out-Null }
 Write-Host "`nzor-ui removed. Taskbar auto-hide (if you enabled it) is in Settings > Personalization > Taskbar." -ForegroundColor Green

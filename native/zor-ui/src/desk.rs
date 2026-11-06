@@ -22,6 +22,31 @@ pub const PORTED: &[&str] = &["clock", "weather", "week", "greet", "calendar", "
     "media", "lyrics", "cover", "todo", "notes", "timer"];
 
 const W: f32 = 310.0; // #col width; cards sit 4px inside it
+const CELL_W: f32 = 130.0; // a preset card grid cell, and the gap between cells
+const CELL_H: f32 = 120.0;
+const GAP: f32 = 12.0;
+/// Inner size in logical px of a preset `sizeMode` ("<rows>x<cols>" cells), None for anything else.
+pub fn grid_size(mode: &str) -> Option<(f32, f32)> {
+    let (r, c) = mode.split_once('x')?;
+    let cells = |n: &str| n.parse::<u32>().ok().filter(|n| (1..=6).contains(n)).map(|n| n as f32);
+    let (r, c) = (cells(r)?, cells(c)?);
+    Some((c * CELL_W + (c - 1.0) * GAP, r * CELL_H + (r - 1.0) * GAP))
+}
+
+/// Cards that follow `desktop.sizes.<id>`; every other card sizes itself from its content.
+pub const SIZED: [&str; 7] = ["media", "calendar", "weather", "greet", "resources", "image1", "worldclock"];
+
+/// (rows, columns) of preset cells a card window of this size holds: the inverse of `grid_size`.
+fn cells(c: &Canvas) -> (u32, u32) {
+    let n = |len: f32, cell: f32| (((len - 8.0 + GAP) / (cell + GAP)).round() as i32).max(1) as u32;
+    (n(c.h, CELL_H), n(c.w, CELL_W))
+}
+
+/// The preset size of this card (outer window size, 4px margin each side) if the preset gave one.
+fn sized(cx: &Ctx, id: &str) -> Option<(f32, f32)> {
+    grid_size(cx.cfg.str(&format!("desktop.sizes.{id}"))).map(|(w, h)| (w + 8.0, h + 8.0))
+}
+
 const LH: f32 = 1.252; // Google Sans Flex line height (ascent + descent) per px of font size
 
 /// Rough heights used only to stack cards that were never dragged (lib/desk.js).
@@ -46,6 +71,53 @@ pub fn default_slot(widgets: &[String], id: &str, screen_h: f32) -> (f32, f32) {
     (LEFT, TOP)
 }
 
+/// How far (physical px, signed) a span `mine` = (start, end) must move to line up with `others` (spans on the same
+/// axis): start, centre and end meet start, centre and end, and a card sits `gap` from a neighbour's far edge.
+/// 0 when nothing is within `thr`.
+pub fn snap_axis(mine: (i32, i32), others: &[(i32, i32)], gap: i32, thr: i32) -> i32 {
+    let mut best: Option<i32> = None;
+    let mut consider = |d: i32| if d.abs() <= thr && best.map_or(true, |b| d.abs() < b.abs()) { best = Some(d); };
+    let mid = |a: i32, b: i32| (a + b) / 2;
+    for &(os, oe) in others {
+        for t in [os, mid(os, oe), oe] {
+            for m in [mine.0, mid(mine.0, mine.1), mine.1] { consider(t - m); }
+        }
+        consider(oe + gap - mine.0);
+        consider(os - gap - mine.1);
+    }
+    best.unwrap_or(0)
+}
+
+/// Where a dragged card at `(x, y)` of size `(w, h)` ends up: snapped to the other cards' and the monitor's edges
+/// and centres. `others` are (left, top, right, bottom) of what it can snap to; `m` is the transparent margin
+/// around a card's visible shape.
+pub fn snap_card((x, y): (i32, i32), (w, h): (i32, i32), m: i32, others: &[(i32, i32, i32, i32)], gap: i32, thr: i32) -> (i32, i32) {
+    let xs: Vec<(i32, i32)> = others.iter().map(|o| (o.0, o.2)).collect();
+    let ys: Vec<(i32, i32)> = others.iter().map(|o| (o.1, o.3)).collect();
+    (x + snap_axis((x + m, x + w - m), &xs, gap, thr), y + snap_axis((y + m, y + h - m), &ys, gap, thr))
+}
+
+/// The visible rectangles of the other desktop cards and of every work area, for `snap_card`.
+pub fn snap_targets(me: windows::Win32::Foundation::HWND, m: i32) -> Vec<(i32, i32, i32, i32)> {
+    use windows::Win32::{Foundation::{BOOL, HWND, LPARAM, RECT}, UI::WindowsAndMessaging::{EnumWindows, GetWindowRect, GetWindowTextW, IsWindowVisible}};
+    struct Scan { me: HWND, m: i32, out: Vec<(i32, i32, i32, i32)> }
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> BOOL {
+        let s = &mut *(lp.0 as *mut Scan);
+        let mut t = [0u16; 48];
+        let n = GetWindowTextW(h, &mut t) as usize;
+        if h != s.me && IsWindowVisible(h).as_bool() && String::from_utf16_lossy(&t[..n]).starts_with("Zor UI / desk-") {
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_ok() { s.out.push((r.left + s.m, r.top + s.m, r.right - s.m, r.bottom - s.m)); }
+        }
+        true.into()
+    }
+    let mut scan = Scan { me, m, out: vec![] };
+    unsafe { let _ = EnumWindows(Some(each), LPARAM(&mut scan as *mut _ as isize)); }
+    let (mons, _) = util::monitors();
+    scan.out.extend(mons.iter().map(|r| (r.left, r.top, r.right, r.bottom)));
+    scan.out
+}
+
 /// Rows in this month's calendar grid.
 pub fn month_rows() -> usize { month_cells(&util::now()).len() / 7 }
 
@@ -58,10 +130,17 @@ pub fn sync(app: &mut App) {
     app.wins.retain(|w| w.drag_key.as_ref().map_or(true, |k| want.contains(k)));
     let (mons, work) = util::monitors();
     let scale = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
+    app.cx.state.reload(); // a preset apply writes the positions from another thread
+    let saved_at = |cx: &Ctx, id: &str| cx.state.v["deskPos"][id].as_object().and_then(|p| Some((p.get("x")?.as_i64()? as i32, p.get("y")?.as_i64()? as i32)));
+    let on_screen = |(x, y): (i32, i32)| mons.iter().any(|m| x >= m.left - 40 && x < m.right - 40 && y >= m.top && y < m.bottom - 40);
+    for w in &app.wins {
+        // cards that are already open follow a changed saved position (a preset moved them)
+        let Some(id) = w.drag_key.as_deref() else { continue };
+        if let Some(p) = saved_at(&app.cx, id).filter(|p| on_screen(*p) && *p != w.pos()) { w.move_to(p.0, p.1); }
+    }
     for id in &want {
         if app.wins.iter().any(|w| w.drag_key.as_deref() == Some(id)) { continue; }
-        let saved = app.cx.state.v["deskPos"][id].as_object().and_then(|p| Some((p.get("x")?.as_i64()? as i32, p.get("y")?.as_i64()? as i32)));
-        let on_screen = |(x, y): (i32, i32)| mons.iter().any(|m| x >= m.left - 40 && x < m.right - 40 && y >= m.top && y < m.bottom - 40);
+        let saved = saved_at(&app.cx, id);
         let (x, y) = saved.filter(|&p| on_screen(p)).unwrap_or_else(|| {
             let (x, y) = default_slot(&cfg.strs("desktop.widgets"), id, (work.bottom - work.top) as f32 / scale);
             ((x * scale) as i32 + work.left, (y * scale) as i32 + work.top)
@@ -87,6 +166,8 @@ pub fn save_pos(cx: &mut Ctx, id: &str, (x, y): (i32, i32)) {
 
 pub struct Card {
     id: String,
+    /// The glass fill of this window and what it was made from.
+    glass: Option<(String, Pixmap)>,
     img: Option<(PathBuf, SystemTime, u32, Pixmap)>,
     np: np::Np,
     notes: Option<small::Notes>,
@@ -128,7 +209,50 @@ fn greet_conf(cx: &Ctx) -> (String, String, bool, String, String) {
 
 impl Card {
     pub fn new(id: &str) -> Card {
-        Card { id: id.into(), img: None, np: np::Np::new(), notes: (id == "notes").then(small::Notes::new), hwnd: Default::default() }
+        Card { id: id.into(), glass: None, img: None, np: np::Np::new(), notes: (id == "notes").then(small::Notes::new), hwnd: Default::default() }
+    }
+
+    fn key_time(&self, cx: &Ctx) -> String {
+        let st = util::now();
+        match self.id.as_str() {
+            "clock" if matches!(clock_style(cx), "digital" | "pixel") => format!("{}{}{}", st.wHour, st.wMinute, st.wDay),
+            "clock" => format!("{}{}{}", st.wHour, st.wMinute, st.wSecond),
+            "worldclock" => format!("{}{}", st.wHour, st.wMinute),
+            "greet" => format!("{}{}", st.wHour, st.wDay),
+            "todo" => small::todo_key(),
+            "notes" => self.notes.as_ref().map_or_else(String::new, |n| n.key()),
+            "timer" => small::timer_key(),
+            "week" | "calendar" => format!("{}{}", st.wDay, st.wMonth),
+            _ => String::new(),
+        }
+    }
+
+    /// This window's rectangle on screen (physical px).
+    fn screen_rect(&self) -> Option<windows::Win32::Foundation::RECT> {
+        use windows::Win32::{Foundation::{HWND, RECT}, UI::WindowsAndMessaging::GetWindowRect};
+        let h = self.hwnd.load(Ordering::Relaxed);
+        let mut r = RECT::default();
+        (h != 0 && unsafe { GetWindowRect(HWND(h as _), &mut r) }.is_ok()).then_some(r)
+    }
+
+    /// The glass fill for `rects` (logical px, the visible shapes in this window), or None when glass is off or
+    /// there is no wallpaper picture to look through. Re-made only when something it depends on changed.
+    fn glass_back(&mut self, c: &Canvas, cx: &Ctx, rects: &[R]) -> Option<Pixmap> {
+        let glass = crate::glass::Glass::from_cfg(&cx.cfg)?;
+        let img = PathBuf::from(cx.state.v["image"].as_str().filter(|s| !s.is_empty())?);
+        let r = self.screen_rect()?;
+        let (w, h) = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
+        let (mons, _) = util::monitors();
+        let (mx, my) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        let mon = mons.iter().find(|m| mx >= m.left && mx < m.right && my >= m.top && my < m.bottom).or(mons.first())?;
+        let stamp = std::fs::metadata(&img).and_then(|m| m.modified()).ok()?;
+        let key = format!("{glass:?}|{img:?}|{stamp:?}|{:?}|{:?}|{rects:?}|{}", (r.left, r.top), (w, h), c.scale);
+        if let Some((k, p)) = &self.glass { if *k == key { return Some(p.clone()); } }
+        let back = crate::glass::backdrop(c.g, &img, (mon.left, mon.top, mon.right, mon.bottom), (r.left, r.top, w, h))?;
+        let shapes: Vec<(f32, f32, f32, f32, f32)> = rects.iter().map(|q| (q.x * c.scale, q.y * c.scale, q.w * c.scale, q.h * c.scale, 23.0 * c.scale)).collect();
+        let out = crate::glass::render(&back, &shapes, &glass, c.scale)?;
+        self.glass = Some((key, out.clone()));
+        Some(out)
     }
 
     /// A picture from the pack's images folder (or the wallpaper), decoded at its drawn size.
@@ -139,6 +263,17 @@ impl Card {
         if let Some((p, t, s, b)) = &self.img { if *p == path && *t == stamp && *s == px { return Some(b.clone()); } }
         let b = g.load_image(&path, px, px)?;
         self.img = Some((path, stamp, px, b.clone()));
+        Some(b)
+    }
+
+    /// `picture` at `w` x `h` px (centre-cropped), for cards that fill a preset-sized frame.
+    fn picture_wh(&mut self, g: &Gfx, file: &str, w: u32, h: u32) -> Option<Pixmap> {
+        let path = crate::conf::pack_dir().join("images").join(file);
+        let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+        let key = (w << 16) | (h & 0xFFFF);
+        if let Some((p, t, s, b)) = &self.img { if *p == path && *t == stamp && *s == key { return Some(b.clone()); } }
+        let b = g.load_image(&path, w, h)?;
+        self.img = Some((path, stamp, key, b.clone()));
         Some(b)
     }
 
@@ -192,6 +327,15 @@ impl View for Card {
     fn size(&self, g: &Gfx, cx: &Ctx, _scale: f32) -> (f32, f32) {
         let pad = 8.0; // #col padding, both sides
         let h3 = 12.0 + 13.0 * LH + 8.0; // .pad top + h3 + its margin
+        if self.id == "media" {
+            // a preset's size only applies while something is playing (np.size is the bare pad otherwise)
+            let (w, nh) = self.np.size(cx, &self.id);
+            if let (Some(sz), true) = (sized(cx, &self.id), nh > pad) { return sz; }
+            return (w, nh);
+        }
+        if SIZED.contains(&self.id.as_str()) { // media returned above
+            if let Some(sz) = sized(cx, &self.id) { return sz; }
+        }
         match self.id.as_str() {
             "media" | "lyrics" | "cover" => self.np.size(cx, &self.id),
             "todo" => (W, small::todo_size(g) + pad - 8.0),
@@ -220,18 +364,8 @@ impl View for Card {
     }
 
     fn key(&self, cx: &Ctx) -> String {
-        let st = util::now();
-        match self.id.as_str() {
-            "clock" if matches!(clock_style(cx), "digital" | "pixel") => format!("{}{}{}", st.wHour, st.wMinute, st.wDay),
-            "clock" => format!("{}{}{}", st.wHour, st.wMinute, st.wSecond),
-            "worldclock" => format!("{}{}", st.wHour, st.wMinute),
-            "greet" => format!("{}{}", st.wHour, st.wDay),
-            "todo" => small::todo_key(),
-            "notes" => self.notes.as_ref().map_or_else(String::new, |n| n.key()),
-            "timer" => small::timer_key(),
-            "week" | "calendar" => format!("{}{}", st.wDay, st.wMonth),
-            _ => String::new(),
-        }
+        let at = if cx.cfg.bool("desktop.glass.enable") { self.screen_rect().map(|r| format!("{},{}", r.left, r.top)).unwrap_or_default() } else { String::new() };
+        format!("{}{at}", self.key_time(cx))
     }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
@@ -239,14 +373,22 @@ impl View for Card {
         let st = util::now();
         let h24 = cx.cfg.get("use24h").as_bool() != Some(false);
         let (_, h) = (c.w, c.h);
-        let card = R::new(4.0, 4.0, W - 8.0, h - 8.0);
-        let bg = |c: &mut Canvas| c.rect(card, 23.0, alpha(t.c("surfaceContainerLow"), 0.88));
+        let card = R::new(4.0, 4.0, c.w - 8.0, h - 8.0);
+        let big = sized(cx, &self.id).is_some();
+        let tiles = big && self.id == "resources";
+        let shapes: Vec<R> = if tiles { (0..3).map(|i| R::new(4.0 + i as f32 * (CELL_W + GAP), 4.0, CELL_W, h - 8.0)).collect() } else { vec![card] };
+        let glassy = matches!(self.id.as_str(), "todo" | "notes" | "timer" | "weather" | "week" | "greet" | "calendar" | "worldclock" | "resources" | "media");
+        let back = if glassy { self.glass_back(c, cx, &shapes) } else { None };
+        let bg = |c: &mut Canvas| match &back {
+            Some(b) => c.image(b, R::new(0.0, 0.0, 0.0, 0.0), 1.0),
+            None => c.rect(card, 23.0, alpha(t.c("surfaceContainerLow"), 0.88)),
+        };
         let muted = t.c("onSurfaceVariant");
         let fg = t.c("onSurface");
         let scale = c.scale;
         if matches!(self.id.as_str(), "media" | "lyrics" | "cover") {
             let id = self.id.clone();
-            return self.np.paint(c, cx, &id);
+            return self.np.paint(c, cx, &id, back.as_ref());
         }
 
         match self.id.as_str() {
@@ -254,6 +396,12 @@ impl View for Card {
             "notes" => { bg(c); if let Some(n) = &mut self.notes { n.paint(c, cx); } }
             "timer" => { bg(c); small::timer_paint(c, cx); }
             "clock" => clock(c, cx, &st, h24),
+            "weather" if big => {
+                bg(c);
+                if let Some(w) = &cx.weather {
+                    match cells(c) { (r, k) if r >= 2 && k >= 3 => big_weather(c, cx, w), (r, _) if r >= 2 => square_weather(c, cx, w), _ => small_weather(c, cx, w) }
+                }
+            }
             "weather" => {
                 bg(c);
                 let Some(w) = &cx.weather else { return };
@@ -291,6 +439,8 @@ impl View for Card {
                     c.text(&day.wDay.to_string(), R::new(x, 84.0, col, 26.0), txt(12.0, if today { 600 } else { 400 }), if today { t.c("onPrimary") } else { fg }, Align::Center);
                 }
             }
+            "greet" if big => { bg(c); big_greet(self, c, cx, &st); }
+            "resources" if big => big_resources(c, cx, back.as_ref()),
             "greet" => {
                 bg(c);
                 let name = [cx.cfg.str("userName").to_string(), cx.host.clone()].into_iter().find(|s| !s.is_empty()).unwrap_or_else(|| "there".into());
@@ -314,6 +464,10 @@ impl View for Card {
                 y += 13.0 * LH;
                 if show_date { c.text(&format!("Today • {}", date_fmt(&st, "dddd, MMM d")), R::new(x, y, wd, 11.0 * LH), txt(11.0, 400), muted, Align::Left); }
             }
+            "calendar" if big => {
+                bg(c);
+                match cells(c) { (r, k) if r >= 2 && k >= 3 => big_calendar(c, cx, &st), (r, _) if r >= 2 => grid_calendar(c, cx, &st), _ => day_calendar(c, cx, &st) }
+            }
             "calendar" => {
                 bg(c);
                 let y = h3(c, cx, "calendar_month", &date_fmt(&st, "MMMM yyyy"));
@@ -328,6 +482,7 @@ impl View for Card {
                     c.text(&d.to_string(), R::new(x, yy, col, 26.0), txt(12.0, if today { 600 } else { 400 }), colr, Align::Center);
                 }
             }
+            "worldclock" if big && cells(c).0 == 1 && cells(c).1 >= 3 => { bg(c); row_worldclock(c, cx, &st, h24); }
             "worldclock" => {
                 bg(c);
                 let mut y = h3(c, cx, "public", "World clock");
@@ -372,6 +527,14 @@ impl View for Card {
                 bg(c);
                 c.para(s, R::new(18.0, 16.0, W - 8.0 - 28.0, h - 32.0), txt(20.0, 500), fg, Align::Left);
             }
+            "image1" if big && !image_conf(cx, "image1").2.is_empty() => {
+                let file = image_conf(cx, "image1").2;
+                let r = R::new(4.0, 4.0, c.w - 8.0, c.h - 8.0);
+                if let Some(pic) = self.picture_wh(c.g, &file, (r.w * scale).round() as u32, (r.h * scale).round() as u32) {
+                    c.shadow(6.0, 16.0, 0.4, |c, col| if let Some(col) = col { c.rect(r, 23.0, col) });
+                    c.clip_round(r, 23.0, |c| c.image(&pic, r, 1.0));
+                }
+            }
             id if id.starts_with("image") || id == "sticker" => {
                 let id = id.to_string();
                 let (shape, size, file) = image_conf(cx, &id);
@@ -390,6 +553,207 @@ impl View for Card {
             }
             _ => {}
         }
+    }
+}
+
+/// The user card at a preset size: avatar and greeting side by side, or stacked in a one-cell card.
+fn big_greet(card: &mut Card, c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME) {
+    let t = &cx.theme;
+    let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
+    let name = [cx.cfg.str("userName").to_string(), cx.host.clone()].into_iter().find(|s| !s.is_empty()).unwrap_or_else(|| "there".into());
+    let (text, sub, show_date, file, shape) = greet_conf(cx);
+    let shape = if shape.is_empty() { Shape::Round(17.0) } else { Shape::parse(&shape) };
+    let narrow = c.w < 200.0 || (c.h > 150.0 && c.w < 330.0); // text goes under the avatar
+    let av_size = if c.w < 200.0 { 52.0 } else if narrow { 96.0 } else if c.h > 150.0 { 112.0 } else { 70.0 };
+    let av = R::new(if narrow && c.w >= 200.0 { (c.w - av_size) / 2.0 } else { 14.0 }, if narrow { 16.0 } else { (c.h - av_size) / 2.0 }, av_size, av_size);
+    let scale = c.scale;
+    if file.is_empty() || !card.shaped_picture(c, &file, shape, av, scale) {
+        if let Some(g) = shape.path(av) { c.fill_path(&g, t.c("tertiaryContainer")); }
+        c.text(&name.chars().next().map(|ch| ch.to_uppercase().collect::<String>()).unwrap_or_default(), av, txt(26.0, 600), t.c("onTertiaryContainer"), Align::Center);
+    }
+    let fill = |s: &str| s.replace("{name}", &name);
+    let hello = fill(if text.is_empty() { "Hi, {name}!" } else { &text });
+    let line = if sub.is_empty() { greeting(st.wHour).to_string() } else { fill(&sub) };
+    let (x, wd) = if narrow { (14.0, c.w - 8.0 - 12.0) } else { (14.0 + av_size + 12.0, c.w - 8.0 - 14.0 - av_size - 18.0) };
+    let block = 15.0 * LH + 13.0 * LH + if show_date && !narrow { 11.0 * LH } else { 0.0 };
+    let mut y = if narrow { av.y + av_size + 8.0 } else { (c.h - block) / 2.0 };
+    let al = if narrow && c.w >= 200.0 { Align::Center } else { Align::Left };
+    c.text(&hello, R::new(x, y, wd, 15.0 * LH), txt(15.0, 600), fg, al);
+    y += 15.0 * LH;
+    c.text(&line, R::new(x, y, wd, 13.0 * LH), txt(13.0, 400), fg, al);
+    y += 13.0 * LH;
+    if show_date && !narrow { c.text(&format!("Today \u{2022} {}", date_fmt(st, "dddd, MMM d")), R::new(x, y, wd, 11.0 * LH), txt(11.0, 400), muted, Align::Left); }
+}
+
+/// Resources as the preset shows it: CPU, RAM and disk as three separate one-cell tiles.
+fn big_resources(c: &mut Canvas, cx: &Ctx, back: Option<&Pixmap>) {
+    let t = &cx.theme;
+    let fg = t.c("onSurface");
+    for (i, (icon, v, label)) in [("speed", cx.cpu, "CPU"), ("memory", cx.mem, "RAM"), ("storage", cx.disk, "Disk")].iter().enumerate() {
+        let r = R::new(4.0 + i as f32 * (CELL_W + GAP), 4.0, CELL_W, c.h - 8.0);
+        // the glass picture covers the whole window: clip it to this tile or it paints over the earlier tiles
+        match back { Some(b) => c.clip_round(r, 23.0, |c| c.image(b, R::new(0.0, 0.0, 0.0, 0.0), 1.0)), None => c.rect(r, 23.0, alpha(t.c("surfaceContainerLow"), 0.88)) }
+        c.circle(r.x + r.w - 14.0 - 15.0, r.y + 14.0 + 15.0, 15.0, t.c("primaryContainer"));
+        c.icon(icon, R::new(r.x + r.w - 14.0 - 30.0, r.y + 14.0, 30.0, 30.0), ico(16.0, false), t.c("onPrimaryContainer"));
+        c.text(&format!("{}%", (v * 100.0).round()), R::new(r.x + 14.0, r.y + r.h - 14.0 - 14.0 * LH - 22.0 * LH, r.w - 20.0, 22.0 * LH), txt(22.0, 600), fg, Align::Left);
+        c.text(label, R::new(r.x + 14.0, r.y + r.h - 14.0 - 14.0 * LH, r.w - 20.0, 14.0 * LH), txt(13.0, 400), fg, Align::Left);
+    }
+}
+
+/// The tall calendar card: month and day on the left, the month grid on the right.
+fn big_calendar(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME) {
+    let t = &cx.theme;
+    let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
+    c.circle(20.0 + 22.0, 24.0 + 22.0, 22.0, t.c("primaryContainer"));
+    c.icon("calendar_month", R::new(20.0, 24.0, 44.0, 44.0), ico(22.0, false), t.c("onPrimaryContainer"));
+    let by = c.h - 4.0 - 14.0; // bottom padding
+    let day_y = by - 52.0 * LH + 6.0;
+    let wd_y = day_y - 17.0 * LH;
+    c.text(&date_fmt(st, "MMMM").to_uppercase(), R::new(20.0, wd_y - 15.0 * LH, 130.0, 15.0 * LH), txt(14.0, 500), fg, Align::Left);
+    c.text(&date_fmt(st, "dddd"), R::new(20.0, wd_y, 130.0, 17.0 * LH), txt(17.0, 500), fg, Align::Left);
+    c.text(&st.wDay.to_string(), R::new(20.0, day_y, 130.0, 52.0 * LH), txt(52.0, 500), fg, Align::Left);
+    let x0 = c.w * 0.38;
+    let col = (c.w - 8.0 - x0 - 18.0) / 7.0;
+    let rows = month_cells(st).len() as f32 / 7.0 + 1.0;
+    let step = ((c.h - 8.0 - 28.0) / rows).min(30.0);
+    c.rect(R::new(x0 - 6.0, 18.0, col * 7.0 + 12.0, step * rows + 8.0), 14.0, alpha(t.c("surfaceContainerHigh"), 0.5));
+    for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+        c.text(d, R::new(x0 + i as f32 * col, 22.0, col, step), txt(11.0, 600), fg, Align::Center);
+    }
+    for (i, (d, out, today)) in month_cells(st).into_iter().enumerate() {
+        let (x, y) = (x0 + (i % 7) as f32 * col, 22.0 + step * (i / 7 + 1) as f32);
+        if today { c.circle(x + col / 2.0, y + step / 2.0, (step / 2.0).min(col / 2.0), t.c("primary")); }
+        let colr = if today { t.c("onPrimary") } else if out { alpha(muted, 0.5) } else { fg };
+        c.text(&d.to_string(), R::new(x, y, col, step), txt(12.0, if today { 600 } else { 500 }), colr, Align::Center);
+    }
+}
+
+/// The weather card at a one-cell size: temperature and place at the bottom, the condition icon on top.
+fn small_weather(c: &mut Canvas, cx: &Ctx, w: &weather::Weather) {
+    let t = &cx.theme;
+    let fg = t.c("onSurface");
+    c.circle(c.w - 4.0 - 14.0 - 15.0, 4.0 + 14.0 + 15.0, 15.0, t.c("primaryContainer"));
+    c.icon(weather::icon(w.status), R::new(c.w - 4.0 - 14.0 - 30.0, 18.0, 30.0, 30.0), ico(16.0, true), t.c("onPrimaryContainer"));
+    let (x, wd) = (18.0, c.w - 8.0 - 20.0);
+    c.text(&weather::temp(w, cx.cfg.str("tempUnit")), R::new(x, c.h - 4.0 - 14.0 - 13.0 * LH - 24.0 * LH, wd, 24.0 * LH), txt(24.0, 600), fg, Align::Left);
+    c.text(if w.city.is_empty() { "Weather" } else { &w.city }, R::new(x, c.h - 4.0 - 14.0 - 13.0 * LH, wd, 13.0 * LH), txt(13.0, 400), fg, Align::Left);
+    if c.w > 250.0 {
+        // wider than one cell: the condition next to the temperature
+        let tx = 18.0 + c.g.measure(&weather::temp(w, cx.cfg.str("tempUnit")), txt(24.0, 600)).0 + 14.0;
+        c.text(&weather::text(w.status), R::new(tx, c.h - 4.0 - 14.0 - 13.0 * LH - 18.0 * LH, c.w - tx - 60.0, 15.0 * LH), txt(15.0, 500), fg, Align::Left);
+    }
+}
+
+/// The weather card two cells tall and narrower than three: temperature, place and four detail tiles.
+fn square_weather(c: &mut Canvas, cx: &Ctx, w: &weather::Weather) {
+    let t = &cx.theme;
+    let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
+    c.text(&weather::temp(w, cx.cfg.str("tempUnit")), R::new(20.0, 16.0, 150.0, 34.0 * LH), txt(34.0, 500), t.c("primary"), Align::Left);
+    c.text(if w.city.is_empty() { "Weather" } else { &w.city }, R::new(20.0, 16.0 + 34.0 * LH + 2.0, c.w - 90.0, 13.0 * LH), txt(13.0, 500), fg, Align::Left);
+    c.text(&weather::text(w.status), R::new(20.0, 16.0 + 34.0 * LH + 2.0 + 15.0 * LH, c.w - 90.0, 12.0 * LH), txt(12.0, 400), muted, Align::Left);
+    let chip = R::new(c.w - 4.0 - 14.0 - 42.0, 18.0, 42.0, 42.0);
+    c.circle(chip.x + 21.0, chip.y + 21.0, 21.0, t.c("primaryContainer"));
+    c.icon(weather::icon(w.status), chip, ico(22.0, true), t.c("onPrimaryContainer"));
+    let pct = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{}%", v.round()));
+    let tiles = [("water_drop", "Humidity", pct(w.humidity)), ("air", "Wind", w.wind.map_or("-".into(), |s| format!("{:.1} m/s", s / 3.6))),
+        ("rainy", "Rain", pct(w.rain)), ("visibility", "Visibility", w.visibility_km.map_or("-".into(), |v| format!("{v} km")))];
+    let tw = (c.w - 8.0 - 28.0 - 6.0) / 2.0;
+    let top = c.h - 4.0 - 14.0 - 2.0 * 54.0 - 6.0;
+    for (i, (icon, label, v)) in tiles.iter().enumerate() {
+        let r = R::new(14.0 + 4.0 + (i % 2) as f32 * (tw + 6.0), top + (i / 2) as f32 * 60.0, tw, 54.0);
+        c.rect(r, 14.0, alpha(t.c("surfaceContainerHigh"), 0.55));
+        c.icon(icon, R::new(r.x + 8.0, r.y, 18.0, r.h), ico(16.0, false), muted);
+        c.text(label, R::new(r.x + 30.0, r.y + 9.0, r.w - 32.0, 11.0 * LH), txt(10.0, 400), muted, Align::Left);
+        c.text(v, R::new(r.x + 30.0, r.y + 9.0 + 11.0 * LH, r.w - 32.0, 14.0 * LH), txt(13.0, 600), fg, Align::Left);
+    }
+}
+
+/// The calendar at one row: the month and weekday over a large day number.
+fn day_calendar(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME) {
+    let t = &cx.theme;
+    let fg = t.c("onSurface");
+    let by = c.h - 4.0 - 12.0;
+    c.text(&st.wDay.to_string(), R::new(18.0, by - 46.0 * LH, 120.0, 46.0 * LH), txt(46.0, 500), fg, Align::Left);
+    c.text(&date_fmt(st, "dddd"), R::new(18.0, by - 46.0 * LH - 15.0 * LH, c.w - 40.0, 15.0 * LH), txt(14.0, 500), fg, Align::Left);
+    c.text(&date_fmt(st, "MMMM").to_uppercase(), R::new(18.0, by - 46.0 * LH - 30.0 * LH, c.w - 40.0, 14.0 * LH), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+    if c.w > 200.0 {
+        let chip = R::new(c.w - 4.0 - 14.0 - 34.0, 18.0, 34.0, 34.0);
+        c.circle(chip.x + 17.0, chip.y + 17.0, 17.0, t.c("primaryContainer"));
+        c.icon("calendar_month", chip, ico(18.0, false), t.c("onPrimaryContainer"));
+    }
+}
+
+/// The calendar two rows tall and narrower than three cells: the month grid under its title.
+fn grid_calendar(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME) {
+    let t = &cx.theme;
+    let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
+    c.text(&date_fmt(st, "MMMM yyyy"), R::new(18.0, 14.0, c.w - 40.0, 15.0 * LH), txt(14.0, 600), fg, Align::Left);
+    let rows = month_cells(st).len() as f32 / 7.0 + 1.0;
+    let step = ((c.h - 8.0 - 14.0 - 15.0 * LH - 18.0) / rows).min(30.0);
+    let col = (c.w - 8.0 - 28.0) / 7.0;
+    let y0 = 14.0 + 15.0 * LH + 6.0;
+    for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+        c.text(d, R::new(18.0 + i as f32 * col, y0, col, step), txt(10.5, 600), muted, Align::Center);
+    }
+    for (i, (d, out, today)) in month_cells(st).into_iter().enumerate() {
+        let (x, y) = (18.0 + (i % 7) as f32 * col, y0 + step * (i / 7 + 1) as f32);
+        if today { c.circle(x + col / 2.0, y + step / 2.0, (step / 2.0).min(col / 2.0), t.c("primary")); }
+        let colr = if today { t.c("onPrimary") } else if out { alpha(muted, 0.5) } else { fg };
+        c.text(&d.to_string(), R::new(x, y, col, step), txt(11.5, if today { 600 } else { 400 }), colr, Align::Center);
+    }
+}
+
+/// The world clock in one row: each city as a column, name over time.
+fn row_worldclock(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME, h24: bool) {
+    let t = &cx.theme;
+    let zones = cx.cfg.strs("desktop.worldClocks");
+    if zones.is_empty() { return; }
+    let here = util::local_offset();
+    let utc_min = (st.wHour as i32 * 60 + st.wMinute as i32) - here;
+    let w = (c.w - 8.0 - 20.0) / zones.len() as f32;
+    for (i, tz) in zones.iter().enumerate() {
+        let r = R::new(14.0 + i as f32 * w, 4.0, w, c.h - 8.0);
+        let city = tz.rsplit('/').next().unwrap_or(tz).replace('_', " ");
+        c.text(&city, R::new(r.x, r.y + 20.0, r.w, 13.0 * LH), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Center);
+        if let Some(off) = util::zone_offset(tz) {
+            let m = (utc_min + off).rem_euclid(1440);
+            c.text(&util::clock((m / 60) as u16, (m % 60) as u16, h24), R::new(r.x, r.y + 20.0 + 13.0 * LH + 4.0, r.w, 24.0 * LH), txt(22.0, 500), t.c("onSurface"), Align::Center);
+        }
+    }
+}
+
+/// The tall weather card: temperature and place on top, six detail tiles below.
+fn big_weather(c: &mut Canvas, cx: &Ctx, w: &weather::Weather) {
+    let t = &cx.theme;
+    let (fg, muted) = (t.c("onSurface"), t.c("onSurfaceVariant"));
+    let fahrenheit = cx.cfg.str("tempUnit") == "F";
+    c.text(&weather::temp(w, cx.cfg.str("tempUnit")), R::new(20.0, 16.0, 150.0, 40.0 * LH), txt(40.0, 500), t.c("primary"), Align::Left);
+    c.text(&weather::text(w.status), R::new(170.0, 22.0, 150.0, 15.0 * LH), txt(15.0, 500), fg, Align::Left);
+    if let Some(f) = w.feels {
+        let (v, u) = if fahrenheit { (f * 9.0 / 5.0 + 32.0, "F") } else { (f, "C") };
+        c.text(&format!("Feels like {}\u{b0}{u}", v.round()), R::new(170.0, 22.0 + 15.0 * LH, 150.0, 12.0 * LH), txt(11.5, 400), muted, Align::Left);
+    }
+    let city_y = 16.0 + 40.0 * LH + 2.0;
+    c.icon("location_on", R::new(20.0, city_y, 14.0, 13.0 * LH), ico(12.0, false), muted);
+    c.text(if w.city.is_empty() { "Weather" } else { &w.city }, R::new(36.0, city_y, 200.0, 13.0 * LH), txt(13.0, 500), muted, Align::Left);
+    let chip = R::new(c.w - 4.0 - 16.0 - 46.0, 18.0, 46.0, 46.0);
+    c.circle(chip.x + 23.0, chip.y + 23.0, 23.0, t.c("primaryContainer"));
+    c.icon(weather::icon(w.status), chip, ico(24.0, true), t.c("onPrimaryContainer"));
+    let pct = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{}%", v.round()));
+    let time = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
+    let tiles = [
+        ("water_drop", "Humidity", pct(w.humidity)), ("air", "Wind", w.wind.map_or("-".into(), |s| format!("{:.2} m/s", s / 3.6))),
+        ("rainy", "Rain Chance", pct(w.rain)), ("visibility", "Visibility", w.visibility_km.map_or("-".into(), |v| format!("{v} km"))),
+        ("wb_twilight", "Sunrise", time(&w.sunrise)), ("bedtime", "Sunset", time(&w.sunset)),
+    ];
+    let gy = c.h - 4.0 - 12.0 - 2.0 * 54.0 - 6.0;
+    let tw = (c.w - 8.0 - 32.0 - 2.0 * 6.0) / 3.0;
+    for (i, (icon, label, v)) in tiles.iter().enumerate() {
+        let r = R::new(16.0 + (i % 3) as f32 * (tw + 6.0), gy + (i / 3) as f32 * 60.0, tw, 54.0);
+        c.rect(r, 14.0, alpha(t.c("surfaceContainerHigh"), 0.55));
+        c.icon(icon, R::new(r.x + 8.0, r.y, 18.0, r.h), ico(16.0, false), muted);
+        c.text(label, R::new(r.x + 30.0, r.y + 9.0, r.w - 32.0, 11.0 * LH), txt(10.0, 400), muted, Align::Left);
+        c.text(v, R::new(r.x + 30.0, r.y + 9.0 + 11.0 * LH, r.w - 32.0, 14.0 * LH), txt(13.0, 600), fg, Align::Left);
     }
 }
 
@@ -520,6 +884,31 @@ mod tests {
         assert_eq!(default_slot(&w, "weather", 1040.0), (16.0, 332.0));
         assert_eq!(default_slot(&w, "lyrics", 1040.0), (454.0, 72.0)); // 72+260+102+280 > 1024: next column
     }
+    #[test]
+    fn snapping_lines_cards_up() {
+        // a card 5px off another's left edge snaps to it; 30px off stays where it is
+        assert_eq!(snap_axis((105, 305), &[(100, 400)], 12, 8), -5);
+        assert_eq!(snap_axis((130, 330), &[(100, 400)], 12, 8), 0);
+        // centres meet: mine centre 200 vs other centre 205
+        assert_eq!(snap_axis((150, 250), &[(100, 310)], 12, 8), 5);
+        // a neighbour's far edge plus the gap: mine starts at 417, other ends at 400, gap 12
+        assert_eq!(snap_axis((417, 500), &[(100, 400)], 12, 8), -5);
+        // the closest of several candidates wins
+        assert_eq!(snap_axis((106, 300), &[(100, 400), (108, 150)], 12, 8), 2);
+        let others = [(228, 324, 642, 576)];
+        // dragged window at (230, 600) with a 4px margin: its top is 2px under the other's bottom + 12 gap... snaps y
+        assert_eq!(snap_card((226, 580), (300, 200), 4, &others, 12, 8), (224, 580 + (576 + 12 - 584)));
+    }
+
+    #[test]
+    fn preset_grid_sizes() {
+        assert_eq!(grid_size("2x3"), Some((414.0, 252.0)));
+        assert_eq!(grid_size("1x1"), Some((130.0, 120.0)));
+        assert_eq!(grid_size("1x2"), Some((272.0, 120.0)));
+        assert_eq!(grid_size("0x2"), None);
+        assert_eq!(grid_size("big"), None);
+    }
+
     #[test]
     fn grid_is_whole_weeks() {
         let st = windows::Win32::Foundation::SYSTEMTIME { wYear: 2026, wMonth: 11, wDay: 4, wDayOfWeek: 3, ..Default::default() };

@@ -4,7 +4,13 @@ use crate::util::http_get;
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Weather { pub status: &'static str, pub celsius: f64, pub wind: Option<f64>, pub city: String }
+pub struct Weather {
+    pub status: &'static str, pub celsius: f64, pub wind: Option<f64>, pub city: String,
+    /// The detail tiles of the big weather card; None when the service left a value out.
+    pub feels: Option<f64>, pub humidity: Option<f64>, pub rain: Option<f64>, pub visibility_km: Option<f64>,
+    /// "HH:MM" local time.
+    pub sunrise: String, pub sunset: String,
+}
 
 /// Zebar's mapping from WMO weather codes to its status names.
 pub fn status(code: u64, day: bool) -> &'static str {
@@ -45,10 +51,16 @@ pub fn temp(w: &Weather, unit: &str) -> String {
 pub fn fetch() -> Option<Weather> {
     let ip: Value = serde_json::from_str(&http_get("https://ipinfo.io/json")?).ok()?;
     let (lat, lon) = ip.get("loc")?.as_str()?.split_once(',')?;
-    let url = format!("https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&timezone=auto");
+    let url = format!("https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&hourly=apparent_temperature,relative_humidity_2m,precipitation_probability,visibility&daily=sunrise,sunset&forecast_days=1&timezone=auto");
     let w: Value = serde_json::from_str(&http_get(&url)?).ok()?;
     let cur = w.get("current_weather")?;
+    let hour = cur.get("time").and_then(Value::as_str).and_then(|t| t.get(11..13)).and_then(|h| h.parse::<usize>().ok()).unwrap_or(0);
+    let at = |key: &str| w["hourly"][key].get(hour).and_then(Value::as_f64);
+    let clock = |key: &str| w["daily"][key].get(0).and_then(Value::as_str).and_then(|t| t.get(11..16)).unwrap_or("").to_string();
     Some(Weather {
+        feels: at("apparent_temperature"), humidity: at("relative_humidity_2m"),
+        rain: at("precipitation_probability"), visibility_km: at("visibility").map(|m| (m / 100.0).round() / 10.0),
+        sunrise: clock("sunrise"), sunset: clock("sunset"),
         status: status(cur.get("weathercode")?.as_u64()?, cur.get("is_day").and_then(Value::as_u64) != Some(0)),
         celsius: cur.get("temperature")?.as_f64()?,
         wind: cur.get("windspeed").and_then(Value::as_f64),
@@ -66,7 +78,7 @@ mod tests {
         assert_eq!(icon("heavy_rain_night"), "rainy");
         assert_eq!(text("clear_day"), "clear sky");
         assert_eq!(text("light_rain_night"), "light rain");
-        let w = Weather { status: "clear_day", celsius: 21.6, wind: None, city: String::new() };
+        let w = Weather { status: "clear_day", celsius: 21.6, wind: None, city: String::new(), feels: None, humidity: None, rain: None, visibility_km: None, sunrise: String::new(), sunset: String::new() };
         assert_eq!(temp(&w, "F"), "71°F");
         assert_eq!(temp(&w, "C"), "22°C");
     }

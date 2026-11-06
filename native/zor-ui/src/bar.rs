@@ -154,6 +154,34 @@ enum El {
     Img(u32, Pixmap, f32), // hit id, picture, size
     Col(Vec<(String, Font, Color)>, f32), // stacked lines (active window, net speed), max width
     Eq(Color, bool), // the island's equalizer bars, moving while `playing`
+    Viz(Color, Vec<f32>), // the bar visualizer (#bar-viz): bars at 0-1 levels
+}
+
+/// #bar-viz: a 60 x 22 canvas of 20 bars.
+const VIZ_W: f32 = 60.0;
+const VIZ_H: f32 = 22.0;
+const VIZ_BARS: u64 = 20;
+const VIZ: u32 = 17;
+
+/// The bar visualizer with its top-left corner at (x, y); also drawn by the Settings preview.
+pub fn draw_viz(c: &mut Canvas, x: f32, y: f32, col: Color, levels: &[f32]) {
+    for (bx, top, bw, bh) in viz_bars(levels, VIZ_W, VIZ_H) {
+        let (x, y) = (x + bx, y + top);
+        let r = (bw / 2.0).min(4.0); // roundRect(x, y, bw, bh, [r, r, 0, 0])
+        if bh <= r * 2.0 { c.rect(R::new(x, y, bw, bh), r.min(bh / 2.0), col); }
+        else { c.rect(R::new(x, y, bw, r * 2.0), r, col); c.rect(R::new(x, y + r * 2.0, bw, bh - r * 2.0), 0.0, col); }
+    }
+}
+
+/// drawBars(.., 'bar'): each bar's (x, top, width, height) in the canvas. 1.5 px gaps, at least 2 px tall, full height at level 1.
+fn viz_bars(levels: &[f32], w: f32, h: f32) -> Vec<(f32, f32, f32, f32)> {
+    let n = levels.len().max(1) as f32;
+    let gap = 1.5;
+    let bw = (w / n - gap).max(1.0);
+    levels.iter().enumerate().map(|(i, v)| {
+        let bh = (v.clamp(0.0, 1.0) * h).max(2.0);
+        (i as f32 * (bw + gap) + gap / 2.0, h - bh, bw, bh)
+    }).collect()
 }
 
 /// The island's equalizer (the marketing page's .island .eq): 4 bars 3px wide, 3px apart, up to 18px tall.
@@ -168,6 +196,13 @@ fn eq_level(ms: f64, i: usize, playing: bool) -> f32 {
     0.4 + 0.6 * bezier(0.16, 1.0, 0.3, 1.0, x)
 }
 
+/// Part of the repaint key, so a paused island (which isn't redrawing) picks up a new or previewed theme at once.
+fn theme_key(t: &crate::conf::Theme) -> String { format!("{:x}{:x}{:x}", t.c("primary"), t.c("onSurface"), t.c("background")) }
+
+/// The island's mute button: what it shows for the current state, and the island's control buttons (previous, play, next, mute).
+fn mute_icon(muted: bool) -> &'static str { if muted { "volume_off" } else { "volume_up" } }
+const CTL_N: u32 = 4;
+
 struct Pill { id: u32, els: Vec<El>, pad: (f32, f32), gap: f32, bg: Option<Color>, hover: bool, fixed: Option<f32>, kind: Kind }
 #[derive(Clone, Copy, PartialEq)]
 enum Kind { Group, Plain, Aw }
@@ -180,6 +215,7 @@ pub struct Bar {
     pub origin: (i32, i32),
     island: Spring,
     di_hover: bool,
+    island_cap: Option<f32>, // the most width the island may take on a narrow bar (from the last frame)
     di_focus: String,
     di_track: String,
     di_track_until: f64,
@@ -197,12 +233,28 @@ pub struct Bar {
     pulsing: bool,
     /// The equalizer is moving (a song is playing in the island).
     eq: bool,
+    /// The bar visualizer's levels and stream (started while `visualizer.bar` is on), and sound is playing in it.
+    viz: std::sync::Arc<crate::viz::Shared>,
+    viz_stream: Option<proc::Stream>,
+    viz_loud: bool,
 }
 
 impl Bar {
+    /// #bar-viz, shown after the island (or after the media group when the island isn't on the bar). Starts or stops the stream.
+    fn viz_pill(&mut self, cx: &Ctx) -> Option<Pill> {
+        if !cx.cfg.bool("visualizer.bar") { self.viz_stream = None; return None; }
+        if self.viz_stream.is_none() { self.viz_stream = crate::viz::listen(&cx.cfg, VIZ_BARS, self.viz.clone()); }
+        let levels = self.viz.levels.lock().map(|g| g.clone()).unwrap_or_default();
+        self.viz_loud = levels.iter().any(|&v| v > 0.0);
+        if !self.viz_loud { self.viz.awake.store(false, std::sync::atomic::Ordering::Relaxed); }
+        let col = cx.cfg.viz_color("visualizer.barColor").unwrap_or_else(|| cx.theme.c("primary"));
+        Some(Pill { id: VIZ, els: vec![El::Viz(col, levels)], pad: (0.0, 0.0), gap: 0.0, bg: None, hover: false, fixed: None, kind: Kind::Plain })
+    }
+
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
-        Bar { mon, edge, origin, island: Spring::default(), di_hover: false, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
-            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false }
+        Bar { mon, edge, origin, island: Spring::default(), di_hover: false, island_cap: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
+            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false,
+            viz: Default::default(), viz_stream: None, viz_loud: false }
     }
 
     fn monitor<'a>(&self, cx: &'a Ctx) -> Option<&'a crate::glaze::Monitor> { cx.wm.monitor_at(self.mon.0, self.mon.1) }
@@ -265,6 +317,7 @@ fn el_w(g: &Gfx, e: &El) -> f32 {
         El::Img(_, _, s) => *s + 6.0,
         El::Col(lines, max) => lines.iter().map(|(t, f, _)| g.measure(t, *f).0).fold(0.0, f32::max).min(*max).ceil(),
         El::Eq(..) => (EQ_BARS * 6 - 3) as f32,
+        El::Viz(..) => VIZ_W,
     }
 }
 
@@ -321,6 +374,7 @@ fn draw_el(c: &mut Canvas, cx: &Ctx, e: &El, x: f32, cy: f32, hover: u32) {
                 c.rect(R::new(x + i as f32 * 6.0, cy + 9.0 - h, 3.0, h), 1.5, *col);
             }
         }
+        El::Viz(col, levels) => draw_viz(c, x, cy - VIZ_H / 2.0, *col, levels),
     }
 }
 
@@ -333,6 +387,42 @@ fn btn(id: u32, w: f32, icon: &'static str, size: f32, fill: bool, col: Color) -
 fn fit(widths: &[f32], i: usize, gap: f32, room: f32, min: f32) -> Option<f32> {
     let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
     (total > room).then(|| (widths[i] - (total - room)).max(min))
+}
+
+/// Makes a horizontal bar's groups fit `room` with some air left, and returns the extra pixels
+/// (0..=7) to add to every gap, and the width the island may take (None: no limit). In order: the
+/// song text shrinks (down to 60), the least useful groups go (visualizer, weather, net speed, quick
+/// buttons), the tray keeps 6 icons, the timer goes, and what is still short is taken from the island.
+/// Its width is animated, so it cuts its own title to the cap: a hovered (wide) one gives way instead
+/// of covering its neighbours, and a collapsed one may grow back to the same cap.
+fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (f32, Option<f32>) {
+    const MARGIN: f32 = 12.0; // least gap between the side groups and the centre, each side
+    const AIR: f32 = 40.0; // spare room wanted on top of the least gaps
+    if room > 1300.0 { return (0.0, None); } // a wide screen keeps the layout it always had
+    let free = |s: &[Vec<Pill>; 3]| {
+        let sum = |v: &Vec<Pill>, gap: f32| v.iter().map(&w).sum::<f32>() + gap * v.len().saturating_sub(1) as f32;
+        room - (sum(&s[0], 6.0) + sum(&s[1], 5.0) + sum(&s[2], 6.0) + 2.0 * MARGIN)
+    };
+    while free(sides) < AIR {
+        let widest = sides.iter_mut().flatten().filter(|p| p.id == MEDIA && p.fixed.is_none())
+            .filter_map(|p| p.els.iter_mut().find_map(|e| if let El::Txt(_, _, _, m) = e { Some(m) } else { None }))
+            .filter(|m| **m > 60.0).max_by(|a, b| a.total_cmp(b));
+        let Some(m) = widest else { break };
+        *m = (*m - 20.0).max(60.0);
+    }
+    for id in [VIZ, WEATHER, NET, UTIL] {
+        if free(sides) >= AIR { break; }
+        for s in sides.iter_mut() { s.retain(|p| p.id != id); }
+    }
+    if free(sides) < AIR {
+        for p in sides.iter_mut().flatten().filter(|p| p.id == TRAY) { p.els.truncate(6); }
+    }
+    if free(sides) < AIR {
+        for s in sides.iter_mut() { s.retain(|p| p.id != TIMER); }
+    }
+    let cap = sides.iter().flatten().find(|p| p.id == ISLAND).map(|p| (w(p) + free(sides) - AIR).max(60.0));
+    let gaps: usize = sides.iter().map(|s| s.len().saturating_sub(1)).sum::<usize>() + 2;
+    (((free(sides) - AIR).max(0.0) / gaps as f32).min(7.0), cap)
 }
 
 fn pill_w(g: &Gfx, p: &Pill) -> f32 {
@@ -449,11 +539,12 @@ impl Bar {
                 els.push(El::Ring { size: 28.0, value: if flag("progress") { m.progress() } else { 0.0 }, icon: "music_note", isize: 14.0, fill: true, color: fg, art });
                 let title = if wide && !m.artist.is_empty() { format!("{} • {}", m.title, m.artist) } else { m.title.clone() };
                 els.push(El::Txt(title, txt(13.0, 400), fg, if wide { wide_w } else { text_w }));
-                if !wide && flag("eq") { els.push(El::Eq(fg, m.playing)); self.eq = m.playing; }
+                if !wide && flag("eq") { els.push(El::Eq(cx.cfg.viz_color("island.eqColor").unwrap_or_else(|| t.c("primary")), m.playing)); self.eq = m.playing; }
                 if wide && flag("controls") {
                     els.push(btn(CTL, 26.0, "skip_previous", 18.0, true, fg));
                     els.push(btn(CTL + 1, 26.0, if m.playing { "pause" } else { "play_arrow" }, 18.0, true, fg));
-                    els.push(btn(CTL + 2, 26.0, "skip_next", 18.0, true, fg));
+                    els.push(btn(CTL + 2, 26.0, "skip_next", 18.0, true, if m.can_next { fg } else { alpha(fg, 0.4) })); // previous restarts the track, so it stays lit
+                    els.push(btn(CTL + 3, 26.0, mute_icon(cx.audio.is_some_and(|a| a.muted)), 18.0, true, fg));
                 }
             }
             _ => {
@@ -485,6 +576,13 @@ impl Bar {
         }
         if els.is_empty() { return None; }
         let mut p = Pill { id: ISLAND, els, pad: (9.0, 9.0), gap: 7.0, bg, hover: false, fixed: None, kind: Kind::Group };
+        if let Some(cap) = self.island_cap {
+            while pill_w(c.g, &p) > cap {
+                let Some(El::Txt(_, _, _, m)) = p.els.iter_mut().find(|e| matches!(e, El::Txt(..))) else { break };
+                if *m <= 60.0 { break; }
+                *m = (*m - 10.0).max(60.0);
+            }
+        }
         let target = pill_w(c.g, &p);
         self.island.set(target);
         p.fixed = Some(self.island.value().max(10.0));
@@ -513,7 +611,7 @@ impl Bar {
                         None => ("Desktop".into(), self.monitor(cx).and_then(|m| m.workspaces.iter().find(|w| w.displayed)).map_or("Windows".into(), |w| format!("Workspace {}", w.display))),
                     };
                     let max = c.w * cx.cfg.get("bar.titleWidth").as_f64().unwrap_or(34.0) as f32 / 100.0; // .aw-title max-width: 34vw
-                    let pad = if cx.cfg.str("bar.style") == "islands" { (16.0, 16.0) } else { (6.0, 6.0) };
+                    let pad = if matches!(cx.cfg.str("bar.style"), "islands" | "clear") { (16.0, 16.0) } else { (6.0, 6.0) };
                     // one line, like the clock pill: "App • Title"
                     let text = if title == app { app } else { format!("{app} • {title}") };
                     out.push(Pill { kind: Kind::Aw, ..group(WINDOW, vec![El::Txt(text, txt(13.5, 400), fg, max)], pad, 0.0) });
@@ -534,9 +632,10 @@ impl Bar {
                         let text = if m.artist.is_empty() { m.title.clone() } else { format!("{} • {}", m.title, m.artist) };
                         out.push(group(MEDIA, vec![El::Ring { size: 26.0, value: m.progress(), icon: if m.playing { "pause" } else { "play_arrow" }, isize: 16.0, fill: true, color: fg, art: None },
                             El::Txt(text, txt(13.0, 400), fg, 230.0)], (5.0, 10.0), 6.0));
+                        if !island_on { out.extend(self.viz_pill(cx)); }
                     }
                 }
-                "island" => { let ob = &on_bar; if let Some(p) = self.island(c, cx, ob) { out.push(p); } }
+                "island" => { let ob = &on_bar; if let Some(p) = self.island(c, cx, ob) { out.push(p); out.extend(self.viz_pill(cx)); } }
                 "workspaces" => {
                     let mon = self.monitor(cx);
                     let shown = mon.and_then(|m| m.workspaces.iter().find(|w| w.displayed)).map(|w| w.name.clone());
@@ -670,6 +769,7 @@ fn el_h(e: &El) -> f32 {
         El::Img(_, _, s) => *s + 6.0,
         El::Col(lines, _) => lines.iter().map(|(_, f, _)| f.size * 1.15).sum(),
         El::Eq(..) => 18.0,
+        El::Viz(..) => VIZ_H,
     }
 }
 
@@ -702,6 +802,7 @@ fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) {
     let (style, groups) = (cx.cfg.str("bar.style"), cx.cfg.str("bar.groups"));
     let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
     let border = alpha(t.c("outlineVariant"), 0.45);
+    if style == "clear" { return (None, None, false); } // a preset's "transparent" bar: only the contents show
     if style == "islands" { return (Some(layer0), Some(border), true); } // `#bar.islands .group` outranks the state colours
     if p.kind != Kind::Group { return (None, None, false); }
     match groups {
@@ -719,13 +820,16 @@ impl View for Bar {
     fn key(&self, cx: &Ctx) -> String {
         let st = util::now();
         let m = cx.media.as_ref().map_or(0, |m| (m.progress() * 200.0) as i32);
-        format!("{}{}{}{m}", st.wHour, st.wMinute, st.wSecond)
+        // sound starting or stopping in the bar visualizer repaints it
+        let loud = self.viz_stream.is_some() && self.viz.levels.lock().is_ok_and(|g| g.iter().any(|&v| v > 0.0));
+        format!("{}{}{}{m}{}{loud}", st.wHour, st.wMinute, st.wSecond, theme_key(&cx.theme))
     }
 
-    fn frame_ms(&self) -> u32 { if self.island.moving() { 16 } else if self.eq { 50 } else if self.pulsing { 100 } else { 0 } }
+    fn frame_ms(&self) -> u32 { if self.island.moving() || self.viz_loud { 16 } else if self.eq { 50 } else if self.pulsing { 100 } else { 0 } }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.eq = false; // island() turns it back on; off when the island isn't on this bar
+        self.viz_loud = false; // viz_pill() turns it back on
         let t = &cx.theme;
         let style = cx.cfg.str("bar.style");
         let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
@@ -739,7 +843,7 @@ impl View for Bar {
         };
         let pad = if flat { 10.0 } else { 5.0 };
         let (cx_, cy) = (bx + bw / 2.0, by + bh / 2.0);
-        if style != "islands" {
+        if !matches!(style, "islands" | "clear") {
             let bar = R::new(bx, by, bw, bh);
             let round = if flat { 0.0 } else { 23.0 };
             if !flat { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { c.rect(bar, round, col) }); }
@@ -768,25 +872,28 @@ impl View for Bar {
             }
             place_column(&hs, bx + pad, pw, by + pad, avail, tight)
         } else {
+            let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
+            let (extra, cap) = compact(&mut sides, inner_w, |p| pill_w(c.g, p)); // a narrow (portrait) screen
+            self.island_cap = cap;
+            let (g5, g6) = (5.0 + extra, 6.0 + extra);
             let mut widths: Vec<Vec<f32>> = sides.iter().map(|s| s.iter().map(|p| pill_w(c.g, p)).collect()).collect();
             let sum = |w: &[f32], gap: f32| w.iter().sum::<f32>() + gap * w.len().saturating_sub(1) as f32;
-            let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
-            let cw = sum(&widths[1], 5.0);
+            let cw = sum(&widths[1], g5);
             // grid 1fr auto 1fr: a side gets half of what the centre leaves, and a long window title
             // shrinks (ellipsis) to fit it instead of running under the centre groups
             let room = (inner_w - cw) / 2.0 - 8.0;
             for si in [0, 2] {
                 let Some(pi) = sides[si].iter().position(|p| p.id == WINDOW) else { continue };
                 let p = &mut sides[si][pi];
-                let Some(w) = fit(&widths[si], pi, 6.0, room, p.pad.0 + p.pad.1 + 40.0) else { continue };
+                let Some(w) = fit(&widths[si], pi, g6, room, p.pad.0 + p.pad.1 + 40.0) else { continue };
                 if let Some(El::Col(_, max) | El::Txt(_, _, _, max)) = p.els.first_mut() { *max = w - p.pad.0 - p.pad.1; }
                 widths[si][pi] = pill_w(c.g, p);
             }
             let total = |i: usize, gap: f32| sum(&widths[i], gap);
-            let starts = [inner_x, inner_x + (inner_w - cw) / 2.0, inner_x + inner_w - total(2, 6.0)];
+            let starts = [inner_x, inner_x + (inner_w - cw) / 2.0, inner_x + inner_w - total(2, g6)];
             let mut placed = vec![];
             for (si, s) in sides.iter().enumerate() {
-                let gap = if si == 1 { 5.0 } else { 6.0 };
+                let gap = if si == 1 { g5 } else { g6 };
                 let mut x = starts[si];
                 for (pi, p) in s.iter().enumerate() {
                     let w = widths[si][pi];
@@ -835,7 +942,7 @@ impl View for Bar {
         match ev {
             Input::Hover(id) => {
                 self.hover = id;
-                let over = id == ISLAND || (BADGE..CTL + 3).contains(&id);
+                let over = id == ISLAND || (BADGE..CTL + CTL_N).contains(&id);
                 if over != self.di_hover { self.di_hover = over; cx.ver += 1; }
             }
             Input::Click(id, b) => self.click(id, b, cx),
@@ -897,9 +1004,18 @@ impl Bar {
             (MEDIA, Btn::Left) => media::control("togglePlayPause"),
             (MEDIA, Btn::Middle) => media::control("next"),
             (MEDIA, Btn::Right) => self.open_here(cx, "sidebar-left"),
-            (i, Btn::Left) if (CTL..CTL + 3).contains(&i) => media::control(["previous", "togglePlayPause", "next"][(i - CTL) as usize]),
+            (i, Btn::Left) if i == CTL + 3 => {
+                if let Some(a) = cx.audio.as_mut() { a.muted = !a.muted; media::set_mute(a.muted); } // flip now, the poll confirms
+            }
+            (i, Btn::Left) if i == CTL || i == CTL + 2 => if let Some(m) = &cx.media { media::skip(m, i == CTL + 2) },
+            (i, Btn::Left) if i == CTL + 1 => media::control("togglePlayPause"),
             (i, Btn::Left) if (BADGE..BADGE + 16).contains(&i) => {
                 if let Some(p) = Self::island_list(cx).get((i - BADGE) as usize) { self.di_focus = p.0.into(); }
+            }
+            // a click on the notification banner goes to that notification
+            (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
+                if let Some(t) = crate::app::Notif::target(&cx.notif, hub::now_ms()) { crate::bridge::sys::open_and_point(t); }
+                cx.notif = None;
             }
             (ISLAND, Btn::Left) => { let a = cx.cfg.str("island.click").to_string(); act(self, if a.is_empty() { "panel" } else { &a }, cx) }
             (ISLAND, Btn::Right) => { let a = cx.cfg.str("island.rightClick").to_string(); act(self, if a.is_empty() { "sidebar-left" } else { &a }, cx) }
@@ -1048,6 +1164,29 @@ impl View for Popup {
 
 #[cfg(test)]
 mod tests {
+    /// drawBars 'bar': 20 bars in 60 px with 1.5 px gaps are 1.5 px wide; silence is 2 px stubs, level 1 fills the 22 px.
+    #[test]
+    fn bar_visualizer_geometry() {
+        let bars = viz_bars(&[0.0, 1.0, 0.5, 2.0, -1.0], 60.0, 22.0);
+        assert_eq!(bars[0], (0.75, 20.0, 10.5, 2.0));
+        assert_eq!((bars[1].1, bars[1].3), (0.0, 22.0));
+        assert_eq!(bars[2].3, 11.0);
+        assert_eq!(bars[3].3, 22.0); // clamped
+        assert_eq!(bars[4].3, 2.0);
+        let twenty = viz_bars(&[0.0; 20], 60.0, 22.0);
+        assert_eq!((twenty[0].2, twenty[1].0), (1.5, 3.75)); // gap / 2 + (bw + gap)
+        assert!(viz_bars(&[], 60.0, 22.0).is_empty());
+        assert_eq!(el_h(&El::Viz(0, vec![])), 22.0);
+    }
+
+    /// Off by default: no pill and no stream. (The stream itself needs real audio, so it isn't started here.)
+    #[test]
+    fn bar_visualizer_is_off_until_switched_on() {
+        let mut bar = Bar::new((0, 0, 1920, 1080), Edge::Top, (0, 0));
+        let cx = Ctx::new(false);
+        assert!(bar.viz_pill(&cx).is_none() && bar.viz_stream.is_none() && !bar.viz_loud);
+    }
+
     /// Bars stay inside 40-100%, sit still while paused, move while playing, and start out of step.
     #[test]
     fn equalizer_levels() {
@@ -1063,6 +1202,27 @@ mod tests {
         assert!(eq_level(250.0, 0, true) > eq_level(100.0, 0, true));
         let first: Vec<f32> = (0..EQ_BARS).map(|i| eq_level(0.0, i, true)).collect();
         assert!(first.windows(2).any(|w| (w[0] - w[1]).abs() > 0.1), "bars are out of step: {first:?}");
+    }
+
+    #[test]
+    fn a_new_or_previewed_theme_changes_the_repaint_key() {
+        let t = |p: &str, bg: &str| crate::conf::Theme::parse(&format!(r##"{{"colors":{{"primary":"{p}","background":"{bg}"}}}}"##));
+        let base = theme_key(&t("#4F46E5", "#101010"));
+        assert_eq!(base, theme_key(&t("#4F46E5", "#101010")));
+        assert_ne!(base, theme_key(&t("#E54646", "#101010")));
+        assert_ne!(base, theme_key(&t("#4F46E5", "#FFFFFF")));
+        crate::conf::set_preview(Some(std::collections::HashMap::from([("primary".to_string(), 0xFF00_FF00)])));
+        let previewed = theme_key(&t("#4F46E5", "#101010"));
+        crate::conf::set_preview(None);
+        assert_ne!(base, previewed);
+        assert_eq!(base, theme_key(&t("#4F46E5", "#101010")));
+    }
+
+    #[test]
+    fn mute_button_shows_the_state_and_is_one_of_the_island_controls() {
+        assert_eq!((mute_icon(true), mute_icon(false)), ("volume_off", "volume_up"));
+        assert!(CTL + 3 < CTL + CTL_N && CTL + CTL_N <= CTL + 0x10);
+        assert!(!(BADGE..BADGE + 16).contains(&(CTL + 3)), "the mute id must not collide with the badges");
     }
 
     #[test]
@@ -1148,6 +1308,49 @@ mod tests {
         fit_column(&mut t, 38.0);
         assert!(matches!(&t.els[0], El::Txt(_, _, _, 38.0)) && matches!(&t.els[1], El::Meter(38.0, _)));
         assert!(pill_h(&t) > 2.0 * 8.0);
+    }
+
+    #[test]
+    fn narrow_bar_drops_extras_in_order() {
+        let pill = |id, w| Pill { id, els: vec![], pad: (0.0, 0.0), gap: 0.0, bg: None, hover: false, fixed: Some(w), kind: Kind::Group };
+        let mk = || [vec![pill(LAUNCHER, 300.0)], vec![pill(WEATHER, 100.0), pill(VIZ, 100.0)], vec![pill(NET, 100.0), pill(SYS, 300.0)]];
+        let ids = |s: &[Vec<Pill>; 3]| s.iter().flatten().map(|p| p.id).collect::<Vec<_>>();
+        let mut roomy = mk();
+        assert_eq!(compact(&mut roomy, 2000.0, |p| p.fixed.unwrap()), (0.0, None)); // a wide screen is left alone
+        assert_eq!(roomy.iter().flatten().count(), 5);
+        // 900 wide + 11 of gaps + 24 of margin = 935 and 40 of air wanted: the visualizer goes, 50 is left over
+        let mut s = mk();
+        let extra = compact(&mut s, 880.0, |p| p.fixed.unwrap()).0;
+        assert_eq!(ids(&s), vec![LAUNCHER, WEATHER, NET, SYS]);
+        assert!((extra - 10.0 / 3.0).abs() < 1e-3); // 10 spare over 3 gaps
+        // plenty of spare room widens the gaps, up to 7
+        let mut s = mk();
+        assert_eq!(compact(&mut s, 1200.0, |p| p.fixed.unwrap()).0, 7.0);
+        assert_eq!(s.iter().flatten().count(), 5);
+        // far too narrow: the always-kept groups stay
+        let mut s = mk();
+        compact(&mut s, 100.0, |p| p.fixed.unwrap());
+        assert_eq!(ids(&s), vec![LAUNCHER, SYS]);
+        // with nothing else to drop, the timer chip goes
+        let mut s = [vec![pill(LAUNCHER, 300.0)], vec![pill(TIMER, 100.0)], vec![pill(SYS, 300.0)]];
+        compact(&mut s, 700.0, |p| p.fixed.unwrap());
+        assert_eq!(ids(&s), vec![LAUNCHER, SYS]);
+    }
+
+    #[test]
+    fn wide_island_gives_way_on_a_narrow_bar() {
+        // the island's width is animated (fixed), so compact() hands back a cap for it to cut its own title to
+        let pill = |id, w| Pill { id, els: vec![], pad: (0.0, 0.0), gap: 0.0, bg: None, hover: false, fixed: Some(w), kind: Kind::Group };
+        let bar = |island| [vec![pill(LAUNCHER, 300.0)], vec![pill(ISLAND, island)], vec![pill(SYS, 300.0)]];
+        let w = |p: &Pill| p.fixed.unwrap();
+        // hovered: 300 + 410 + 300 + 24 margin = 1034 in 1000, so it must lose 34 plus 40 of air
+        assert_eq!(compact(&mut bar(410.0), 1000.0, w).1, Some(336.0));
+        // collapsed, 76 is free: it may grow back to the same cap (no flicker between the two)
+        assert_eq!(compact(&mut bar(300.0), 1000.0, w).1, Some(336.0));
+        // wide screens and bars without an island have no cap
+        assert_eq!(compact(&mut bar(410.0), 2000.0, w).1, None);
+        let mut none = [vec![pill(LAUNCHER, 300.0)], vec![], vec![pill(SYS, 300.0)]];
+        assert_eq!(compact(&mut none, 1000.0, w).1, None);
     }
 
     #[test]

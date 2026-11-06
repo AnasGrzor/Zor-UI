@@ -51,7 +51,14 @@ impl Sc {
         }
     }
     fn wheel(&mut self, d: i32) { self.s.wheel(d, self.content, self.view); }
+    fn scrolls(&self) -> bool { self.content > self.view }
 }
+
+/// Least height of the notifications/calendar/to-do/timer card.
+const BOTTOM_MIN: f32 = 340.0;
+
+/// Card height: what is left under the `upper` block of a panel `panel_h` tall, but at least `BOTTOM_MIN`.
+fn bottom_height(panel_h: f32, upper: f32) -> f32 { (panel_h - 13.0 - upper).max(BOTTOM_MIN) }
 
 pub struct SidebarRight {
     area: (f32, f32),
@@ -68,6 +75,7 @@ pub struct SidebarRight {
     todo: ui::TextBox,
     todo_focus: bool,
     sw_mode: bool,
+    sc_main: Sc,
     sc_mixer: Sc,
     sc_notif: Sc,
     sc_todo: Sc,
@@ -90,7 +98,7 @@ impl SidebarRight {
         SidebarRight {
             area, sh: Default::default(), alive: Arc::new(AtomicBool::new(true)), cfg: None, started: false, power_open: false, armed: [false; 2], mixer_open: false,
             tab: 0, cal: (today.wYear as i32, today.wMonth as u32), todo: ui::TextBox::new(false), todo_focus: false, sw_mode: false,
-            sc_mixer: Default::default(), sc_notif: Default::default(), sc_todo: Default::default(), sc_page: Default::default(), sc_laps: Default::default(),
+            sc_main: Default::default(), sc_mixer: Default::default(), sc_notif: Default::default(), sc_todo: Default::default(), sc_page: Default::default(), sc_laps: Default::default(),
             rects: vec![], dragv: None, tg: vec![], gens: HashMap::new(), render: std::env::args().nth(1).as_deref() == Some("--render"),
         }
     }
@@ -408,7 +416,7 @@ fn record_items(cfg: &crate::conf::Config) -> Vec<crate::menu::Item> {
 
 /// What `--render` shows: a plausible session without running the helpers.
 fn sample() -> Shared {
-    let n = |id: &str, app: &str, title: &str, body: &str, ago: f64| Notif { id: id.into(), app: app.into(), title: title.into(), body: body.into(), time: hub::now_ms() / 1000.0 - ago };
+    let n = |id: &str, app: &str, title: &str, body: &str, ago: f64| Notif { id: id.into(), app: app.into(), title: title.into(), body: body.into(), time: hub::now_ms() / 1000.0 - ago, open: String::new() };
     Shared {
         loaded: true, wifi: Some(true), bluetooth: Some(false), caffeine: false, brightness: Some(70.0), night: false, plan_loaded: true, plan: Some("Balanced".into()),
         notifs: vec![
@@ -444,21 +452,30 @@ impl View for SidebarRight {
         let p = R::new(6.0, 6.0, w - 12.0, h - 12.0);
         ui::panel(c, cx, p, 30.0);
         let (x0, cw) = (p.x + 13.0, p.w - 26.0);
-        let mut y = p.y + 13.0;
-        self.paint_header(c, cx, &s, x0, y, cw);
-        y += 42.0 + 10.0;
-        if self.power_open {
-            self.paint_power(c, cx, x0, y, cw);
-            y += 58.0 + 10.0;
-        }
-        self.paint_toggles(c, cx, &s, x0, y, cw);
-        y += 8.0 * 58.0 + 7.0 * 6.0 + 10.0; // 16 toggles, two per row
-        y += self.paint_sliders(c, cx, &s, x0, y, cw) + 10.0;
-        ui::chip(c, cx, x0, y, ID_MIXER_BTN, Some("tune"), "App volume", self.mixer_open);
-        y += 32.0 + 10.0;
-        if self.mixer_open { y += self.paint_mixer(c, cx, &s, x0, y, cw) + 10.0; }
-        let bottom = R::new(x0, y, cw, (p.y + p.h - 13.0 - y).max(0.0));
-        self.paint_bottom(c, cx, &s, bottom);
+        let sliders = [cx.audio.map(|a| a.volume), cx.audio.and_then(|a| a.mic_volume), s.brightness].iter().flatten().count();
+        let slider_h = if sliders == 0 { 0.0 } else { sliders as f32 * 50.0 - 6.0 };
+        let mixer_h = if !self.mixer_open { 0.0 } else if s.mixer.is_empty() { 27.0 } else { (s.mixer.len() as f32 * 50.0 - 6.0).min(240.0) + 10.0 };
+        let upper = 13.0 + 52.0 + if self.power_open { 68.0 } else { 0.0 } + 8.0 * 58.0 + 7.0 * 6.0 + 10.0 + slider_h + 10.0 + 42.0 + mixer_h;
+        // the card keeps a usable height; the panel scrolls when the screen is too short for both
+        let bottom_h = bottom_height(p.h, upper);
+        let mut sc = std::mem::take(&mut self.sc_main);
+        sc.region(c, cx, p, upper + bottom_h + 13.0, |c, top| {
+            let mut y = top + 13.0;
+            self.paint_header(c, cx, &s, x0, y, cw);
+            y += 42.0 + 10.0;
+            if self.power_open {
+                self.paint_power(c, cx, x0, y, cw);
+                y += 58.0 + 10.0;
+            }
+            self.paint_toggles(c, cx, &s, x0, y, cw);
+            y += 8.0 * 58.0 + 7.0 * 6.0 + 10.0; // 16 toggles, two per row
+            y += self.paint_sliders(c, cx, &s, x0, y, cw) + 10.0;
+            ui::chip(c, cx, x0, y, ID_MIXER_BTN, Some("tune"), "App volume", self.mixer_open);
+            y += 32.0 + 10.0;
+            if self.mixer_open { y += self.paint_mixer(c, cx, &s, x0, y, cw) + 10.0; }
+            self.paint_bottom(c, cx, &s, R::new(x0, y, cw, bottom_h));
+        });
+        self.sc_main = sc;
     }
 
     fn context(&mut self, id: u32, _cx: &Ctx) -> Vec<crate::menu::Item> { self.notif_menu(id) }
@@ -472,7 +489,7 @@ impl View for SidebarRight {
             }
             Input::Wheel(id, d) => {
                 let mixer = (ID_MIX_SLIDER..ID_MIX_SLIDER + 100).contains(&id) || (ID_MIX_MUTE..ID_MIX_MUTE + 100).contains(&id);
-                if mixer && self.mixer_open { self.sc_mixer.wheel(d); } else { self.wheel_tab(d); }
+                if mixer && self.mixer_open { self.sc_mixer.wheel(d); } else if !self.wheel_tab(d) { self.sc_main.wheel(d); }
             }
             Input::Key { vk, ctrl, shift, alt } if self.todo_focus && self.tab == 2 => if self.todo.key(vk, ctrl, shift, alt) == ui::Edit::Submit { self.add_todo(); },
             Input::Char(ch) if self.todo_focus && self.tab == 2 => { self.todo.ch(ch); }
@@ -500,5 +517,26 @@ mod output_tests {
         let items = output_items(&[d("Speakers", false), d("Headset", true)], &Sh::default());
         assert_eq!(items.iter().map(|i| (i.icon, i.label.as_str())).collect::<Vec<_>>(), [("speaker", "Speakers"), ("check", "Headset")]);
         assert!(output_items(&[], &Sh::default()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_keeps_its_minimum_height_on_a_short_panel() {
+        assert_eq!(bottom_height(600.0, 700.0), BOTTOM_MIN);
+        assert_eq!(bottom_height(1400.0, 700.0), 1400.0 - 13.0 - 700.0);
+    }
+
+    #[test]
+    fn wheel_falls_through_when_the_page_cannot_scroll() {
+        let mut s = SidebarRight::new((400.0, 800.0));
+        s.tab = 3;
+        s.sc_page = Sc { content: 100.0, view: 300.0, ..Default::default() };
+        assert!(!s.wheel_tab(-120));
+        s.sc_page.content = 500.0;
+        assert!(s.wheel_tab(-120));
     }
 }

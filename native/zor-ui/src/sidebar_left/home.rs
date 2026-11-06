@@ -221,7 +221,7 @@ impl Tab for Home {
             if over && main { c.rect(b, 30.0, alpha(t.c("onPrimary"), 0.08)); }
             c.icon(icon, b, ico(26.0, true), if on { fg } else { alpha(fg, 0.4) });
         };
-        btn(c, x, u, PREV, "skip_previous", m.can_prev, false);
+        btn(c, x, u, PREV, "skip_previous", true, false); // without the app's previous it restarts the track
         btn(c, x + u + 8.0, u * 1.6, PLAY, if m.playing { "pause" } else { "play_arrow" }, true, true);
         btn(c, x + u * 2.6 + 16.0, u, NEXT, "skip_next", m.can_next, false);
         y += 56.0 + 12.0;
@@ -242,9 +242,9 @@ impl Tab for Home {
     fn input(&mut self, ev: &Input, cx: &mut Ctx, _hover: u32) {
         let Some(m) = self.current(cx).cloned() else { return };
         match ev {
-            Input::Click(PREV, _) if m.can_prev => media::control_of(&m.id, "previous"),
+            Input::Click(PREV, _) => media::skip(&m, false),
             Input::Click(PLAY, _) => media::control_of(&m.id, "togglePlayPause"),
-            Input::Click(NEXT, _) if m.can_next => media::control_of(&m.id, "next"),
+            Input::Click(NEXT, _) => media::skip(&m, true),
             Input::Click(id, _) if self.sessions.iter().any(|s| s.1 == *id) => self.chosen = self.sessions.iter().find(|s| s.1 == *id).map(|s| s.0.clone()),
             Input::Drag(SEEK, x, _, ph) if m.duration > 0.0 => {
                 let Some(bar) = self.bar else { return };

@@ -21,7 +21,7 @@ mod picker;
 pub(crate) mod rec_audio;
 mod screen_translate;
 pub(crate) mod sys;
-mod theme;
+pub(crate) mod theme;
 mod toggles;
 pub(crate) mod update;
 mod we;
@@ -58,6 +58,7 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         .or_else(|| notify::call(cfg, name, args))
         .or_else(|| we::call(cfg, name, args))
         .or_else(|| media::call(cfg, name, args))
+        .or_else(|| theme::call(cfg, name, args))
         .or_else(|| picker::call(cfg, name, args))
         .or_else(|| screen_translate::call(cfg, name, args))
 }

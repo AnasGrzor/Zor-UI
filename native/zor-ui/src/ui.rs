@@ -211,6 +211,8 @@ impl Scroll {
         self.tgt = Some(self.tgt.unwrap_or(self.y) - d as f32 / 120.0 * 48.0);
         self.clamp(content_h, view_h);
     }
+    /// Glides to offset `y` (clamped to the content).
+    pub fn to(&mut self, y: f32, content_h: f32, view_h: f32) { self.tgt = Some(y); self.clamp(content_h, view_h); }
     /// Takes the position a scrollbar drag asked for, if any.
     fn apply_drag(&mut self, content_h: f32, view_h: f32) {
         if let Some(v) = self.pend.take() { self.y = v; self.tgt = None; self.at = None; self.clamp(content_h, view_h); }
@@ -379,6 +381,17 @@ impl TextBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_to_clamps_to_the_content() {
+        let mut s = Scroll::default();
+        s.to(300.0, 500.0, 200.0);
+        assert_eq!((s.moving(), s.tgt), (true, Some(300.0)));
+        s.to(900.0, 500.0, 200.0);
+        assert_eq!(s.tgt, Some(300.0));
+        s.to(50.0, 100.0, 200.0); // content shorter than the view
+        assert_eq!(s.tgt, Some(0.0));
+    }
 
     #[test]
     fn wave_squiggles_and_scrub_expires() {

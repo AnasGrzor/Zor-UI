@@ -83,13 +83,17 @@ pub struct Dock {
     /// Group names by hit id (filled by paint).
     slots: Vec<String>,
     wins: Vec<GWin>,
+    /// The hovered spot id (1 + slot), from `Input::Hover`.
+    hover: u32,
+    /// Each slot's rect and tooltip text (filled by paint).
+    tips: Vec<(R, String)>,
     /// Auto-hide: the dock is drawn only while the pointer is at the bottom edge (or on the dock, plus a short grace).
     up: Cell<bool>,
     last_hit: Cell<Option<Instant>>,
 }
 
 impl Dock {
-    pub fn new(mon: [i32; 4], right: bool) -> Dock { Dock { mon, right, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![], up: Cell::new(false), last_hit: Cell::new(None) } }
+    pub fn new(mon: [i32; 4], right: bool) -> Dock { Dock { mon, right, sh: Default::default(), icons: HashMap::new(), slots: vec![], wins: vec![], hover: 0, tips: vec![], up: Cell::new(false), last_hit: Cell::new(None) } }
 
     /// Updates `up` from the pointer: reveal at the monitor's bottom (or right) 2 px, stay up while over the dock.
     fn track(&self, h: f32) -> bool {
@@ -139,6 +143,12 @@ impl Dock {
     }
 }
 
+/// Tooltip of a dock slot: the app name, plus the window count when it has several.
+fn tip(g: &Group) -> String {
+    let name = bar::pretty_app(&g.name);
+    if g.wins.len() > 1 { format!("{name} ({} windows)", g.wins.len()) } else { name }
+}
+
 /// The dock pill inside a window of `cw` x `ch`: centred along the edge, 4 px in from it.
 /// Returns the pill and the length of the icons inside it (a plain strip is longer than its icons).
 fn pill_rect(right: bool, cw: f32, ch: f32, n: usize, sep: bool, k: &Look) -> (R, f32) {
@@ -176,6 +186,7 @@ impl View for Dock {
         let list = self.items(cx);
         self.want_icons(cx, &list.iter().map(|g| g.name.clone()).collect::<Vec<_>>());
         self.slots = list.iter().map(|g| g.name.clone()).collect();
+        self.tips.clear();
         if list.is_empty() || !self.up.get() { return; } // #dock:empty { display: none }, and hidden until the pointer reaches the edge
         let sep = list.iter().position(|g| !g.pinned).filter(|&i| i > 0);
         let k = look(&Config(cx.cfg.0.clone()));
@@ -190,6 +201,7 @@ impl View for Dock {
                 else { c.rect(R::new(x + 2.0, y + 6.0, 1.0, item - 12.0), 0.0, t.c("outlineVariant")); x += 5.0 + 4.0; }
             }
             let b = R::new(x, y, item, item);
+            self.tips.push((b, tip(g)));
             let focused = g.wins.iter().any(|w| w.1);
             if focused { c.rect(b, 17.0, t.c("secondaryContainer")); }
             if c.hit(b, 1 + i as u32) && !focused { c.rect(b, 17.0, alpha(t.c("onSurface"), 0.08)); }
@@ -212,14 +224,23 @@ impl View for Dock {
         }
     }
 
+    fn hover_popup(&self) -> Option<(u32, R, String)> {
+        if !self.up.get() { return None; }
+        let (r, tip) = self.tips.get((self.hover as usize).checked_sub(1)?)?;
+        Some((self.hover, *r, tip.clone()))
+    }
+
+    fn popup_edge(&self) -> Option<bar::Edge> { Some(if self.right { bar::Edge::Right } else { bar::Edge::Bottom }) }
+
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
+        if let Input::Hover(id) = ev { self.hover = id; return; }
         let Input::Click(id, btn) = ev else { return };
         let Some(name) = self.slots.get(id as usize - 1).cloned() else { return };
         let list = self.items(cx);
         let Some(g) = list.iter().find(|g| g.name == name) else { return };
         match btn {
             Btn::Left => match next_window(&g.wins) {
-                Some(w) => glaze::command(&format!("focus --container-id {w}")),
+                Some(w) => glaze::focus(w, cx.wm.windows.iter().any(|x| x.id == w && x.minimized)),
                 None => {
                     let cfg = Config(cx.cfg.0.clone());
                     std::thread::spawn(move || { proc::bridge(&cfg, "launch", &[&name]); });
@@ -308,6 +329,29 @@ mod tests {
         let (strip, inner) = pill_rect(false, 1920.0, p.h, 3, false, &p);
         assert_eq!((strip.x, strip.w), (0.0, 1920.0));
         assert!(inner < strip.w);
+    }
+    #[test]
+    fn tooltip_names_the_app_and_counts_windows() {
+        let g = |n: &str, k: usize| Group { name: n.into(), pinned: true, wins: (0..k).map(|i| (i.to_string(), false)).collect() };
+        assert_eq!(tip(&g("Code", 0)), bar::pretty_app("Code"));
+        assert_eq!(tip(&g("Code", 1)), bar::pretty_app("Code"));
+        assert_eq!(tip(&g("Code", 3)), format!("{} (3 windows)", bar::pretty_app("Code")));
+    }
+    #[test]
+    fn hover_shows_a_tooltip_only_while_the_dock_is_up() {
+        let mut d = Dock::new([0, 0, 1920, 1080], false);
+        d.tips = vec![(R::new(10.0, 0.0, 44.0, 44.0), "Code".into()), (R::new(58.0, 0.0, 44.0, 44.0), "Edge".into())];
+        d.hover = 2;
+        assert!(d.hover_popup().is_none(), "hidden dock");
+        d.up.set(true);
+        let (id, r, t) = d.hover_popup().unwrap();
+        assert_eq!((id, r.x, t.as_str()), (2, 58.0, "Edge"));
+        d.hover = 0;
+        assert!(d.hover_popup().is_none(), "pointer off the icons");
+        d.hover = 9;
+        assert!(d.hover_popup().is_none(), "unknown spot");
+        assert_eq!(d.popup_edge(), Some(bar::Edge::Bottom));
+        assert_eq!(Dock::new([0, 0, 1, 1], true).popup_edge(), Some(bar::Edge::Right));
     }
     #[test]
     fn pin_and_unpin() {

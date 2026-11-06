@@ -42,14 +42,15 @@ the dock and the Claude usage watcher.
   each other company. See [Buddies](#buddies).
 - **Settings app.** Every option, galleries for Wallpaper Engine wallpapers and community presets, a Usage page
   with the memory and CPU of Zor UI, each of its parts and its helper programs, and an About page with a
-  **Check for updates** button.
+  **Check for updates** button. Options that change how something looks show a live preview next to the control.
 - **Updates and installer.** Zor UI checks GitHub for a newer release once a day and installs it, keeping your
   `config.json`. Set `"autoUpdate": false` to stop that. Releases also ship `ZorUI-Setup.exe`, a one-click
   installer with `zorui.exe` prebuilt, so the target PC needs no Rust.
-- **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards, an auto-hiding dock, a window and clipboard
-  overview, and an audio visualizer.
-- **Theming.** Material You colors generated from your wallpaper, applied to the bar, Windows light and dark mode,
-  Windows Terminal and Flow Launcher.
+- **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards that snap to each other, with an
+  optional glass look. An auto-hiding dock, a window and clipboard overview, and an audio visualizer for the
+  island, the bar and the desktop, each with its own color.
+- **Theming.** Material You colors generated from your wallpaper or from a color you pick, applied to the bar,
+  Windows light and dark mode, Windows Terminal and Flow Launcher.
 - **Tools.** Screen recording, screen translate (OCR), color picker, night light, game mode, brightness for
   external monitors over DDC/CI, and a power plan switcher.
 
@@ -244,8 +245,25 @@ wallpapers and from the preview image for scenes and web wallpapers. With **Foll
 default), Zor UI also re-themes when you change wallpaper in Wallpaper Engine's own window or a playlist moves
 on. **Stop live wallpaper** returns to your normal wallpaper, and so does picking an image with `Mod+Ctrl+T`.
 
+**Theme from a color.** Settings > Colors has a color picker (saturation and value square, hue slider, hex field
+and preset colors). While the picker is open the whole Settings window previews the palette that color would give.
+**Apply** is what re-themes.
+
+**Per-monitor wallpapers.** Settings > Wallpapers can give each monitor its own picture. A picture that doesn't
+match a monitor's shape is cut to it around its brightest, most detailed part.
+
+**Glass cards.** Settings > Bar & desktop > Glass cards draws each desktop card as the wallpaper behind it, blurred
+and bent at the rim, with a color fringe, tint and highlight. Blur, bend, edge width, highlight, fringe, frosting,
+color strength and tint each have a slider and a preview. A preset that uses glass turns it on. **Snap cards to
+each other** lines a dragged card up with the edges and centers of other cards and draws guide lines (hold `Alt` to
+drag freely).
+
+**Log.** Zor UI writes one line per user action and per preset or wallpaper step to `zorui.log` in its data folder
+(moved to `zorui.log.old` past 1 MB), so a silent failure can be traced afterwards.
+
 **Presets.** Settings > Presets lists the community gallery. **Apply** downloads the preset's wallpaper and
-applies its color scheme, workspace labels (for example 一 二 三) and transparency. You can also save your own
+applies its color scheme, workspace labels (for example 一 二 三), bar layout and style, desktop card positions and
+pictures, and transparency. You can also save your own
 setup and switch back later.
 
 ## How some of these work on Windows

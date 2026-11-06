@@ -10,7 +10,7 @@
 use crate::{
     app::{App, Ctx},
     assist,
-    bar::pretty_app,
+    bar::{pretty_app, Edge},
     cast::{self, Cast, Hair, Trim},
     desk::greeting,
     gfx::{alpha, polygon, txt, Align, Canvas, Color, Gfx, R},
@@ -18,7 +18,7 @@ use crate::{
     win::{Btn, Input, View, Win, Z},
 };
 use std::{
-    sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering},
     time::Instant,
 };
 use windows::Win32::{
@@ -68,8 +68,14 @@ const FX: f32 = W / 2.0;
 const FY: f32 = 56.0;
 /// The bar's height (bar.rs docks 56 px).
 const BAR: f32 = 56.0;
-/// The bar is on the top edge, so the buddies walk along its bottom; on any other edge they walk along the monitor's top.
-static BAR_ON_TOP: AtomicBool = AtomicBool::new(true);
+/// The bar's edge (`Edge as u8`): the buddies stand on its inner side, and on the monitor's bottom for a side bar.
+static BAR_EDGE: AtomicU8 = AtomicU8::new(Edge::Top as u8);
+/// Where the buddies' feet are (screen px): the bar's bottom edge for a top bar, the bar's top edge for a bottom bar,
+/// and the monitor's bottom for a left or right bar.
+fn feet_line(edge: Edge, top: i32, bottom: i32, scale: f32) -> f32 {
+    let bar = (BAR * scale).round();
+    match edge { Edge::Top => top as f32 + bar, Edge::Bottom => bottom as f32 - bar, Edge::Left | Edge::Right => bottom as f32 }
+}
 const SPEED: f32 = 28.0;
 
 /// One look at the desktop around him: the bar's data sources, reduced to what he comments on.
@@ -187,7 +193,7 @@ pub fn sync(app: &mut App) {
     let wants = [app.cx.native("gojo"), app.cx.native("buddyB") || app.cx.cfg.bool("buddies.b.on")];
     ON.store(wants.iter().any(|&w| w), Ordering::Relaxed);
     TALK.store(app.cx.cfg.bool("native.gojoVoice"), Ordering::Relaxed);
-    BAR_ON_TOP.store(app.cx.bar_edge() == crate::bar::Edge::Top, Ordering::Relaxed);
+    BAR_EDGE.store(app.cx.bar_edge() as u8, Ordering::Relaxed);
     PRIMARY.store((app.cx.cfg.str("buddies.primary") == "b") as usize, Ordering::Relaxed);
     for (slot, want) in wants.into_iter().enumerate() {
         let at = app.wins.iter().position(|w| w.hwnd.0 as isize == HWNDS[slot].load(Ordering::Relaxed));
@@ -275,6 +281,9 @@ pub struct Gojo {
     perch: Option<f32>,
     /// Fell to the perch to sit there: sit when he lands.
     sit_after: bool,
+    /// How far into the sitting pose he is drawn (1 sitting, 0 standing), eased so he rises instead of snapping.
+    sit_k: f32,
+    k_t: f32,
     mon: RECT,
     scale: f32,
     /// 0 or 1: which window and which "buddies" config slot ("a" or "b") this is.
@@ -318,7 +327,7 @@ impl Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
-            chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false,
+            chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
             mon: RECT::default(), scale: 1.0,
             slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), sprite: None, name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
             work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true,        };
@@ -408,7 +417,10 @@ impl Gojo {
     fn pick(&mut self, lines: &[&str]) -> String { lines[(self.rand() * lines.len() as f32) as usize % lines.len()].to_string() }
     fn say(&mut self, s: &str, secs: f32) { self.bubble = Some((s.to_string(), self.t + secs)); speak(s); }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
-    fn line(&self) -> f32 { self.mon.top as f32 + if BAR_ON_TOP.load(Ordering::Relaxed) { (BAR * self.scale).round() } else { 0.0 } }
+    fn line(&self) -> f32 {
+        let edge = match BAR_EDGE.load(Ordering::Relaxed) { x if x == Edge::Bottom as u8 => Edge::Bottom, x if x == Edge::Left as u8 => Edge::Left, x if x == Edge::Right as u8 => Edge::Right, _ => Edge::Top };
+        feet_line(edge, self.mon.top, self.mon.bottom, self.scale)
+    }
 
     /// Looks at what's going on around him and comments on a change: at most one line every ~20-35 s, and
     /// never over one he's already saying (the newest change waits for its turn).
@@ -519,7 +531,7 @@ impl Gojo {
             self.follow_game(ctx);
             self.hidden = fullscreen_on(self.mon);
             // the window he sits on moved or closed
-            if self.perch.is_some() && self.mode == Mode::Sit {
+            if self.perch.is_some() && matches!(self.mode, Mode::Sit | Mode::Stand) {
                 match window_top(self.mon, self.x, self.line()) {
                     Some(t) => { self.perch = Some(t); self.y = t; }
                     None => { self.perch = None; self.y = self.line(); self.poof = Some(self.t); self.mode = Mode::Stand; self.wait = 2.0; }
@@ -609,7 +621,7 @@ impl Gojo {
                     let r = self.rand();
                     if self.mode == Mode::Sit {
                         self.mode = Mode::Stand; self.wait = 1.0 + self.rand() * 2.0;
-                        if self.perch.take().is_some() { self.y = line; self.poof = Some(self.t); } // back up to the bar
+                        // he keeps his footing on the window: no teleport up to the bar
                     }
                     else if r < 0.5 && self.walk {
                         let (l, rt) = (self.mon.left as f32 + 40.0 * s, self.mon.right as f32 - 40.0 * s);
@@ -726,29 +738,33 @@ const SHOE: Color = 0xFF09090D;
 const MOUTH: Color = 0xFF9A5050;
 
 /// What the drawing needs from the state for one frame.
-struct Look<'c> { walk: Option<f32>, sit: bool, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, style: Hair, c: &'c Cast, trim: &'c Trim }
+struct Look<'c> { walk: Option<f32>, sit: f32, swing: f32, peek: f32, arm: f32, talk: bool, hair: f32, style: Hair, c: &'c Cast, trim: &'c Trim }
 
 /// The chibi, feet at the pose origin, y up is negative. Colours are replaced by `over` in the
 /// shadow pass.
 fn figure(k: &mut Ink, l: &Look<'_>) {
     // legs and shoes
-    let (hip, u) = if l.sit { (0.0, 10.0) } else { (-10.0, 0.0) };
+    // `e` blends standing (0) into sitting (1): the body sinks onto the ledge, the legs bend out to the knee
+    let e = l.sit * l.sit * (3.0 - 2.0 * l.sit);
+    let u = 10.0 * e;
+    let mix = |a: f32, b: f32| a + (b - a) * e;
     for side in [-1.0f32, 1.0] {
         let hx = side * 2.6;
-        let (mut sx, mut sy) = (hx, hip);
-        let (fx, fy) = if l.sit {
-            // thigh out along the ledge, shin hanging from the knee and swinging
-            let knee = (if side > 0.0 { 10.0 } else { 8.0 }, 1.5);
-            k.fill(&limb(hx * 0.5, 1.0, knee.0, knee.1, 3.8), l.c.pants);
-            (sx, sy) = knee;
-            let a = (l.swing + if side > 0.0 { 0.0 } else { 2.2 }).sin() * 0.4;
-            (knee.0 + a.sin() * 9.0, knee.1 + a.cos() * 9.0)
-        } else if let Some(ph) = l.walk {
+        let stand = if let Some(ph) = l.walk {
             let sw = (ph * side).sin();
             (hx + sw * 2.4, -2.0 - (ph * side).cos().max(0.0) * 1.3)
         } else { (hx, -2.0) };
-        k.fill(&limb(sx, sy, fx, fy, 3.6), l.c.pants);
-        k.fill(&ell(fx + 0.7, fy + 0.7, 2.7, 1.6), SHOE);
+        // thigh out along the ledge, shin hanging from the knee and swinging
+        let knee = (if side > 0.0 { 10.0 } else { 8.0 }, 1.5);
+        let a = (l.swing + if side > 0.0 { 0.0 } else { 2.2 }).sin() * 0.4;
+        let sit = (knee.0 + a.sin() * 9.0, knee.1 + a.cos() * 9.0);
+        let hip = (mix(hx, hx * 0.5), mix(-10.0, 1.0));
+        let foot = (mix(stand.0, sit.0), mix(stand.1, sit.1));
+        // standing, the knee is halfway down a straight leg
+        let kn = (mix((hip.0 + foot.0) / 2.0, knee.0), mix((hip.1 + foot.1) / 2.0, knee.1));
+        k.fill(&limb(hip.0, hip.1, kn.0, kn.1, mix(3.6, 3.8)), l.c.pants);
+        k.fill(&limb(kn.0, kn.1, foot.0, foot.1, 3.6), l.c.pants);
+        k.fill(&ell(foot.0 + 0.7, foot.1 + 0.7, 2.7, 1.6), SHOE);
     }
     // coat, collar, zip
     k.fill(&rr(-7.2, -21.0 + u, 7.2, -8.5 + u, 3.0), l.c.coat);
@@ -876,9 +892,11 @@ impl View for Gojo {
         let pt = self.purple.map(|p| t - p);
         let arm = pt.map_or(0.0, |p| (p / 0.3).min(1.0) * if p > 2.0 { (2.6 - p) / 0.6 } else { 1.0 });
         let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
+        self.sit_k = ease_toward(self.sit_k, if self.sitting() { 1.0 } else { 0.0 }, (t - self.k_t).clamp(0.0, 0.1));
+        self.k_t = t;
         let sprite = self.load_sprite(c);
         let look = Look {
-            walk, sit: self.sitting(), swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
+            walk, sit: self.sit_k, swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
             talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, style: self.style, c: &self.cast, trim: &self.trim,
         };
 
@@ -892,7 +910,7 @@ impl View for Gojo {
             // a picture stands where the figure's feet would be, and sits a little lower on a ledge
             Some((_, _, Some(img))) if sprite => {
                 let sway = walk.map_or(0.0, |w| (w * 2.0).sin() * 0.05);
-                c.sprite(img, FX, pose.oy + if self.sitting() { 4.0 } else { 0.0 }, self.dir, rot + sway);
+                c.sprite(img, FX, pose.oy + 4.0 * self.sit_k, self.dir, rot + sway);
             }
             _ => c.shadow(0.6, 2.4, 0.7, |c, over| figure(&mut Ink { c, pose, over }, &look)),
         }
@@ -961,6 +979,13 @@ impl View for Gojo {
         }
     }
 }
+
+/// Moves `k` towards `target` at a constant rate, so a full sit or stand takes `SIT_SECS`.
+fn ease_toward(k: f32, target: f32, dt: f32) -> f32 {
+    let step = dt / SIT_SECS;
+    if (target - k).abs() <= step { target } else { k + step * (target - k).signum() }
+}
+const SIT_SECS: f32 = 0.45;
 
 /// One step of getting to `ground` (screen y): up is instant, down falls with gravity `g`. Returns (y, vy).
 fn settle(y: f32, ground: f32, vy: f32, g: f32, dt: f32) -> (f32, f32) {
@@ -1034,6 +1059,15 @@ pub fn fullscreen_monitor() -> Option<RECT> {
 mod tests {
     use super::*;
     #[test]
+    fn feet_stand_on_the_bar_wherever_it_is() {
+        // 1080p monitor, 1.0 scale: a top bar's bottom, a bottom bar's top, a side bar leaves the monitor's bottom
+        assert_eq!(feet_line(Edge::Top, 0, 1080, 1.0), 56.0);
+        assert_eq!(feet_line(Edge::Bottom, 0, 1080, 1.0), 1024.0);
+        assert_eq!((feet_line(Edge::Left, 0, 1080, 1.0), feet_line(Edge::Right, 0, 1080, 1.0)), (1080.0, 1080.0));
+        // a second monitor above the first and a 150 % scale
+        assert_eq!(feet_line(Edge::Bottom, -1080, 0, 1.5), -84.0);
+    }
+    #[test]
     fn fullscreen_may_overhang_by_its_border() {
         let m = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
         assert!(covers(m, m));
@@ -1055,6 +1089,15 @@ mod tests {
         let (y, vy) = settle(200.0, 300.0, 0.0, 1800.0, 0.016);
         assert!(y > 200.0 && y < 300.0 && vy > 0.0, "off an edge he falls: {y} {vy}");
         assert_eq!(settle(299.9, 300.0, 400.0, 1800.0, 0.1).0, 300.0, "and stops at the ground");
+    }
+    #[test]
+    fn standing_up_takes_a_moment_and_never_overshoots() {
+        let mut k = 1.0;
+        k = ease_toward(k, 0.0, 0.016);
+        assert!(k > 0.9 && k < 1.0, "first frame barely moves: {k}");
+        for _ in 0..40 { k = ease_toward(k, 0.0, 0.016); }
+        assert_eq!(k, 0.0);
+        assert_eq!(ease_toward(0.5, 1.0, 10.0), 1.0, "a long frame clamps at the target");
     }
     #[test]
     fn rand_stays_in_range() {

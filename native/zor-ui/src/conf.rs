@@ -14,7 +14,7 @@ fn defaults() -> Value {
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },
         "football": { "leagues": [] },
-        "visualizer": { "desktop": true, "bar": false, "bars": 64 },
+        "visualizer": { "desktop": true, "bar": false, "bars": 64, "color": "", "desktopColor": "", "barColor": "" },
         "nightLight": { "kelvin": 4500 },
         "record": { "audio": "both", "mic": "" },
         "wallpaperEngine": { "follow": true, "path": "" },
@@ -26,12 +26,12 @@ fn defaults() -> Value {
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
             "agents": true, "agentWorking": true, "recording": true, "timer": true,
-            "media": true, "art": true, "progress": true, "eq": true, "controls": true, "trackSeconds": 3,
+            "media": true, "art": true, "progress": true, "eq": true, "eqColor": "", "controls": true, "trackSeconds": 3,
             "idle": "auto", "status": true, "badges": true, "textWidth": 170, "wideWidth": 280,
             "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
             "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3 }
         },
-        "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false,
+        "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false, "snap": true, "snapLines": true,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
         "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
             "listen": true, "listenAi": true, "allow": { "search": true, "open": true, "message": true },
@@ -62,6 +62,10 @@ impl Config {
     pub fn load() -> Config { Config::parse(&fs::read_to_string(pack_dir().join("config.json")).unwrap_or_default()) }
     pub fn get(&self, path: &str) -> &Value {
         path.split('.').try_fold(&self.0, |v, k| v.get(k)).unwrap_or(&Value::Null)
+    }
+    /// A visualizer's color: its own setting (`own`), else the shared `visualizer.color`, else None (use the theme).
+    pub fn viz_color(&self, own: &str) -> Option<Color> {
+        parse_hex(self.str(own)).or_else(|| parse_hex(self.str("visualizer.color")))
     }
     pub fn bool(&self, path: &str) -> bool { self.get(path).as_bool().unwrap_or(false) }
     pub fn str(&self, path: &str) -> &str { self.get(path).as_str().unwrap_or("") }
@@ -96,8 +100,15 @@ impl Theme {
         Theme { colors, dark: raw.get("mode").and_then(Value::as_str) != Some("light") }
     }
     /// A Material colour by its theme.json name ("onSurface"); magenta if a name is mistyped.
-    pub fn c(&self, name: &str) -> Color { self.colors.get(name).copied().unwrap_or(0xFFFF_00FF) }
+    pub fn c(&self, name: &str) -> Color {
+        PREVIEW.with(|p| p.borrow().as_ref().and_then(|m| m.get(name).copied())).or_else(|| self.colors.get(name).copied()).unwrap_or(0xFFFF_00FF)
+    }
 }
+
+thread_local! { static PREVIEW: std::cell::RefCell<Option<HashMap<String, Color>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Paints every `Theme::c` on this thread from `colors` (a palette being previewed) until it is set to None; returns the previous one.
+pub fn set_preview(colors: Option<HashMap<String, Color>>) -> Option<HashMap<String, Color>> { PREVIEW.with(|p| p.replace(colors)) }
 
 pub fn parse_hex(s: &str) -> Option<Color> {
     let h = s.strip_prefix('#')?;
@@ -129,6 +140,8 @@ impl State {
         let v = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
         State { path, v }
     }
+    /// Re-reads the file: the theme scripts and preset apply write it from other processes.
+    pub fn reload(&mut self) { self.v = State::load(self.path.clone()).v; }
     /// Applies `f` to the file as it is now and writes it back. The theme scripts write this file too
     /// (live wallpaper, image, mode), so saving the copy read at start-up would erase their keys.
     pub fn update(&mut self, f: impl FnOnce(&mut Value)) {
@@ -159,6 +172,16 @@ mod tests {
 
     use super::*;
     #[test]
+    fn a_preview_palette_overrides_the_theme_until_cleared() {
+        let t = Theme::parse("");
+        let real = t.c("primary");
+        assert!(set_preview(Some(HashMap::from([("primary".to_string(), 0xFF11_2233)]))).is_none());
+        assert_eq!((t.c("primary"), t.c("onSurface")), (0xFF11_2233, Theme::parse("").c("onSurface"))); // unnamed colours still come from the theme
+        assert_eq!(set_preview(None).map(|m| m.len()), Some(1));
+        assert_eq!(t.c("primary"), real);
+    }
+
+    #[test]
     fn state_update_keeps_keys_written_since_load() {
         let path = std::env::temp_dir().join(format!("zor-ui-state-test-{}.json", std::process::id()));
         fs::write(&path, r#"{"deskPos": {}}"#).unwrap();
@@ -169,6 +192,17 @@ mod tests {
         let _ = fs::remove_file(&path);
         assert_eq!(disk["live"], "we:x");
         assert_eq!(disk["leftTab"], "ai");
+    }
+    #[test]
+    fn a_visualizer_uses_its_own_color_then_the_shared_one() {
+        let c = Config::parse(r##"{"visualizer": {"color": "#112233"}, "island": {"eqColor": "#445566"}}"##);
+        assert_eq!(c.viz_color("island.eqColor"), Some(0xFF44_5566)); // its own wins
+        assert_eq!(c.viz_color("visualizer.desktopColor"), Some(0xFF11_2233)); // unset: the shared color
+        let bad = Config::parse(r##"{"visualizer": {"color": "red"}, "island": {"eqColor": "#12"}}"##);
+        assert_eq!(bad.viz_color("island.eqColor"), None); // invalid everywhere: the theme
+        assert_eq!(Config::parse("").viz_color("island.eqColor"), None);
+        let b = Config::parse(r##"{"visualizer": {"barColor": "#abcdef"}}"##);
+        assert_eq!((b.viz_color("visualizer.barColor"), b.viz_color("visualizer.desktopColor")), (Some(0xFFAB_CDEF), None));
     }
     #[test]
     fn config_merges_sections() {

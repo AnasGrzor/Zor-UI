@@ -14,10 +14,20 @@ const H: f32 = 200.0;
 static CUR: Mutex<Option<(isize, (u64, i32, i32, i32))>> = Mutex::new(None);
 
 #[derive(Default)]
-struct Shared {
-    levels: Mutex<Vec<f32>>,
+pub struct Shared {
+    pub levels: Mutex<Vec<f32>>,
     /// The frame timer is running; the stream wakes the window only when it isn't.
-    awake: AtomicBool,
+    pub awake: AtomicBool,
+}
+
+/// Starts the bridge's `visualizer` stream (`bars` levels per line) into `sh`, waking the app when sound starts.
+pub fn listen(cfg: &crate::conf::Config, bars: u64, sh: Arc<Shared>) -> Option<proc::Stream> {
+    proc::stream(cfg, "visualizer", &[&bars.to_string()], move |line| {
+        let Some(l) = parse_levels(line) else { return };
+        let loud = l.iter().any(|&v| v > 0.0);
+        if let Ok(mut g) = sh.levels.lock() { *g = l; }
+        if loud && !sh.awake.swap(true, Ordering::Relaxed) { app::post(Box::new(|_| {})); } // starts the frame timer
+    })
 }
 
 pub struct Viz {
@@ -35,6 +45,9 @@ pub fn parse_levels(line: &str) -> Option<Vec<f32>> {
     (v.len() > 4).then_some(v)
 }
 
+/// Made-up levels for `n` bars (`--render`, and the Settings preview).
+pub fn sample_levels(n: usize) -> Vec<f32> { (0..n).map(|i| ((i as f32 * 0.35).sin() * 0.4 + 0.5) * (1.0 - i as f32 / 90.0)).collect() }
+
 /// What drawBars() draws per bar at 0-1 `level` in a canvas `h` high: the bar's height and its peak cap's top (distance from the bottom).
 pub fn bar_geometry(level: f32, peak: f32, h: f32) -> (f32, f32) { ((level.clamp(0.0, 1.0) * h * 0.92).max(3.0), peak * h * 0.92 + 6.0) }
 
@@ -43,13 +56,7 @@ impl Viz {
     pub fn new(mon: (i32, i32, i32)) -> Viz { Viz { mon, sh: Default::default(), peaks: vec![], last: 0.0, active: false, _stream: None } }
 
     fn start(&mut self, cfg: &crate::conf::Config, bars: u64) {
-        let sh = self.sh.clone();
-        self._stream = proc::stream(cfg, "visualizer", &[&bars.to_string()], move |line| {
-            let Some(l) = parse_levels(line) else { return };
-            let loud = l.iter().any(|&v| v > 0.0);
-            if let Ok(mut g) = sh.levels.lock() { *g = l; }
-            if loud && !sh.awake.swap(true, Ordering::Relaxed) { app::post(Box::new(|_| {})); } // starts the frame timer
-        });
+        self._stream = listen(cfg, bars, self.sh.clone());
     }
 }
 
@@ -64,7 +71,7 @@ impl View for Viz {
         #[cfg(not(debug_assertions))]
         let sample = false;
         let levels: Vec<f32> = if sample {
-            (0..64).map(|i| ((i as f32 * 0.35).sin() * 0.4 + 0.5) * (1.0 - i as f32 / 90.0)).collect()
+            sample_levels(64)
         } else { self.sh.levels.lock().map(|g| g.clone()).unwrap_or_default() };
         let levels = if levels.is_empty() { vec![0.0; cx.cfg.get("visualizer.bars").as_u64().unwrap_or(48).clamp(8, 256) as usize] } else { levels };
         let now = hub::now_ms();
@@ -73,7 +80,7 @@ impl View for Viz {
         if self.peaks.len() != levels.len() { self.peaks = vec![0.0; levels.len()]; }
         let n = levels.len();
         let (w, h) = (c.w, c.h);
-        let primary = cx.theme.c("primary");
+        let primary = cx.cfg.viz_color("visualizer.desktopColor").unwrap_or_else(|| cx.theme.c("primary"));
         let gap = (w / n.max(1) as f32 * 0.22).max(2.0);
         let bw = (w / n.max(1) as f32 - gap).max(1.0);
         for i in 0..n {
@@ -133,6 +140,12 @@ mod tests {
         assert_eq!(parse_levels("0.10 0.50 1.00 0.00 0.25\n"), Some(vec![0.1, 0.5, 1.0, 0.0, 0.25]));
         assert_eq!(parse_levels("0.1 0.2"), None); // too short, like `v.length > 4`
         assert_eq!(parse_levels("a b c d e f"), None);
+    }
+    #[test]
+    fn sample_levels_are_valid_levels() {
+        let l = sample_levels(64);
+        assert_eq!(l.len(), 64);
+        assert!(l.iter().all(|v| (0.0..=1.0).contains(v)) && l.iter().any(|&v| v > 0.3));
     }
     #[test]
     fn bars_are_at_least_three_px() {

@@ -281,11 +281,22 @@ $glaze = @((Join-Path $pf 'glazewm.exe'), (Get-Command glazewm -ErrorAction Sile
 if (-not $glaze) {
   Write-Warning 'GlazeWM not found. Install it, then start it from the Start menu.'
 } else {
-  $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
-  if (-not (Test-Path $startup)) {
-    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
-    $sc.TargetPath = $glaze; $sc.Save()
-    Info 'added GlazeWM to startup'
+  # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).
+  try {
+    $act = New-ScheduledTaskAction -Execute $glaze
+    $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName 'GlazeWM' -Action $act -Trigger $trg -Settings $set -Force | Out-Null
+    $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+    if (Test-Path $old) { Remove-Item $old }
+    Info 'GlazeWM starts at login (scheduled task)'
+  } catch {
+    Info "couldn't add the login task ($($_.Exception.Message)); falling back to the Startup folder"
+    $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+    if (-not (Test-Path $startup)) {
+      $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
+      $sc.TargetPath = $glaze; $sc.Save()
+    }
   }
   if (Get-Process glazewm -ErrorAction SilentlyContinue) {
     Invoke-Native { & $glaze command wm-reload-config 2>&1 | Out-Null }

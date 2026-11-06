@@ -7,7 +7,10 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
 /// run() in core.js: toggles or switchwall with their -Name value arguments. Null for anything else.
 pub fn run(cfg: &Config, script: &str, args: &[&str]) -> Value {
-    crate::bridge::script(cfg, script, args).unwrap_or(Value::Null)
+    crate::log::line(&format!("run {script} {}", args.join(" ")));
+    let r = crate::bridge::script(cfg, script, args).unwrap_or(Value::Null);
+    crate::log::line(&format!("run {script} -> {}", r["error"].as_str().map_or("ok".to_string(), |e| format!("error: {e}"))));
+    r
 }
 
 /// Fire and forget, on a thread (clicks must never wait for the command).

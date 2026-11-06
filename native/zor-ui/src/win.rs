@@ -48,10 +48,86 @@ pub trait View {
     fn frame_ms(&self) -> u32 { 0 }
     /// The hovered spot that has a popup, and its rect (bar groups).
     fn hover_popup(&self) -> Option<(u32, R, String)> { None }
+    /// The screen edge the window sits on, when it is not the bar's (the dock). The popup opens away from it.
+    fn popup_edge(&self) -> Option<crate::bar::Edge> { None }
     /// Popups: height (CSS px) of a header strip that drags the window (settings). 0: not movable.
     fn movable(&self) -> f32 { 0.0 }
     /// Popups: true if Esc is the view's (clear a search box); it then closes itself with Action::Close.
     fn captures_esc(&self) -> bool { false }
+    /// Popups: (min, max) size in CSS px if dragging any edge or corner resizes the window (settings).
+    fn limits(&self) -> Option<((f32, f32), (f32, f32))> { None }
+    /// Sets the size in CSS px; only called when `limits` is Some.
+    fn resize(&mut self, _w: f32, _h: f32) {}
+    /// A resize drag ended (settings saves the size).
+    fn resize_end(&mut self) {}
+}
+
+/// Width of the resize band along each edge, CSS px. Settings' panel starts 6 px in and the shadow
+/// outside it is see-through (the mouse passes through), so the band reaches 6 px into the panel.
+pub const EDGE: f32 = 12.0;
+
+/// Which edges the point (x, y) touches on a (w, h) window: (-1 left, 1 right, 0 neither; -1 top, 1 bottom, 0 neither).
+pub fn edge_at(x: f32, y: f32, w: f32, h: f32) -> (i32, i32) {
+    let f = |v: f32, n: f32| if v < EDGE { -1 } else if v >= n - EDGE { 1 } else { 0 };
+    (f(x, w), f(y, h))
+}
+
+/// Window rect (left, top, w, h) after dragging `edge` by `d`, with each side held to [min, max].
+/// Dragging a left or top edge moves the window so the opposite edge stays put.
+pub fn drag_rect(r: (i32, i32, i32, i32), edge: (i32, i32), d: (i32, i32), min: (i32, i32), max: (i32, i32)) -> (i32, i32, i32, i32) {
+    let side = |p: i32, len: i32, e: i32, d: i32, lo: i32, hi: i32| match e {
+        1 => (p, (len + d).clamp(lo, hi)),
+        -1 => { let n = (len - d).clamp(lo, hi); (p + len - n, n) }
+        _ => (p, len),
+    };
+    let (x, w) = side(r.0, r.2, edge.0, d.0, min.0, max.0);
+    let (y, h) = side(r.1, r.3, edge.1, d.1, min.1, max.1);
+    (x, y, w, h)
+}
+
+thread_local! {
+    /// The pointer is over a resizable window's edge (see `edge_at`): WM_SETCURSOR shows the matching arrow.
+    static EDGE_HOT: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edges_and_corners() {
+        assert_eq!(edge_at(100.0, 100.0, 900.0, 700.0), (0, 0));
+        assert_eq!(edge_at(2.0, 100.0, 900.0, 700.0), (-1, 0));
+        assert_eq!(edge_at(890.0, 100.0, 900.0, 700.0), (1, 0));
+        assert_eq!(edge_at(100.0, 3.0, 900.0, 700.0), (0, -1));
+        assert_eq!(edge_at(100.0, 695.0, 900.0, 700.0), (0, 1));
+        assert_eq!(edge_at(1.0, 1.0, 900.0, 700.0), (-1, -1));
+        assert_eq!(edge_at(899.0, 699.0, 900.0, 700.0), (1, 1));
+    }
+
+    #[test]
+    fn right_and_bottom_grow_in_place() {
+        let r = (100, 50, 800, 600);
+        assert_eq!(drag_rect(r, (1, 1), (40, -30), (300, 300), (2000, 2000)), (100, 50, 840, 570));
+        assert_eq!(drag_rect(r, (0, 1), (99, 10), (300, 300), (2000, 2000)), (100, 50, 800, 610));
+    }
+
+    #[test]
+    fn left_and_top_move_the_window() {
+        let r = (100, 50, 800, 600);
+        // dragging the left edge 40 px left grows the window and keeps the right edge at 900
+        assert_eq!(drag_rect(r, (-1, 0), (-40, 0), (300, 300), (2000, 2000)), (60, 50, 840, 600));
+        assert_eq!(drag_rect(r, (0, -1), (0, 20), (300, 300), (2000, 2000)), (100, 70, 800, 580));
+    }
+
+    #[test]
+    fn clamps_stop_the_window_moving() {
+        let r = (100, 50, 800, 600);
+        // shrinking past the minimum pins the width, and the left edge stops at 900 - 300
+        assert_eq!(drag_rect(r, (-1, 0), (700, 0), (300, 300), (2000, 2000)), (600, 50, 300, 600));
+        assert_eq!(drag_rect(r, (1, 0), (5000, 0), (300, 300), (2000, 2000)), (100, 50, 2000, 600));
+        assert_eq!(drag_rect(r, (-1, 0), (-5000, 0), (300, 300), (2000, 2000)), (-1100, 50, 2000, 600));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -77,6 +153,8 @@ pub struct Win {
     hover: u32,
     press: u32,
     drag: Option<Drag>,
+    /// Edge being dragged: which edge, pointer position and window rect (physical px) at the press.
+    rsz: Option<((i32, i32), POINT, (i32, i32, i32, i32))>,
     /// The left button is down on a spot (Input::Drag is flowing).
     held: bool,
     last: (u64, String, u32, (i32, i32)),
@@ -86,7 +164,7 @@ pub struct Win {
     pub gliding: bool,
 }
 
-struct Drag { start: POINT, from: POINT, moved: bool }
+struct Drag { start: POINT, from: POINT, moved: bool, snap: Vec<(i32, i32, i32, i32)> }
 
 pub const CLASS: windows::core::PCWSTR = w!("zor-ui-widget");
 /// Not in the WindowsAndMessaging module of the windows crate.
@@ -121,7 +199,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
+                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
         }
     }
 
@@ -279,8 +357,34 @@ impl Win {
                         let (dx, dy) = (p.x - d.start.x, p.y - d.start.y);
                         if !d.moved && dx * dx + dy * dy < 16 { return false; } // a move under 4px is still a click
                         d.moved = true;
-                        let _ = SetWindowPos(self.hwnd, None, d.from.x + dx, d.from.y + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                        let (mut nx, mut ny) = (d.from.x + dx, d.from.y + dy);
+                        // Figma-style guides: cards line up with each other unless Alt is held or Settings turns it off
+                        if !d.snap.is_empty() && GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000 == 0 {
+                            let k = GetDpiForWindow(self.hwnd) as f32 / 96.0;
+                            let mut r = RECT::default();
+                            let _ = GetWindowRect(self.hwnd, &mut r);
+                            let m = (4.0 * k).round() as i32;
+                            (nx, ny) = crate::desk::snap_card((nx, ny), (r.right - r.left, r.bottom - r.top), m, &d.snap, (12.0 * k).round() as i32, (8.0 * k).round() as i32);
+                            if crate::guides::wanted(cx) { crate::guides::set(crate::guides::align_lines((nx + m, ny + m, nx + r.right - r.left - m, ny + r.bottom - r.top - m), &d.snap)); }
+                        } else { crate::guides::clear(); }
+                        let _ = SetWindowPos(self.hwnd, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                         return false;
+                    }
+                    if let (Some((edge, p0, r0)), Some((min, max))) = (self.rsz, self.view.limits()) {
+                        let mut p = POINT::default();
+                        let _ = GetCursorPos(&mut p);
+                        let s = self.scale();
+                        let px = |(w, h): (f32, f32)| ((w * s).round() as i32, (h * s).round() as i32);
+                        let (x, y, w, h) = drag_rect(r0, edge, (p.x - p0.x, p.y - p0.y), px(min), px(max));
+                        self.view.resize(w as f32 / s, h as f32 / s);
+                        self.move_to(x, y);
+                        cx.ver += 1;
+                        return false;
+                    }
+                    if self.view.limits().is_some() {
+                        let (x, y) = self.xy(lp);
+                        let s = self.scale();
+                        EDGE_HOT.with(|e| e.set(edge_at(x, y, self.px.0 as f32 / s, self.px.1 as f32 / s)));
                     }
                     if self.sdrag.is_some() { let (_, y) = self.xy(lp); self.sbar_to(y); cx.ver += 1; return false; }
                     if self.held {
@@ -292,10 +396,22 @@ impl Win {
                     let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut t);
                 }
-                WM_MOUSELEAVE => if self.hover != 0 { self.hover = 0; self.view.input(Input::Hover(0), cx); },
+                WM_MOUSELEAVE => if EDGE_HOT.with(|e| e.replace((0, 0))) != (0, 0) || self.hover != 0 { self.hover = 0; self.view.input(Input::Hover(0), cx); },
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-                    self.press = self.hit_lp(lp);
                     let (x, y) = self.xy(lp);
+                    if msg == WM_LBUTTONDOWN && self.view.limits().is_some() {
+                        let s = self.scale();
+                        let edge = edge_at(x, y, self.px.0 as f32 / s, self.px.1 as f32 / s);
+                        if edge != (0, 0) {
+                            let mut p = POINT::default();
+                            let _ = GetCursorPos(&mut p);
+                            let r = self.rect();
+                            self.rsz = Some((edge, p, (r.left, r.top, r.right - r.left, r.bottom - r.top)));
+                            SetCapture(self.hwnd);
+                            return false;
+                        }
+                    }
+                    self.press = self.hit_lp(lp);
                     if msg == WM_LBUTTONDOWN && self.press >= crate::ui::SBAR {
                         if let Some(b) = self.bars.iter().find(|b| b.id == self.press) {
                             self.sdrag = Some((b.id, b.grab(y)));
@@ -313,19 +429,22 @@ impl Win {
                         let mut p = POINT::default();
                         let _ = GetCursorPos(&mut p);
                         let (x, y) = self.pos();
-                        self.drag = Some(Drag { start: p, from: POINT { x, y }, moved: false });
+                        let k = GetDpiForWindow(self.hwnd) as f32 / 96.0;
+                        let snap = if self.drag_key.is_some() && cx.cfg.get("desktop.snap").as_bool() != Some(false) { crate::desk::snap_targets(self.hwnd, (4.0 * k).round() as i32) } else { vec![] };
+                        self.drag = Some(Drag { start: p, from: POINT { x, y }, moved: false, snap });
                     }
                     SetCapture(self.hwnd);
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                     let _ = ReleaseCapture();
                     if self.sdrag.take().is_some() { return false; }
+                    if self.rsz.take().is_some() { self.view.resize_end(); return false; }
                     if self.held && msg == WM_LBUTTONUP {
                         self.held = false;
                         let (x, y) = self.xy(lp);
                         self.view.input(Input::Drag(self.press, x, y, Phase::End), cx);
                     }
-                    if let Some(d) = self.drag.take() { if d.moved { return true; } }
+                    if let Some(d) = self.drag.take() { crate::guides::clear(); if d.moved { return true; } }
                     let id = self.hit_lp(lp);
                     if id != 0 && id == self.press {
                         let b = match msg { WM_RBUTTONUP => Btn::Right, WM_MBUTTONUP => Btn::Middle, _ => Btn::Left };
@@ -375,6 +494,12 @@ impl Drop for Win {
 /// Window messages that need no app state (so they work while the app is busy painting).
 pub unsafe fn early(hwnd: HWND, msg: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     match msg {
+        WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT && EDGE_HOT.with(|e| e.get()) != (0, 0) => {
+            let (ex, ey) = EDGE_HOT.with(|e| e.get());
+            let c = match (ex, ey) { (0, _) => IDC_SIZENS, (_, 0) => IDC_SIZEWE, _ if ex == ey => IDC_SIZENWSE, _ => IDC_SIZENESW };
+            SetCursor(LoadCursorW(None, c).unwrap_or_default());
+            Some(LRESULT(1))
+        }
         WM_MOUSEACTIVATE => {
             let noact = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE.0 as isize != 0;
             Some(LRESULT(if noact { MA_NOACTIVATE } else { MA_ACTIVATE } as isize))

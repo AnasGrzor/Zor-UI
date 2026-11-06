@@ -4,7 +4,7 @@ use crate::{
     assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, pill, dock, frame, glaze, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, dock, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -18,7 +18,15 @@ use windows::Win32::{
     UI::{HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI}, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub struct Notif { pub app: String, pub text: String, pub until: f64 }
+/// The island's toast banner; `open` is what a click on it launches (see bridge/notify.rs open_target), "" for our own.
+pub struct Notif { pub app: String, pub text: String, pub until: f64, pub open: String }
+
+impl Notif {
+    /// What a click should launch while the banner is still showing.
+    pub fn target(n: &Option<Notif>, now: f64) -> Option<&str> {
+        n.as_ref().filter(|n| n.until > now && !n.open.is_empty()).map(|n| n.open.as_str())
+    }
+}
 pub struct Osd { pub icon: &'static str, pub value: Option<f32>, pub text: String, pub until: f64 }
 
 /// What views can read (and clicks can change).
@@ -175,6 +183,7 @@ impl App {
         buddy::sync(&mut app);
         dock::sync(&mut app);
         frame::sync(&mut app);
+        guides::sync(&mut app);
         viz::sync(&mut app);
         app.sync_bars();
         APP.with_borrow_mut(|a| *a = Some(app));
@@ -218,11 +227,11 @@ impl App {
                 let n = &v["new"];
                 if n.is_null() { return; }
                 let s = |k: &str| n[k].as_str().unwrap_or("").to_string();
-                let (app, text) = (s("app"), if s("title").is_empty() { s("body") } else { s("title") });
+                let (app, text, open) = (s("app"), if s("title").is_empty() { s("body") } else { s("title") }, s("open"));
                 post(Box::new(move |cx| {
                     if cx.cfg.get("island.notifications").as_bool() == Some(false) { return; }
                     let secs = cx.cfg.get("island.notifySeconds").as_f64().unwrap_or(5.0);
-                    cx.notif = Some(Notif { app, text, until: hub::now_ms() + secs * 1000.0 });
+                    cx.notif = Some(Notif { app, text, until: hub::now_ms() + secs * 1000.0, open });
                 }));
             }));
         }
@@ -294,6 +303,8 @@ impl App {
             let px = p.win.size_px();
             if px != p.px {
                 p.px = px;
+                // a resizable window is placed by the user's drag, not re-centred
+                if p.win.view.limits().is_some() { continue; }
                 let (x, y) = popup::spot(&p.name, p.mon, p.win.scale(), px, p.at, self.cx.bar_edge());
                 p.win.move_to(x, y);
             }
@@ -365,7 +376,7 @@ impl App {
                 let added = crate::bridge::agent_hook::auto_install(&custom);
                 if added.is_empty() { return; }
                 let text = format!("Now tracking {}", added.join(", "));
-                post(Box::new(move |cx| cx.notif = Some(Notif { app: "Zor UI".into(), text, until: hub::now_ms() + 6000.0 })));
+                post(Box::new(move |cx| cx.notif = Some(Notif { app: "Zor UI".into(), text, until: hub::now_ms() + 6000.0, open: String::new() })));
             });
         }
         if n % 2 == 0 && self.reload() {
@@ -374,6 +385,7 @@ impl App {
             pill::sync(self);
             dock::sync(self);
             frame::sync(self);
+            guides::sync(self);
             viz::sync(self);
             self.sync_bars();
             let gone: Vec<String> = self.pops.iter().filter(|p| !self.cx.native(&p.name)).map(|p| p.name.clone()).collect();
@@ -409,8 +421,13 @@ impl App {
         self.repaint();
     }
 
+    /// Window `i` of the bars followed by the other windows (the dock): `popup_check`'s index.
+    fn hover_win(&self, i: usize) -> Option<&Win> {
+        self.bars.get(i).or_else(|| self.wins.get(i.checked_sub(self.bars.len())?))
+    }
+
     fn popup_check(&mut self, bi: usize) {
-        let hp = self.bars.get(bi).and_then(|b| b.view.hover_popup());
+        let hp = self.hover_win(bi).and_then(|b| b.view.hover_popup());
         match hp {
             Some((id, r, tip)) => {
                 if self.shown == Some((bi, id)) || self.pending.as_ref().map(|p| (p.0, p.1)) == Some((bi, id)) { return; }
@@ -431,15 +448,16 @@ impl App {
     fn show_popup(&mut self) {
         unsafe { let _ = KillTimer(self.msg, HOVER); }
         let Some((bi, id, r, tip)) = self.pending.take() else { return };
-        let Some(bar) = self.bars.get(bi) else { return };
+        let Some(bar) = self.hover_win(bi) else { return };
         if bar.view.hover_popup().map(|p| p.0) != Some(id) { return; }
         let s = bar.scale();
         let origin = bar.pos();
+        let edge = bar.view.popup_edge().unwrap_or(self.cx.bar_edge());
         if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id, tip: tip.clone() }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
         let Some(p) = self.popup.as_mut() else { return };
         p.view = Box::new(Popup { id, tip });
         p.update(&self.g, &self.cx, true);
-        let (x, y) = bar::popup_spot(self.cx.bar_edge(), origin, r, s, p.size_px());
+        let (x, y) = bar::popup_spot(edge, origin, r, s, p.size_px());
         p.move_to(x, y);
         p.show();
         self.shown = Some((bi, id));
@@ -680,9 +698,13 @@ impl App {
         match msg {
             WM_DPICHANGED => self.wins[i].update(&self.g, &self.cx, true),
             _ => {
+                let click = matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN);
+                if click { self.hide_popup(); }
                 if self.wins[i].mouse(msg, wp, lp, &mut self.cx) {
                     if let Some(k) = self.wins[i].drag_key.clone() { let p = self.wins[i].pos(); desk::save_pos(&mut self.cx, &k, p); }
                 }
+                if !click { self.popup_check(self.bars.len() + i); }
+                if self.wins[i].drag_key.is_some() { guides::refresh(self); }
                 self.wins[i].update(&self.g, &self.cx, false);
                 self.frames(); // a wheel may have started a scroll glide
             }
@@ -774,6 +796,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn banner_click_target() {
+        let n = |until: f64, open: &str| Some(super::Notif { app: "a".into(), text: "t".into(), until, open: open.into() });
+        assert_eq!(super::Notif::target(&n(5000.0, "ms-phone:x"), 1000.0), Some("ms-phone:x"));
+        assert_eq!(super::Notif::target(&n(500.0, "ms-phone:x"), 1000.0), None); // expired
+        assert_eq!(super::Notif::target(&n(5000.0, ""), 1000.0), None); // our own banner
+        assert_eq!(super::Notif::target(&None, 1000.0), None);
+    }
+
     #[test]
     fn game_mode_needs_two_agreeing_ticks() {
         assert_eq!(super::game_vote(false, true, 0), (false, 1));

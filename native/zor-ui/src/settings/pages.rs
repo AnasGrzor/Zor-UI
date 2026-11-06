@@ -22,6 +22,10 @@ pub const CITIES: [(&str, &str); 20] = [
 ];
 
 /// Buddy colors: (hex, name). Empty keeps the character's own.
+/// The visualizers the Settings preview can show.
+#[derive(Clone, Copy)]
+enum Viz { Island, Bar, Desktop }
+
 const COLORS: [(&str, &str); 13] = [
     ("", "Character's own"), ("#16161D", "Black"), ("#F5F5F5", "White"), ("#B0B7C3", "Silver"), ("#D6303A", "Red"), ("#F48FB1", "Pink"), ("#F28C28", "Orange"),
     ("#F2D13A", "Yellow"), ("#4CAF50", "Green"), ("#26A69A", "Teal"), ("#4A7BE0", "Blue"), ("#8E5BD0", "Purple"), ("#6B4423", "Brown"),
@@ -49,6 +53,9 @@ pub const DESKTOP_WIDGETS: [(&str, &str); 18] = [("clock", "Clock"), ("weather",
     ("calendar", "Calendar"), ("todo", "To do"), ("notes", "Notes"), ("timer", "Timer"), ("worldclock", "World clock"),
     ("resources", "Resources"), ("text", "Custom text")];
 const IMAGE_SHAPES: [(&str, &str); 7] = [("cookie", "Cookie"), ("flower", "Flower"), ("clover", "Clover"), ("squircle", "Squircle"), ("circle", "Circle"), ("rounded", "Rounded"), ("square", "Square")];
+/// Grid sizes ("<rows>x<cols>") for `desktop.sizes.<id>`; "" is the card's own size.
+const CARD_SIZES: [(&str, &str); 9] = [("", "Default"), ("1x1", "1 × 1"), ("1x2", "1 × 2"), ("1x3", "1 × 3"), ("2x1", "2 × 1"), ("2x2", "2 × 2"),
+    ("2x3", "2 × 3"), ("3x2", "3 × 2"), ("3x3", "3 × 3")];
 const KEY_PROVIDERS: [(&str, &str); 6] = [("gemini", "Google Gemini"), ("anthropic", "Anthropic (Claude)"), ("openai", "OpenAI"), ("mistral", "Mistral"),
     ("openrouter", "OpenRouter"), ("wallhaven", "Wallhaven (for NSFW search)")];
 const ISLAND_ACTIONS: [(&str, &str); 6] = [("panel", "Expand the island"), ("sidebar-left", "Left sidebar"), ("sidebar-right", "Right sidebar"),
@@ -80,7 +87,7 @@ fn opts(list: &[(&str, &str)]) -> Vec<(Value, String)> { list.iter().map(|(v, l)
 fn px(min: f64, max: f64, step: f64) -> Sl { Sl { min, max, step, fmt: Fmt::Px } }
 
 /// One tile of the wallpaper / preset galleries.
-pub struct Tile { pub img: Option<PathBuf>, pub badge: String, pub title: String, pub sub: String, pub busy: bool, pub icon: &'static str, pub act: Act, pub current: bool }
+pub struct Tile { pub img: Option<PathBuf>, pub badge: String, pub title: String, pub sub: String, pub busy: bool, pub icon: &'static str, pub act: Act, pub current: bool, pub link: Option<String> }
 
 impl Settings {
     pub fn page(&mut self, p: &mut Pen) {
@@ -150,6 +157,8 @@ impl Settings {
             self.sw(p, "island.art", "Album art", "Otherwise a music note", "image");
             self.sw(p, "island.progress", "Progress ring", "Around the cover", "progress_activity");
             self.sw(p, "island.eq", "Equalizer", "Moving bars next to the song while it plays", "equalizer");
+            self.color(p, "island.eqColor", "Equalizer color", "Empty follows the visualizer color, then the theme", "palette");
+            self.viz_preview(p, &[Viz::Island]);
             self.sw(p, "island.controls", "Controls on hover", "Previous, play / pause and next, with the artist", "play_pause");
             self.num(p, "island.trackSeconds", "Expand on a new song (seconds)", 0, 15, "expand");
         });
@@ -234,13 +243,19 @@ impl Settings {
                 ui::chip(p.c, p.cx, ax, r.y + 4.0, id, None, "Apply", false);
                 let hex = self.fields.get("seed").map(|f| f.tb.text.clone()).unwrap_or_else(|| self.info.seed.clone());
                 let fr = R::new(ax - 12.0 - 96.0, r.y + 2.0, 96.0, 36.0);
-                self.field_ui(p, "seed", Some(&self.info.seed.clone()), super::Kind::Plain, fr, "#6750a4", 12.0, false);
+                // while the picker is open the field holds the picked colour, so it must not be reset from theme.json
+                let init = self.picker.is_none().then(|| self.info.seed.clone());
+                self.field_ui(p, "seed", init.as_deref(), super::Kind::Plain, fr, "#6750a4", 12.0, false);
                 let col = conf::parse_hex(hex.trim()).unwrap_or(0xFF67_50A4);
-                p.c.rect(R::new(fr.x - 8.0 - 48.0, r.y + 2.0, 48.0, 36.0), 6.0, col);
+                let sw = R::new(fr.x - 8.0 - 48.0, r.y + 2.0, 48.0, 36.0);
+                p.c.rect(sw, 6.0, col);
+                let id = p.act(Act::Do("picker", String::new()));
+                if p.c.hit(sw, id) { p.c.rect(sw, 6.0, alpha(p.col("onSurface"), 0.12)); }
             }
             if !self.busy.is_empty() { p.spinner_block(); }
         });
-        if let Load::Ready(mons) = &self.mons {
+        let merged = self.monitor_wallpapers(p);
+        if let (false, Load::Ready(mons)) = (merged, &self.mons) {
             let mons = mons.clone();
             if !mons.is_empty() {
                 p.h2("brightness_6", "Brightness", "");
@@ -262,6 +277,48 @@ impl Settings {
             self.slider(p, "nightLight.kelvin", "Night light warmth", Sl { min: 2500.0, max: 6000.0, step: 100.0, fmt: Fmt::Kelvin }, "nightlight");
             self.sw(p, "syncLockScreen", "Use the wallpaper on the lock screen", "Windows may block this on managed PCs", "lock");
         });
+    }
+
+    /// One card row per monitor: its picture drawn in that monitor's own shape inside a fixed area, its name, and
+    /// buttons; then its brightness slider. The picture is the file the bridge cut with `focus_crop` and handed to
+    /// Windows, so the preview can't differ from the real thing. False when there is nothing to show (one monitor),
+    /// so the caller keeps the plain brightness list.
+    fn monitor_wallpapers(&mut self, p: &mut Pen) -> bool {
+        let Load::Ready(list) = &self.wmons else { return false };
+        let list = list.clone();
+        if list.len() < 2 { return false; }
+        let bright: Vec<(String, String)> = match &self.mons { Load::Ready(m) => m.iter().filter_map(|s| s.split_once('|')).map(|(i, n)| (n.to_string(), i.to_string())).collect(), _ => vec![] };
+        p.h2("desktop_windows", "Monitors", "");
+        p.card(|p| {
+            for m in &list {
+                let (i, w, h) = (m["i"].as_u64().unwrap_or(0), m["w"].as_f64().unwrap_or(1920.0) as f32, m["h"].as_f64().unwrap_or(1080.0) as f32);
+                let custom = m["custom"] == true;
+                let name = m["name"].as_str().unwrap_or("").to_string();
+                let Some(r) = p.row(PREVIEW_H + 24.0) else { continue };
+                let (bw, bh) = monitor_box(w, h);
+                let b = R::new(r.x + 12.0 + (PREVIEW_W - bw) / 2.0, r.y + 12.0 + (PREVIEW_H - bh) / 2.0, bw, bh);
+                p.c.rect(b, 10.0, p.col("surfaceContainer"));
+                self.picture(p, std::path::Path::new(m["file"].as_str().unwrap_or("")), b, 10.0);
+                let (title, sub) = monitor_caption(&name, i as usize, w as i32, h as i32, custom);
+                let tx = r.x + 12.0 + PREVIEW_W + 20.0;
+                let tw = r.w - (tx - r.x) - 12.0;
+                let ty = r.y + (PREVIEW_H + 24.0 - 82.0) / 2.0;
+                p.c.text(&title, R::new(tx, ty, tw, 22.0), txt(15.0, 500), p.col("onSurface"), Align::Left);
+                p.c.text(&sub, R::new(tx, ty + 24.0, tw, 16.0), txt(12.0, 400), p.col("onSurfaceVariant"), Align::Left);
+                let w1 = chip_w(p.c, "Choose", true);
+                let a = p.act(Act::Do("mon-wall", i.to_string()));
+                ui::chip(p.c, p.cx, tx, ty + 50.0, a, Some("folder_open"), "Choose", false);
+                if custom {
+                    let a = p.act(Act::Do("mon-clear", i.to_string()));
+                    ui::chip(p.c, p.cx, tx + w1 + 12.0, ty + 50.0, a, Some("restart_alt"), "Use main", false);
+                }
+                if let Some((_, bi)) = bright.iter().find(|(n, _)| *n == name) {
+                    self.slider(p, &format!("monitor.{bi}"), "Brightness", Sl { min: 1.0, max: 100.0, step: 1.0, fmt: Fmt::PctInt }, "brightness_6");
+                }
+            }
+            p.note("A picture that is not the shape of its monitor is cut to fit, keeping the busiest part.", 12.0);
+        });
+        true
     }
 
     fn wallpapers(&mut self, p: &mut Pen) {
@@ -328,7 +385,7 @@ impl Settings {
                         badge: it["type"].as_str().unwrap_or("").to_string(), title: it["title"].as_str().unwrap_or("").to_string(),
                         sub: format!("{}{}", if it["origin"] == "workshop" { "Workshop" } else { "My projects" },
                             match it["rating"].as_str() { Some(r) if !r.is_empty() && r != "Everyone" => format!(" · {r}"), _ => String::new() }),
-                        busy: self.busy == id, icon: if c { "check" } else { "wallpaper" }, act: Act::Do("we-apply", id), current: c }
+                        busy: self.busy == id, icon: if c { "check" } else { "wallpaper" }, act: Act::Do("we-apply", id), current: c, link: None }
                 }).collect();
                 self.grid(p, tiles);
                 if shown.len() > 120 { p.note(&format!("Showing 120 of {}. Search to narrow it down.", shown.len()), 14.0); }
@@ -361,8 +418,7 @@ impl Settings {
                 _ => p.spinner_block(),
             }
         });
-        p.h2("public", "Community gallery", "github.com/pctrade/end4-pCpresets");
-        p.card(|p| {
+        p.h2("public", "Community gallery", "github.com/pctrade/end4-pCpresets");        p.card(|p| {
             p.note("Applies each preset's wallpaper, color scheme, workspace labels and transparency. Linux-only parts (Hyprland, Quickshell layouts) are skipped.", 12.0);
             match &self.online {
                 Load::Ready(o) if o["error"].is_string() => {
@@ -378,13 +434,75 @@ impl Settings {
                         let name = pr["name"].as_str().unwrap_or("").to_string();
                         Tile { img: Some(super::preview_path(&name)), badge: String::new(), title: name.replace('_', " "),
                             sub: pr["author"].as_str().filter(|a| !a.is_empty()).map(|a| format!("by {a}")).unwrap_or_default(),
-                            busy: self.busy == name, icon: "download", act: Act::Do("apply-online", name), current: false }
+                            busy: self.busy == name, icon: "download", link: Some(super::store::preset_url(&name)), act: Act::Do("apply-online", name), current: false }
                     }).collect();
                     self.grid(p, tiles);
                 }
                 _ => p.spinner_block(),
             }
         });
+    }
+
+    /// A sample card in the current glass settings over your wallpaper; follows a slider while it is dragged.
+    fn glass_preview(&mut self, p: &mut Pen) {
+        const H: f32 = 150.0;
+        let Some(r) = p.row(H + 16.0) else { return };
+        let v = |s: &Self, k: &str| { let path = format!("desktop.glass.{k}"); match &s.drag_val { Some((q, x)) if *q == path => *x, _ => s.gn(p.cx, &path) } };
+        let tint = crate::glass::tint_rgb(&self.gs(p.cx, "desktop.glass.tint"));
+        let g = crate::glass::Glass { frost: v(self, "frost") as f32, haze: v(self, "haze") as f32, pull: v(self, "pull") as f32, rim: v(self, "rimWidth") as f32, sheen: v(self, "sheen") as f32,
+            split: v(self, "split") as f32, tint: tint.unwrap_or((0.0, 0.0, 0.0)), tint_strength: if tint.is_some() { v(self, "tintStrength") as f32 } else { 0.0 }, vivid: v(self, "vividness") as f32 };
+        let Some(img) = p.cx.state.v["image"].as_str().filter(|s| !s.is_empty()).map(std::path::PathBuf::from) else { return p.note("Pick a wallpaper picture to see the preview.", 12.0) };
+        let (box_, k) = (R::new(r.x + 12.0, r.y + 8.0, r.w - 24.0, H), p.c.scale);
+        let (w, h) = ((box_.w * k).round() as u32, (H * k).round() as u32);
+        let key = format!("{g:?}|{img:?}|{w}x{h}");
+        if self.glass_prev.as_ref().map_or(true, |(c, _)| *c != key) {
+            // the face area of a 1920x1080 wallpaper, where a card preview is most telling
+            let Some(mut pic) = crate::glass::backdrop(p.c.g, &img, (0, 0, 1920, 1080), (900, 250, w, h)) else { return };
+            let card = (w as f32 * 0.2, h as f32 * 0.15, w as f32 * 0.6, h as f32 * 0.7, 23.0 * k);
+            let Some(glass) = crate::glass::render(&pic, &[card], &g, k) else { return };
+            // lay the glass over the plain picture so the preview is one image
+            if let Some(mut m) = tiny_skia::PixmapMut::from_bytes(pic.data_mut(), w, h) {
+                m.draw_pixmap(0, 0, glass.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+            }
+            self.glass_prev = Some((key, pic));
+        }
+        if let Some((_, pic)) = &self.glass_prev { p.c.clip_round(box_, 17.0, |c| c.image(pic, box_, 1.0)); }
+        let card = R::new(box_.x + box_.w * 0.2, box_.y + H * 0.15, box_.w * 0.6, H * 0.7);
+        p.c.text("27\u{b0}C", R::new(card.x + 18.0, card.y + 10.0, card.w - 36.0, 38.0), txt(30.0, 500), 0xFFFFFFFF, Align::Left);
+        p.c.text("Karachi  \u{2022}  clear sky", R::new(card.x + 18.0, card.y + 52.0, card.w - 36.0, 18.0), txt(13.0, 400), 0xFFFFFFFF, Align::Left);
+    }
+
+    /// Sample bars, drawn the way each visualizer draws them, in the color its setting gives right now.
+    fn viz_preview(&mut self, p: &mut Pen, which: &[Viz]) {
+        const H: f32 = 76.0;
+        let Some(r) = p.row(H + 12.0) else { return };
+        let gap = 10.0;
+        let w = (r.w - 24.0 - gap * (which.len() - 1) as f32) / which.len() as f32;
+        for (i, k) in which.iter().enumerate() {
+            let (label, own) = match k { Viz::Island => ("Island", "island.eqColor"), Viz::Bar => ("Bar", "visualizer.barColor"), Viz::Desktop => ("Desktop", "visualizer.desktopColor") };
+            let col = self.viz_color(p.cx, own);
+            let b = R::new(r.x + 12.0 + i as f32 * (w + gap), r.y + 6.0, w, H);
+            p.c.rect(b, 12.0, p.col("surfaceContainer"));
+            p.c.text(label, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
+            let area = R::new(b.x + 10.0, b.y + 24.0, b.w - 20.0, H - 34.0); // bars stand on its bottom edge
+            match k {
+                Viz::Island => for (j, lv) in [0.5f32, 1.0, 0.7, 0.85].iter().enumerate() { // the island's 4 bars, 3 px wide and apart
+                    let h = 18.0 * lv;
+                    p.c.rect(R::new(area.x + (area.w - 15.0) / 2.0 + j as f32 * 6.0, area.y + area.h - h, 3.0, h), 1.5, col);
+                },
+                Viz::Bar => crate::bar::draw_viz(p.c, area.x + (area.w - 60.0) / 2.0, area.y + area.h - 22.0, col, &crate::viz::sample_levels(20)),
+                Viz::Desktop => {
+                    let lv = crate::viz::sample_levels(28);
+                    let (bw, gp) = (area.w / lv.len() as f32 * 0.78, area.w / lv.len() as f32 * 0.22);
+                    for (j, v) in lv.iter().enumerate() {
+                        let (bh, cap) = crate::viz::bar_geometry(*v, (*v + 0.08).min(1.0), area.h);
+                        let x = area.x + j as f32 * (bw + gp);
+                        p.c.rect(R::new(x, area.y + area.h - bh, bw, bh), bw.min(4.0) / 2.0, alpha(col, 1.0 - 0.6 * bh / area.h));
+                        p.c.rect(R::new(x, area.y + area.h - cap, bw, 2.0), 0.0, col);
+                    }
+                }
+            }
+        }
     }
 
     fn bar(&mut self, p: &mut Pen) {
@@ -408,13 +526,17 @@ impl Settings {
             self.seg(p, "tempUnit", &[("C", "°C"), ("F", "°F")], "Temperature", "thermostat");
             self.sw(p, "showKeyboardLayout", "Keyboard layout indicator", "", "keyboard");
             self.sw(p, "visualizer.bar", "Visualizer in the bar", "Small cava-style bars next to the media", "graphic_eq");
+            if self.gb(p.cx, "visualizer.bar") {
+                self.color(p, "visualizer.barColor", "Bar visualizer color", "Empty follows the visualizer color", "palette");
+                self.viz_preview(p, &[Viz::Bar]);
+            }
         });
         p.h2("dashboard_customize", "Bar layout", "");
         p.card(|p| {
             self.seg(p, "bar.position", &[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], "Bar position", "vertical_align_top");
             self.sw(p, "bar.hideFullscreen", "Hide in full screen", "The bar hides on a monitor while an app (a game, a video) covers it", "fullscreen");
             p.note("Side bars show icons and short text only (no window title). Moving the bar frees or takes screen space for windows after zorui restarts.", 12.0);
-            self.seg(p, "bar.style", &[("float", "Float"), ("flat", "Flat"), ("islands", "Islands")], "Bar style", "style");
+            self.seg(p, "bar.style", &[("float", "Float"), ("flat", "Flat"), ("islands", "Islands"), ("clear", "Clear")], "Bar style", "style");
             self.seg(p, "bar.groups", &[("filled", "Filled"), ("outlined", "Outlined"), ("none", "None")], "Group backgrounds", "rounded_corner");
             self.slider(p, "bar.titleWidth", "Window title width", Sl { min: 10.0, max: 40.0, step: 1.0, fmt: Fmt::PctInt }, "width");
             p.note("Drag a part up or down to change its order (top shows first), or into another column. Or click it and use the arrow keys.", 12.0);
@@ -430,6 +552,21 @@ impl Settings {
             let cur = self.garr(p.cx, "desktop.widgets");
             p.chips(DESKTOP_WIDGETS.iter().map(|(id, n)| (n.to_string(), None, cur.iter().any(|c| c == id), Act::Do("dwidget", id.to_string()))).collect());
             self.seg(p, "desktop.clock", &[("cookie", "Cookie"), ("analog", "Analog"), ("digital", "Digital"), ("pixel", "Pixel")], "Clock style", "schedule");
+            self.sw(p, "desktop.glass.enable", "Glass cards", "Cards show the wallpaper behind them, blurred and bent at the rim. A preset with glass turns this on", "blur_on");
+            if self.get(p.cx, "desktop.glass.enable") == json!(true) {
+                self.slider(p, "desktop.glass.haze", "Glass blur", px(0.0, 20.0, 1.0), "blur_on");
+                self.slider(p, "desktop.glass.pull", "Glass bend at the edge", Sl { min: 0.0, max: 100.0, step: 5.0, fmt: Fmt::PctInt }, "lens_blur");
+                self.slider(p, "desktop.glass.rimWidth", "Glass edge width", px(4.0, 40.0, 1.0), "border_outer");
+                self.slider(p, "desktop.glass.sheen", "Glass highlight", Sl { min: 0.0, max: 1.0, step: 0.05, fmt: Fmt::Pct }, "light_mode");
+                self.slider(p, "desktop.glass.split", "Glass colour fringe", Sl { min: 0.0, max: 0.3, step: 0.01, fmt: Fmt::Pct }, "gradient");
+                self.slider(p, "desktop.glass.frost", "Glass frosting", Sl { min: 0.0, max: 0.2, step: 0.01, fmt: Fmt::Pct }, "ac_unit");
+                self.slider(p, "desktop.glass.vividness", "Glass colour strength", Sl { min: 0.5, max: 2.0, step: 0.05, fmt: Fmt::Pct }, "palette");
+                self.seg(p, "desktop.glass.tint", &[("transparent", "No tint"), ("black", "Dark"), ("white", "Light")], "Glass tint", "contrast");
+                self.slider(p, "desktop.glass.tintStrength", "Glass tint strength", Sl { min: 0.0, max: 1.0, step: 0.05, fmt: Fmt::Pct }, "opacity");
+                self.glass_preview(p);
+            }
+            self.sw(p, "desktop.snap", "Snap cards to each other", "Dragged cards line up with other cards' edges and centres. Hold Alt to drag freely", "grid_on");
+            self.sw(p, "desktop.snapLines", "Snapping guide lines", "Show a line where a dragged card lines up with another. Snapping still works with this off", "straighten");
             self.sw(p, "desktop.clockVertical", "Stacked digital clock", "Hours over minutes, for the Digital style", "view_agenda");
             p.note("World clock cities: pick as many as you like.", 12.0);
             let cur = self.garr(p.cx, "desktop.worldClocks");
@@ -450,7 +587,21 @@ impl Settings {
             self.sw(p, "dock.enabled", "Dock", "Pinned apps and open windows along the bottom. Right-click an app to pin it", "dock_to_bottom");
             self.sw(p, "visualizer.desktop", "Desktop visualizer", "Audio bars along the bottom of the screen (cava)", "equalizer");
             self.num(p, "visualizer.bars", "Visualizer bars", 16, 160, "bar_chart");
+            self.color(p, "visualizer.color", "Visualizer color", "Every visualizer, unless one has its own. Empty follows the theme", "palette");
+            self.color(p, "visualizer.desktopColor", "Desktop visualizer color", "Empty follows the visualizer color", "palette");
+            self.viz_preview(p, &[Viz::Island, Viz::Bar, Viz::Desktop]);
             self.text(p, "userName", "Your name", "Shown in the greeting and sidebar", "person");
+        });
+        p.h2("aspect_ratio", "Card sizes", "");
+        p.card(|p| {
+            for id in crate::desk::SIZED {
+                let name = DESKTOP_WIDGETS.iter().find(|w| w.0 == id).map_or(id, |w| w.1);
+                if let Some(r) = p.row(40.0) {
+                    p.left(r, "aspect_ratio", name, "", 130.0);
+                    self.select_box(p, &format!("desktop.sizes.{id}"), opts(&CARD_SIZES), R::new(r.x + r.w - 130.0, r.y, 130.0, 40.0));
+                }
+            }
+            p.note("Size in grid cells, rows by columns. The other cards fit their content. Media only takes the size while something plays.", 12.0);
         });
         p.h2("image", "Image cards", "");
         p.card(|p| {
@@ -825,6 +976,10 @@ impl Settings {
                 let b = R::new(m.x + m.w - 10.0 - 36.0, m.y + 8.0, 36.0, 36.0);
                 if t.busy { p.c.circle(b.x + 18.0, b.y + 18.0, 18.0, p.col("secondaryContainer")); p.spinner(b.x + 18.0, b.y + 18.0, 20.0); }
                 else { let id = p.act(t.act); ui::icon_btn(p.c, p.cx, b, id, t.icon, IconKind::Tonal, 20.0, false); }
+                if let Some(u) = t.link {
+                    let id = p.act(Act::Do("url", u));
+                    ui::icon_btn(p.c, p.cx, R::new(b.x - 36.0 - 4.0, b.y, 36.0, 36.0), id, "open_in_new", IconKind::Plain, 20.0, false);
+                }
             }
         }
         p.y += h;
@@ -895,9 +1050,39 @@ fn cap(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
+const PREVIEW_W: f32 = 200.0;
+const PREVIEW_H: f32 = 124.0;
+
+/// The monitor's preview box: its shape scaled to fit the fixed preview area.
+fn monitor_box(w: f32, h: f32) -> (f32, f32) {
+    let k = (PREVIEW_W / w.max(1.0)).min(PREVIEW_H / h.max(1.0));
+    ((w * k).round().max(8.0), (h * k).round().max(8.0))
+}
+
+/// Title and second line of a monitor's row: "DELL U2723QE", "Portrait, 1080 x 1920, its own picture".
+/// An empty name falls back to "Display 2".
+fn monitor_caption(name: &str, i: usize, w: i32, h: i32, custom: bool) -> (String, String) {
+    let shape = if h > w { "Portrait" } else if w > h { "Landscape" } else { "Square" };
+    (if name.is_empty() { format!("Display {}", i + 1) } else { name.to_string() }, format!("{shape}, {w} x {h}, {}", if custom { "its own picture" } else { "main wallpaper" }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_captions() {
+        assert_eq!(monitor_caption("DELL U2723QE", 1, 1080, 1920, true), ("DELL U2723QE".into(), "Portrait, 1080 x 1920, its own picture".into()));
+        assert_eq!(monitor_caption("", 1, 2560, 1440, false), ("Display 2".into(), "Landscape, 2560 x 1440, main wallpaper".into()));
+        assert_eq!(monitor_caption("x", 0, 800, 800, false).1, "Square, 800 x 800, main wallpaper");
+    }
+
+    #[test]
+    fn monitor_boxes_keep_their_shape_inside_the_preview_area() {
+        assert_eq!(monitor_box(1920.0, 1080.0), (200.0, 113.0));
+        assert_eq!(monitor_box(1080.0, 1920.0), (70.0, 124.0));
+        for (w, h) in [(3440.0, 1440.0), (800.0, 800.0), (0.0, 0.0)] { let (bw, bh) = monitor_box(w, h); assert!(bw <= PREVIEW_W && bh <= PREVIEW_H && bw >= 8.0 && bh >= 8.0, "{w}x{h}"); }
+    }
 
     #[test]
     fn captions() {
@@ -911,6 +1096,12 @@ mod tests {
         assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
+    }
+
+    #[test]
+    fn card_size_choices_are_real_grids() {
+        for (v, _) in CARD_SIZES { assert!(v.is_empty() || crate::desk::grid_size(v).is_some(), "{v}"); }
+        for id in crate::desk::SIZED { assert!(DESKTOP_WIDGETS.iter().any(|w| w.0 == id), "{id}"); }
     }
 }
 

@@ -145,6 +145,26 @@ fn toast_text(payload: &[u8]) -> (String, String) {
     }
 }
 
+/// What a click on the toast should ShellExecute: the toast's protocol link (`ms-phone:...`) when it has
+/// one, else the owning app by AUMID, else "".
+// shortcut: opaque (non-protocol) launch args need COM activation, so those toasts only open the app.
+fn open_target(payload: &[u8], aumid: &str) -> String {
+    let p = String::from_utf8_lossy(payload);
+    let tag = p.find("<toast").and_then(|i| p[i..].find('>').map(|e| &p[i..i + e]));
+    let attr = |name: &str| tag.and_then(|t| {
+        let key = format!(" {name}=\"");
+        let from = t.find(&key)? + key.len();
+        Some(unescape(&t[from..from + t[from..].find('"')?]))
+    });
+    if attr("activationType").as_deref() == Some("protocol") {
+        if let Some(l) = attr("launch") {
+            // a scheme of 2+ letters, so "C:\..." paths are not mistaken for links
+            if l.split_once(':').is_some_and(|(s, _)| s.len() > 1 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))) { return l; }
+        }
+    }
+    if aumid.is_empty() { String::new() } else { format!("shell:AppsFolder\\{aumid}") }
+}
+
 /// Ids the user dismissed (strings only, like the ids we write).
 fn load_dismissed(path: &Path) -> BTreeSet<String> {
     load_json(path, json!([])).as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default()
@@ -163,7 +183,7 @@ fn read_notifications(db: &Path, dismissed_file: &Path) -> Value {
         if dismissed.contains(&r.id) { continue; }
         let (title, body) = toast_text(&r.payload);
         if title.is_empty() && body.is_empty() { continue; }
-        items.push(json!({ "id": r.id, "app": pretty_app(&r.aumid), "title": title, "body": body, "time": r.arrival.map_or(0.0, filetime_to_unix) }));
+        items.push(json!({ "id": r.id, "app": pretty_app(&r.aumid), "title": title, "body": body, "time": r.arrival.map_or(0.0, filetime_to_unix), "open": open_target(&r.payload, &r.aumid) }));
     }
     json!({ "items": items })
 }
@@ -423,6 +443,21 @@ mod tests {
         assert_eq!(t, "Hi & bye");
         assert_eq!(b, "Line A");
         assert_eq!(toast_text(b""), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn click_target() {
+        let app = "MSEdge";
+        let open = |p: &str| open_target(p.as_bytes(), app);
+        assert_eq!(open(r#"<toast activationType="protocol" launch="ms-phone:messages?id=1&amp;thread=5"><visual/></toast>"#), "ms-phone:messages?id=1&thread=5");
+        assert_eq!(open(r#"<toast hint-people="tel:1" launch="windowsdefender://threat" activationType="protocol">"#), "windowsdefender://threat");
+        // opaque launch args, a drive path, a missing launch and no payload all fall back to the app
+        let fallback = "shell:AppsFolder\\MSEdge";
+        assert_eq!(open(r#"<toast launch="identifier=abc"><visual/></toast>"#), fallback);
+        assert_eq!(open(r#"<toast activationType="protocol" launch="C:\x.exe">"#), fallback);
+        assert_eq!(open("<toast><visual/></toast>"), fallback);
+        assert_eq!(open(""), fallback);
+        assert_eq!(open_target(b"", ""), "");
     }
 
     #[test]

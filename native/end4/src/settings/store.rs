@@ -25,7 +25,7 @@ impl Inbox {
 
 /// A Config that only carries what bridge / run need, to move into a thread.
 pub fn bcfg(cx: &Ctx) -> Config {
-    Config::parse(&json!({ "pythonPath": cx.cfg.str("pythonPath"), "bridgePath": cx.cfg.str("bridgePath"), "scriptsDir": cx.cfg.str("scriptsDir") }).to_string())
+    Config::parse(&json!({ "scriptsDir": cx.cfg.str("scriptsDir") }).to_string())
 }
 
 /// The message to toast when a bridge / script answer failed.

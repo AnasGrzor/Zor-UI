@@ -1,5 +1,5 @@
-//! Talk to the primary buddy: `zorui.exe --buddy listen` (a hotkey) records your voice, the Python
-//! bridge turns it into text with the Parakeet model, and this module does what you asked:
+//! Talk to the primary buddy: `zorui.exe --buddy listen` (a hotkey) records your voice, the speech
+//! recognizer turns it into text with the Parakeet model, and this module does what you asked:
 //! search the web, open an app or Steam game, or start a message. Phrases it doesn't know go to the
 //! AI model from the sidebar, which can also pick one of those actions. Nothing is ever sent for you:
 //! messages open in the app and wait for you to press Enter.
@@ -255,7 +255,7 @@ fn ask_ai(cfg: &Config, said: &str) -> String {
         if let Some(d) = v["delta"].as_str() { let _ = tx2.send(Ok(d.to_string())); }
         if let Some(e) = v["error"].as_str() { let _ = tx2.send(Err(e.to_string())); }
     }, move || { let _ = tx3.send(Ok(String::new())); drop(tx3); });
-    if stream.is_none() { return "I can't reach my brain. Check pythonPath and bridgePath in config.json.".into(); }
+    if stream.is_none() { return "I can't reach my brain.".into(); }
     let mut reply = String::new();
     // the exit marker is an empty Ok; stop on it, on an error, or after 30 s
     while let Ok(m) = rx.recv_timeout(std::time::Duration::from_secs(30)) {
@@ -304,7 +304,7 @@ pub fn listen(cfg: &Config) {
             if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); } else { ask(&cfg2, t); }
         }
     });
-    if s.is_none() { crate::pill::set(0); say_later("I can't start listening. Check pythonPath and bridgePath in config.json.", 6.0); }
+    if s.is_none() { crate::pill::set(0); say_later("I can't start listening.", 6.0); }
     if let Ok(mut l) = LISTENER.lock() { *l = s; } // replacing it stops a recording already running
 }
 

@@ -29,7 +29,7 @@ const ID_TOGGLE: u32 = 20; // + 0..16
 const ID_SLIDER: u32 = 40; // volume, mic, brightness
 const ID_MIXER_BTN: u32 = 50;
 const ID_MIX_SLIDER: u32 = 100; // + row
-const ID_MIX_MUTE: u32 = 200; // + row
+const ID_MIX_MUTE: u32 = 900; // + row (200..300 belongs to the notification and timer pages)
 const ID_TAB: u32 = 300; // + 0..4
 const TABS: [&str; 4] = ["notif", "cal", "todo", "timer"];
 
@@ -442,7 +442,7 @@ impl View for SidebarRight {
                 self.drag(id, x, ph, cx);
             }
             Input::Wheel(id, d) => {
-                let mixer = (ID_MIX_SLIDER..ID_MIX_MUTE + 100).contains(&id);
+                let mixer = (ID_MIX_SLIDER..ID_MIX_SLIDER + 100).contains(&id) || (ID_MIX_MUTE..ID_MIX_MUTE + 100).contains(&id);
                 if mixer && self.mixer_open { self.sc_mixer.wheel(d); } else { self.wheel_tab(d); }
             }
             Input::Key { vk, ctrl, shift, alt } if self.todo_focus && self.tab == 2 => if self.todo.key(vk, ctrl, shift, alt) == ui::Edit::Submit { self.add_todo(); },
@@ -456,6 +456,14 @@ impl View for SidebarRight {
 #[cfg(test)]
 mod output_tests {
     use super::*;
+
+    #[test]
+    fn mixer_ids_leave_the_page_ids_alone() {
+        // Clear (211), the calendar (220), add (231) and the timer (240..245) must not hit the mixer's arms
+        for id in [210u32, 211, 220, 221, 231, 240, 242, 244] {
+            assert!(!(ID_MIX_SLIDER..ID_MIX_SLIDER + 100).contains(&id) && !(ID_MIX_MUTE..ID_MIX_MUTE + 100).contains(&id), "{id}");
+        }
+    }
 
     #[test]
     fn output_menu_ticks_the_default() {

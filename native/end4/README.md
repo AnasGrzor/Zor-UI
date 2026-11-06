@@ -1,15 +1,15 @@
 # Zor UI native shell (`zorui.exe`)
 
-The Zor UI widgets (formerly end4-pC) drawn by one small Windows process instead of a Zebar browser window per widget.
+The Zor UI widgets (formerly end4-pC) drawn by one small Windows process. The first version used a Zebar browser window per widget.
 The bar on two monitors plus four desktop cards take about 32 MB working set (9 MB private) here;
 the same widgets in Zebar used about 1 GB.
 
-It reads the same files as the Zebar pack (`~/.glzr/zebar/zor-ui/config.json`, `theme.json`, the fonts in
-`assets/fonts`). Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
+It reads `~/.glzr/zebar/zor-ui/config.json`, `theme.json` and the fonts in `assets/fonts` (the folder keeps the name
+from the Zebar days). Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
 
 ## What it draws
 
-`config.json` → `"native"` lists the parts this app has taken over; Zebar skips them.
+`config.json` → `"native"` turns a part on or off. Every part is on by default except the buddy.
 
 | Part | Key | Ported |
 |---|---|---|
@@ -21,28 +21,22 @@ It reads the same files as the Zebar pack (`~/.glzr/zebar/zor-ui/config.json`, `
 | Left / right sidebar | `"sidebar-left"`, `"sidebar-right"` | left: home, AI chat, translator, anime, football. Right: toggles, sliders, mixer, notifications, calendar, to-do, timer |
 | Settings | `"settings": true` | every page, including the wallpaper and preset galleries |
 | Dock, visualizer | `"dock"`, `"visualizer"` | both (each also has its own on/off switch in Settings) |
-| Theme | `"theme": true` | wallpaper and color changes run in Rust (`src/bridge/theme.rs`); false uses `switchwall.ps1` |
-
-Zebar is now only a fallback: every part above is native. A part whose key is false (or missing) is drawn by
-Zebar instead, and the bar and GlazeWM's keys open it with `zebar start-widget`, like before. `desktop.js` keeps
-the list of native cards in `NATIVE`; update both when a card is ported.
+| Theme | `"theme": true` | wallpaper and color changes (`src/bridge/theme.rs`) |
 
 ## Helper commands (`src/bridge`)
 
-The Python and PowerShell helpers are ported module by module: `sys` (config, night light, mixer, dock icons),
-`web` (secrets, translate, booru, AI chat, presets), `football`, `notify` (toasts, agents), `we` (Wallpaper
-Engine), `media` (visualizer, recorder, file picker), `toggles` (toggles.ps1) and `theme` (switchwall.ps1 and the
-Material You colors). Each command prints the same JSON as the script. One that is not ported yet (the color picker,
-the screen translator, brightness and game mode, and the yande.re and danbooru sources, whose TLS handshake `curl.exe`
-fails on some networks) runs the script. `zorui.exe --bridge <command>` and `zorui.exe --script <toggles|switchwall>`
-run a command from a terminal; `END4_PYTHON_BRIDGE=1` forces the scripts.
+`sys` (config, night light, mixer, dock icons), `web` (secrets, translate, booru, AI chat, presets), `football`,
+`notify` (toasts, agents), `we` (Wallpaper Engine), `media` (visualizer, recorder, file picker), `picker` and
+`screen_translate`, `listen` (voice: WASAPI mic and sherpa-onnx, whose DLLs download on first use), `agent_hook`
+(`--agent` and `--install-agents` for coding-agent hooks), `toggles` and `theme` (switchwall and the Material You
+colors). `zorui.exe --bridge <command>` and `zorui.exe --script <toggles|switchwall>` run a command from a terminal
+and print its JSON.
 
 ## Opening popups
 
 `zorui.exe --open <name>` (name: `island-panel`, `overview`, `sidebar-left`, `sidebar-right`, `settings`) asks the
-running instance (WM_COPYDATA to its message window) to open the popup, or close it if it's open. Native when the
-part is in `"native"`, else Zebar's copy; with no instance running it starts Zebar's copy. `install.ps1` points the
-GlazeWM keys at it, and the bridge has `native-open <name>` for Zebar's own code. Popups sit on the clicked bar's
+running instance (WM_COPYDATA to its message window) to open the popup, or close it if it's open. `install.ps1` points the
+GlazeWM keys at it. With no instance running it does nothing. Popups sit on the clicked bar's
 monitor, else GlazeWM's focused one, take keyboard focus, and close on Esc or when they lose focus.
 
 ## Checking drawing without windows
@@ -50,15 +44,12 @@ monitor, else GlazeWM's focused one, take keyboard focus, and close on Esc or wh
 `zorui.exe --render <part> <out.png> [w h scale]` paints one view offscreen (real config and theme, sample media)
 and writes a PNG: a desk card id, `bar`, `dock`, `visualizer`, or a popup name. w and h are CSS px.
 
-## Shared state with Zebar
+## Shared state
 
-The Zebar widgets keep the timer, recording, agents and "open on this monitor" hints in localStorage.
-With a native bar, `lib/core.js` mirrors those keys over `ws://127.0.0.1:6133/state` (`hub.rs`), and the
-hub pushes every change back. Only Zebar's page origins may connect. A WebSocket because Zebar's request
-caching swallows `fetch()` to that port.
+The timer, recording, agents and "open on this monitor" hints live in `hub.rs` and are saved to
+`%LOCALAPPDATA%\zor-ui\shared.json`.
 
-The bar also runs the bridge streams the Zebar bar used to run (`agents-watch`, `notifications-watch`,
-`we-sync`).
+The bar runs the bridge streams `agents-watch`, `notifications-watch` and `we-sync`.
 
 ## Build
 
@@ -72,21 +63,20 @@ cargo build --release
 releases link through `windows-link` (raw-dylib), which needs `dlltool` + an assembler that rustup's GNU
 toolchain doesn't ship. Keep the lock file when updating.
 
-`install.ps1` builds it when `cargo` is on PATH, copies `zorui.exe` to `%LOCALAPPDATA%\zor-ui`, and turns on every missing
-`"native"` key (`desktop`, `bar`, `visualizer`, `dock`, the popups). GlazeWM starts it with Zebar (`startup_commands`) and ignores its
-windows (`window_rules`).
+`install.ps1` copies the prebuilt `zorui.exe` (or builds it when `cargo` is on PATH) to `%LOCALAPPDATA%\zor-ui`.
+GlazeWM starts it (`startup_commands`) and ignores its windows (`window_rules`).
 
-`zorui.exe --all` draws every ported part whatever `"native"` says, for comparing next to Zebar.
+`zorui.exe --all` draws every part whatever `"native"` says.
 
 ## How it draws
 
 - `gfx.rs`: tiny-skia for shapes and pictures, DirectWrite for text (variable font weights, Material Symbols
   ligatures), all on the CPU. Direct2D was tried first; its software mode loads WARP and cost ~10 MB more.
 - `win.rs`: one layered window per widget (per-pixel alpha), repainted only when its content changes.
-  Bars are app bars (they reserve 56 px like Zebar's `dockToEdge`).
+  Bars are app bars (they reserve 56 px).
 - `app.rs`: shared state, a 1 s tick, config/theme reload on file change, jobs from background threads.
 - Data: `glaze.rs` (GlazeWM IPC WebSocket), `media.rs` (media session, Core Audio), `sys.rs` (network,
-  battery, keyboard, CPU, Luxon date tokens), `tray.rs` (systray-util, the crate Zebar uses), `weather.rs`.
+  battery, keyboard, CPU, Luxon date tokens), `tray.rs` (systray-util), `weather.rs`.
 
 Known limits: the bars must dock before the tray starts (systray-util's stand-in `Shell_TrayWnd` swallows
 app bar messages), so bars rebuilt after a monitor change don't reserve their strip until a restart.

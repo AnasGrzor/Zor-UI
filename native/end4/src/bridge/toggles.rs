@@ -1,5 +1,4 @@
-//! Rust port of scripts/toggles.ps1. colorpick and screentranslate (full-screen Python tools)
-//! return None so the script still runs them.
+//! Rust port of scripts/toggles.ps1. colorpick and screentranslate hand over to picker.rs / screen_translate.rs.
 
 use super::common::*;
 use super::*;
@@ -32,7 +31,7 @@ use windows::{
 };
 
 /// toggles.ps1 with its PowerShell-style arguments ("-Action", "wifi", "-Value", ...). None: not ported.
-pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
+pub fn run(cfg: &Config, args: &[&str]) -> Option<Value> {
     let (action, value, monitor) = parse_args(args);
     let action = action?;
     // "active", or a 0-based index into `monitors`
@@ -94,8 +93,8 @@ pub fn run(_cfg: &Config, args: &[&str]) -> Option<Value> {
         }
         "gamemode" => Some(json!({ "gamemode": game_mode() })),
         "timer-done" => Some(timer_done(&value)),
-        // full-screen Python tools: still the script
-        "colorpick" | "screentranslate" => None,
+        "colorpick" => super::call(cfg, "color-pick", &[]),
+        "screentranslate" => super::call(cfg, "screen-translate", &[]),
         _ => Some(json!({ "error": format!("unknown action '{action}'") })),
     }
 }
@@ -337,15 +336,15 @@ fn kill(pid: u32) {
     unsafe { if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) { let _ = TerminateProcess(h, 1); let _ = CloseHandle(h); } }
 }
 
-/// Game mode: frees RAM by stopping the native shell, Zebar, Flow Launcher and the live wallpaper; run
-/// again to bring them back. "On" = neither the shell (it holds the single-instance mutex) nor Zebar
-/// runs, so no state file can go stale. GlazeWM keeps running so the key still works. Returns the new state.
+/// Game mode: frees RAM by stopping the native shell, Flow Launcher and the live wallpaper; run
+/// again to bring them back. "On" = the shell (it holds the single-instance mutex)
+/// is not running, so no state file can go stale. GlazeWM keeps running so the key still works. Returns the new state.
 fn game_mode() -> bool {
     let shell_up = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("zor-ui-native")).map(|h| { let _ = CloseHandle(h); }).is_ok() };
-    let stopping = shell_up || !pids(&["zebar.exe"]).is_empty();
+    let stopping = shell_up;
     let we = super::we::we_running();
     if stopping {
-        pids(&["zebar.exe", "flow.launcher.exe"]).into_iter().for_each(kill);
+        pids(&["flow.launcher.exe"]).into_iter().for_each(kill);
         if we { let _ = super::we::we_control(&["stop"], 15); }
         let (me, others) = (unsafe { GetCurrentProcessId() }, pids(&["zorui.exe"]));
         others.iter().filter(|&&p| p != me).for_each(|&p| kill(p));
@@ -356,7 +355,6 @@ fn game_mode() -> bool {
         if we { let _ = super::we::we_control(&["play"], 15); }
         let null = || (Stdio::null(), Stdio::null());
         let launch = |mut c: std::process::Command| { let (o, e) = null(); let _ = c.stdin(Stdio::null()).stdout(o).stderr(e).spawn(); };
-        launch(hidden("zebar"));
         if let Ok(me) = std::env::current_exe() { launch(hidden(me)); }
         let flow = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("FlowLauncher").join("Flow.Launcher.exe");
         if flow.is_file() { launch(hidden(flow)); }

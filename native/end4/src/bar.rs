@@ -8,7 +8,7 @@ use crate::{
     weather,
     win::{Btn, Input, View},
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{collections::HashMap, time::Instant};
 
 const LH: f32 = 1.252;
@@ -199,14 +199,9 @@ impl Bar {
         split_workspaces(n, cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32, main)
     }
 
-    /// Opens a Zebar popup on this bar's monitor (openHere).
+    /// Opens a popup on this bar's monitor (openHere).
     fn open_here(&self, cx: &mut Ctx, name: &str) {
-        if cx.native(name) {
-            cx.actions.push(Action::Open { name: name.into(), mon: Some((self.mon.0, self.mon.1)), at: None });
-            return;
-        }
-        if let Some(m) = self.monitor(cx) { hub::set("end4.openOn", Some(json!({ "monitor": m.id, "at": hub::now_ms() }).to_string())); }
-        proc::zebar_widget(name);
+        cx.actions.push(Action::Open { name: name.into(), mon: Some((self.mon.0, self.mon.1)), at: None });
     }
 
     fn art(&mut self, g: &Gfx, cx: &Ctx, px: u32) -> Option<Pixmap> {
@@ -890,7 +885,7 @@ impl Bar {
         }
     }
 
-    /// openIslandPanel() in bar.js: the panel (still Zebar) opens under the island.
+    /// openIslandPanel() in bar.js: the panel opens under the island.
     fn open_island_panel(&self, cx: &mut Ctx) {
         let closed: f64 = hub::get("end4.closedAt.island-panel").and_then(|v| v.parse().ok()).unwrap_or(0.0);
         if hub::now_ms() - closed < 600.0 { return; } // the click that closed it
@@ -898,13 +893,7 @@ impl Bar {
         let Some((_, r)) = self.pills.iter().find(|p| p.0 == ISLAND) else { return };
         let s = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
         let (ax, ay) = anchor(self.edge, self.origin, *r, s);
-        if cx.native("island-panel") {
-            cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)) });
-            return;
-        }
-        let at = json!({ "x": ax, "y": ay });
-        hub::set("end4.islandAt", Some(at.to_string()));
-        proc::zebar_preset("island-panel");
+        cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)) });
     }
 }
 

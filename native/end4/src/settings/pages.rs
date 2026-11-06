@@ -31,9 +31,9 @@ const CLOCK_FORMATS: [&str; 7] = ["EEE, dd/MM '•' HH:mm", "HH:mm", "h:mm a", "
 
 static FONTS: OnceLock<Vec<String>> = OnceLock::new();
 
-pub const PAGES: [(&str, &str, &str); 9] = [
+pub const PAGES: [(&str, &str, &str); 10] = [
     ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
-    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("services", "hub", "Services"), ("about", "info", "About"),
+    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
 ];
 const SCHEMES: [(&str, &str, &str); 10] = [
     ("auto", "auto_awesome", "Auto"), ("content", "image", "Content"), ("expressive", "palette", "Expressive"),
@@ -82,6 +82,7 @@ impl Settings {
             "island" => self.island(p),
             "buddies" => self.buddies(p),
             "services" => self.services(p),
+            "usage" => self.usage(p),
             _ => self.about(p),
         }
     }
@@ -628,12 +629,53 @@ impl Settings {
         p.y += h + 12.0;
     }
 
+    fn usage(&mut self, p: &mut Pen) {
+        let (me, kids) = crate::perf::processes();
+        let parts = crate::perf::parts();
+        let row = |p: &mut Pen, ic: &str, label: &str, sub: &str, value: String, frac: f32| {
+            if let Some(r) = p.row(40.0) {
+                let vw = p.c.g.measure(&value, txt(13.0, 500)).0.ceil() + 4.0;
+                p.left(r, ic, label, sub, vw);
+                p.c.text(&value, R::new(r.x + r.w - vw, r.y, vw, r.h - 6.0), txt(13.0, 500), p.col("onSurface"), Align::Right);
+                let bar = R::new(r.x, r.y + r.h - 4.0, r.w, 3.0);
+                p.c.rect(bar, 1.5, alpha(p.col("onSurface"), 0.08));
+                p.c.rect(R::new(bar.x, bar.y, (bar.w * frac.clamp(0.0, 1.0)).max(if frac > 0.0 { 3.0 } else { 0.0 }), bar.h), 1.5, p.col("primary"));
+            }
+        };
+        let kids_ws: u64 = kids.iter().map(|k| k.ws).sum();
+        let kids_cpu = kids.iter().fold(0.0f32, |a, k| a + k.cpu);
+        p.h2("memory", "Zor UI", "CPU is the share of one core. Updates every second");
+        p.card(|p| {
+            row(p, "memory", "Memory", "Working set of zorui.exe", crate::perf::mb(me.ws), me.ws as f32 / (600u64 << 20) as f32);
+            row(p, "database", "Private memory", "Committed to the app alone", crate::perf::mb(me.private), me.private as f32 / (600u64 << 20) as f32);
+            row(p, "speed", "CPU", "All windows and background work", format!("{:.1}%", me.cpu), me.cpu / 100.0);
+            row(p, "terminal", "Helper programs", &format!("{} running (scripts, bridge, tools)", kids.len()), format!("{} · {:.1}%", crate::perf::mb(kids_ws), kids_cpu), kids_cpu / 100.0);
+        });
+        p.h2("dashboard", "Parts", "Drawing time and pixel buffers of each part");
+        p.card(|p| {
+            if parts.is_empty() { p.note("Nothing has drawn yet.", 12.0); }
+            let top = parts.iter().map(|x| x.cpu).fold(0.1f32, f32::max);
+            for x in &parts {
+                let sub = format!("{} window{} · {:.0} frames/s · {} buffer", x.windows, if x.windows == 1 { "" } else { "s" }, x.fps, crate::perf::mb(x.bytes));
+                row(p, "widgets", &x.name, &sub, format!("{:.2}%", x.cpu), x.cpu / top);
+            }
+        });
+        p.h2("terminal", "Helper programs", "Started by Zor UI");
+        p.card(|p| {
+            if kids.is_empty() { p.note("None running right now.", 12.0); }
+            let top = kids.iter().map(|k| k.ws).max().unwrap_or(1).max(1) as f32;
+            for k in &kids {
+                row(p, "terminal", &k.name, &format!("pid {}", k.pid), format!("{} · {:.1}%", crate::perf::mb(k.ws), k.cpu), k.ws as f32 / top);
+            }
+        });
+    }
+
     fn about(&mut self, p: &mut Pen) {
         p.h2("info", "About", "");
         p.card(|p| {
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "zor-ui", true);
-                p.left(r, "", "Zor UI", "Its own shell for GlazeWM on Windows. Some parts are ported from end4-pC by pctrade (GPL-3.0)", w);
+                p.left(r, "", "Zor UI", "A native shell for GlazeWM on Windows: bar, Dynamic Island, sidebars, buddies, dock. Some parts are ported from end4-pC by pctrade (GPL-3.0)", w);
                 p.chip_right(r, Some("open_in_new"), "Credit: end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
             }
             if let Some(r) = p.row(40.0) {
@@ -791,7 +833,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "services", "about"]);
+        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }

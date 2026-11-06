@@ -1,8 +1,6 @@
-//! Rust ports of the pack's helper scripts: scripts/end4_bridge.py (+ football.py, end4_theme.py),
-//! toggles.ps1 and switchwall.ps1. `proc` asks here first; a command no module claims (None) still
-//! runs the script, so the port can land one command at a time. Each command prints the same JSON
-//! as the script did, so callers don't change. `END4_PYTHON_BRIDGE=1` sends everything to the
-//! scripts again (for comparing the two).
+//! The helper commands (system, web, football, notifications, Wallpaper Engine, media, color picker, screen
+//! translate, voice listening, toggles and switchwall). `proc` is how the shell calls them; `zorui.exe
+//! --bridge <command>` and `--script <toggles|switchwall>` run them from a terminal. Each prints JSON.
 
 use crate::conf::Config;
 use serde_json::Value;
@@ -11,9 +9,11 @@ use std::sync::{
     Arc,
 };
 
+pub(crate) mod agent_hook;
 mod claude_cli;
 mod common;
 mod football;
+mod listen;
 mod media;
 mod sub_cli;
 mod notify;
@@ -49,11 +49,8 @@ impl Sink {
     pub fn stopped(&self) -> bool { self.stop.load(Ordering::Relaxed) }
 }
 
-fn python_only() -> bool { std::env::var("END4_PYTHON_BRIDGE").is_ok_and(|v| v == "1") }
-
-/// One-shot end4_bridge.py command `name`. None: not ported, run the script.
+/// One-shot end4_bridge.py command `name`. None: not a command.
 pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
-    if python_only() { return None; }
     sys::call(cfg, name, args)
         .or_else(|| web::call(cfg, name, args))
         .or_else(|| football::call(cfg, name, args))
@@ -68,13 +65,9 @@ type Streamer = fn(&Config, &str, &[String], &str, &Sink);
 
 /// The module that streams `name` (a long-running bridge command), if any.
 fn streamer(name: &str) -> Option<Streamer> {
-    if python_only() { return None; }
-    [(web::STREAMS, web::stream as Streamer), (notify::STREAMS, notify::stream), (we::STREAMS, we::stream), (media::STREAMS, media::stream)]
+    [(web::STREAMS, web::stream as Streamer), (notify::STREAMS, notify::stream), (we::STREAMS, we::stream), (media::STREAMS, media::stream), (listen::STREAMS, listen::stream)]
         .into_iter().find(|(names, _)| names.contains(&name)).map(|(_, f)| f)
 }
-
-/// A Rust port handles streaming command `name`.
-pub fn ported_stream(name: &str) -> bool { streamer(name).is_some() }
 
 /// Starts streaming command `name` on a thread: `on_line` gets each line, `on_exit` runs when it ends.
 /// None: not ported. Setting the returned flag asks the command to stop.
@@ -91,18 +84,15 @@ pub fn stream(cfg: &Config, name: &str, args: &[&str], stdin: &str, on_line: imp
 
 /// PowerShell helper `script` (toggles / switchwall) with its -Name value arguments. None: not ported.
 pub fn script(cfg: &Config, script: &str, args: &[&str]) -> Option<Value> {
-    if python_only() { return None; }
     match script {
         "toggles" => toggles::run(cfg, args),
-        // the port writes GlazeWM / Flow / Terminal configs and hasn't re-themed a live PC yet: opt in
-        "switchwall" if Config::load().bool("native.theme") => theme::switchwall(cfg, args),
+        "switchwall" => theme::switchwall(cfg, args),
         _ => None,
     }
 }
 
 /// `zorui.exe --bridge <command> [args]` / `--script <toggles|switchwall> [args]`: runs a command from the
-/// command line (GlazeWM keybinds use this) and prints what the script would; anything not ported runs
-/// the script itself. stdin feeds streaming commands such as ai-chat.
+/// command line (GlazeWM keybinds use this) and prints what the script would; an unknown command exits with 2. stdin feeds streaming commands such as ai-chat.
 pub fn cli(kind: &str, args: &[String]) -> i32 {
     use std::io::{Read, Write};
     let cfg = Config::load();
@@ -122,6 +112,6 @@ pub fn cli(kind: &str, args: &[String]) -> i32 {
         f(&cfg, name, &args, &stdin, &Sink::new(|l| { let mut o = std::io::stdout(); let _ = writeln!(o, "{l}"); let _ = o.flush(); }, Arc::new(AtomicBool::new(false))));
         return 0;
     }
-    print(&crate::proc::bridge(&cfg, name, &rest)); // not ported: the Python script
-    0
+    eprintln!("unknown command {name}");
+    2
 }

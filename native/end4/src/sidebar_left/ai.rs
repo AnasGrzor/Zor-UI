@@ -129,7 +129,7 @@ impl Ai {
             if let Some(e) = v["error"].as_str() { ib.push(Ev::Err(id, e.into())); wake(); }
         }, move || { ib2.push(Ev::Exit(id)); wake(); });
         if self.stream.is_none() {
-            if let Some(m) = self.history.last_mut() { m.content = "Couldn't start the bridge (check pythonPath / bridgePath in config.json).".into(); m.error = true; }
+            if let Some(m) = self.history.last_mut() { m.content = "Couldn't start the AI request.".into(); m.error = true; }
         }
     }
 

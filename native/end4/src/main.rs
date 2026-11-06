@@ -3,6 +3,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod appicon;
 mod assist;
 mod bridge;
 mod bar;
@@ -21,6 +22,7 @@ mod lyrics;
 mod media;
 mod menu;
 mod overview;
+mod perf;
 mod pill;
 mod popup;
 mod proc;
@@ -45,10 +47,10 @@ use windows::{
     },
 };
 
-/// `zorui.exe --open <name>`: asks the running instance to open (or toggle) a popup; without one, Zebar's copy opens.
+/// `zorui.exe --open <name>`: asks the running instance to open (or toggle) a popup; without one, nothing happens.
 fn open_running(name: &str) {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') { return; }
-    if !send_running(&format!("open {name}")) { proc::zebar_widget(name); }
+    send_running(&format!("open {name}"));
 }
 
 /// Sends a command line to the running instance's message window; false when none is running.
@@ -64,6 +66,9 @@ fn send_running(text: &str) -> bool {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| args.iter().position(|a| a == flag);
+    // agent hooks run on every tool call: answer before any window or COM setup
+    if let Some(i) = arg("--agent") { std::process::exit(bridge::agent_hook::cli(&args[i + 1..])); }
+    if arg("--install-agents").is_some() { std::process::exit(bridge::agent_hook::cli(&["--install".to_string()])); }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

@@ -3,7 +3,7 @@
 //! at once from `over` until config.json reloads. Re-theming actions (wallpaper, mode, scheme, presets,
 //! Wallpaper Engine) run the same bridge / script commands as the JS.
 //!
-//! `END4_RENDER_PAGE=<quick|keys|wallpapers|presets|bar|island|services|about>` opens that page and, with
+//! `END4_RENDER_PAGE=<quick|keys|wallpapers|presets|bar|island|services|usage|about>` opens that page and, with
 //! `--render settings`, skips all background loading; `END4_RENDER_DEMO=1` adds sample presets / wallpapers /
 //! key states so those pages can be drawn offline.
 
@@ -66,7 +66,6 @@ pub struct Settings {
     inbox: Inbox,
     /// A copy of the config for background callbacks (they have no `Ctx`).
     cfgc: Config,
-    native: [bool; 3],
     /// Values written but not yet seen in config.json: path -> (value, written at ms).
     over: HashMap<String, (Value, f64)>,
     acts: Vec<Act>,
@@ -121,7 +120,7 @@ impl Settings {
         let env = std::env::var("END4_RENDER_PAGE").ok();
         let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or(0);
         let mut s = Settings {
-            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""), native: [false; 3],
+            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""),
             over: HashMap::new(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, sl: None, drag_val: None, toast: None,
             busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
@@ -171,14 +170,13 @@ impl Settings {
         store::config_set(self.cfgc_bridge(), path, &v, &self.inbox);
     }
     fn cfgc_bridge(&self) -> Config {
-        Config::parse(&json!({ "pythonPath": self.cfgc.str("pythonPath"), "bridgePath": self.cfgc.str("bridgePath"), "scriptsDir": self.cfgc.str("scriptsDir") }).to_string())
+        Config::parse(&json!({ "scriptsDir": self.cfgc.str("scriptsDir") }).to_string())
     }
 
     pub fn toast(&mut self, msg: &str) { self.toast = Some((msg.to_string(), hub::now_ms() + TOAST_MS)); }
 
     fn sync(&mut self, cx: &Ctx) {
         self.cfgc = Config(cx.cfg.0.clone());
-        self.native = [cx.native("desktop"), cx.native("visualizer"), cx.native("dock")];
         let now = hub::now_ms();
         self.over.retain(|k, (v, t)| now - *t < 8000.0 && cx.cfg.get(k) != v);
         if self.toast.as_ref().is_some_and(|t| t.1 < now) { self.toast = None; }
@@ -321,7 +319,6 @@ impl Settings {
             let v: Vec<&str> = DESKTOP_WIDGETS.iter().map(|w| w.0).filter(|w| cur.iter().any(|c| c == w) || *w == id).collect();
             self.set("desktop.widgets", json!(v));
         }
-        if !self.native[0] { proc::zebar_preset(&format!("desk-{id}")); }
     }
 
     fn act(&mut self, cx: &mut Ctx, a: Act) {
@@ -330,14 +327,7 @@ impl Settings {
             Act::Switch(path) => {
                 let v = !self.gb(cx, &path);
                 self.set(&path, json!(v));
-                if v && !self.rendering {
-                    match path.as_str() {
-                        "visualizer.desktop" if !self.native[1] => proc::zebar_preset("visualizer"),
-                        "desktopWidgets" if !self.native[0] => proc::zebar_preset("desktop"),
-                        "dock.enabled" if !self.native[2] => proc::zebar_preset("dock"), // turning it off: it closes itself
-                        _ => {}
-                    }
-                }
+
             }
             Act::Seg(path, v) => self.set(&path, v),
             Act::Step(path, d, min, max) => {
@@ -428,7 +418,6 @@ impl Settings {
                 if was { cur.retain(|c| *c != arg) } else { cur.push(arg.clone()) }
                 let v: Vec<&str> = DESKTOP_WIDGETS.iter().map(|w| w.0).filter(|w| cur.iter().any(|c| c == w)).collect();
                 self.set("desktop.widgets", json!(v));
-                if !was && !self.native[0] { proc::zebar_preset(&format!("desk-{arg}")); } // turned-off cards close themselves
             }
             "new-buddy" => {
                 let key = |f: &str| format!("buddies.{arg}.{f}");
@@ -550,12 +539,17 @@ impl Settings {
 impl View for Settings {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
 
-    fn key(&self, _: &Ctx) -> String { format!("{}{}", self.toast.is_some(), self.busy) }
+    fn key(&self, _: &Ctx) -> String {
+        // the Usage page redraws every second
+        let tick = if PAGES[self.page].0 == "usage" { (hub::now_ms() / 1000.0) as u64 } else { 0 };
+        format!("{}{}{tick}", self.toast.is_some(), self.busy)
+    }
 
     fn frame_ms(&self) -> u32 {
         if self.rendering { 0 }
         else if self.scroll.moving() { 16 }
         else if self.toast.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
+        else if PAGES[self.page].0 == "usage" { 1000 }
         else if self.focus.is_some() && self.active { 500 }
         else { 0 }
     }

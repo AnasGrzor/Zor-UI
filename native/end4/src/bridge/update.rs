@@ -1,5 +1,5 @@
 //! Self-update. Once a day (and on `zorui.exe --update`) asks GitHub for the latest release, and when
-//! its tag is newer than this build it downloads the release's payload.zip and runs install.ps1 from
+//! its tag is newer than this build it downloads the release's zorui-app.zip and runs install.ps1 from
 //! it. install.ps1 stops zorui, copies the new files over the old ones, keeps config.json and restarts.
 //! Turn it off with "autoUpdate": false in config.json.
 
@@ -9,7 +9,11 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 
 const LATEST: &str = "https://api.github.com/repos/AnasGrzor/Zor-UI/releases/latest";
-const ASSET: &str = "payload.zip";
+/// The release assets that hold the app, newest name first. "payload.zip" is what builds up to 0.1.2 ask for, so
+/// releases keep shipping it for one version; then drop it here and in scripts/build-release.ps1.
+const ASSETS: [&str; 2] = ["zorui-app.zip", "payload.zip"];
+/// Where the download is saved.
+const SAVED: &str = "update.zip";
 
 /// "v0.2.1" -> [0, 2, 1]; None when any part is not a number.
 fn parse_version(s: &str) -> Option<Vec<u64>> {
@@ -24,10 +28,10 @@ fn newer(tag: &str, current: &str) -> bool {
     }
 }
 
-/// The payload.zip download URL out of a GitHub release object.
+/// The app zip's download URL out of a GitHub release object (the first of ASSETS the release has).
 fn asset_url(release: &Value) -> Option<&str> {
-    release.get("assets")?.as_array()?.iter()
-        .find(|a| a.get("name").and_then(Value::as_str) == Some(ASSET))?
+    let assets = release.get("assets")?.as_array()?;
+    ASSETS.iter().find_map(|name| assets.iter().find(|a| a.get("name").and_then(Value::as_str) == Some(name)))?
         .get("browser_download_url")?.as_str()
 }
 
@@ -48,16 +52,16 @@ pub fn check(cfg: &Config, force: bool) -> Result<Option<String>, String> {
     // One attempt per tag: a release built without a version bump would otherwise reinstall every day.
     let state = load_json(&state_path(), json!({}));
     if !should_install(tag, env!("CARGO_PKG_VERSION"), state.get("tried").and_then(Value::as_str), force) { return Ok(None); }
-    let url = asset_url(&release).ok_or_else(|| format!("release {tag} has no {ASSET}"))?;
+    let url = asset_url(&release).ok_or_else(|| format!("release {tag} has no {}", ASSETS[0]))?;
     let zip = get_bytes(url, &[], 300).ok_or("download failed")?;
     let dir = std::env::temp_dir().join("zorui-update");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    fs::write(dir.join(ASSET), zip).map_err(|e| e.to_string())?;
+    fs::write(dir.join(SAVED), zip).map_err(|e| e.to_string())?;
     save_json(&state_path(), &json!({ "tried": tag }));
     // Detached from this process: install.ps1 kills zorui.exe, so it must not be our child's child.
     let script = format!(
-        "Expand-Archive -Force '{d}\\{ASSET}' '{d}\\x'; & '{d}\\x\\install.ps1' -SkipDeps -Mod {m}",
+        "Expand-Archive -Force '{d}\\{SAVED}' '{d}\\x'; & '{d}\\x\\install.ps1' -SkipDeps -Mod {m}",
         d = dir.display(), m = mod_arg(cfg));
     let mut c = hidden("powershell.exe");
     c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
@@ -109,11 +113,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_payload_asset() {
-        let r = json!({ "assets": [
+    fn finds_the_app_asset() {
+        let old = json!({ "assets": [
             { "name": "ZorUI-Setup.exe", "browser_download_url": "https://x/setup" },
             { "name": "payload.zip", "browser_download_url": "https://x/payload" } ] });
-        assert_eq!(asset_url(&r), Some("https://x/payload"));
+        assert_eq!(asset_url(&old), Some("https://x/payload"));
+        let both = json!({ "assets": [
+            { "name": "payload.zip", "browser_download_url": "https://x/payload" },
+            { "name": "zorui-app.zip", "browser_download_url": "https://x/app" } ] });
+        assert_eq!(asset_url(&both), Some("https://x/app"));
         assert_eq!(asset_url(&json!({ "assets": [] })), None);
     }
 

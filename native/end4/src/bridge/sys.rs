@@ -1,5 +1,4 @@
-//! Rust port of the system commands of end4_bridge.py: config-set, open, nightlight, mixer, app-icons,
-//! launch, click-through, focus-widget, native-open. Everything else still runs the Python script.
+//! System commands: config-set, open, nightlight, mixer, app-icons, launch.
 
 use super::common::*;
 use super::*;
@@ -17,10 +16,9 @@ use windows::{
             Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
         },
         UI::{
-            Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP},
             ColorSystem::SetDeviceGammaRamp,
             Shell::ShellExecuteW,
-            WindowsAndMessaging::{EnumWindows, FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, IsWindowVisible, SetForegroundWindow, SetWindowLongW, GWL_EXSTYLE, SW_SHOWNORMAL},
+            WindowsAndMessaging::SW_SHOWNORMAL,
         },
     },
 };
@@ -28,15 +26,12 @@ use windows::{
 /// One-shot command `name`; None if this module doesn't port it (or got arguments the script would reject).
 pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
     Some(match (name, args) {
-        ("config-set", [k, v]) => config_set(&pack().join("config.json"), &pack().parent()?.join("settings.json"), k, v),
+        ("config-set", [k, v]) => config_set(&pack().join("config.json"), k, v),
         ("open", [url]) => open(url),
         ("nightlight", [] | [_] | [_, _]) => nightlight(&root().join("nightlight.json"), args.first().copied().unwrap_or("status"), args.get(1).copied().unwrap_or(""))?,
         ("mixer", [] | [_] | [_, _] | [_, _, _]) => mixer(args.first().copied().unwrap_or("list"), args.get(1).copied().unwrap_or(""), args.get(2).copied().unwrap_or("")),
         ("app-icons", _) => app_icons(args),
         ("launch", [n]) => launch(n),
-        ("click-through", [w]) => click_through(w),
-        ("focus-widget", [w] | [w, _] | [w, _, _]) => focus_widget(w, args.get(1).copied().unwrap_or("0"), args.get(2).copied().unwrap_or("0"))?,
-        ("native-open", [n]) => native_open(n),
         _ => return None,
     })
 }
@@ -55,13 +50,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// A widget name as the script accepts it: `[a-z-]+`.
-fn widget_ok(w: &str) -> bool { !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c == '-') }
-
-// ---------------------------------------------------------------- config-set
-
-/// Sets a dotted key in config.json (value is JSON); widget switches also re-sync Zebar's startup list.
-fn config_set(config: &Path, settings: &Path, key: &str, value_json: &str) -> Value {
+/// Sets a dotted key in config.json (value is JSON).
+fn config_set(config: &Path, key: &str, value_json: &str) -> Value {
     if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') { return err("bad key"); }
     let Ok(value) = serde_json::from_str::<Value>(value_json) else { return err("bad value") };
     let mut cfg = load_json(config, json!({}));
@@ -76,28 +66,7 @@ fn config_set(config: &Path, settings: &Path, key: &str, value_json: &str) -> Va
     }
     if let (Some(map), Some(last)) = (node.as_object_mut(), parts.last()) { map.insert(last.to_string(), value); }
     if !save_json(config, &cfg) { return err("couldn't write config.json"); }
-    if key.starts_with("visualizer") || key == "desktopWidgets" || key == "dock.enabled" { sync_zebar_startup(&cfg, settings); }
     json!({ "ok": true })
-}
-
-/// Keeps Zebar's startup list in line with the widgets enabled in config.
-fn sync_zebar_startup(cfg: &Value, path: &Path) {
-    let mut s = load_json(path, json!({}));
-    if !s.is_object() { s = json!({}); }
-    let entry = |w: &str| json!({ "pack": "zor-ui", "widget": w, "preset": "default" });
-    let on = |k: &str, k2: Option<&str>, default: bool| {
-        let v = match k2 { Some(k2) => cfg.get(k).and_then(|d| d.get(k2)), None => cfg.get(k) };
-        v.map_or(default, truthy)
-    };
-    let mut mine = vec![];
-    if !on("native", Some("bar"), false) { mine.push(entry("bar")); } // native/end4 draws the bar instead of Zebar
-    if on("desktopWidgets", None, true) { mine.push(entry("desktop")); }
-    if on("visualizer", Some("desktop"), true) { mine.push(entry("visualizer")); }
-    if on("dock", Some("enabled"), false) { mine.push(entry("dock")); }
-    let old = s.get("startupConfigs").and_then(Value::as_array).cloned().unwrap_or_default();
-    mine.extend(old.into_iter().filter(|c| c.get("pack").and_then(Value::as_str) != Some("zor-ui")));
-    s["startupConfigs"] = Value::Array(mine);
-    save_json(path, &s);
 }
 
 // ---------------------------------------------------------------- open / launch
@@ -192,63 +161,6 @@ fn icon_script(todo: &[(&String, &String)], folder: &Path) -> String {
     let q = |s: &str| format!("'{}'", s.replace(['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "''"));
     let saves: Vec<String> = todo.iter().map(|(n, e)| format!("try {{ [Drawing.Icon]::ExtractAssociatedIcon({}).ToBitmap().Save({}) }} catch {{ }}", q(e), q(&folder.join(format!("{n}.png")).to_string_lossy()))).collect();
     format!("Add-Type -AssemblyName System.Drawing; {}", saves.join("; "))
-}
-
-// ---------------------------------------------------------------- native-open / click-through / focus-widget
-
-/// Toggles a popup in native/end4 (`zorui.exe --open <name>`); it starts Zebar's copy if end4 isn't running.
-fn native_open(name: &str) -> Value {
-    let exe = root().join("zorui.exe");
-    if !(widget_ok(name) && exe.exists()) { return json!({ "ok": false }); }
-    let null = std::process::Stdio::null;
-    let _ = hidden(exe).args(["--open", name]).stdin(null()).stdout(null()).stderr(null()).spawn();
-    json!({ "ok": true })
-}
-
-/// Lets mouse clicks pass through a widget's window (WS_EX_LAYERED | WS_EX_TRANSPARENT).
-fn click_through(widget: &str) -> Value {
-    if !widget_ok(widget) { return json!({ "ok": false }); }
-    let title = wide(&format!("Zebar - zor-ui / {widget}"));
-    unsafe {
-        let Ok(h) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) else { return err("window not found") };
-        if h.0.is_null() { return err("window not found"); }
-        let ex = GetWindowLongW(h, GWL_EXSTYLE);
-        SetWindowLongW(h, GWL_EXSTYLE, ex | 0x80000 | 0x20);
-    }
-    json!({ "ok": true })
-}
-
-/// Python's int(float(s)); None if it isn't a number.
-fn int_of(s: &str) -> Option<i32> { s.trim().parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i32) }
-
-unsafe extern "system" fn each_window(h: HWND, lp: LPARAM) -> BOOL {
-    let found = &mut *(lp.0 as *mut Vec<(String, HWND)>);
-    let mut buf = [0u16; 256];
-    let n = GetWindowTextW(h, &mut buf).max(0) as usize;
-    if IsWindowVisible(h).as_bool() { found.push((String::from_utf16_lossy(buf.get(..n).unwrap_or_default()), h)); }
-    TRUE
-}
-
-/// Gives a popup keyboard focus. A no-op key event first makes this process eligible for the foreground;
-/// x, y pick the copy at that screen position over one on another monitor that is still closing.
-fn focus_widget(widget: &str, x: &str, y: &str) -> Option<Value> {
-    if !widget_ok(widget) { return Some(json!({ "ok": false })); }
-    let (x, y) = (int_of(x)?, int_of(y)?);
-    let title = format!("Zebar - zor-ui / {widget}");
-    let mut all: Vec<(String, HWND)> = vec![];
-    unsafe {
-        let _ = EnumWindows(Some(each_window), LPARAM(&mut all as *mut _ as isize));
-        let best = all.iter().filter(|(t, _)| *t == title).filter_map(|(_, h)| {
-            let mut r = RECT::default();
-            GetWindowRect(*h, &mut r).ok()?;
-            Some(((r.left - x).abs() + (r.top - y).abs(), h.0 as usize, *h))
-        }).min_by_key(|(d, p, _)| (*d, *p));
-        let Some((_, _, h)) = best else { return Some(err("window not found")) };
-        keybd_event(0x87, 0, Default::default(), 0); // F24 down/up: no app uses it
-        keybd_event(0x87, 0, KEYEVENTF_KEYUP, 0);
-        let _ = SetForegroundWindow(h);
-        Some(json!({ "ok": GetForegroundWindow() == h }))
-    }
 }
 
 // ---------------------------------------------------------------- nightlight
@@ -411,24 +323,13 @@ mod tests {
     }
 
     #[test]
-    fn config_set_nests_and_syncs() {
+    fn config_set_nests() {
         let d = tmp("cfg");
-        let (c, s) = (d.join("config.json"), d.join("settings.json"));
-        std::fs::write(&s, r#"{"startupConfigs":[{"pack":"other","widget":"x"},{"pack":"zor-ui","widget":"old"}],"keep":1}"#).unwrap();
-        assert_eq!(config_set(&c, &s, "ai.model", "\"gem\""), json!({ "ok": true }));
+        let c = d.join("config.json");
+        assert_eq!(config_set(&c, "ai.model", "\"gem\""), json!({ "ok": true }));
         assert_eq!(load_json(&c, json!(null)), json!({ "ai": { "model": "gem" } }));
-        assert_eq!(config_set(&c, &s, "bad key", "1")["ok"], false);
-        assert_eq!(config_set(&c, &s, "a.b", "{oops")["ok"], false);
-        config_set(&c, &s, "dock.enabled", "true");
-        let st = load_json(&s, json!(null));
-        let w: Vec<&str> = st["startupConfigs"].as_array().unwrap().iter().map(|e| e["widget"].as_str().unwrap()).collect();
-        assert_eq!(w, ["bar", "desktop", "visualizer", "dock", "x"]);
-        assert_eq!(st["keep"], 1);
-        config_set(&c, &s, "native.bar", "true");
-        config_set(&c, &s, "visualizer.desktop", "false");
-        let st = load_json(&s, json!(null));
-        let w: Vec<&str> = st["startupConfigs"].as_array().unwrap().iter().map(|e| e["widget"].as_str().unwrap()).collect();
-        assert_eq!(w, ["desktop", "dock", "x"]);
+        assert_eq!(config_set(&c, "bad key", "1")["ok"], false);
+        assert_eq!(config_set(&c, "a.b", "{oops")["ok"], false);
     }
 
     #[test]
@@ -442,11 +343,8 @@ mod tests {
 
     #[test]
     fn validators() {
-        assert!(widget_ok("sidebar-left") && !widget_ok("Bar") && !widget_ok("") && !widget_ok("a b"));
         assert!(icon_name_ok("Visual Studio+1.x") && !icon_name_ok("a/b") && !icon_name_ok(""));
         assert_eq!(open("file:///c:/x")["ok"], false);
-        assert_eq!(int_of(" 12.7 "), Some(12));
-        assert_eq!(int_of("x"), None);
         assert!(truthy(&json!("a")) && !truthy(&json!(0)) && !truthy(&json!({})));
     }
 

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Removes Zor UI and restores your previous GlazeWM / Zebar configs.
-  Apps installed by install.ps1 (GlazeWM, Zebar, Flow Launcher, Python) are left alone;
+  Removes Zor UI and restores your previous GlazeWM configs.
+  Apps installed by install.ps1 (GlazeWM, Flow Launcher) are left alone;
   remove them with winget if you want.
 #>
 $ErrorActionPreference = 'Continue'
@@ -14,12 +14,11 @@ function Restore-Latest($path) {
 }
 
 # Undo night light (gamma) and close live wallpapers before removing anything.
-$py = Join-Path $env:LOCALAPPDATA 'zor-ui\venv\Scripts\python.exe'
-$bridge = Join-Path $env:LOCALAPPDATA 'zor-ui\scripts\end4_bridge.py'
-if ((Test-Path $py) -and (Test-Path $bridge)) { & $py -X utf8 $bridge nightlight off 2>$null | Out-Null }
+$exe = Join-Path $env:LOCALAPPDATA 'zor-ui\zorui.exe'
+if (Test-Path $exe) { & $exe --bridge nightlight off 2>$null | Out-Null }
 $lively = Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Livelycu.exe'
 if (Test-Path $lively) { & $lively closewp --monitor -1 2>$null | Out-Null }
-Get-Process zebar, end4 -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process zorui, end4 -ErrorAction SilentlyContinue | Stop-Process -Force
 $pid0 = Join-Path $env:LOCALAPPDATA 'zor-ui\caffeine.pid'
 if (Test-Path $pid0) { Stop-Process -Id (Get-Content $pid0) -Force -ErrorAction SilentlyContinue }
 
@@ -36,5 +35,5 @@ Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'zor-ui') -ErrorAction 
 $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
 if (Test-Path $startup) { Remove-Item $startup; Write-Host 'removed GlazeWM from startup' }
 
-if (Get-Process glazewm -ErrorAction SilentlyContinue) { glazewm command wm-reload-config 2>$null | Out-Null; Start-Process zebar }
+if (Get-Process glazewm -ErrorAction SilentlyContinue) { glazewm command wm-reload-config 2>$null | Out-Null }
 Write-Host "`nzor-ui removed. Taskbar auto-hide (if you enabled it) is in Settings > Personalization > Taskbar." -ForegroundColor Green

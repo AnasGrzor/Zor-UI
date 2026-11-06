@@ -4,11 +4,11 @@ use crate::gfx::Color;
 use serde_json::{json, Value};
 use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
 
-/// DEFAULTS in lib/core.js, plus "native": the parts this app has taken over from Zebar (Zebar skips them).
+/// DEFAULTS in lib/core.js, plus "native": the parts this app draws (all on by default except the buddy; false turns one off).
 fn defaults() -> Value {
     serde_json::from_str(r#"{
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
-        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "pythonPath": "", "bridgePath": "",
+        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true,
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
         "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
         "translator": { "source": "auto", "target": "en" },
@@ -36,7 +36,7 @@ fn defaults() -> Value {
             "listen": true, "listenAi": true, "allow": { "search": true, "open": true, "message": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
-        "native": {}
+        "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "visualizer": true }
     }"#).expect("defaults are valid JSON")
 }
 
@@ -149,6 +149,13 @@ pub fn data_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_part_is_native_unless_turned_off() {
+        let c = Config::parse("{\"native\": {\"bar\": false}}");
+        assert!(c.bool("native.theme") && c.bool("native.settings") && !c.bool("native.bar") && !c.bool("native.gojo"));
+        assert!(Config::parse("").bool("native.bar"));
+    }
+
     use super::*;
     #[test]
     fn state_update_keeps_keys_written_since_load() {

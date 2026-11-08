@@ -156,7 +156,7 @@ pub fn sync(app: &mut App) {
     }
 }
 
-/// A card was dragged: remember where (physical px, like Zebar's localStorage).
+/// A card was dragged: remember where (physical px).
 pub fn save_pos(cx: &mut Ctx, id: &str, (x, y): (i32, i32)) {
     cx.state.update(|v| {
         if !v["deskPos"].is_object() { v["deskPos"] = json!({}); }

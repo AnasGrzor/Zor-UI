@@ -26,6 +26,36 @@ pub const CITIES: [(&str, &str); 20] = [
 #[derive(Clone, Copy)]
 enum Viz { Island, Bar, Desktop }
 
+/// Which visualizer a color setting paints (the shared color shows the bar).
+fn viz_of(path: &str) -> Option<Viz> {
+    match path { "island.eqColor" => Some(Viz::Island), "visualizer.barColor" | "visualizer.color" => Some(Viz::Bar), "visualizer.desktopColor" => Some(Viz::Desktop), _ => None }
+}
+
+/// Sample bars in `area` (they stand on its bottom edge), drawn with the code the real visualizer uses.
+fn draw_viz_sample(c: &mut crate::gfx::Canvas, k: Viz, area: R, col: crate::gfx::Color) {
+    match k {
+        Viz::Island => crate::bar::draw_eq(c, area.x + (area.w - 15.0) / 2.0, area.y + area.h - 9.0, col, &crate::bar::EQ_SAMPLE),
+        Viz::Bar => crate::bar::draw_viz(c, area.x + (area.w - 60.0) / 2.0, area.y + area.h - 22.0, col, &crate::viz::sample_levels(20)),
+        Viz::Desktop => {
+            let lv = crate::viz::sample_levels(28);
+            let (bw, gp) = (area.w / lv.len() as f32 * 0.78, area.w / lv.len() as f32 * 0.22);
+            for (j, v) in lv.iter().enumerate() {
+                let (bh, cap) = crate::viz::bar_geometry(*v, (*v + 0.08).min(1.0), area.h);
+                let x = area.x + j as f32 * (bw + gp);
+                c.rect(R::new(x, area.y + area.h - bh, bw, bh), bw.min(4.0) / 2.0, alpha(col, 1.0 - 0.6 * bh / area.h));
+                c.rect(R::new(x, area.y + area.h - cap, bw, 2.0), 0.0, col);
+            }
+        }
+    }
+}
+
+/// The strip inside the color picker for config `path`: the visualizer it colors, in the color being picked.
+/// `None` when the path is no visualizer color.
+pub fn picker_strip(path: &str) -> Option<Box<dyn Fn(&mut crate::gfx::Canvas, R, crate::gfx::Color)>> {
+    let k = viz_of(path)?;
+    Some(Box::new(move |c, r, col| draw_viz_sample(c, k, R::new(r.x + 10.0, r.y + 6.0, r.w - 20.0, r.h - 12.0), col)))
+}
+
 const COLORS: [(&str, &str); 13] = [
     ("", "Character's own"), ("#16161D", "Black"), ("#F5F5F5", "White"), ("#B0B7C3", "Silver"), ("#D6303A", "Red"), ("#F48FB1", "Pink"), ("#F28C28", "Orange"),
     ("#F2D13A", "Yellow"), ("#4CAF50", "Green"), ("#26A69A", "Teal"), ("#4A7BE0", "Blue"), ("#8E5BD0", "Purple"), ("#6B4423", "Brown"),
@@ -35,9 +65,10 @@ const CLOCK_FORMATS: [&str; 7] = ["EEE, dd/MM '•' HH:mm", "HH:mm", "h:mm a", "
 
 static FONTS: OnceLock<Vec<String>> = OnceLock::new();
 
-pub const PAGES: [(&str, &str, &str); 10] = [
+pub const PAGES: [(&str, &str, &str); 11] = [
     ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
-    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
+    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("contacts", "contacts", "Contacts"),
+    ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
 ];
 const SCHEMES: [(&str, &str, &str); 10] = [
     ("auto", "auto_awesome", "Auto"), ("content", "image", "Content"), ("expressive", "palette", "Expressive"),
@@ -77,6 +108,7 @@ fn page_blurb(key: &str) -> &'static str {
         "bar" => "The bar, the desktop cards and how they are laid out",
         "island" => "What the island shows and how it reacts",
         "buddies" => "The characters that live on your desktop",
+        "contacts" => "The people the buddy can message by voice",
         "services" => "API keys, models and sign-ins",
         "usage" => "What the AI tools have used",
         _ => "Version and updates",
@@ -84,6 +116,24 @@ fn page_blurb(key: &str) -> &'static str {
 }
 
 fn opts(list: &[(&str, &str)]) -> Vec<(Value, String)> { list.iter().map(|(v, l)| (json!(v), l.to_string())).collect() }
+
+/// The icon and name a contact's app is listed under. Any spelling of WhatsApp Web gets its own; unknown apps show as WhatsApp,
+/// as they did before.
+fn contact_app_label(app: &str) -> (&'static str, &'static str) {
+    match app {
+        "discord" => ("forum", "Discord"),
+        "whatsappweb" | "whatsapp-web" | "whatsapp web" => ("language", "WhatsApp Web"),
+        _ => ("chat", "WhatsApp"),
+    }
+}
+
+/// The "Screen help model" choices: the sidebar's model first, then every model that can read images. One that can't is left
+/// out, unless it is the one already chosen, so the picker never shows a blank.
+fn screen_model_choices(models: &[(String, String)], current: &str) -> Vec<(Value, String)> {
+    let mut v = vec![(json!(""), "Same as the sidebar's AI model".to_string())];
+    v.extend(models.iter().filter(|(id, _)| id == current || crate::bridge::model_id_can_see(id)).map(|(id, name)| (json!(id), name.clone())));
+    v
+}
 fn px(min: f64, max: f64, step: f64) -> Sl { Sl { min, max, step, fmt: Fmt::Px } }
 
 /// One tile of the wallpaper / preset galleries.
@@ -106,6 +156,7 @@ impl Settings {
             "bar" => self.bar(p),
             "island" => self.island(p),
             "buddies" => self.buddies(p),
+            "contacts" => self.contacts_page(p),
             "services" => self.services(p),
             "usage" => self.usage(p),
             _ => self.about(p),
@@ -134,6 +185,67 @@ impl Settings {
         }
     }
 
+    /// The Contacts page: the people the buddy can message by voice.
+    fn contacts_page(&mut self, p: &mut Pen) {
+        p.h2("contacts", "People the buddy can message", "");
+        p.card(|p| {
+            self.contacts(p);
+            p.note("Say \"message <name> saying ...\". The chat opens with the text ready and you press Enter to send. WhatsApp uses its app if it is installed, otherwise WhatsApp Web. Discord needs the user id (Developer Mode, right-click, Copy User ID).", 12.0);
+        });
+    }
+
+    /// The people the buddy can message: one row each with edit and delete buttons, then the form that adds one or, after the
+    /// pencil, saves changes to that one.
+    fn contacts(&mut self, p: &mut Pen) {
+        let list = self.garr(p.cx, "buddies.contacts");
+        let editing = self.fields.get("contact-edit").map(|f| f.tb.text.clone()).unwrap_or_default();
+        let people: Vec<(String, (String, String, String))> = list.into_iter().filter_map(|e| crate::assist::parse_contact(&e).map(|c| (e, c))).collect();
+        if people.is_empty() { p.note("No contacts yet. Add one below, then say \"message <name> saying ...\".", 12.0); }
+        for (entry, (name, app, value)) in people {
+            let Some(r) = p.row(44.0) else { continue };
+            let (ic, app_name) = contact_app_label(&app);
+            p.left(r, ic, &name, &format!("{app_name}  \u{2022}  {value}"), 80.0);
+            let id = p.act(Act::Do("edit-contact", entry.clone()));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 76.0, r.y + 4.0, 36.0, 36.0), id, "edit", IconKind::Plain, 20.0, entry == editing); // filled while it is the one being edited
+            let id = p.act(Act::Do("del-contact", entry));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "delete", IconKind::Plain, 20.0, false);
+        }
+        if !editing.is_empty() {
+            if let Some(r) = p.row(44.0) {
+                let who = crate::assist::parse_contact(&editing).map(|c| c.0).unwrap_or_default();
+                p.left(r, "edit", &format!("Editing {who}"), "Change anything below, then save", 100.0);
+                p.chip_right(r, None, "Cancel", Act::Do("cancel-edit", String::new()));
+            }
+        }
+        let app = match self.fields.get("contact-app").map(|f| f.tb.text.as_str()) { Some("discord") => "discord", Some("whatsappweb") => "whatsappweb", _ => "whatsapp" };
+        if let Some(r) = p.row(44.0) {
+            p.left(r, "person_add", "Name", "What you say to the buddy", 240.0);
+            self.field_ui(p, "contact-name", None, super::Kind::Plain, R::new(r.x + r.w - 240.0, r.y + 2.0, 240.0, 40.0), "Ali", 17.0, false);
+        }
+        if let Some(r) = p.row(44.0) {
+            p.left(r, "apps", "App", "", 340.0);
+            let mut x = r.x + r.w - 340.0;
+            for (key, label) in [("whatsapp", "WhatsApp"), ("whatsappweb", "WhatsApp Web"), ("discord", "Discord")] {
+                let id = p.act(Act::Do("contact-app", key.into()));
+                x += ui::chip(p.c, p.cx, x, r.y + 6.0, id, None, label, app == key).w + 8.0;
+            }
+        }
+        let (sub, ph) = match app {
+            "discord" => ("User id: Developer Mode, right-click, Copy User ID", "1234567890"),
+            "whatsappweb" => ("Number with country code, opens in your browser", "+923001234567"),
+            _ => ("Phone number with country code", "+923001234567"),
+        };
+        if let Some(r) = p.row(44.0) {
+            p.left(r, "tag", if app == "discord" { "User id" } else { "Number" }, sub, 240.0);
+            self.field_ui(p, "contact-value", None, super::Kind::Plain, R::new(r.x + r.w - 240.0, r.y + 2.0, 240.0, 40.0), ph, 17.0, false);
+        }
+        if let Some(r) = p.row(44.0) {
+            let (ic, title, button) = if editing.is_empty() { ("add_circle", "Add this contact", "Add") } else { ("save", "Save changes", "Save") };
+            p.left(r, ic, title, "", 80.0);
+            p.chip_right(r, None, button, Act::Do("add-contact", String::new()));
+        }
+    }
+
     fn island(&mut self, p: &mut Pen) {
         p.h2("pill", "What the island shows", "");
         p.card(|p| {
@@ -143,6 +255,7 @@ impl Settings {
             self.sw(p, "island.volume", "Volume changes", "The new level, with a bar", "volume_up");
             self.sw(p, "island.mic", "Microphone mute", "When the mic is muted or turned back on", "mic");
             self.num(p, "island.osdSeconds", "Volume and mic seconds", 1, 10, "timer");
+            self.sw(p, "island.privacy", "Mic and camera in use", "An orange or green dot while an app listens or films, and a note when one starts", "videocam");
             self.sw(p, "island.agents", "AI agents that need you", "A permission prompt or a question from Claude, Codex or any agent reporting to Zor UI", "smart_toy");
             self.sw(p, "autoTrackAgents", "Track coding agents automatically", "Adds hooks to Claude Code, Codex and Gemini CLI when found on this PC, and checks every 5 minutes", "radar");
             self.sw(p, "island.agentWorking", "AI agents at work", "The agent and its 5-hour usage, when nothing else is showing", "pending");
@@ -276,6 +389,7 @@ impl Settings {
             self.slider(p, "font.weight", "Bar & desktop font thickness", Sl { min: -300.0, max: 300.0, step: 50.0, fmt: Fmt::Weight }, "format_bold");
             self.slider(p, "nightLight.kelvin", "Night light warmth", Sl { min: 2500.0, max: 6000.0, step: 100.0, fmt: Fmt::Kelvin }, "nightlight");
             self.sw(p, "syncLockScreen", "Use the wallpaper on the lock screen", "Windows may block this on managed PCs", "lock");
+            self.sw(p, "runOnStartup", "Start Zor UI and GlazeWM at login", "Turn off to start them yourself. Takes effect at the next login", "power_settings_new");
         });
     }
 
@@ -485,24 +599,20 @@ impl Settings {
             p.c.rect(b, 12.0, p.col("surfaceContainer"));
             p.c.text(label, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
             let area = R::new(b.x + 10.0, b.y + 24.0, b.w - 20.0, H - 34.0); // bars stand on its bottom edge
-            match k {
-                Viz::Island => for (j, lv) in [0.5f32, 1.0, 0.7, 0.85].iter().enumerate() { // the island's 4 bars, 3 px wide and apart
-                    let h = 18.0 * lv;
-                    p.c.rect(R::new(area.x + (area.w - 15.0) / 2.0 + j as f32 * 6.0, area.y + area.h - h, 3.0, h), 1.5, col);
-                },
-                Viz::Bar => crate::bar::draw_viz(p.c, area.x + (area.w - 60.0) / 2.0, area.y + area.h - 22.0, col, &crate::viz::sample_levels(20)),
-                Viz::Desktop => {
-                    let lv = crate::viz::sample_levels(28);
-                    let (bw, gp) = (area.w / lv.len() as f32 * 0.78, area.w / lv.len() as f32 * 0.22);
-                    for (j, v) in lv.iter().enumerate() {
-                        let (bh, cap) = crate::viz::bar_geometry(*v, (*v + 0.08).min(1.0), area.h);
-                        let x = area.x + j as f32 * (bw + gp);
-                        p.c.rect(R::new(x, area.y + area.h - bh, bw, bh), bw.min(4.0) / 2.0, alpha(col, 1.0 - 0.6 * bh / area.h));
-                        p.c.rect(R::new(x, area.y + area.h - cap, bw, 2.0), 0.0, col);
-                    }
-                }
-            }
+            draw_viz_sample(p.c, *k, area, col);
         }
+    }
+
+    /// Sample tray icons as the bar draws them: the first N and the chevron that holds the rest.
+    fn tray_preview(&mut self, p: &mut Pen) {
+        const H: f32 = 56.0;
+        let Some(r) = p.row(H + 12.0) else { return };
+        let b = R::new(r.x + 12.0, r.y + 6.0, r.w - 24.0, H);
+        p.c.rect(b, 12.0, p.col("surfaceContainerHigh"));
+        p.c.text("Bar", R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
+        let edge = crate::bar::Edge::parse(&self.gs(p.cx, "bar.position"));
+        let visible = self.gn(p.cx, "bar.trayVisible").max(0.0) as usize;
+        crate::bar::draw_tray_sample(p.c, p.cx, b.x + 10.0, b.y + 36.0, visible, edge);
     }
 
     fn bar(&mut self, p: &mut Pen) {
@@ -525,6 +635,8 @@ impl Settings {
             self.pick(p, "clockFormat", formats, "Clock format", "Shown as it looks right now", "schedule", 260.0);
             self.seg(p, "tempUnit", &[("C", "°C"), ("F", "°F")], "Temperature", "thermostat");
             self.sw(p, "showKeyboardLayout", "Keyboard layout indicator", "", "keyboard");
+            self.num(p, "bar.trayVisible", "Tray icons shown (0 = all)", 0, 12, "keyboard_arrow_up");
+            self.tray_preview(p);
             self.sw(p, "visualizer.bar", "Visualizer in the bar", "Small cava-style bars next to the media", "graphic_eq");
             if self.gb(p.cx, "visualizer.bar") {
                 self.color(p, "visualizer.barColor", "Bar visualizer color", "Empty follows the visualizer color", "palette");
@@ -723,15 +835,26 @@ impl Settings {
             self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
             self.sw(p, "buddies.allow.message", "Start messages", "\"message <name> saying ...\" opens the chat with the text ready. You press Enter to send", "chat");
             self.sw(p, "buddies.listenAi", "Ask the AI for other requests", "Sends what you said to the sidebar's AI model. Off: only the phrases above work", "auto_awesome");
+            self.sw(p, "buddies.screen", "Let the buddy see my screen", "\"where is ...\" or \"what's on my screen\" sends a picture of each monitor to the AI. Off: nothing is captured", "screenshot_monitor");
+            if self.gb(p.cx, "buddies.screen") {
+                // only models that can read images are offered; blank follows the sidebar's AI model
+                let current = self.gs(p.cx, "buddies.screenModel");
+                let vision = screen_model_choices(match &self.models { Load::Ready(m) => m.as_slice(), _ => &[] }, &current);
+                self.pick(p, "buddies.screenModel", vision, "Screen help model", "Models that can't read images are hidden", "model_training", 260.0);
+            }
+            self.sw(p, "buddies.drive", "Let the buddy take over", "\"take over and ...\" or \"click ...\": after you say yes, the AI moves the mouse and types for one task, using the screen model below. Esc, your mouse or your voice stops it. Needs screen help", "smart_toy");
+            if self.gb(p.cx, "buddies.drive") {
+                self.num(p, "buddies.driveRounds", "Most steps per take-over", 1, 100, "format_list_numbered");
+                self.num(p, "buddies.driveSecs", "Most seconds per take-over", 10, 900, "timer");
+            }
             self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
             let mut mics = vec![(json!(""), "Windows default".to_string())];
             mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
             self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
             let mut models = vec![(json!(""), "Automatic".to_string())];
             models.extend(crate::assist::speech_models().into_iter().map(|(dir, name)| (json!(dir), name)));
-            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC (Orca's Parakeet). Automatic uses the first one", "model_training", 260.0);
-            self.text_ph(p, "buddies.contacts", "Contacts", "name=app:number, comma separated", "contacts", "ali=whatsapp:+923001234567, sam=discord:1234567890");
-            p.note("Contacts are the one thing to type, since nobody else knows them: whatsapp takes a phone number with country code, discord takes the user id (Developer Mode, right-click, Copy User ID). Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
+            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC. Automatic uses the first one", "model_training", 260.0);
+            p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
         });
         p.h2("favorite", "Partners", "");
         p.card(|p| {
@@ -916,7 +1039,7 @@ impl Settings {
             }
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Edit", true);
-                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json" }, w);
+                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zor-ui\\config.json" }, w);
                 p.chip_right(r, Some("edit"), "Edit", Act::Do("editcfg", String::new()));
             }
         });
@@ -1070,6 +1193,42 @@ fn monitor_caption(name: &str, i: usize, w: i32, h: i32, custom: bool) -> (Strin
 mod tests {
     use super::*;
 
+    fn model_list() -> Vec<(String, String)> {
+        [("claude-cli:haiku", "Claude subscription: Haiku"), ("gemini-cli:default", "Gemini subscription"), ("codex-cli:default", "ChatGPT subscription"),
+         ("gemini-2.5-flash", "Gemini 2.5 Flash"), ("gpt-4o-mini", "GPT-4o mini")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn contacts_are_listed_under_their_own_app() {
+        assert_eq!(contact_app_label("whatsapp"), ("chat", "WhatsApp"));
+        assert_eq!(contact_app_label("discord"), ("forum", "Discord"));
+        for a in ["whatsappweb", "whatsapp-web", "whatsapp web"] { assert_eq!(contact_app_label(a), ("language", "WhatsApp Web"), "{a}"); }
+        assert_eq!(contact_app_label("signal"), ("chat", "WhatsApp"), "an unknown app keeps the old label");
+    }
+
+    #[test]
+    fn the_screen_model_picker_offers_only_models_that_can_read_images() {
+        let ids = |v: &[(Value, String)]| v.iter().map(|(i, _)| i.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let v = screen_model_choices(&model_list(), "");
+        assert_eq!(ids(&v), ["", "claude-cli:haiku", "gemini-2.5-flash", "gpt-4o-mini"], "the sidebar's model first, text-only ones dropped, order kept");
+        assert_eq!(v[0].1, "Same as the sidebar's AI model");
+        assert_eq!(v[1].1, "Claude subscription: Haiku", "names come through");
+    }
+
+    #[test]
+    fn a_text_only_model_that_is_already_chosen_stays_so_the_picker_is_never_blank() {
+        let v = screen_model_choices(&model_list(), "gemini-cli:default");
+        assert!(v.iter().any(|(i, _)| i == "gemini-cli:default"), "kept, so the user can see and change it");
+        assert!(!v.iter().any(|(i, _)| i == "codex-cli:default"), "the other text-only one is still hidden");
+    }
+
+    #[test]
+    fn the_screen_model_picker_works_before_the_list_has_loaded() {
+        let v = screen_model_choices(&[], "");
+        assert_eq!(v.len(), 1, "just the sidebar's model while the list loads");
+        assert_eq!(screen_model_choices(&[], "claude-cli:sonnet").len(), 1, "a chosen model that isn't listed yet is not invented");
+    }
+
     #[test]
     fn monitor_captions() {
         assert_eq!(monitor_caption("DELL U2723QE", 1, 1080, 1920, true), ("DELL U2723QE".into(), "Portrait, 1080 x 1920, its own picture".into()));
@@ -1093,7 +1252,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "services", "usage", "about"]);
+        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "contacts", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }
@@ -1129,9 +1288,40 @@ mod page_header_tests {
         assert!(buddies_height(true) > buddies_height(false) + 30.0);
     }
 
+    /// Height of the Contacts page (`page`) or of the Buddies page, laid out with these contacts and, if given, the entry being edited.
+    fn contacts_height(list: &[&str], editing: &str, page: bool) -> f32 {
+        use crate::{app::Ctx, gfx::{Canvas, Gfx}};
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0u8; 800 * 800 * 4];
+        let mut c = Canvas::new(&g, &mut px, 800, 800, 1.0, 0).unwrap();
+        let mut cx = Ctx::new(false);
+        cx.cfg = conf::Config::parse(&json!({ "buddies": { "contacts": list } }).to_string());
+        let mut st = Settings::new((800.0, 800.0)).on_page(if page { "contacts" } else { "buddies" });
+        if !editing.is_empty() { st.fields.entry("contact-edit".into()).or_insert_with(|| crate::settings::Field::new(false)).tb.set(editing); }
+        let mut p = Pen::new(&mut c, &cx, 0.0, 0.0, 600.0, 0.0, 0.0);
+        p.dry = true;
+        if page { st.contacts_page(&mut p) } else { st.buddies(&mut p) }
+        p.y
+    }
+
+    #[test]
+    fn the_contacts_are_no_longer_on_the_buddies_page() {
+        let three = ["A=whatsapp:1", "B=discord:2", "C=whatsapp:3"];
+        assert_eq!(contacts_height(&[], "", false), contacts_height(&three, "", false), "the list and its form moved out of Voice commands");
+    }
+
+    #[test]
+    fn the_contacts_page_grows_with_the_list_and_while_one_is_being_edited() {
+        let two = ["A=whatsapp:1", "B=discord:2"];
+        assert!(contacts_height(&two, "", true) > contacts_height(&[], "", true), "a row per contact");
+        assert!(contacts_height(&two, "A=whatsapp:1", true) > contacts_height(&two, "", true) + 30.0, "an 'Editing A' row with a Cancel button appears");
+    }
+
     #[test]
     fn every_page_has_a_blurb() {
         for (key, _, _) in PAGES.iter() { assert!(!page_blurb(key).is_empty(), "{key}"); }
         assert_ne!(page_blurb("quick"), page_blurb("about"));
+        assert_ne!(page_blurb("contacts"), page_blurb("buddies"), "the new page has its own line");
     }
 }

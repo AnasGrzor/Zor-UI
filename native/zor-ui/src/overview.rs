@@ -144,7 +144,7 @@ pub fn build(wm: &Wm, count: usize, query: &str) -> Vec<WsView> {
 /// What --render shows without GlazeWM: a few windows (only with ZORUI_RENDER_SAMPLE set).
 fn sample() -> Wm {
     use glaze::{Monitor, Ws};
-    let w = |id: &str, t: &str, p: &str, ws: &str, focus: bool, floating: bool| GWin { id: id.into(), title: t.into(), process: p.into(), focus, floating, minimized: false, ws: ws.into() };
+    let w = |id: &str, t: &str, p: &str, ws: &str, focus: bool, floating: bool| GWin { id: id.into(), title: t.into(), process: p.into(), focus, floating, minimized: false, ws: ws.into(), maximized: false };
     let ws = |n: &str| Ws { name: n.into(), display: n.into(), displayed: n == "1", occupied: true };
     Wm {
         monitors: vec![Monitor { id: "m".into(), focus: true, workspaces: ["1", "2", "3"].map(ws).to_vec(), ..Default::default() }],
@@ -401,7 +401,7 @@ impl Overview {
 mod tests {
     use super::*;
 
-    fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, minimized: false, ws: ws.into() } }
+    fn win(id: &str, title: &str, process: &str, ws: &str) -> GWin { GWin { id: id.into(), title: title.into(), process: process.into(), focus: false, floating: false, minimized: false, ws: ws.into(), maximized: false } }
 
     #[test]
     fn tall_screens_get_fewer_columns() {

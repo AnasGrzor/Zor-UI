@@ -82,8 +82,7 @@ pub fn run(cfg: &Config, args: &[&str]) -> Option<Value> {
         "taskmgr" => { shell("taskmgr", ""); ok() }
         "actioncenter" => { shell("ms-actioncenter:", ""); ok() }
         "editconfig" => {
-            let p = std::env::var("USERPROFILE").unwrap_or_default();
-            shell("notepad", &format!("\"{p}\\.glzr\\zebar\\zor-ui\\config.json\""));
+            shell("notepad", &format!("\"{}\"", crate::conf::pack_dir().join("config.json").display()));
             ok()
         }
         "lock" => { let _ = hidden("rundll32.exe").args(["user32.dll,", "LockWorkStation"]).spawn(); ok() }

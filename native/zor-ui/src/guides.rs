@@ -45,8 +45,15 @@ pub fn wanted(cx: &Ctx) -> bool {
 
 struct Overlay { mon: [i32; 4] }
 
+/// The overlay's size in CSS px: the whole monitor while lines show, 1 px otherwise, so the idle window
+/// holds a 4-byte buffer instead of a full-screen one (8 MB at 1080p).
+fn overlay_size(mon: [i32; 4], scale: f32, active: bool) -> (f32, f32) {
+    if !active { return (1.0, 1.0); }
+    ((mon[2] - mon[0]) as f32 / scale, (mon[3] - mon[1]) as f32 / scale)
+}
+
 impl View for Overlay {
-    fn size(&self, _: &Gfx, _: &Ctx, scale: f32) -> (f32, f32) { ((self.mon[2] - self.mon[0]) as f32 / scale, (self.mon[3] - self.mon[1]) as f32 / scale) }
+    fn size(&self, _: &Gfx, _: &Ctx, scale: f32) -> (f32, f32) { overlay_size(self.mon, scale, !lines().is_empty()) }
 
     fn key(&self, _: &Ctx) -> String { format!("{:?}", lines()) }
 
@@ -108,6 +115,13 @@ mod tests {
     fn horizontal_alignment() {
         let g = align_lines((0, 100, 50, 200), &[(300, 100, 400, 180)]);
         assert!(g.contains(&Guide { vertical: false, at: 100, from: 0, to: 400 }), "{g:?}");
+    }
+
+    #[test]
+    fn idle_overlay_is_one_pixel() {
+        let mon = [0, 0, 1920, 1080];
+        assert_eq!(overlay_size(mon, 1.0, false), (1.0, 1.0));
+        assert_eq!(overlay_size(mon, 1.5, true), (1280.0, 720.0));
     }
 
     #[test]

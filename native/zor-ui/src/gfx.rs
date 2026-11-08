@@ -249,7 +249,7 @@ impl Gfx {
         if let Some(l) = self.layouts.borrow().get(&key) { return Some(l.clone()); }
         let l = self.layout_new(s, f, w, h, align, wrap)?;
         let mut all = self.layouts.borrow_mut();
-        if all.len() > 3000 { all.clear(); }
+        if all.len() > LAYOUTS_MAX { all.clear(); }
         all.insert(key, l.clone());
         Some(l)
     }
@@ -480,12 +480,11 @@ impl<'a> Canvas<'a> {
     /// a bitmap kept under `key` (one entry; put everything it depends on in the key), later frames blit that.
     pub fn backdrop(&mut self, key: &[u32], draw: impl FnOnce(&mut Canvas)) {
         // a few entries, so two open windows (settings + overview) don't evict each other every frame
-        thread_local! { static KEPT: std::cell::RefCell<Vec<(Vec<u32>, Pixmap)>> = Default::default(); }
         let (pw, ph) = self.size_px();
         if !KEPT.with(|k| k.borrow().iter().any(|e| e.0 == key)) {
             let Some(mut pm) = Pixmap::new(pw, ph) else { return draw(self) };
             if let Some(mut sc) = Canvas::new(self.g, pm.data_mut(), pw, ph, self.scale, 0) { draw(&mut sc); }
-            KEPT.with(|k| { let mut k = k.borrow_mut(); if k.len() >= 4 { k.remove(0); } k.push((key.to_vec(), pm)); });
+            KEPT.with(|k| { let mut k = k.borrow_mut(); if k.len() >= KEPT_MAX { k.remove(0); } k.push((key.to_vec(), pm)); });
         }
         KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().iter().find(|e| e.0 == key), &mut self.surf) {
             // a backdrop goes on a fresh (cleared) canvas, so a plain copy equals source-over and skips the blend pipeline
@@ -676,6 +675,14 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// Most window-sized bitmaps `Canvas::backdrop` keeps, and most text layouts `Gfx::layout` keeps before it starts over.
+const KEPT_MAX: usize = 2;
+const LAYOUTS_MAX: usize = 500;
+thread_local! { static KEPT: std::cell::RefCell<Vec<(Vec<u32>, Pixmap)>> = Default::default(); }
+
+/// Frees the kept backdrops (a closed window's panel is a full-window bitmap that nothing will blit again).
+pub fn drop_backdrops() { KEPT.with(|k| k.borrow_mut().clear()); }
+
 /// Three box-blur passes each way, about a Gaussian of std. dev. `r`.
 fn box_blur(a: &mut [u8], w: usize, h: usize, r: usize) {
     if r == 0 || w == 0 || h == 0 { return; }
@@ -700,6 +707,14 @@ fn box_blur(a: &mut [u8], w: usize, h: usize, r: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drop_backdrops_empties_the_cache() {
+        KEPT.with(|k| k.borrow_mut().push((vec![1], Pixmap::new(2, 2).unwrap())));
+        drop_backdrops();
+        assert!(KEPT.with(|k| k.borrow().is_empty()));
+        assert!(KEPT_MAX >= 2, "settings + overview must not evict each other");
+    }
+
     #[test]
     fn colours() { assert_eq!(alpha(0xFF11_2233, 0.88), 0xE011_2233); }
     #[test]

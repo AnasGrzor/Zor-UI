@@ -26,8 +26,11 @@ pub struct Pop {
 
 /// The view for a popup name. `area` is the CSS-px size from `area()`; views that size themselves ignore it.
 pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
+    // "settings:presets" opens the settings on that page (used by `--render`); an unknown page keeps the first
+    if let Some(page) = name.strip_prefix("settings:") { return Some(Box::new(Settings::new(area).on_page(page))); }
     Some(match name {
         "island-panel" => Box::new(Island::new(area)),
+        "tray-flyout" => Box::new(crate::tray_flyout::TrayFlyout::default()),
         "overview" => Box::new(Overview::new(area)),
         "sidebar-left" => Box::new(SidebarLeft::new(area)),
         "sidebar-right" => Box::new(SidebarRight::new(area)),
@@ -41,6 +44,7 @@ pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
 pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
     let (bar_w, bar_h) = if edge.vertical() { (edge.thick(), 0.0) } else { (0.0, edge.thick()) };
     let portrait = h > w;
+    let name = if name.starts_with("settings:") { "settings" } else { name };
     match name {
         "sidebar-left" | "sidebar-right" => (480.0_f32.min(w - bar_w), (h - bar_h).max(200.0)),
         // a tall screen has room for rows, not for a wider window
@@ -69,7 +73,7 @@ pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)
     match name {
         "sidebar-left" => (free.left, free.top),
         "sidebar-right" => (free.right - px.0, free.top),
-        "island-panel" => {
+        "island-panel" | "tray-flyout" => {
             let (ax, ay) = at.unwrap_or(((free.left + free.right) / 2, free.top));
             match edge {
                 Edge::Top => (within(ax - px.0 / 2, mon.left, mon.right - px.0), ay),
@@ -86,6 +90,13 @@ pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)
 mod tests {
     use super::*;
     const MON: RECT = RECT { left: -1920, top: 0, right: 0, bottom: 1080 };
+
+    #[test]
+    fn settings_page_names() {
+        assert!(make("settings:presets", (900.0, 800.0)).is_some() && make("settings:nope", (900.0, 800.0)).is_some());
+        assert!(make("bogus:presets", (900.0, 800.0)).is_none());
+        assert_eq!(area("settings:island", 1920.0, 1080.0, Edge::Top), area("settings", 1920.0, 1080.0, Edge::Top));
+    }
 
     #[test]
     fn presets() {

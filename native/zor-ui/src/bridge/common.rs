@@ -8,7 +8,7 @@ pub const NO_WINDOW: u32 = 0x0800_0000;
 
 /// %LOCALAPPDATA%\zor-ui (ROOT in end4_bridge.py): state.json, secrets, caches.
 pub fn root() -> PathBuf { crate::conf::data_dir() }
-/// The Zebar pack folder: config.json, theme.json, wallpaper.jpg.
+/// The pack folder: config.json, theme.json, wallpaper.jpg.
 pub fn pack() -> PathBuf { crate::conf::pack_dir() }
 /// The installed scripts folder (football.py, terminal templates...).
 pub fn scripts(cfg: &crate::conf::Config) -> PathBuf {

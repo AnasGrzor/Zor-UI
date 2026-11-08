@@ -8,6 +8,22 @@ const MAX: u64 = 1_000_000;
 /// Appends `msg` to zorui.log.
 pub fn line(msg: &str) { write_to(&crate::conf::data_dir().join("zorui.log"), msg); }
 
+/// Routes every `tracing` event at INFO or above (libraries use it) into zorui.log, one line each.
+/// Call once at start; a second call is ignored.
+pub fn init() {
+    let _ = tracing_subscriber::fmt().with_ansi(false).without_time().with_max_level(tracing_subscriber::filter::LevelFilter::INFO).with_writer(|| Sink).try_init();
+}
+
+struct Sink;
+
+impl std::io::Write for Sink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { line(&event_text(b)); Ok(b.len()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+/// A formatted event without its trailing newline (`line` adds its own).
+fn event_text(b: &[u8]) -> String { String::from_utf8_lossy(b).trim_end().to_string() }
+
 fn write_to(path: &Path, msg: &str) {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX) { let _ = std::fs::rename(path, path.with_extension("log.old")); }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -18,6 +34,12 @@ fn write_to(path: &Path, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_text_drops_the_newline_and_bad_bytes() {
+        assert_eq!(event_text(b" INFO systray_util: Found 3 buttons\n"), " INFO systray_util: Found 3 buttons");
+        assert_eq!(event_text(&[b'a', 0xFF, b'\n']), format!("a{}", char::REPLACEMENT_CHARACTER));
+    }
 
     #[test]
     fn lines_append_and_the_file_rotates() {

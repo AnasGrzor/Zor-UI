@@ -36,7 +36,7 @@ $Repo = $PSScriptRoot
 $Root = Join-Path $env:LOCALAPPDATA 'zor-ui'
 $Scripts = Join-Path $Root 'scripts'
 $Glzr = Join-Path $env:USERPROFILE '.glzr'
-$Pack = Join-Path $Glzr 'zebar\zor-ui'
+$Pack = Join-Path $Glzr 'zor-ui'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM
 
@@ -65,14 +65,17 @@ if ([Environment]::OSVersion.Version.Major -lt 10) { throw 'Zor UI needs Windows
 # Python environment carry over. Runs once: it does nothing when the old folders are gone.
 $oldRoot = Join-Path $env:LOCALAPPDATA 'end4-pC'
 $oldPack = Join-Path $Glzr 'zebar\end4-pC'
+$zebarPack = Join-Path $Glzr 'zebar\zor-ui'   # where the settings lived while the shell ran inside Zebar
 $oldFlow = Join-Path $env:APPDATA 'FlowLauncher\Themes\end4-pC.xaml'
 $oldFrag = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\end4-pC'
-if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
-  Step 'Moving settings from the old end4-pC name'
+if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $zebarPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
+  Step 'Moving settings out of the old end4-pC and Zebar folders'
   Get-Process end4, zorui, zebar -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 1
   if ((Test-Path $oldRoot) -and -not (Test-Path $Root)) { Move-Item $oldRoot $Root; Info "moved $oldRoot" }
-  if ((Test-Path $oldPack) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $oldPack $Pack; Info "moved $oldPack" }
+  foreach ($op in $zebarPack, $oldPack) {
+    if ((Test-Path $op) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $op $Pack; Info "moved $op" }
+  }
   if ((Test-Path $oldFlow) -and -not (Test-Path ($oldFlow -replace 'end4-pC', 'zor-ui'))) { Move-Item $oldFlow ($oldFlow -replace 'end4-pC', 'zor-ui') }
   if ((Test-Path $oldFrag) -and -not (Test-Path ($oldFrag -replace 'end4-pC', 'zor-ui'))) {
     Move-Item $oldFrag ($oldFrag -replace 'end4-pC', 'zor-ui')
@@ -90,6 +93,26 @@ foreach ($f in @($stale)) {
   [IO.File]::WriteAllText($f, ([IO.File]::ReadAllText($f) -replace 'end4-pC', 'zor-ui'), $Utf8)
   Info "updated $f"
 }
+
+# ------------------------------------------------------------------ 0b. Zebar
+# Zebar's own default bar would draw a second bar under ours, so remove Zebar and everything that starts it.
+# The settings were moved out of its folder above; the folder itself is renamed, not deleted, in case it holds the user's own widgets.
+Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+if (-not $SkipDeps -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+  Invoke-Native { winget list --id glzr-io.zebar -e --accept-source-agreements 2>&1 | Out-Null }
+  if ($LASTEXITCODE -eq 0) {
+    Step 'Removing Zebar'
+    Invoke-Native { winget uninstall --id glzr-io.zebar -e --silent 2>&1 | Out-Null }
+  }
+}
+Get-ChildItem ([Environment]::GetFolderPath('Startup')) -Filter '*zebar*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+foreach ($n in @((Get-Item $runKey -ErrorAction SilentlyContinue).Property | Where-Object { $_ -match 'zebar' })) {
+  Remove-ItemProperty -Path $runKey -Name $n -ErrorAction SilentlyContinue
+}
+Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'zebar' } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+$zebarDir = Join-Path $Glzr 'zebar'
+if (Test-Path $zebarDir) { Move-Item $zebarDir "$zebarDir.bak-$Stamp" -Force -ErrorAction SilentlyContinue; Info "Zebar folder kept as zebar.bak-$Stamp" }
 
 # ------------------------------------------------------------------ 1. apps
 if (-not $SkipDeps) {
@@ -120,8 +143,7 @@ Copy-Item -Recurse -Force (Join-Path $Repo 'scripts\terminal') $Scripts
 Copy-Item -Recurse -Force (Join-Path $Repo 'flowlauncher') $Root
 New-Item -ItemType Directory -Force -Path $Pack | Out-Null
 Copy-Item -Recurse -Force (Join-Path $Repo 'assets') $Pack
-# The Zebar widget pack and Python helpers of older versions are gone: remove what they left behind.
-Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+# The widget pack and Python helpers of older versions are gone: remove what they left behind.
 foreach ($old in 'lib', 'we-thumbs') { Remove-Item -Recurse -Force (Join-Path $Pack $old) -ErrorAction SilentlyContinue }
 foreach ($pat in '*.html', '*.js', 'zpack.json') { Remove-Item -Force (Join-Path $Pack $pat) -ErrorAction SilentlyContinue }
 Remove-Item -Recurse -Force (Join-Path $Root 'venv') -ErrorAction SilentlyContinue
@@ -161,6 +183,8 @@ if (Test-Path $prebuilt) {
   Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
   Copy-Item -Force $built $native
 } else { throw 'No prebuilt zorui.exe next to install.ps1 and Rust is not installed (rustup.rs).' }
+# zorui-svc.exe, the boot service (step 8), ships next to zorui.exe in the release and is built with it from source.
+$svcSrc = @((Join-Path $Repo 'zorui-svc.exe'), (Join-Path $Repo 'native\zor-ui\target\release\zorui-svc.exe')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 $cfgPath = Join-Path $Pack 'config.json'
 $modKey = if ($Mod -eq 'win') { 'lwin' } else { 'alt' }
@@ -187,18 +211,6 @@ if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add 
   }
 }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
-
-# Zebar (if still installed) must not start the removed widgets: drop zor-ui from its startup list.
-$zebarSettings = Join-Path $Glzr 'zebar\settings.json'
-if (Test-Path $zebarSettings) {
-  try {
-    $zs = Get-Content $zebarSettings -Raw | ConvertFrom-Json
-    if ($zs.startupConfigs) {
-      $zs.startupConfigs = @($zs.startupConfigs | Where-Object { $_.pack -ne 'zor-ui' })
-      Write-Text $zebarSettings ($zs | ConvertTo-Json -Depth 6)
-    }
-  } catch { Info "couldn't update $zebarSettings" }
-}
 
 # ------------------------------------------------------------------ 4. glazewm config
 Step 'Writing the GlazeWM config'
@@ -281,32 +293,81 @@ $glaze = @((Join-Path $pf 'glazewm.exe'), (Get-Command glazewm -ErrorAction Sile
 if (-not $glaze) {
   Write-Warning 'GlazeWM not found. Install it, then start it from the Start menu.'
 } else {
-  # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).
-  try {
-    $act = New-ScheduledTaskAction -Execute $glaze
-    $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName 'GlazeWM' -Action $act -Trigger $trg -Settings $set -Force | Out-Null
-    $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
-    if (Test-Path $old) { Remove-Item $old }
-    Info 'GlazeWM starts at login (scheduled task)'
-  } catch {
-    Info "couldn't add the login task ($($_.Exception.Message)); falling back to the Startup folder"
-    $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
-    if (-not (Test-Path $startup)) {
-      $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
-      $sc.TargetPath = $glaze; $sc.Save()
+  # glazewm.exe is a uiAccess exe: Windows refuses to start it from a non-elevated Task Scheduler task (error 740),
+  # and it crashes when started before the shell is up. The ZorShell service (zorui-svc.exe, LocalSystem) starts
+  # zorui, and GlazeWM through `cmd /c start`, in your session at boot once Explorer has settled. Installing it needs admin.
+  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  $svcOk = $false
+  if ($isAdmin -and $svcSrc) {
+    try {
+      $svcDir = Join-Path $env:ProgramFiles 'zor-ui'      # under Program Files: only admins can replace the exe the service runs
+      $svcData = Join-Path $env:ProgramData 'zor-ui'
+      $svcExe = Join-Path $svcDir 'zorui-svc.exe'
+      if (Get-Service ZorShell -ErrorAction SilentlyContinue) { Stop-Service ZorShell -Force; Start-Sleep -Seconds 1 }
+      New-Item -ItemType Directory -Force $svcDir, $svcData | Out-Null
+      Copy-Item -Force $svcSrc $svcExe
+      Write-Text (Join-Path $svcData 'svc.json') (@{ glazewm = $glaze; zorui = $native; settle_ms = 8000 } | ConvertTo-Json)
+      # The service runs as SYSTEM and starts what this file names, so only admins may edit it.
+      Invoke-Native { & icacls $svcData /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null }
+      # The Settings switch "Start Zor UI and GlazeWM at login" writes this flag; Users may write only this file. A re-install keeps its value.
+      $flag = Join-Path $svcData 'startup.json'
+      if (-not (Test-Path $flag)) { Write-Text $flag '{"run_on_startup":true}' }
+      Invoke-Native { & icacls $flag /grant:r 'Users:M' | Out-Null }
+      if (-not (Get-Service ZorShell -ErrorAction SilentlyContinue)) {
+        Invoke-Native { & sc.exe create ZorShell binPath= "`"$svcExe`"" start= auto DisplayName= 'Zor UI shell launcher' | Out-Null }
+      } else {
+        Invoke-Native { & sc.exe config ZorShell binPath= "`"$svcExe`"" start= auto | Out-Null }
+      }
+      Invoke-Native { & sc.exe description ZorShell 'Starts the Zor UI shell (zorui) and GlazeWM when you log on.' | Out-Null }
+      Invoke-Native { & sc.exe failure ZorShell reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null }
+      Start-Service ZorShell
+      # Fast Startup restores the stopped service from the hibernation file instead of starting it, so also start it at every logon.
+      $act = New-ScheduledTaskAction -Execute 'sc.exe' -Argument 'start ZorShell'
+      $trg = New-ScheduledTaskTrigger -AtLogOn
+      $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+      Register-ScheduledTask -TaskName 'ZorShellLogon' -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
+      # the task and Startup shortcut of older installs would race the service
+      if (Get-ScheduledTask -TaskName 'GlazeWM' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'GlazeWM' -Confirm:$false }
+      $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (Test-Path $old) { Remove-Item $old }
+      $svcOk = $true
+      Info 'zorui and GlazeWM start at boot (ZorShell service)'
+    } catch {
+      Info "couldn't install the boot service ($($_.Exception.Message)); falling back to a logon task"
+    }
+  } elseif (-not $isAdmin) {
+    Info 'not running as admin: re-run install.ps1 from an elevated PowerShell to start at boot through a service. Using a logon task.'
+  }
+  if (-not $svcOk) {
+    # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).
+    # `cmd /c start` goes through ShellExecute, which can start the uiAccess glazewm.exe; a task running it directly fails with 740.
+    try {
+      $act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c start `"`" `"$glaze`""
+      $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+      $trg.Delay = 'PT15S'   # glazewm panics when it starts before the shell is ready
+      $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+      Register-ScheduledTask -TaskName 'GlazeWM' -Action $act -Trigger $trg -Settings $set -Force | Out-Null
+      $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (Test-Path $old) { Remove-Item $old }
+      Info 'GlazeWM starts at login (scheduled task)'
+    } catch {
+      Info "couldn't add the login task ($($_.Exception.Message)); falling back to the Startup folder"
+      $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (-not (Test-Path $startup)) {
+        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
+        $sc.TargetPath = $glaze; $sc.Save()
+      }
     }
   }
   if (Get-Process glazewm -ErrorAction SilentlyContinue) {
     Invoke-Native { & $glaze command wm-reload-config 2>&1 | Out-Null }
-  } else {
+  } elseif (-not $svcOk) {
     Start-Process $glaze   # its startup_commands also start Flow Launcher
   }
   # GlazeWM's startup_commands only run when GlazeWM starts, so start Flow Launcher now if needed.
   $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
   if ((Test-Path $flow) -and -not (Get-Process Flow.Launcher -ErrorAction SilentlyContinue)) { Start-Process $flow }
-  if ((Test-Path $native) -and -not (Get-Process zorui -ErrorAction SilentlyContinue)) { Start-Process $native }
+  if (-not $svcOk -and (Test-Path $native) -and -not (Get-Process zorui -ErrorAction SilentlyContinue)) { Start-Process $native }
 }
 
 $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }

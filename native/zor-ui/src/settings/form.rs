@@ -366,6 +366,7 @@ impl Settings {
     /// The color a visualizer setting gives right now (pending edits included): its own, else the shared one, else the theme's.
     pub fn viz_color(&self, cx: &crate::app::Ctx, own: &str) -> crate::gfx::Color {
         let hex = |p: &str| crate::conf::parse_hex(&self.gs(cx, p));
+        if let (Some(pk), true) = (&self.picker, self.pick_path.as_deref() == Some(own)) { return pk.color(); } // being picked: live
         hex(own).or_else(|| hex("visualizer.color")).unwrap_or_else(|| cx.theme.c("primary"))
     }
 

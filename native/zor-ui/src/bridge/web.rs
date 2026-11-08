@@ -138,7 +138,7 @@ fn get_json_e(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Result<Val
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn b64_encode(d: &[u8]) -> String {
+pub(super) fn b64_encode(d: &[u8]) -> String {
     let mut o = String::new();
     for c in d.chunks(3) {
         let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
@@ -422,6 +422,60 @@ fn all_models() -> Vec<Value> {
     v
 }
 
+/// The pictures attached to a chat message as (mime type, base64 data, text that introduces it). A message is
+/// {"role", "content", "images": [{"mime", "data", "label"}]}; every provider's adapter reads them from here, so
+/// the callers never need to know which model answers.
+pub(super) fn images_of(m: &Value) -> Vec<(String, String, String)> {
+    m["images"].as_array().map(|a| a.iter().filter_map(|i| {
+        let data = i["data"].as_str().filter(|d| !d.is_empty())?;
+        let mime = i["mime"].as_str().filter(|x| !x.is_empty()).unwrap_or("image/jpeg");
+        Some((mime.to_string(), data.to_string(), i["label"].as_str().unwrap_or("").to_string()))
+    }).collect()).unwrap_or_default()
+}
+
+/// Can this provider's models be sent pictures? The Gemini and Codex command line tools only take text.
+pub(super) fn can_see(provider: &str) -> bool { provider == "claude-cli" || !provider.ends_with("-cli") }
+
+/// Can the model with this id be sent pictures? A model that isn't in the list is taken as OpenAI-style, as `ai_chat` does.
+pub(super) fn can_see_model(id: &str) -> bool {
+    let provider = all_models().into_iter().find(|m| m["id"].as_str() == Some(id)).and_then(|m| m["provider"].as_str().map(str::to_string));
+    can_see(provider.as_deref().unwrap_or("openai"))
+}
+
+/// Can the model with this id be sent pictures, judging by the id alone? No model list is needed, so Settings can ask every
+/// frame. Subscription command line models are named "<provider>-cli:<name>".
+pub(super) fn id_can_see(id: &str) -> bool { can_see(id.split(':').next().unwrap_or("")) }
+
+/// The message text, or None when it is empty (the providers refuse empty text blocks).
+fn text_of(m: &Value) -> Option<&str> { m["content"].as_str().filter(|t| !t.trim().is_empty()) }
+
+/// Gemini parts of a message: each picture (after its label), then the text.
+fn gemini_parts(m: &Value) -> Vec<Value> {
+    let imgs = images_of(m);
+    if imgs.is_empty() { return vec![json!({ "text": m["content"] })]; }
+    let mut p = vec![];
+    for (mime, data, label) in imgs {
+        if !label.is_empty() { p.push(json!({ "text": label })); }
+        p.push(json!({ "inline_data": { "mime_type": mime, "data": data } }));
+    }
+    p.extend(text_of(m).map(|t| json!({ "text": t })));
+    p
+}
+
+/// Content of a message in the Anthropic and OpenAI shapes (`openai`: image_url data URLs instead of base64 sources).
+fn blocks_of(m: &Value, openai: bool) -> Value {
+    let imgs = images_of(m);
+    if imgs.is_empty() { return m["content"].clone(); }
+    let mut b = vec![];
+    for (mime, data, label) in imgs {
+        if !label.is_empty() { b.push(json!({ "type": "text", "text": label })); }
+        b.push(if openai { json!({ "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{data}") } }) }
+               else { json!({ "type": "image", "source": { "type": "base64", "media_type": mime, "data": data } }) });
+    }
+    b.extend(text_of(m).map(|t| json!({ "type": "text", "text": t })));
+    Value::Array(b)
+}
+
 /// What to send for a chat turn: URL, headers and JSON body for `provider`.
 fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system: &str, temp: f64) -> (String, Vec<(String, String)>, Value) {
     let id = model["id"].as_str().unwrap_or("");
@@ -431,14 +485,14 @@ fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system
     match provider {
         "gemini" => {
             headers.push(h("x-goog-api-key", key));
-            let contents: Vec<Value> = msgs.iter().map(|m| json!({ "role": if role(m) == "assistant" { "model" } else { "user" }, "parts": [{ "text": m["content"] }] })).collect();
+            let contents: Vec<Value> = msgs.iter().map(|m| json!({ "role": if role(m) == "assistant" { "model" } else { "user" }, "parts": gemini_parts(m) })).collect();
             (format!("https://generativelanguage.googleapis.com/v1beta/models/{id}:streamGenerateContent?alt=sse"), headers,
              json!({ "contents": contents, "systemInstruction": { "parts": [{ "text": system }] }, "generationConfig": { "temperature": temp } }))
         }
         "anthropic" => {
             headers.push(h("x-api-key", key));
             headers.push(h("anthropic-version", "2023-06-01"));
-            let messages: Vec<Value> = msgs.iter().map(|m| json!({ "role": role(m), "content": m["content"] })).collect();
+            let messages: Vec<Value> = msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, false) })).collect();
             ("https://api.anthropic.com/v1/messages".into(), headers,
              json!({ "model": id, "max_tokens": 4096, "system": system, "temperature": temp, "stream": true, "messages": messages }))
         }
@@ -450,7 +504,7 @@ fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system
             }
             let url = model["endpoint"].as_str().filter(|e| !e.is_empty()).unwrap_or(openai_like(provider)).to_string();
             let mut messages = vec![json!({ "role": "system", "content": system })];
-            messages.extend(msgs.iter().map(|m| json!({ "role": role(m), "content": m["content"] })));
+            messages.extend(msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, true) })));
             (url, headers, json!({ "model": id, "stream": true, "temperature": temp, "messages": messages }))
         }
     }
@@ -488,7 +542,11 @@ fn ai_chat(stdin: &str, out: &Sink) {
     };
     let model = all_models().into_iter().find(|m| m["id"] == req["model"]).unwrap_or_else(|| json!({ "id": req["model"], "provider": "openai" }));
     let provider = model["provider"].as_str().unwrap_or("openai").to_string();
-    let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"])).cloned().collect()).unwrap_or_default();
+    let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"]) || !images_of(m).is_empty()).cloned().collect()).unwrap_or_default();
+    if !can_see(&provider) && msgs.iter().any(|m| !images_of(m).is_empty()) {
+        out.emit(&json!({ "error": "This model can't see images. Pick another one for screen help in Settings, Buddies." }));
+        return;
+    }
     let system = req["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant inside a Windows desktop sidebar. Use Markdown. Be concise.");
     let temp = req["temperature"].as_f64().or_else(|| req["temperature"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.5);
     if provider == "claude-cli" {
@@ -990,6 +1048,67 @@ mod tests {
         assert!(url.starts_with("http://localhost:11434") && body["messages"][0]["role"] == "system");
         let (url, _, _) = chat_request("custom", &json!({ "id": "m", "endpoint": "http://x/y" }), "", &msgs, "s", 0.5);
         assert_eq!(url, "http://x/y");
+    }
+
+    fn shot() -> Vec<Value> {
+        vec![json!({ "role": "user", "content": "where is save?", "images": [{ "mime": "image/jpeg", "data": "QUJD", "label": "screen 1" }] })]
+    }
+
+    #[test]
+    fn pictures_reach_every_provider_in_its_own_shape() {
+        let (_, _, g) = chat_request("gemini", &json!({ "id": "m" }), "K", &shot(), "s", 0.5);
+        assert_eq!(g["contents"][0]["parts"], json!([{ "text": "screen 1" }, { "inline_data": { "mime_type": "image/jpeg", "data": "QUJD" } }, { "text": "where is save?" }]));
+        let (_, _, a) = chat_request("anthropic", &json!({ "id": "m" }), "K", &shot(), "s", 0.5);
+        assert_eq!(a["messages"][0]["content"], json!([{ "type": "text", "text": "screen 1" }, { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "QUJD" } }, { "type": "text", "text": "where is save?" }]));
+        for p in ["openai", "openrouter", "mistral", "ollama"] {
+            let (_, _, o) = chat_request(p, &json!({ "id": "m" }), "K", &shot(), "s", 0.5);
+            assert_eq!(o["messages"][1]["content"][1], json!({ "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,QUJD" } }), "{p}");
+        }
+    }
+
+    #[test]
+    fn text_only_messages_are_sent_exactly_as_before() {
+        let msgs = vec![json!({ "role": "user", "content": "hi" })];
+        let (_, _, a) = chat_request("anthropic", &json!({ "id": "m" }), "K", &msgs, "s", 0.5);
+        assert_eq!(a["messages"][0]["content"], "hi");
+        let (_, _, o) = chat_request("openai", &json!({ "id": "m" }), "K", &msgs, "s", 0.5);
+        assert_eq!(o["messages"][1]["content"], "hi");
+        let (_, _, g) = chat_request("gemini", &json!({ "id": "m" }), "K", &msgs, "s", 0.5);
+        assert_eq!(g["contents"][0]["parts"], json!([{ "text": "hi" }]));
+    }
+
+    #[test]
+    fn a_picture_without_words_sends_no_empty_text_block() {
+        let msgs = vec![json!({ "role": "user", "content": "", "images": [{ "data": "QUJD" }] })];
+        let (_, _, a) = chat_request("anthropic", &json!({ "id": "m" }), "K", &msgs, "s", 0.5);
+        assert_eq!(a["messages"][0]["content"], json!([{ "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "QUJD" } }]), "mime defaults to jpeg");
+        let (_, _, g) = chat_request("gemini", &json!({ "id": "m" }), "K", &msgs, "s", 0.5);
+        assert_eq!(g["contents"][0]["parts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn images_without_data_are_ignored() {
+        assert!(images_of(&json!({ "images": [{ "mime": "image/png", "data": "" }, { "mime": "image/png" }] })).is_empty());
+        assert!(images_of(&json!({ "content": "x" })).is_empty());
+        assert_eq!(images_of(&json!({ "images": [{ "mime": "image/png", "data": "QQ==", "label": "l" }] })), [("image/png".to_string(), "QQ==".to_string(), "l".to_string())]);
+    }
+
+    #[test]
+    fn a_model_id_tells_whether_it_takes_pictures() {
+        for id in ["claude-cli:haiku", "claude-cli:sonnet", "gemini-2.5-flash", "gpt-4o-mini", "openrouter/auto", "claude-sonnet-5-5", "llava:13b", ""] {
+            assert!(id_can_see(id), "{id}");
+        }
+        for id in ["gemini-cli:default", "codex-cli:default"] { assert!(!id_can_see(id), "{id}"); }
+        // the same answer as asking by provider, for every model the app lists
+        for m in default_models().into_iter().chain(super::sub_cli::models()).chain(super::claude_cli::models()) {
+            assert_eq!(id_can_see(m["id"].as_str().unwrap()), can_see(m["provider"].as_str().unwrap()), "{}", m["id"]);
+        }
+    }
+
+    #[test]
+    fn only_some_providers_take_pictures() {
+        for p in ["gemini", "anthropic", "openai", "openrouter", "mistral", "ollama", "custom", "claude-cli"] { assert!(can_see(p), "{p}"); }
+        for p in ["gemini-cli", "codex-cli"] { assert!(!can_see(p), "{p}"); }
     }
 
     #[test]

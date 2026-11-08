@@ -18,16 +18,25 @@ $exe = Join-Path $env:LOCALAPPDATA 'zor-ui\zorui.exe'
 if (Test-Path $exe) { & $exe --bridge nightlight off 2>$null | Out-Null }
 $lively = Join-Path $env:LOCALAPPDATA 'Programs\Lively Wallpaper\Livelycu.exe'
 if (Test-Path $lively) { & $lively closewp --monitor -1 2>$null | Out-Null }
+if (Get-ScheduledTask -TaskName 'ZorShellLogon' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'ZorShellLogon' -Confirm:$false -ErrorAction SilentlyContinue }
+# The boot service would restart zorui, so remove it first (removing a service needs admin).
+if (Get-Service ZorShell -ErrorAction SilentlyContinue) {
+  try {
+    Stop-Service ZorShell -Force -ErrorAction Stop
+    sc.exe delete ZorShell | Out-Null
+    Remove-Item -Recurse -Force (Join-Path $env:ProgramFiles 'zor-ui'), (Join-Path $env:ProgramData 'zor-ui') -ErrorAction SilentlyContinue
+    Write-Host 'removed the ZorShell service'
+  } catch { Write-Warning "couldn't remove the ZorShell service ($($_.Exception.Message)); run uninstall.ps1 from an elevated PowerShell" }
+}
 Get-Process zorui, end4 -ErrorAction SilentlyContinue | Stop-Process -Force
 $pid0 = Join-Path $env:LOCALAPPDATA 'zor-ui\caffeine.pid'
 if (Test-Path $pid0) { Stop-Process -Id (Get-Content $pid0) -Force -ErrorAction SilentlyContinue }
 
 Restore-Latest (Join-Path $Glzr 'glazewm\config.yaml')
-Restore-Latest (Join-Path $Glzr 'zebar\settings.json')
 Restore-Latest (Join-Path $env:APPDATA 'FlowLauncher\Settings\Settings.json')
 
 Remove-Item -Recurse -Force 'HKCU:\Software\Classes\Directory\Background\shell\ZorUISettings' -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force (Join-Path $Glzr 'zebar\zor-ui') -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force (Join-Path $Glzr 'zor-ui') -ErrorAction SilentlyContinue
 Remove-Item -Force (Join-Path $env:APPDATA 'FlowLauncher\Themes\zor-ui.xaml') -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\zor-ui') -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'zor-ui') -ErrorAction SilentlyContinue

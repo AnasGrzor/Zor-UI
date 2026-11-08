@@ -1,4 +1,4 @@
-//! GlazeWM over its IPC WebSocket (ws://127.0.0.1:6123), like Zebar's glazewm provider: subscribe
+//! GlazeWM over its IPC WebSocket (ws://127.0.0.1:6123): subscribe
 //! to every event and re-query the monitor tree, focus, binding modes and pause state.
 
 use serde_json::Value;
@@ -13,11 +13,13 @@ use std::{
 pub struct Ws { pub name: String, pub display: String, pub displayed: bool, pub occupied: bool }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Monitor { pub id: String, pub x: i32, pub y: i32, pub w: i32, pub focus: bool, pub workspaces: Vec<Ws> }
+pub struct Monitor { pub id: String, pub x: i32, pub y: i32, pub w: i32, pub h: i32, pub focus: bool, pub workspaces: Vec<Ws> }
 
 /// A tiled / floating window (overview, dock): `ws` is the workspace name it sits on.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GWin { pub id: String, pub title: String, pub process: String, pub focus: bool, pub floating: bool, pub minimized: bool, pub ws: String }
+pub struct GWin { pub id: String, pub title: String, pub process: String, pub focus: bool, pub floating: bool, pub minimized: bool, pub ws: String,
+    /// GlazeWM turned an app-maximized window into fullscreen: it ignores the work area and covers the bar.
+    pub maximized: bool }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wm {
@@ -152,10 +154,22 @@ const QUERIES: [&str; 4] = ["query monitors", "query focused", "query binding-mo
 /// Connects (and reconnects) on a thread; `on` gets the new state after every change.
 pub fn start(on: impl Fn(Wm) + Send + 'static) {
     let _ = OUT.set(Mutex::new(None));
+    // GlazeWM sends no event when an app maximizes itself, so re-query the tree now and then.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(2));
+        if let Some(Ok(mut s)) = OUT.get().map(|m| m.lock()) {
+            if let Some(st) = s.as_mut() { if send(st, "query monitors").is_err() { *s = None; } }
+        }
+    });
     std::thread::spawn(move || loop {
-        if let Err(()) = session(&on) { std::thread::sleep(Duration::from_secs(2)); }
+        let r = session(&on);
+        if let Some(Ok(mut s)) = OUT.get().map(|m| m.lock()) { *s = None; }
+        if let Err(()) = r { std::thread::sleep(Duration::from_secs(2)); }
     });
 }
+
+/// Whether the IPC link to GlazeWM is up.
+pub fn connected() -> bool { matches!(OUT.get().map(|m| m.lock().map(|s| s.is_some())), Some(Ok(true))) }
 
 fn session(on: &impl Fn(Wm)) -> Result<(), ()> {
     let mut s = TcpStream::connect(("127.0.0.1", 6123)).map_err(|_| ())?;
@@ -168,6 +182,7 @@ fn session(on: &impl Fn(Wm)) -> Result<(), ()> {
     send(&mut s, "sub --events all").map_err(|_| ())?;
     for q in QUERIES { send(&mut s, q).map_err(|_| ())?; }
     let mut wm = Wm::default();
+    let mut fixed = std::collections::HashSet::new();
     while let Some(m) = read_message(&mut r, &mut s) {
         let Ok(v) = serde_json::from_str::<Value>(&m) else { continue };
         if v["messageType"] == "event_subscription" {
@@ -176,9 +191,28 @@ fn session(on: &impl Fn(Wm)) -> Result<(), ()> {
         }
         let before = wm.clone();
         apply(&mut wm, v["clientMessage"].as_str().unwrap_or(""), &v["data"]);
-        if wm != before { on(wm.clone()); }
+        if wm != before {
+            for (id, cmd) in maximize_floating(&wm, &mut fixed) { command_on(&id, &cmd); }
+            on(wm.clone());
+        }
     }
     Err(())
+}
+
+/// (id, command) for windows the app maximized itself (Electron apps like Orca do) and not yet handled.
+/// GlazeWM's fullscreen covers the bar, so the window becomes floating and fills the monitor's work
+/// area instead, which is a maximize that keeps the bar visible. `fixed` remembers the ones already
+/// sent, so a window that maximizes again right away is not fought in a loop.
+fn maximize_floating(wm: &Wm, fixed: &mut std::collections::HashSet<String>) -> Vec<(String, String)> {
+    fixed.retain(|id| wm.windows.iter().any(|w| &w.id == id && w.maximized));
+    wm.windows.iter().filter(|w| w.maximized && fixed.insert(w.id.clone())).map(|w| {
+        // shortcut: assumes GlazeWM reports monitor x/y/width/height as the work area (bar excluded); not tried live.
+        let cmd = match wm.monitors.iter().find(|m| m.workspaces.iter().any(|s| s.name == w.ws)) {
+            Some(m) if m.w > 0 && m.h > 0 => format!("set-floating --x-pos {}px --y-pos {}px --width {}px --height {}px", m.x, m.y, m.w, m.h),
+            _ => "set-floating --centered".into(),
+        };
+        (w.id.clone(), cmd)
+    }).collect()
 }
 
 fn apply(wm: &mut Wm, query: &str, d: &Value) {
@@ -207,7 +241,8 @@ fn collect(v: &Value, ws: &str, out: &mut Vec<GWin>) {
     for c in v["children"].as_array().into_iter().flatten() {
         if c["type"] == "window" {
             out.push(GWin { id: s(&c["id"]), title: s(&c["title"]), process: s(&c["processName"]), focus: c["hasFocus"].as_bool() == Some(true),
-                floating: c["state"]["type"] == "floating", minimized: c["state"]["type"] == "minimized", ws: ws.into() });
+                floating: c["state"]["type"] == "floating", minimized: c["state"]["type"] == "minimized", ws: ws.into(),
+                maximized: c["state"]["type"] == "fullscreen" && c["state"]["maximized"].as_bool() == Some(true) });
         } else { collect(c, ws, out); }
     }
 }
@@ -216,7 +251,7 @@ fn monitors(d: &Value) -> Vec<Monitor> {
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
     d["monitors"].as_array().map(|ms| ms.iter().map(|m| Monitor {
         id: s(&m["id"]), x: m["x"].as_i64().unwrap_or(0) as i32, y: m["y"].as_i64().unwrap_or(0) as i32,
-        w: m["width"].as_i64().unwrap_or(0) as i32, focus: m["hasFocus"].as_bool().unwrap_or(false),
+        w: m["width"].as_i64().unwrap_or(0) as i32, h: m["height"].as_i64().unwrap_or(0) as i32, focus: m["hasFocus"].as_bool().unwrap_or(false),
         workspaces: m["children"].as_array().map(|ws| ws.iter().map(|w| Ws {
             name: s(&w["name"]), display: w["displayName"].as_str().map(String::from).unwrap_or_else(|| s(&w["name"])),
             displayed: w["isDisplayed"].as_bool().unwrap_or(false),
@@ -242,6 +277,37 @@ mod tests {
 
     use super::*;
     #[test]
+    fn floats_app_maximized_window_once() {
+        let win = |id: &str, max: bool| GWin { id: id.into(), maximized: max, ws: "1".into(), ..Default::default() };
+        let ws = Ws { name: "1".into(), ..Default::default() };
+        let mon = Monitor { x: 1920, y: 40, w: 1900, h: 1000, workspaces: vec![ws], ..Default::default() };
+        let mut wm = Wm { windows: vec![win("a", false), win("orca", true)], monitors: vec![mon], ..Default::default() };
+        let mut fixed = std::collections::HashSet::new();
+        let want = vec![("orca".to_string(), "set-floating --x-pos 1920px --y-pos 40px --width 1900px --height 1000px".to_string())];
+        assert_eq!(maximize_floating(&wm, &mut fixed), want);
+        assert!(maximize_floating(&wm, &mut fixed).is_empty(), "no loop while it stays maximized");
+        wm.windows[1].maximized = false;
+        assert!(maximize_floating(&wm, &mut fixed).is_empty());
+        wm.windows[1].maximized = true;
+        assert_eq!(maximize_floating(&wm, &mut fixed), want, "fixed again after it maximizes anew");
+        wm.monitors.clear();
+        wm.windows[1].maximized = false;
+        maximize_floating(&wm, &mut fixed);
+        wm.windows[1].maximized = true;
+        assert_eq!(maximize_floating(&wm, &mut fixed)[0].1, "set-floating --centered", "no monitor: centered");
+    }
+
+    #[test]
+    fn only_app_maximized_counts() {
+        let tree = |state: &str| serde_json::from_str::<Value>(&format!(r#"{{"children":[{{"type":"window","id":"w","state":{state}}}]}}"#)).unwrap();
+        let mut out = vec![];
+        collect(&tree(r#"{"type":"fullscreen","maximized":true}"#), "1", &mut out);
+        collect(&tree(r#"{"type":"fullscreen","maximized":false}"#), "1", &mut out);
+        collect(&tree(r#"{"type":"tiling"}"#), "1", &mut out);
+        assert_eq!(out.iter().map(|w| w.maximized).collect::<Vec<_>>(), vec![true, false, false]);
+    }
+
+    #[test]
     fn parses_tree() {
         let mut wm = Wm::default();
         let d: Value = serde_json::from_str(r#"{"monitors":[{"id":"m1","x":0,"y":0,"width":1920,"hasFocus":true,
@@ -249,7 +315,7 @@ mod tests {
         apply(&mut wm, "query monitors", &d);
         assert_eq!(wm.monitors[0].workspaces[0], Ws { name: "1".into(), display: "1".into(), displayed: true, occupied: true });
         assert_eq!(wm.monitors[0].workspaces[1].display, "Web");
-        assert_eq!(wm.windows, vec![GWin { id: "w1".into(), title: "A".into(), process: "code".into(), focus: true, floating: true, minimized: false, ws: "1".into() }]);
+        assert_eq!(wm.windows, vec![GWin { id: "w1".into(), title: "A".into(), process: "code".into(), focus: true, floating: true, minimized: false, ws: "1".into(), maximized: false }]);
         assert_eq!(wm.workspace, "1");
         apply(&mut wm, "query focused", &serde_json::json!({"focused": {"type": "window", "title": "T", "processName": "code"}}));
         assert_eq!(wm.window, Some(("T".into(), "code".into())));

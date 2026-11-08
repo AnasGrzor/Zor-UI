@@ -1,4 +1,4 @@
-//! System tray icons through systray-util (the crate Zebar's systray provider uses): it stands in
+//! System tray icons through systray-util: it stands in
 //! for the taskbar's tray so apps send their icons here. Runs on its own thread.
 
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -20,6 +20,11 @@ pub fn click(id: &str, how: Click) {
     let a = match how { Click::Left => SystrayIconAction::LeftClick, Click::Right => SystrayIconAction::RightClick,
         Click::Middle => SystrayIconAction::MiddleClick, Click::Double => SystrayIconAction::LeftDoubleClick };
     if let Some(Ok(t)) = ACT.get().map(|m| m.lock()) { let _ = t.send((id.to_string(), a)); }
+}
+
+pub fn click_btn(id: &str, b: crate::win::Btn) {
+    use crate::win::Btn;
+    click(id, match b { Btn::Left => Click::Left, Btn::Right => Click::Right, Btn::Middle => Click::Middle, Btn::Double => Click::Double });
 }
 
 pub fn start(on: impl Fn(Vec<Icon>) + Send + 'static) {

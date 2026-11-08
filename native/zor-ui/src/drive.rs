@@ -1,0 +1,978 @@
+//! Take-over: after one yes from you, the AI moves the mouse and types to finish a task while you watch. Each round it
+//! gets a picture of every monitor, answers with a short line and a few actions as plain JSON (any provider can do that),
+//! and this module runs them with `SendInput`. It stops, and hands the mouse back, on Esc, when you move the mouse, when
+//! you speak to the buddy, at a password field, in front of an app running as administrator, or at a round or time limit.
+//!
+//! Everything that decides something is a plain function or the loop `run`, which talks to the world through `Host`, so
+//! the tests drive it with a fake model and fake hands. `Live` is the real `Host`.
+
+use crate::{assist, conf::Config, screen};
+use serde_json::Value;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use windows::{
+    core::w,
+    Win32::{
+        Foundation::{CloseHandle, BOOL, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
+        Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+        System::{
+            Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
+            LibraryLoader::GetModuleHandleW,
+            Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+        },
+        UI::{
+            Accessibility::{CUIAutomation, IUIAutomation},
+            Input::KeyboardAndMouse::*,
+            WindowsAndMessaging::*,
+        },
+    },
+};
+
+/// Actions the model may send in one round; more are dropped.
+pub const MAX_ACTIONS: usize = 5;
+/// Longest text one `type` action may enter.
+pub const MAX_TEXT: usize = 500;
+/// How far (screen px) the pointer may be from where the drive left it before it counts as you moving it, and how long it must rest.
+pub const MOVE_PX: i32 = 24;
+pub const REST_MS: u64 = 150;
+/// Pause after every action: the app moves focus when it handles the click, and keys sent before that go to the old control.
+pub const SETTLE_MS: u64 = 150;
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Btn { Left, Right }
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Act {
+    Move,
+    Click(Btn, u8),
+    Type(String),
+    /// A key combo as virtual-key codes, pressed in order and released in reverse.
+    Keys(Vec<u16>),
+    /// Notches right and down (negative: left and up).
+    Scroll(i32, i32),
+    Wait(u64),
+    /// Pause and ask the user a yes/no question.
+    Ask(String),
+}
+
+/// One action as the model sent it. `pos` is in the picture's pixels on screen `screen` (default: screen 1).
+#[derive(Debug, PartialEq, Clone)]
+pub struct Action { pub act: Act, pub pos: Option<(f32, f32)>, pub screen: Option<usize>, pub label: String }
+
+impl Action {
+    /// A few words for the model's history and the log.
+    pub fn describe(&self) -> String {
+        let at = self.pos.map(|(x, y)| format!(" at {},{}", x as i32, y as i32)).unwrap_or_default();
+        match &self.act {
+            Act::Move => format!("moved the mouse{at}"),
+            Act::Click(Btn::Left, 1) => format!("clicked{at}"),
+            Act::Click(Btn::Left, n) => format!("clicked {n} times{at}"),
+            Act::Click(Btn::Right, _) => format!("right-clicked{at}"),
+            Act::Type(t) => format!("typed {} characters", t.chars().count()),
+            Act::Keys(k) => format!("pressed {} keys", k.len()),
+            Act::Scroll(dx, dy) => format!("scrolled {dx},{dy}{at}"),
+            Act::Wait(ms) => format!("waited {ms} ms"),
+            Act::Ask(q) => format!("asked \"{q}\""),
+        }
+    }
+}
+
+/// The virtual-key code for one key name; the aliases people and models use (cmd, opt, esc, return, del ...) all work.
+pub fn vk(name: &str) -> Option<u16> {
+    let n = name.trim().to_lowercase();
+    let code = match n.as_str() {
+        "cmd" | "command" | "win" | "super" | "meta" | "windows" => VK_LWIN.0,
+        "ctrl" | "control" => VK_CONTROL.0,
+        "shift" => VK_SHIFT.0,
+        "alt" | "opt" | "option" => VK_MENU.0,
+        "esc" | "escape" => VK_ESCAPE.0,
+        "return" | "enter" => VK_RETURN.0,
+        "tab" => VK_TAB.0,
+        "space" | "spacebar" => VK_SPACE.0,
+        "backspace" => VK_BACK.0,
+        "del" | "delete" | "forwarddelete" => VK_DELETE.0,
+        "left" => VK_LEFT.0, "right" => VK_RIGHT.0, "up" => VK_UP.0, "down" => VK_DOWN.0,
+        "home" => VK_HOME.0, "end" => VK_END.0, "pageup" => VK_PRIOR.0, "pagedown" => VK_NEXT.0, "insert" => VK_INSERT.0,
+        s if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => s.to_uppercase().as_bytes()[0] as u16, // 'A'..'Z', '0'..'9' are their own codes
+        s => match s.strip_prefix('f').and_then(|d| d.parse::<u16>().ok()) {
+            Some(i) if (1..=12).contains(&i) => VK_F1.0 + i - 1,
+            _ => return None,
+        },
+    };
+    Some(code)
+}
+
+/// "ctrl+shift+s" as key codes; None if any part is unknown or there is nothing.
+pub fn parse_keys(s: &str) -> Option<Vec<u16>> {
+    let keys: Option<Vec<u16>> = s.split('+').map(vk).collect();
+    keys.filter(|k| !k.is_empty() && k.len() <= 4)
+}
+
+/// One action from the model's JSON; None for unknown types (screenshot, zoom ... are no-ops: every round starts with a fresh picture) and bad fields.
+pub fn parse_action(v: &Value) -> Option<Action> {
+    let pos = || Some((v["x"].as_f64()? as f32, v["y"].as_f64()? as f32));
+    let text = |k: &str| v[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let (mut p, mut act) = (None, None);
+    match v["type"].as_str()?.to_lowercase().as_str() {
+        "mouse_move" | "move" => { p = Some(pos()?); act = Some(Act::Move); }
+        "left_click" | "click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 1)); }
+        "right_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Right, 1)); }
+        "double_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 2)); }
+        "triple_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 3)); }
+        "type" => act = Some(Act::Type(v["text"].as_str().filter(|s| !s.is_empty())?.chars().take(MAX_TEXT).collect())),
+        "keys" | "key" => act = Some(Act::Keys(parse_keys(text("keys").or_else(|| text("text"))?)?)),
+        "scroll" => {
+            p = pos();
+            let n = |k: &str| v[k].as_i64().unwrap_or(0).clamp(-20, 20) as i32;
+            act = Some(Act::Scroll(n("dx"), n("dy")));
+        }
+        "wait" => act = Some(Act::Wait(v["ms"].as_u64().unwrap_or(500).min(5000))),
+        "ask" => act = Some(Act::Ask(text("question").or_else(|| text("text"))?.chars().take(200).collect())),
+        _ => {}
+    }
+    Some(Action { act: act?, pos: p, screen: v["screen"].as_u64().map(|n| n as usize), label: v["label"].as_str().unwrap_or("").chars().take(40).collect() })
+}
+
+/// What the model answered: a short line to say, the actions (at most `MAX_ACTIONS`), and whether the task is finished.
+#[derive(Debug, PartialEq)]
+pub struct Reply { pub say: String, pub actions: Vec<Action>, pub done: bool }
+
+/// The JSON object in a reply (maybe inside a code fence). None when there isn't one.
+pub fn parse_reply(text: &str) -> Option<Reply> {
+    let (a, b) = (text.find('{')?, text.rfind('}')?);
+    let v: Value = serde_json::from_str(text.get(a..=b)?).ok()?;
+    v.is_object().then(|| Reply {
+        say: v["say"].as_str().unwrap_or("").trim().chars().take(160).collect(),
+        actions: v["actions"].as_array().map(|a| a.iter().filter_map(parse_action).take(MAX_ACTIONS).collect()).unwrap_or_default(),
+        done: v["done"].as_bool().unwrap_or(false),
+    })
+}
+
+/// A click on something that sends, deletes or pays gets its own yes, even if the model forgot to ask.
+pub fn risky(label: &str) -> bool {
+    const WORDS: [&str; 15] = ["send", "delete", "remove", "erase", "pay", "buy", "purchase", "order", "submit", "transfer", "publish", "post", "uninstall", "format", "checkout"];
+    label.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| WORDS.contains(&w))
+}
+
+/// Why a take-over ended.
+#[derive(Debug, PartialEq, Clone)]
+pub enum Stop { Done, Esc, Voice, UserMouse, Rounds, Time, Refused(String), Error(String) }
+
+impl Stop {
+    /// What the buddy says when he hands the mouse back.
+    pub fn message(&self) -> String {
+        match self {
+            Stop::Done => "Done. The mouse is yours.".into(),
+            Stop::Esc => "Stopped. The mouse is yours.".into(),
+            Stop::Voice => "You called me, so I stopped. The mouse is yours.".into(),
+            Stop::UserMouse => "You took the mouse, so I stopped.".into(),
+            Stop::Rounds => "That took more steps than I'm allowed, so I stopped. The mouse is yours.".into(),
+            Stop::Time => "I ran out of time and stopped. The mouse is yours.".into(),
+            Stop::Refused(why) | Stop::Error(why) => format!("{} The mouse is yours.", why),
+        }
+    }
+}
+
+/// Watches whether you moved the mouse: the drive tells it where the pointer should be, and a pointer that is far from there
+/// is you. It waits for the pointer to rest before it says so, so it doesn't fight a hand that is still moving.
+pub struct MouseWatch { expected: (i32, i32), moving: Option<((i32, i32), u64)> }
+
+impl MouseWatch {
+    pub fn new(at: (i32, i32)) -> MouseWatch { MouseWatch { expected: at, moving: None } }
+    /// The drive just put (or found) the pointer here.
+    pub fn expect(&mut self, at: (i32, i32)) { self.expected = at; self.moving = None; }
+    /// Feed the pointer position and the time; true when you moved it and it has rested.
+    pub fn took(&mut self, at: (i32, i32), now_ms: u64) -> bool {
+        let far = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() > MOVE_PX || (a.1 - b.1).abs() > MOVE_PX;
+        match self.moving {
+            None => { if far(at, self.expected) { self.moving = Some((at, now_ms)); } false }
+            Some((last, since)) => {
+                if (at.0 - last.0).abs() > 3 || (at.1 - last.1).abs() > 3 { self.moving = Some((at, now_ms)); false }
+                else { now_ms.saturating_sub(since) >= REST_MS }
+            }
+        }
+    }
+}
+
+// ---- SendInput builders: pure, so the tests can look at what would be sent ----
+
+/// A screen coordinate as 0..=65535 over the virtual screen starting at `origin` with `size` pixels.
+pub fn norm(p: i32, origin: i32, size: i32) -> i32 { ((p - origin) as i64 * 65535 / (size - 1).max(1) as i64).clamp(0, 65535) as i32 }
+
+fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+}
+
+fn key(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+}
+
+/// Move to screen pixel (x, y) on a virtual screen (left, top, width, height).
+pub fn move_input(x: i32, y: i32, v: (i32, i32, i32, i32)) -> INPUT {
+    mouse(norm(x, v.0, v.2), norm(y, v.1, v.3), 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+}
+
+/// `n` presses of a button, each a down and an up.
+pub fn click_inputs(b: Btn, n: u8) -> Vec<INPUT> {
+    let (d, u) = match b { Btn::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP), Btn::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP) };
+    (0..n).flat_map(|_| [mouse(0, 0, 0, d), mouse(0, 0, 0, u)]).collect()
+}
+
+/// Wheel turns: `dy` notches down (positive) and `dx` right. One notch is 120.
+pub fn scroll_inputs(dx: i32, dy: i32) -> Vec<INPUT> {
+    let mut v = vec![];
+    if dy != 0 { v.push(mouse(0, 0, -dy * 120, MOUSEEVENTF_WHEEL)); }
+    if dx != 0 { v.push(mouse(0, 0, dx * 120, MOUSEEVENTF_HWHEEL)); }
+    v
+}
+
+/// Text as Unicode key events (no clipboard, so yours stays untouched). Enter and Tab are real keys.
+pub fn text_inputs(s: &str) -> Vec<INPUT> {
+    let mut v = vec![];
+    for c in s.replace("\r\n", "\n").chars() {
+        match c {
+            '\n' => { v.push(key(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0))); v.push(key(VK_RETURN.0, 0, KEYEVENTF_KEYUP)); }
+            '\t' => { v.push(key(VK_TAB.0, 0, KEYBD_EVENT_FLAGS(0))); v.push(key(VK_TAB.0, 0, KEYEVENTF_KEYUP)); }
+            c => for u in c.encode_utf16(&mut [0u16; 2]) {
+                v.push(key(0, *u, KEYEVENTF_UNICODE));
+                v.push(key(0, *u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            },
+        }
+    }
+    v
+}
+
+/// Key downs in order, then key ups in reverse.
+pub fn combo_inputs(keys: &[u16]) -> (Vec<INPUT>, Vec<INPUT>) {
+    (keys.iter().map(|k| key(*k, 0, KEYBD_EVENT_FLAGS(0))).collect(), keys.iter().rev().map(|k| key(*k, 0, KEYEVENTF_KEYUP)).collect())
+}
+
+/// Where an action lands on the real screen, or why it can't: the picture's pixel mapped through the monitor it names.
+pub fn resolve(caps: &[screen::Cap], a: &Action) -> Result<Option<(i32, i32)>, String> {
+    let Some((x, y)) = a.pos else { return Ok(None) };
+    match screen::target(caps, a.screen) {
+        Some(c) => Ok(Some(screen::to_screen(c, x, y))),
+        None => Err(format!("there is no screen {}", a.screen.unwrap_or(1))),
+    }
+}
+
+// ---- the loop ----
+
+pub struct Limits { pub rounds: u32, pub ms: u64 }
+
+/// Everything the loop needs from the outside, so tests can stand in for the PC.
+pub trait Host {
+    fn capture(&mut self) -> Result<Vec<screen::Cap>, String>;
+    /// One model call: the goal, what has happened so far, the pictures. Returns the model's text.
+    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap]) -> Result<String, String>;
+    /// Runs one action at its screen position (None when it has none).
+    fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String>;
+    fn cursor(&self) -> (i32, i32);
+    fn now_ms(&self) -> u64;
+    fn sleep(&mut self, ms: u64);
+    /// Esc pressed or you spoke to the buddy.
+    fn halted(&mut self) -> Option<Stop>;
+    fn say(&mut self, line: &str);
+    /// Shows where the next click goes.
+    fn point(&mut self, at: (i32, i32), label: &str);
+    fn confirm(&mut self, question: &str) -> bool;
+    fn password_focused(&self) -> bool;
+    /// The front window is running as administrator, so it ignores our input.
+    fn front_blocks_input(&self) -> bool;
+    fn release(&mut self);
+}
+
+const NAP_MS: u64 = 25;
+
+struct Guard<'a, H: Host> { h: &'a mut H, watch: MouseWatch, start: u64, limit: u64 }
+
+impl<H: Host> Guard<'_, H> {
+    fn check(&mut self) -> Option<Stop> {
+        if let Some(s) = self.h.halted() { return Some(s); }
+        if self.h.now_ms().saturating_sub(self.start) > self.limit { return Some(Stop::Time); }
+        let (at, now) = (self.h.cursor(), self.h.now_ms());
+        self.watch.took(at, now).then_some(Stop::UserMouse)
+    }
+    /// Sleeps in short slices so Esc, your mouse and the clock are checked the whole time.
+    fn pause(&mut self, ms: u64) -> Option<Stop> {
+        let mut left = ms;
+        loop {
+            if let Some(s) = self.check() { return Some(s); }
+            if left == 0 { return None; }
+            let n = left.min(NAP_MS);
+            self.h.sleep(n);
+            left -= n;
+        }
+    }
+}
+
+/// Runs the take-over until it ends. `goal` is what you asked for. Always calls `release` at the end.
+pub fn run<H: Host>(h: &mut H, goal: &str, lim: Limits) -> Stop {
+    let (start, at) = (h.now_ms(), h.cursor());
+    let mut g = Guard { watch: MouseWatch::new(at), start, limit: lim.ms, h };
+    let stop = rounds(&mut g, goal, lim.rounds);
+    g.h.release();
+    stop
+}
+
+fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
+    let mut history: Vec<String> = vec![];
+    let mut bad = 0;
+    g.h.say("Hands off the mouse while I drive. Esc stops me.");
+    for round in 1..=max {
+        if let Some(s) = g.check() { return s; }
+        let caps = match g.h.capture() { Ok(c) => c, Err(e) => return Stop::Error(e) };
+        let text = match g.h.model(goal, &history, &caps) {
+            Ok(t) => t,
+            // a model call cut short by Esc, your voice or the clock reports that instead of an error
+            Err(e) => return g.h.halted().or_else(|| (g.h.now_ms().saturating_sub(g.start) > g.limit).then_some(Stop::Time)).unwrap_or(Stop::Error(e)),
+        };
+        // your hand is still on the mouse after the yes, and the model takes seconds: only moves from here on count
+        g.watch.expect(g.h.cursor());
+        let Some(reply) = parse_reply(&text) else {
+            bad += 1;
+            if bad >= 2 { return Stop::Error("I couldn't understand my own plan.".into()); }
+            history.push(format!("round {round}: your reply was not valid JSON; answer with only the JSON object"));
+            continue;
+        };
+        if !reply.say.is_empty() { g.h.say(&reply.say); }
+        let mut approved = false;
+        for a in &reply.actions {
+            if let Some(s) = g.check() { return s; }
+            match step(g, &caps, a, &mut approved) {
+                Ok(note) => history.push(format!("round {round}: {note}")),
+                Err(Stop::Error(e)) => { history.push(format!("round {round}: could not do that, {e}")); break; }
+                Err(s) => return s,
+            }
+        }
+        if reply.done { return Stop::Done; }
+        if reply.actions.is_empty() { history.push(format!("round {round}: you did nothing; if the task is finished say done")); }
+        if history.len() > 12 { history.drain(..history.len() - 12); }
+        if let Some(s) = g.pause(400) { return s; } // let the screen settle before the next picture
+    }
+    Stop::Rounds
+}
+
+/// Does one action. Err(Stop::Error) means just this action failed (the round ends, the model hears why); any other Err ends the take-over.
+fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], a: &Action, approved: &mut bool) -> Result<String, Stop> {
+    if let Act::Ask(q) = &a.act {
+        if !g.h.confirm(q) { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+        *approved = true;
+        g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
+        return Ok(format!("{}; the user said yes", a.describe()));
+    }
+    if let Act::Wait(ms) = a.act {
+        return match g.pause(ms) { Some(s) => Err(s), None => Ok(a.describe()) };
+    }
+    let at = resolve(caps, a).map_err(Stop::Error)?;
+    if matches!(a.act, Act::Click(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
+        return Err(Stop::Refused("You said no, so I stopped.".into()));
+    }
+    if matches!(a.act, Act::Type(_)) && g.h.password_focused() {
+        return Err(Stop::Refused("That's a password field, so type that one yourself.".into()));
+    }
+    if g.h.front_blocks_input() {
+        return Err(Stop::Refused("The window in front runs as administrator and ignores me.".into()));
+    }
+    if let (Some(p), Act::Click(..)) = (at, &a.act) {
+        g.h.point(p, &a.label);
+        if let Some(s) = g.pause(900) { return Err(s); } // the buddy flies there and rings it first
+    }
+    g.h.act(a, at).map_err(|e| if e.contains("administrator") { Stop::Refused(e) } else { Stop::Error(e) })?;
+    let aimed = at.unwrap_or_else(|| g.h.cursor()); // where we put it, not where it is: a grab during the action must still show
+    g.watch.expect(aimed);
+    if let Some(s) = g.pause(SETTLE_MS) { return Err(s); }
+    Ok(a.describe())
+}
+
+// ---- the real PC ----
+
+/// What the model is told.
+pub const SYSTEM: &str = "You are a desktop buddy who is temporarily controlling the user's mouse and keyboard to finish one task. \
+Each turn you get the goal, what you did so far, and a picture of every screen (each picture says its size and which screen it is). \
+Answer with ONLY one JSON object: {\"say\":\"one short sentence about what you do next\",\"actions\":[...],\"done\":false}. \
+Set done to true, with an empty actions list, when the goal is reached or cannot be reached. Actions (at most 5 per turn), with x and y \
+in the picture's pixels (origin top-left) and screen set to the screen number when there is more than one: \
+{\"type\":\"left_click\",\"x\":0,\"y\":0,\"screen\":1,\"label\":\"2 words naming the target\"}, right_click, double_click, triple_click, mouse_move, \
+{\"type\":\"type\",\"text\":\"...\"}, {\"type\":\"keys\",\"keys\":\"ctrl+s\"}, {\"type\":\"scroll\",\"x\":0,\"y\":0,\"dy\":3} (dy positive scrolls down), \
+{\"type\":\"wait\",\"ms\":500}, {\"type\":\"ask\",\"question\":\"...\"}. Always put a click's label. Look at the new picture after every turn \
+and only do what you can see. Never type into a password field. Before anything that sends, deletes, buys or pays, or that you cannot undo, \
+use an ask action and wait for the answer. Do only the goal and nothing else. The first thing you say must ask the user to keep their hands off the mouse.";
+
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+static ESC: AtomicBool = AtomicBool::new(false);
+static VOICE: AtomicBool = AtomicBool::new(false);
+/// The question the island is showing and the answer once you gave it.
+static ASK: std::sync::Mutex<Option<(String, Option<bool>)>> = std::sync::Mutex::new(None);
+static HOOK_TID: AtomicU32 = AtomicU32::new(0);
+
+pub fn active() -> bool { ACTIVE.load(Ordering::Relaxed) }
+/// You spoke to the buddy (the hotkey): a take-over in progress stops.
+pub fn request_stop() { if active() { VOICE.store(true, Ordering::Relaxed); } }
+
+/// The question waiting for your answer, for the island to show.
+pub fn pending() -> Option<String> { ASK.lock().ok().and_then(|a| a.as_ref().filter(|a| a.1.is_none()).map(|a| a.0.clone())) }
+/// Your answer from the island's Allow or Deny.
+pub fn answer(yes: bool) { if let Ok(mut a) = ASK.lock() { if let Some(a) = a.as_mut() { a.1 = Some(yes); } } }
+
+fn island_open() -> bool {
+    unsafe { FindWindowW(None, w!("Zor UI / island-panel")).is_ok_and(|h| IsWindowVisible(h).as_bool()) }
+}
+
+/// Asks in the island panel and waits for Allow or Deny. No answer in 90 s, Esc, or your voice is a no.
+fn ask_island(q: &str) -> bool {
+    if let Ok(mut a) = ASK.lock() { *a = Some((q.chars().take(260).collect(), None)); }
+    // opening a panel that is already open would close it
+    if !island_open() { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::open("island-panel")))); }
+    let start = std::time::Instant::now();
+    let yes = loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let a = ASK.lock().ok().and_then(|a| a.as_ref().and_then(|a| a.1));
+        if let Some(y) = a { break y; }
+        if ESC.load(Ordering::Relaxed) || VOICE.load(Ordering::Relaxed) || start.elapsed().as_secs() >= 90 { break false; }
+    };
+    if let Ok(mut a) = ASK.lock() { *a = None; }
+    if !yes { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::Close("island-panel".into())))); }
+    yes
+}
+
+/// "Take over" is on in Settings. Off unless turned on: it moves your mouse and sends screenshots away.
+pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.drive").as_bool().unwrap_or(false) }
+
+pub fn limits(cfg: &Config) -> Limits {
+    Limits { rounds: cfg.get("buddies.driveRounds").as_u64().unwrap_or(25).clamp(1, 200) as u32, ms: cfg.get("buddies.driveSecs").as_u64().unwrap_or(180).clamp(10, 3600) * 1000 }
+}
+
+unsafe extern "system" fn esc_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if code >= 0 && w.0 as u32 == WM_KEYDOWN {
+        let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
+        // injected keys are ours (a model's "esc" key must not stop itself)
+        if k.vkCode == VK_ESCAPE.0 as u32 && k.flags.0 & LLKHF_INJECTED.0 == 0 { ESC.store(true, Ordering::Relaxed); }
+    }
+    CallNextHookEx(None, code, w, l)
+}
+
+/// The low-level keyboard hook that sees Esc, on a thread of its own with a message loop. Dropping it removes the hook.
+struct EscHook(Option<std::thread::JoinHandle<()>>);
+
+impl EscHook {
+    fn install() -> Option<EscHook> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let th = std::thread::spawn(move || unsafe {
+            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_hook), GetModuleHandleW(None).map(|m| m).unwrap_or(HMODULE::default()), 0);
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE); // creates this thread's queue before the id is shared
+            let _ = tx.send(hook.is_ok().then(|| GetCurrentThreadId()));
+            if let Ok(h) = hook {
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                let _ = UnhookWindowsHookEx(h);
+            }
+        });
+        let tid = rx.recv().ok().flatten()?;
+        HOOK_TID.store(tid, Ordering::Relaxed);
+        Some(EscHook(Some(th)))
+    }
+}
+
+impl Drop for EscHook {
+    fn drop(&mut self) {
+        unsafe { let _ = PostThreadMessageW(HOOK_TID.swap(0, Ordering::Relaxed), WM_QUIT, WPARAM(0), LPARAM(0)); }
+        if let Some(t) = self.0.take() { let _ = t.join(); }
+    }
+}
+
+/// An extended window style with the click-through flag set or cleared.
+pub fn with_pass_through(ex: isize, on: bool) -> isize {
+    let f = WS_EX_TRANSPARENT.0 as isize;
+    if on { ex | f } else { ex & !f }
+}
+
+/// Makes the buddy windows let mouse clicks through (or not). Their ring and label sit right on the target, and a
+/// click on them is a click on the buddy, not on the app.
+fn pass_through(on: bool) {
+    unsafe extern "system" fn each(h: HWND, data: LPARAM) -> BOOL {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
+            let mut t = [0u16; 64];
+            let n = GetWindowTextW(h, &mut t).max(0) as usize;
+            if String::from_utf16_lossy(&t[..n]).starts_with("Zor UI / gojo") {
+                SetWindowLongPtrW(h, GWL_EXSTYLE, with_pass_through(GetWindowLongPtrW(h, GWL_EXSTYLE), data.0 != 0));
+            }
+        }
+        BOOL(1)
+    }
+    unsafe { let _ = EnumWindows(Some(each), LPARAM(on as isize)); }
+}
+
+fn send(inputs: &[INPUT]) -> bool { inputs.is_empty() || unsafe { SendInput(inputs, size_of::<INPUT>() as i32) as usize == inputs.len() } }
+
+fn virtual_screen() -> (i32, i32, i32, i32) {
+    unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) }
+}
+
+/// Is the process with this id running elevated? None when that can't be read.
+fn elevated(pid: u32) -> Option<bool> {
+    unsafe {
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut tok = Default::default();
+        let ok = OpenProcessToken(p, TOKEN_QUERY, &mut tok).is_ok();
+        let _ = CloseHandle(p);
+        if !ok { return None; }
+        let (mut e, mut n) = (TOKEN_ELEVATION::default(), 0u32);
+        let r = GetTokenInformation(tok, TokenElevation, Some(&mut e as *mut _ as *mut _), size_of::<TOKEN_ELEVATION>() as u32, &mut n);
+        let _ = CloseHandle(tok);
+        r.ok().map(|_| e.TokenIsElevated != 0)
+    }
+}
+
+fn front_blocks() -> bool {
+    unsafe {
+        let w: HWND = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, Some(&mut pid));
+        if pid == 0 { return false; }
+        // we are elevated too: UIPI lets us through. Unknown target while we are not: assume it blocks.
+        let me = elevated(windows::Win32::System::Threading::GetProcessId(GetCurrentProcess())).unwrap_or(false);
+        !me && elevated(pid) != Some(false)
+    }
+}
+
+fn focused_is_password() -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return false };
+        uia.GetFocusedElement().and_then(|e| e.CurrentIsPassword()).is_ok_and(|b| b.as_bool())
+    }
+}
+
+struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, t0: std::time::Instant, limit_ms: u64 }
+
+impl Host for Live<'_> {
+    fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { screen::capture_all() }
+    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap]) -> Result<String, String> {
+        let done = if history.is_empty() { "nothing yet".to_string() } else { history.join("\n") };
+        let convo = assist::convo_with(&self.model, SYSTEM, &format!("Goal: {goal}
+
+What you did so far:
+{done}
+
+The screens now are attached. Answer with the JSON."), caps);
+        // the call runs on its own thread so Esc, your voice and the time limit still work while the model thinks
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cfg = Config(self.cfg.0.clone());
+        std::thread::spawn(move || { let _ = tx.send(assist::chat(&cfg, &convo, 90)); });
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(r) => return r,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("I got no answer from the AI.".into()),
+                Err(_) if ESC.load(Ordering::Relaxed) || VOICE.load(Ordering::Relaxed) || self.now_ms() > self.limit_ms => return Err("stopped while waiting for the AI".into()),
+                Err(_) => {}
+            }
+        }
+    }
+    fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
+        crate::log::line(&format!("drive: {} {:?}", a.describe(), at));
+        let fail = |what: &str| format!("Windows refused the {what}; the window in front may run as administrator.");
+        if let Some((x, y)) = at { if !send(&[move_input(x, y, virtual_screen())]) { return Err(fail("mouse move")); } }
+        let ok = match &a.act {
+            Act::Move | Act::Wait(_) | Act::Ask(_) => true,
+            Act::Click(b, n) => send(&click_inputs(*b, *n)),
+            Act::Scroll(dx, dy) => send(&scroll_inputs(*dx, *dy)),
+            Act::Type(t) => send(&text_inputs(t)),
+            Act::Keys(k) => {
+                self.held = k.clone();
+                let ok = send(&combo_inputs(k).0);
+                self.release(); // the key-ups, even when the downs failed half way
+                ok
+            }
+        };
+        if ok { Ok(()) } else { Err(fail("input")) }
+    }
+    fn cursor(&self) -> (i32, i32) { let mut p = Default::default(); unsafe { let _ = GetCursorPos(&mut p); } (p.x, p.y) }
+    fn now_ms(&self) -> u64 { self.t0.elapsed().as_millis() as u64 }
+    fn sleep(&mut self, ms: u64) { std::thread::sleep(std::time::Duration::from_millis(ms)); }
+    fn halted(&mut self) -> Option<Stop> {
+        if ESC.swap(false, Ordering::Relaxed) { Some(Stop::Esc) } else if VOICE.swap(false, Ordering::Relaxed) { Some(Stop::Voice) } else { None }
+    }
+    fn say(&mut self, line: &str) { assist::say_later(line, 6.0); }
+    fn point(&mut self, at: (i32, i32), label: &str) { if crate::buddy::on() { assist::point_later(at.0, at.1, label); } }
+    fn confirm(&mut self, q: &str) -> bool { ask_island(q) }
+    fn password_focused(&self) -> bool { focused_is_password() }
+    fn front_blocks_input(&self) -> bool { front_blocks() }
+    /// Sends a key-up for every key this drive pressed, then forgets them.
+    fn release(&mut self) {
+        let keys = std::mem::take(&mut self.held);
+        send(&combo_inputs(&keys).1);
+    }
+}
+
+/// Starts a take-over for `goal` on a worker thread after asking you. Returns what the buddy says right now.
+pub fn start(cfg: &Config, goal: &str) -> String {
+    let model = assist::screen_model(cfg);
+    if !crate::bridge::model_can_see(&model) { return "This model can't see images. Pick another one under Settings, Buddies.".into(); }
+    if ACTIVE.swap(true, Ordering::Relaxed) { return "I'm already driving. Press Esc to stop me.".into(); }
+    let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
+    std::thread::spawn(move || {
+        let lim = limits(&cfg);
+        let mut live = Live { cfg: &cfg, model, held: vec![], t0: std::time::Instant::now(), limit_ms: lim.ms };
+        ESC.store(false, Ordering::Relaxed);
+        VOICE.store(false, Ordering::Relaxed);
+        let q = format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(&goal, 140));
+        let line = if !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
+            live.t0 = std::time::Instant::now();
+            pass_through(true);
+            let stop = run(&mut live, &goal, lim);
+            pass_through(false);
+            drop(hook);
+            crate::log::line(&format!("drive ended: {stop:?}"));
+            stop.message()
+        } else { "I can't watch the Esc key, so I won't drive.".to_string() };
+        ACTIVE.store(false, Ordering::Relaxed);
+        assist::say_later(&line, 8.0);
+    });
+    "Checking with you first.".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::VecDeque;
+
+    fn act(v: Value) -> Option<Action> { parse_action(&v) }
+
+    #[test]
+    fn key_names_and_aliases_map_to_one_code() {
+        for n in ["cmd", "Command", "win", "super", "meta", "windows"] { assert_eq!(vk(n), Some(VK_LWIN.0), "{n}"); }
+        for n in ["alt", "opt", "option"] { assert_eq!(vk(n), Some(VK_MENU.0)); }
+        for n in ["esc", "escape"] { assert_eq!(vk(n), Some(VK_ESCAPE.0)); }
+        for n in ["return", "ENTER"] { assert_eq!(vk(n), Some(VK_RETURN.0)); }
+        for n in ["del", "delete", "forwarddelete"] { assert_eq!(vk(n), Some(VK_DELETE.0)); }
+        assert_eq!(vk("backspace"), Some(VK_BACK.0));
+        assert_eq!((vk("pageup"), vk("pagedown")), (Some(VK_PRIOR.0), Some(VK_NEXT.0)));
+        assert_eq!((vk("spacebar"), vk("space")), (Some(VK_SPACE.0), Some(VK_SPACE.0)));
+        assert_eq!((vk("a"), vk("Z"), vk("7")), (Some(0x41), Some(0x5A), Some(0x37)));
+        assert_eq!((vk("f1"), vk("f12"), vk("f13"), vk("f0")), (Some(VK_F1.0), Some(VK_F12.0), None, None));
+        assert_eq!((vk(""), vk("banana"), vk("!")), (None, None, None));
+    }
+
+    #[test]
+    fn combos_need_every_part_to_be_known() {
+        assert_eq!(parse_keys("ctrl+shift+s"), Some(vec![VK_CONTROL.0, VK_SHIFT.0, 0x53]));
+        assert_eq!(parse_keys(" Ctrl + S "), Some(vec![VK_CONTROL.0, 0x53]));
+        assert_eq!(parse_keys("ctrl+banana"), None);
+        assert_eq!(parse_keys(""), None);
+        assert_eq!(parse_keys("ctrl+alt+shift+win+a"), None, "five keys at once is not a shortcut");
+    }
+
+    #[test]
+    fn actions_parse_and_bad_ones_are_dropped() {
+        let c = act(json!({ "type": "left_click", "x": 10.5, "y": 20, "screen": 2, "label": "Save" })).unwrap();
+        assert_eq!(c, Action { act: Act::Click(Btn::Left, 1), pos: Some((10.5, 20.0)), screen: Some(2), label: "Save".into() });
+        assert_eq!(act(json!({ "type": "double_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Left, 2));
+        assert_eq!(act(json!({ "type": "triple_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Left, 3));
+        assert_eq!(act(json!({ "type": "right_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Right, 1));
+        assert!(act(json!({ "type": "left_click", "x": 1 })).is_none(), "a click needs both coordinates");
+        assert!(act(json!({ "type": "screenshot" })).is_none() && act(json!({ "type": "zoom", "x": 1, "y": 1 })).is_none(), "observation actions are no-ops");
+        assert!(act(json!({ "type": "format_disk" })).is_none() && act(json!({ "x": 1 })).is_none());
+        assert_eq!(act(json!({ "type": "keys", "keys": "ctrl+s" })).unwrap().act, Act::Keys(vec![VK_CONTROL.0, 0x53]));
+        assert!(act(json!({ "type": "keys", "keys": "ctrl+nope" })).is_none());
+        assert!(act(json!({ "type": "type", "text": "" })).is_none());
+        assert_eq!(act(json!({ "type": "wait", "ms": 999999 })).unwrap().act, Act::Wait(5000), "waits are capped");
+        assert_eq!(act(json!({ "type": "scroll", "dy": 500, "dx": -3 })).unwrap().act, Act::Scroll(-3, 20), "scrolls are capped");
+        assert_eq!(act(json!({ "type": "scroll", "dy": 2 })).unwrap().pos, None, "a scroll may stay where the pointer is");
+        assert_eq!(act(json!({ "type": "ask", "question": "Delete it?" })).unwrap().act, Act::Ask("Delete it?".into()));
+        let long = "x".repeat(MAX_TEXT + 100);
+        assert!(matches!(act(json!({ "type": "type", "text": long })).unwrap().act, Act::Type(t) if t.chars().count() == MAX_TEXT));
+    }
+
+    #[test]
+    fn a_reply_is_found_inside_fences_and_capped() {
+        let r = parse_reply("```json\n{\"say\":\"I'll click Save.\",\"actions\":[{\"type\":\"left_click\",\"x\":640,\"y\":360}],\"done\":false}\n```").unwrap();
+        assert_eq!((r.say.as_str(), r.actions.len(), r.done), ("I'll click Save.", 1, false));
+        let many = json!({ "actions": (0..9).map(|_| json!({ "type": "wait" })).collect::<Vec<_>>() }).to_string();
+        assert_eq!(parse_reply(&many).unwrap().actions.len(), MAX_ACTIONS);
+        assert_eq!(parse_reply("{\"done\":true}").unwrap(), Reply { say: String::new(), actions: vec![], done: true });
+        assert!(parse_reply("Sure, I'll do that!").is_none() && parse_reply("{broken").is_none() && parse_reply("[1,2]").is_none());
+    }
+
+    #[test]
+    fn sending_things_are_spotted_by_their_label() {
+        for l in ["Send", "Delete file", "Place order", "Pay now", "submit", "Remove from cart", "Post", "Check out / Checkout"] { assert!(risky(l), "{l}"); }
+        for l in ["Save", "Open", "Compose", "Sender settings", "Postal code", "Cancel", ""] { assert!(!risky(l), "{l}"); }
+    }
+
+    #[test]
+    fn coordinates_normalise_over_the_virtual_screen() {
+        let v = (-1920, 0, 3840, 1080);
+        assert_eq!(norm(-1920, v.0, v.2), 0);
+        assert_eq!(norm(1919, v.0, v.2), 65535);
+        assert_eq!(norm(0, v.0, v.2), 32776, "the primary monitor's left edge is just past the middle of a left+primary desktop");
+        assert_eq!(norm(-5000, v.0, v.2), 0, "outside is held to the edge");
+        assert_eq!(norm(99999, v.0, v.2), 65535);
+        assert_eq!(norm(5, 0, 1), 65535, "a one pixel screen never divides by zero");
+    }
+
+    fn flags(i: &INPUT) -> u32 { unsafe { i.Anonymous.mi.dwFlags.0 } }
+
+    #[test]
+    fn mouse_inputs_are_absolute_on_the_virtual_desktop() {
+        let m = move_input(-1920, 0, (-1920, 0, 3840, 1080));
+        let want = (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK).0;
+        assert_eq!(flags(&m), want);
+        assert_eq!(unsafe { (m.Anonymous.mi.dx, m.Anonymous.mi.dy) }, (0, 0));
+        let c = click_inputs(Btn::Left, 2);
+        assert_eq!(c.len(), 4);
+        assert_eq!([flags(&c[0]), flags(&c[1])], [MOUSEEVENTF_LEFTDOWN.0, MOUSEEVENTF_LEFTUP.0]);
+        assert_eq!(flags(&click_inputs(Btn::Right, 1)[1]), MOUSEEVENTF_RIGHTUP.0);
+        let s = scroll_inputs(2, 3);
+        assert_eq!((flags(&s[0]), unsafe { s[0].Anonymous.mi.mouseData } as i32), (MOUSEEVENTF_WHEEL.0, -360), "down is a negative wheel");
+        assert_eq!((flags(&s[1]), unsafe { s[1].Anonymous.mi.mouseData } as i32), (MOUSEEVENTF_HWHEEL.0, 240));
+        assert!(scroll_inputs(0, 0).is_empty());
+    }
+
+    #[test]
+    fn text_goes_in_as_unicode_without_the_clipboard() {
+        let t = text_inputs("a€\n😀");
+        // a, €, Enter (down+up each) and the emoji as a surrogate pair
+        assert_eq!(t.len(), 2 + 2 + 2 + 4);
+        let k = |i: &INPUT| unsafe { (i.Anonymous.ki.wVk.0, i.Anonymous.ki.wScan, i.Anonymous.ki.dwFlags.0) };
+        assert_eq!(k(&t[0]), (0, 'a' as u16, KEYEVENTF_UNICODE.0));
+        assert_eq!(k(&t[1]), (0, 'a' as u16, (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP).0));
+        assert_eq!(k(&t[4]).0, VK_RETURN.0, "a newline is the Enter key");
+        assert_eq!(k(&t[6]).1, 0xD83D);
+        assert_eq!(k(&t[8]).1, 0xDE00);
+        assert_eq!(text_inputs("a\r\nb").len(), 6, "CRLF is one Enter");
+    }
+
+    #[test]
+    fn every_key_down_has_its_key_up_in_reverse() {
+        let (d, u) = combo_inputs(&[VK_CONTROL.0, VK_SHIFT.0, 0x53]);
+        let code = |i: &INPUT| unsafe { i.Anonymous.ki.wVk.0 };
+        assert_eq!(d.iter().map(code).collect::<Vec<_>>(), [VK_CONTROL.0, VK_SHIFT.0, 0x53]);
+        assert_eq!(u.iter().map(code).collect::<Vec<_>>(), [0x53, VK_SHIFT.0, VK_CONTROL.0]);
+        assert!(u.iter().all(|i| unsafe { i.Anonymous.ki.dwFlags } == KEYEVENTF_KEYUP));
+    }
+
+    fn cap(x: i32, w: i32, cursor: bool) -> screen::Cap { screen::Cap { jpeg: vec![], x, y: 0, w, h: 1080, sw: 1280, sh: 720, cursor } }
+
+    #[test]
+    fn a_click_lands_on_the_monitor_it_names_even_at_negative_x() {
+        let caps = [cap(0, 1920, true), cap(-1920, 1920, false)];
+        let click = |screen, x| Action { act: Act::Click(Btn::Left, 1), pos: Some((x, 360.0)), screen, label: String::new() };
+        assert_eq!(resolve(&caps, &click(None, 640.0)), Ok(Some((960, 540))));
+        assert_eq!(resolve(&caps, &click(Some(2), 640.0)), Ok(Some((-960, 540))));
+        assert!(resolve(&caps, &click(Some(3), 1.0)).unwrap_err().contains("no screen 3"));
+        let type_ = Action { act: Act::Type("x".into()), pos: None, screen: None, label: String::new() };
+        assert_eq!(resolve(&caps, &type_), Ok(None));
+    }
+
+    #[test]
+    fn your_mouse_stops_it_only_after_it_rests() {
+        let mut w = MouseWatch::new((100, 100));
+        assert!(!w.took((110, 100), 0), "a small nudge is nothing");
+        assert!(!w.took((400, 300), 10), "far away: you moved it, but it is still moving");
+        assert!(!w.took((420, 300), 60));
+        assert!(!w.took((420, 300), 150), "rested for under 150 ms since the last move");
+        assert!(w.took((421, 301), 260), "rested: hand back");
+        let mut w = MouseWatch::new((0, 0));
+        assert!(!w.took((500, 500), 0));
+        w.expect((500, 500));
+        assert!(!w.took((500, 500), 1000), "the drive put it there itself");
+    }
+
+    #[test]
+    fn the_island_shows_a_question_until_you_answer_it() {
+        assert_eq!(pending(), None);
+        *ASK.lock().unwrap() = Some(("Send it?".into(), None));
+        assert_eq!(pending(), Some("Send it?".into()));
+        answer(true);
+        assert_eq!(pending(), None, "answered: the island stops showing it");
+        assert_eq!(ASK.lock().unwrap().as_ref().and_then(|a| a.1), Some(true));
+        *ASK.lock().unwrap() = None;
+        answer(false); // nothing is waiting: no panic, no stray answer
+        assert!(ASK.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_buddy_lets_clicks_through_only_while_driving() {
+        let plain = WS_EX_TOPMOST.0 as isize | WS_EX_LAYERED.0 as isize;
+        let on = with_pass_through(plain, true);
+        assert_eq!(on, plain | WS_EX_TRANSPARENT.0 as isize);
+        assert_eq!(with_pass_through(on, false), plain, "the other styles are untouched both ways");
+        assert_eq!(with_pass_through(on, true), on);
+    }
+
+    #[test]
+    fn every_stop_says_the_mouse_is_back() {
+        for s in [Stop::Done, Stop::Esc, Stop::Voice, Stop::UserMouse, Stop::Rounds, Stop::Time, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
+            assert!(s.message().contains("mouse"), "{s:?}");
+        }
+        assert_eq!(Stop::Error("Broke.".into()).message(), "Broke. The mouse is yours.");
+    }
+
+    #[test]
+    fn limits_come_from_settings_and_stay_sane() {
+        let c = |j: Value| Config::parse(&j.to_string());
+        let l = limits(&c(json!({})));
+        assert_eq!((l.rounds, l.ms), (25, 180_000));
+        let l = limits(&c(json!({ "buddies": { "driveRounds": 0, "driveSecs": 1 } })));
+        assert_eq!((l.rounds, l.ms), (1, 10_000));
+        assert_eq!(limits(&c(json!({ "buddies": { "driveRounds": 99999 } }))).rounds, 200);
+        assert!(!enabled(&c(json!({}))) && enabled(&c(json!({ "buddies": { "drive": true } }))), "off until turned on");
+    }
+
+    /// A pretend PC: a scripted model, recorded actions, a clock that only moves when asked to sleep.
+    struct Fake {
+        replies: VecDeque<Result<String, String>>,
+        did: Vec<String>, did_at: Vec<u64>, said: Vec<String>, asked: Vec<String>, models: usize, released: bool,
+        now: u64, mouse: (i32, i32), halt_after: Option<usize>, yes: bool, password: bool, blocked: bool, shaky: bool, grab_while_thinking: bool, think_ms: u64,
+    }
+
+    fn fake(replies: &[&str]) -> Fake {
+        Fake { replies: replies.iter().map(|r| Ok(r.to_string())).collect(), did: vec![], did_at: vec![], said: vec![], asked: vec![], models: 0, released: false,
+               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0 }
+    }
+
+    impl Host for Fake {
+        fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { Ok(vec![cap(0, 1920, true)]) }
+        fn model(&mut self, _: &str, _: &[String], _: &[screen::Cap]) -> Result<String, String> { self.models += 1; self.now += self.think_ms; if self.grab_while_thinking { self.mouse = (self.mouse.0 + 500, self.mouse.1 + 200); self.now += 5000; } self.replies.pop_front().unwrap_or(Ok("{\"done\":true}".into())) }
+        fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
+            self.did.push(a.describe());
+            self.did_at.push(self.now);
+            if let Some(p) = at { self.mouse = p; }
+            if self.shaky { self.mouse = (self.mouse.0 + 300, self.mouse.1); } // you grabbed the mouse right after
+            Ok(())
+        }
+        fn cursor(&self) -> (i32, i32) { self.mouse }
+        fn now_ms(&self) -> u64 { self.now }
+        fn sleep(&mut self, ms: u64) { self.now += ms; }
+        fn halted(&mut self) -> Option<Stop> { match self.halt_after { Some(0) => Some(Stop::Esc), Some(n) => { self.halt_after = Some(n - 1); None } None => None } }
+        fn say(&mut self, l: &str) { self.said.push(l.into()); }
+        fn point(&mut self, _: (i32, i32), _: &str) {}
+        fn confirm(&mut self, q: &str) -> bool { self.asked.push(q.into()); self.yes }
+        fn password_focused(&self) -> bool { self.password }
+        fn front_blocks_input(&self) -> bool { self.blocked }
+        fn release(&mut self) { self.released = true; }
+    }
+
+    const CLICK: &str = r#"{"say":"Clicking Save.","actions":[{"type":"left_click","x":640,"y":360,"label":"Save"}],"done":false}"#;
+    const DONE: &str = r#"{"say":"All done.","actions":[],"done":true}"#;
+    fn limits_(rounds: u32, ms: u64) -> Limits { Limits { rounds, ms } }
+
+    #[test]
+    fn it_works_a_task_then_hands_back() {
+        let mut f = fake(&[CLICK, DONE]);
+        assert_eq!(run(&mut f, "click save", limits_(25, 60_000)), Stop::Done);
+        assert_eq!(f.did, ["clicked at 640,360"]);
+        assert_eq!(f.mouse, (960, 540), "the click was mapped to the real screen");
+        assert_eq!(f.said[0], "Hands off the mouse while I drive. Esc stops me.", "the first words ask for your hands off");
+        assert!(f.said.contains(&"Clicking Save.".to_string()) && f.released && f.models == 2);
+    }
+
+    #[test]
+    fn esc_stops_it_before_the_next_action() {
+        let mut f = fake(&[CLICK, CLICK, CLICK]);
+        f.halt_after = Some(3);
+        assert_eq!(run(&mut f, "x", limits_(25, 60_000)), Stop::Esc);
+        assert!(f.did.len() < 3 && f.released, "teardown always runs");
+    }
+
+    #[test]
+    fn it_stops_at_the_round_and_time_limits() {
+        let mut f = fake(&[CLICK, CLICK, CLICK, CLICK]);
+        assert_eq!(run(&mut f, "x", limits_(2, 600_000)), Stop::Rounds);
+        assert_eq!((f.models, f.released), (2, true));
+        let mut f = fake(&[CLICK, CLICK, CLICK, CLICK]);
+        assert_eq!(run(&mut f, "x", limits_(25, 1500)), Stop::Time);
+        assert!(f.released);
+    }
+
+    #[test]
+    fn grabbing_the_mouse_hands_it_back() {
+        let mut f = fake(&[CLICK, CLICK, CLICK]);
+        f.shaky = true;
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::UserMouse);
+        assert_eq!(f.did.len(), 1, "no second click once you took over");
+        assert!(f.released);
+    }
+
+    #[test]
+    fn typing_waits_for_the_click_to_move_focus() {
+        let mut f = fake(&[r#"{"actions":[{"type":"left_click","x":1,"y":1,"label":"Name box"},{"type":"type","text":"hi"}]}"#, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Done);
+        assert_eq!(f.did.len(), 2);
+        assert!(f.did_at[1] - f.did_at[0] >= SETTLE_MS, "keys sent at once after a click go to the old control: {:?}", f.did_at);
+    }
+
+    #[test]
+    fn moving_the_mouse_while_the_model_thinks_is_not_taking_over() {
+        let mut f = fake(&[CLICK, DONE]);
+        f.grab_while_thinking = true; // your hand was still on the mouse after clicking yes
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Done);
+        assert_eq!(f.did.len(), 1, "the click went ahead");
+    }
+
+    #[test]
+    fn it_never_types_into_a_password_field() {
+        let mut f = fake(&[r#"{"actions":[{"type":"type","text":"hunter2"}]}"#]);
+        f.password = true;
+        let s = run(&mut f, "log in", limits_(5, 60_000));
+        assert!(matches!(&s, Stop::Refused(w) if w.contains("password")), "{s:?}");
+        assert!(f.did.is_empty());
+        let mut f = fake(&[r#"{"actions":[{"type":"type","text":"hello"}]}"#, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done, "other fields are fine");
+        assert_eq!(f.did, ["typed 5 characters"]);
+    }
+
+    #[test]
+    fn it_stops_in_front_of_an_administrator_window() {
+        let mut f = fake(&[CLICK]);
+        f.blocked = true;
+        assert!(matches!(run(&mut f, "x", limits_(5, 60_000)), Stop::Refused(w) if w.contains("administrator")));
+        assert!(f.did.is_empty() && f.released);
+    }
+
+    #[test]
+    fn a_risky_click_needs_its_own_yes() {
+        let send = r#"{"actions":[{"type":"left_click","x":1,"y":1,"label":"Send"}]}"#;
+        let mut f = fake(&[send, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done);
+        assert_eq!(f.asked.len(), 1, "the app asked even though the model didn't");
+        let mut f = fake(&[send]);
+        f.yes = false;
+        assert!(matches!(run(&mut f, "x", limits_(5, 60_000)), Stop::Refused(_)));
+        assert!(f.did.is_empty(), "a no means nothing is clicked");
+        let asked = r#"{"actions":[{"type":"ask","question":"Send it?"},{"type":"left_click","x":1,"y":1,"label":"Send"}]}"#;
+        let mut f = fake(&[asked, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done);
+        assert_eq!(f.asked, ["Send it?"], "one yes from the model's own ask covers that click");
+    }
+
+    #[test]
+    fn esc_during_a_slow_model_call_still_stops() {
+        let mut f = fake(&[]);
+        f.replies.push_back(Err("stopped while waiting for the AI".into()));
+        f.halt_after = Some(1); // the check at the top of the round passes, the one after the failed call sees Esc
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Esc);
+        let mut f = fake(&[]);
+        f.replies.push_back(Err("stopped while waiting for the AI".into()));
+        f.think_ms = 700_000; // the clock ran out while waiting
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Time);
+    }
+
+    #[test]
+    fn bad_replies_get_one_retry_and_a_missing_screen_is_reported_back() {
+        let mut f = fake(&["I think so!", DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done, "a second try works");
+        let mut f = fake(&["nope", "still nope"]);
+        assert!(matches!(run(&mut f, "x", limits_(5, 60_000)), Stop::Error(_)));
+        let mut f = fake(&[r#"{"actions":[{"type":"left_click","x":1,"y":1,"screen":4}]}"#, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done);
+        assert!(f.did.is_empty(), "a click on a screen that isn't there is skipped");
+        let mut f = fake(&[]);
+        f.replies.push_back(Err("no brain".into()));
+        assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Error("no brain".into()));
+        assert!(f.released);
+    }
+}

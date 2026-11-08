@@ -1,6 +1,6 @@
 //! Rust port of scripts/buddy_listen.py (the `buddy-listen` stream): records the microphone through
-//! WASAPI until you stop talking, then transcribes it on this PC with the Parakeet model that Orca
-//! downloads. The recognizer is sherpa-onnx's C API, loaded at run time from %LOCALAPPDATA%\zor-ui\sherpa
+//! WASAPI until you stop talking, then transcribes it on this PC with a local Parakeet model.
+//! The recognizer is sherpa-onnx's C API, loaded at run time from %LOCALAPPDATA%\zor-ui\sherpa
 //! (downloaded once from the sherpa-onnx release). Prints the same JSON lines as the script:
 //! {"state": "starting" | "listening" | "thinking"}, {"level": rms}, then {"text"} or {"error"}.
 
@@ -40,7 +40,7 @@ fn arg<'a>(args: &'a [String], flag: &str) -> &'a str {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("")
 }
 
-/// The model folder: `cfg_path` (buddies.model) or Orca's own copy; "" when neither has tokens.txt.
+/// The model folder: `cfg_path` (buddies.model) or the default speech-models copy; "" when neither has tokens.txt.
 fn model_dir(cfg_path: &str) -> String {
     let orca = std::env::var("APPDATA").map(|a| format!("{a}\\orca\\speech-models\\{MODEL}")).unwrap_or_default();
     [cfg_path.to_string(), orca].into_iter().find(|d| !d.is_empty() && Path::new(d).join("tokens.txt").is_file()).unwrap_or_default()
@@ -50,7 +50,7 @@ fn listen(args: &[String], out: &Sink) {
     let wav = arg(args, "--wav");
     let dir = model_dir(arg(args, "--model"));
     if dir.is_empty() {
-        out.emit(&json!({ "error": "Parakeet model not found. Open Orca once and enable voice dictation, or set buddies.model." }));
+        out.emit(&json!({ "error": "Parakeet model not found. Set buddies.model to the model folder." }));
         return;
     }
     out.emit(&json!({ "state": "starting" }));

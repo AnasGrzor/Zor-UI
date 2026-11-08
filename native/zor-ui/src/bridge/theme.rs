@@ -1,5 +1,5 @@
 //! Rust port of scripts/switchwall.ps1 and scripts/end4_theme.py: pick a wallpaper, make a Material You
-//! palette from it and push that to Zebar, GlazeWM, Flow Launcher and Windows Terminal, then follow
+//! palette from it and push that to GlazeWM, Flow Launcher and Windows Terminal, then follow
 //! Windows' light/dark setting and the lock screen.
 //! shortcut: animated pictures use WIC's raw frame 1 (GIF frames aren't composed), thumbnails are
 //! JPEG at WIC's default quality (Pillow used 85); upgrade if either shows.
@@ -224,6 +224,7 @@ fn fit_file(src: &str, n: usize, w: i32, h: i32) -> Option<String> {
     let name = format!("wp-{n}-{:x}.jpg", hs.finish());
     let dest = dir.join(&name);
     if !dest.exists() {
+        let _ = std::fs::create_dir_all(&dir);
         let rows: Vec<u8> = (y..y + ch).flat_map(|r| px[(r * pw + x) * 3..(r * pw + x + cw) * 3].iter().copied()).collect();
         write_rgb_jpeg(cw, ch, &rows, &dest)?;
     }
@@ -245,8 +246,8 @@ pub fn call(_cfg: &Config, name: &str, _args: &[&str]) -> Option<Value> {
 
 // ------------------------------------------------------------------ writers
 
-/// Zebar's theme.json, through a temp file so the widgets never read half of it.
-fn write_zebar(pack_dir: &Path, payload: &Value) -> bool { save_json(&pack_dir.join("theme.json"), payload) }
+/// theme.json, through a temp file so the widgets never read half of it.
+fn write_theme(pack_dir: &Path, payload: &Value) -> bool { save_json(&pack_dir.join("theme.json"), payload) }
 
 /// Replaces the managed colour block in GlazeWM's config. False if the file or its markers are missing.
 fn write_glazewm(cfg: &Path, c: &BTreeMap<String, String>) -> bool {
@@ -376,7 +377,7 @@ fn run_theme(o: &Opts, p: &Paths) -> Result<Value, String> {
 
     let live = match &o.live { Some(l) => Some(l.clone()), None if o.image.is_none() && o.color.is_none() => s("live"), None => None };
     let payload = json!({ "mode": mode, "scheme": scheme, "resolvedScheme": used, "seed": rgb_hex(seed), "wallpaper": image, "live": live, "colors": colors, "term": term });
-    write_zebar(&p.pack, &payload);
+    write_theme(&p.pack, &payload);
     if let Some(i) = &image { write_thumbnail(&p.pack, Path::new(i)); }
     let glaze_ok = write_glazewm(&p.glazewm, &colors);
     let flow_ok = write_flow(&p.flow_template, &p.flow_themes, &colors, dark);
@@ -607,7 +608,7 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
     if !image.is_empty() { image = resolve(&image)?; }
     if !image.is_empty() && !theme_only { set_wallpaper(&image); }
 
-    // 2. Palette -> Zebar / GlazeWM / Flow Launcher / Terminal.
+    // 2. Palette -> GlazeWM / Flow Launcher / Terminal.
     let opt = |s: &String| (!s.is_empty()).then(|| s.clone());
     let result = run_theme(&Opts { image: opt(&image), color: opt(&color), mode: opt(&mode), scheme: opt(&scheme), live: opt(&live) }, paths)
         .map_err(|e| format!("end4_theme produced no output: {e}"))?;

@@ -1,0 +1,28 @@
+[package]
+name = "zor-setup"
+version = "0.1.9"
+edition = "2021"
+description = "Graphical installer and uninstaller for Zor UI. Embeds the release zip and runs install.ps1 behind a wizard window."
+
+[[bin]]
+name = "ZorUI-Setup"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_ApplicationInstallationAndServicing",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Controls",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

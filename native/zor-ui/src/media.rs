@@ -1,4 +1,4 @@
-//! Now playing: Windows' media sessions (the same source as Zebar's media provider) and the
+//! Now playing: Windows' media sessions and the
 //! default audio devices' volume. Each runs on its own COM thread and reports through `on`.
 
 use std::{
@@ -62,7 +62,7 @@ static MEDIA: OnceLock<Mutex<mpsc::Sender<Msg>>> = OnceLock::new();
 
 fn send(m: Msg) { if let Some(Ok(t)) = MEDIA.get().map(|m| m.lock()) { let _ = t.send(m); } }
 
-/// "togglePlayPause" | "play" | "pause" | "next" | "previous" on the current session, like Zebar's media provider methods.
+/// "togglePlayPause" | "play" | "pause" | "next" | "previous" on the current session.
 pub fn control(what: &'static str) { send(Msg::Control(None, what)); }
 /// The same on the session `id` (`Media::id`).
 pub fn control_of(id: &str, what: &'static str) { send(Msg::Control(Some(id.into()), what)); }
@@ -117,6 +117,32 @@ fn anchor(raw: (f64, f64), playing: bool, prev: Option<&Media>, now: f64) -> (f6
             if playing && p.playing { (p.position, p.at) } else { (p.position + played(p), now) }
         }
         _ => (raw.0, if playing { clock(raw.1, now) } else { now }),
+    }
+}
+
+/// What to try for a control, in order, until one works.
+#[derive(Debug, PartialEq)]
+enum Step { Session(&'static str), MediaKey }
+
+/// A browser tab paused for long goes stale: Windows answers the toggle with `false`. Then plain
+/// "play" is tried, and last the system media key, which Chrome and Edge still obey.
+fn chain(c: &'static str) -> Vec<Step> {
+    match c {
+        "next" | "previous" | "play" | "pause" => vec![Step::Session(c)],
+        _ => vec![Step::Session("togglePlayPause"), Step::Session("play"), Step::MediaKey],
+    }
+}
+
+fn session_control(s: &Session, c: &str) -> bool {
+    match c { "next" => s.TrySkipNextAsync(), "previous" => s.TrySkipPreviousAsync(), "play" => s.TryPlayAsync(), "pause" => s.TryPauseAsync(), _ => s.TryTogglePlayPauseAsync() }
+        .and_then(|a| a.get()).unwrap_or(false)
+}
+
+fn media_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MEDIA_PLAY_PAUSE};
+    unsafe {
+        keybd_event(VK_MEDIA_PLAY_PAUSE.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_MEDIA_PLAY_PAUSE.0 as u8, 0, KEYEVENTF_KEYUP, 0);
     }
 }
 
@@ -228,9 +254,12 @@ pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
             prev = view.1.iter().map(|m| (m.id.clone(), m.clone())).collect();
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Msg::Control(id, c)) => {
-                    if let Some(s) = id.and_then(|id| by_id(&all, &id)).or(cur.as_ref()) {
-                        let _ = match c { "next" => s.TrySkipNextAsync(), "previous" => s.TrySkipPreviousAsync(), "play" => s.TryPlayAsync(), "pause" => s.TryPauseAsync(), _ => s.TryTogglePlayPauseAsync() }.and_then(|a| a.get());
-                    }
+                    let s = id.and_then(|id| by_id(&all, &id)).or(cur.as_ref());
+                    let _ = chain(c).iter().any(|step| match (step, s) {
+                        (Step::Session(n), Some(s)) => session_control(s, n),
+                        (Step::Session(_), None) => false,
+                        (Step::MediaKey, _) => { crate::log::line(&format!("media control {c}: session refused, sent the media key")); media_key(); true }
+                    });
                 }
                 Ok(Msg::Seek(id, secs)) => {
                     if let Some(s) = by_id(&all, &id) {
@@ -281,7 +310,40 @@ impl IAudioEndpointVolumeCallback_Impl for Notify_Impl {
     fn OnNotify(&self, _: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> windows::core::Result<()> { let _ = self.0.send(AMsg::Changed); Ok(()) }
 }
 
+/// An app holds the mic: the meter thread reads its level. Set by the app each second.
+pub static MIC_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MIC_SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The default mic is picking up a voice (only kept up to date while `MIC_WATCH` is set).
+pub fn mic_speaking() -> bool { MIC_SPEAKING.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Reads the default mic's peak level every 50 ms while `MIC_WATCH` is set; asleep (one wake per 0.5 s) otherwise.
+fn start_mic_level() {
+    use std::sync::atomic::Ordering::Relaxed;
+    std::thread::spawn(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return };
+        let (mut hold, mut meter, mut n) = (crate::privacy::Hold::default(), None::<IAudioMeterInformation>, 0u32);
+        loop {
+            if !MIC_WATCH.load(Relaxed) {
+                (meter, n) = (None, 0);
+                MIC_SPEAKING.store(false, Relaxed);
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            // looked up again every 3 s: the default mic may have changed
+            if meter.is_none() || n % 60 == 0 {
+                meter = en.GetDefaultAudioEndpoint(eCapture, eConsole).ok().and_then(|d| d.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None).ok());
+            }
+            n += 1;
+            let peak = meter.as_ref().and_then(|m| m.GetPeakValue().ok()).unwrap_or(0.0);
+            MIC_SPEAKING.store(hold.feed(peak, crate::hub::now_ms()), Relaxed);
+        }
+    });
+}
+
 pub fn start_audio(on: impl Fn(Audio) + Send + 'static) {
+    start_mic_level();
     let (tx, rx) = mpsc::channel();
     let _ = AUDIO.set(Mutex::new(tx.clone()));
     std::thread::spawn(move || unsafe {
@@ -391,6 +453,13 @@ mod tests {
 
     fn at(position: f64, at: f64, snap: (f64, f64)) -> Media {
         Media { id: "MSEdge".into(), title: "Video".into(), playing: true, current: true, duration: 100.0, position, at, snap, ..Default::default() }
+    }
+
+    #[test]
+    fn a_stale_toggle_falls_back_to_play_then_the_media_key() {
+        assert_eq!(chain("togglePlayPause"), vec![Step::Session("togglePlayPause"), Step::Session("play"), Step::MediaKey]);
+        assert_eq!(chain("next"), vec![Step::Session("next")]);
+        assert_eq!(chain("pause"), vec![Step::Session("pause")]);
     }
 
     #[test]

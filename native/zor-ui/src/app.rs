@@ -4,7 +4,7 @@ use crate::{
     assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, pill, dock, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, privacy, dock, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -51,6 +51,8 @@ pub struct Ctx {
     pub tray: Vec<tray::Icon>,
     pub notif: Option<Notif>,
     pub osd: Option<Osd>,
+    /// The apps holding the microphone and camera (polled every tick while the island shows it).
+    pub privacy: crate::privacy::Privacy,
     /// Bumps whenever any of the above changes; windows repaint on a new version.
     pub ver: u64,
     /// `--all`: run every ported part even if config.json "native" doesn't list it (side-by-side testing).
@@ -85,16 +87,20 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, ver: 0, all, actions: vec![],
+            notif: None, osd: None, privacy: Default::default(), ver: 0, all, actions: vec![],
         }
     }
 
-    /// True if this app, not Zebar, draws `part` ("desktop", "bar", ...).
+    /// True if this app draws `part` ("desktop", "bar", ...).
     pub fn native(&self, part: &str) -> bool { self.all || self.cfg.bool(&format!("native.{part}")) }
-    /// The edge the native bar sits on (the Zebar bar is always on top).
+    /// The edge the native bar sits on.
     pub fn bar_edge(&self) -> bar::Edge { if self.native("bar") { bar::Edge::parse(self.cfg.str("bar.position")) } else { bar::Edge::Top } }
     fn island_shown(&self) -> bool { bar::layout(&self.cfg).iter().any(|m| m.0 == "island" && m.1 != "hidden") }
 }
+
+const TRAY_FLYOUT: &str = "tray-flyout";
+
+fn contains(r: &RECT, p: POINT) -> bool { p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom }
 
 pub type Job = Box<dyn FnOnce(&mut Ctx) + Send>;
 static JOBS: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
@@ -157,6 +163,8 @@ thread_local!(pub static APP: RefCell<Option<App>> = const { RefCell::new(None) 
 const TICK: usize = 1;
 const FRAME: usize = 2;
 const HOVER: usize = 3;
+/// While the tray flyout is open: watches for a click outside it, the only thing that closes it.
+const OUTSIDE: usize = 4;
 
 impl App {
     pub fn start(all: bool) -> windows::core::Result<()> {
@@ -191,7 +199,7 @@ impl App {
         crate::appicon::add(msg);
 
         std::thread::spawn(|| loop {
-            // Weather every 30 min like the Zebar provider; retry a minute after a failed fetch.
+            // Weather every 30 min; retry a minute after a failed fetch.
             match weather::fetch() {
                 Some(w) => { post(Box::new(move |cx| cx.weather = Some(w))); std::thread::sleep(std::time::Duration::from_secs(1800)); }
                 None => std::thread::sleep(std::time::Duration::from_secs(60)),
@@ -212,11 +220,12 @@ impl App {
         if self.started { return; }
         self.started = true;
         glaze::start(|wm| post(Box::new(move |cx| cx.wm = wm)));
+        crate::rescue::watch();
         media::start_media(|m, all| post(Box::new(move |cx| { cx.media = m; cx.sessions = all; })));
         media::start_audio(|a| post(Box::new(move |cx| osd(cx, a))));
         tray::start(|icons| post(Box::new(move |cx| cx.tray = icons)));
         let cfg = &self.cx.cfg;
-        // These ran in the Zebar bar (bar.js); each is a bridge stream.
+        // Each of these is a bridge stream.
         if self.cx.island_shown() {
             self._streams.extend(proc::stream(cfg, "agents-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
@@ -268,7 +277,7 @@ impl App {
             self.bars.push(w);
         }
         // After docking: the tray's stand-in Shell_TrayWnd (systray-util) catches SHAppBarMessage,
-        // and Explorer ignores the app bar messages it forwards. Zebar docks first for the same reason.
+        // and Explorer ignores the app bar messages it forwards.
         self.start_bar_sources();
     }
 
@@ -326,6 +335,20 @@ impl App {
         }
     }
 
+    /// Reads who holds the mic and camera; a new app also gets a few seconds in the island.
+    fn privacy_check(&mut self) {
+        let cx = &mut self.cx;
+        let on = cx.island_shown() && cx.cfg.get("island.privacy").as_bool() != Some(false);
+        let new = if on { privacy::read() } else { Default::default() };
+        if new == cx.privacy { return; }
+        if let Some((icon, text)) = privacy::notice(&cx.privacy, &new) {
+            cx.osd = Some(Osd { icon, value: None, text, until: hub::now_ms() + 4000.0 });
+        }
+        media::MIC_WATCH.store(new.mic.is_some(), std::sync::atomic::Ordering::Relaxed);
+        cx.privacy = new;
+        cx.ver += 1;
+    }
+
     /// Hides the shell while a game (any full-screen app) is in front, and restores it after.
     fn game_check(&mut self) {
         // With a second monitor only the bar on the covered one hides (bars_for_fullscreen); the other keeps working.
@@ -368,6 +391,11 @@ impl App {
         self.bars_for_fullscreen();
         self.ticks += 1;
         let n = self.ticks;
+        if n % 60 == 0 {
+            crate::glass::trim_idle(std::time::Duration::from_secs(30));
+            // hand freed pages back to Windows, so Task Manager shows what is really in use
+            unsafe { let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(windows::Win32::System::Threading::GetCurrentProcess(), usize::MAX, usize::MAX); }
+        }
         if n % 30 == 0 { crate::appicon::add(self.msg); } // Explorer forgets it when it restarts
         // hook up coding agents found on the PC: at start (after 2 s), then every 5 minutes for ones installed later
         if (n == 2 || n % 300 == 0) && self.cx.cfg.get("autoTrackAgents").as_bool() != Some(false) {
@@ -404,6 +432,7 @@ impl App {
             let net_fast = bar::layout(&self.cx.cfg).iter().any(|m| m.0 == "netspeed" && m.1 != "hidden");
             if n % if net_fast { 2 } else { 5 } == 0 { self.cx.net = self.netmon.sample(); self.cx.ver += 1; }
             if n % 15 == 0 { self.cx.battery = sys::battery(); }
+            self.privacy_check();
             if n % 2 == 0 && self.cx.cfg.bool("showKeyboardLayout") { self.cx.kb = sys::keyboard(); }
             // pomodoro phases end here (bar.js renderTimer): whichever bar sees it first announces it
             if let Some(done) = hub::tick(&self.cx.cfg) {
@@ -421,9 +450,20 @@ impl App {
         self.repaint();
     }
 
-    /// Window `i` of the bars followed by the other windows (the dock): `popup_check`'s index.
+    /// Window `i` of the bars, then the other windows (the dock), then the open popups: `popup_check`'s index.
     fn hover_win(&self, i: usize) -> Option<&Win> {
-        self.bars.get(i).or_else(|| self.wins.get(i.checked_sub(self.bars.len())?))
+        let j = i.checked_sub(self.bars.len());
+        self.bars.get(i).or_else(|| self.wins.get(j?)).or_else(|| self.pops.get(j?.checked_sub(self.wins.len())?).map(|p| &p.win))
+    }
+
+    /// Closes the tray flyout on a mouse press anywhere but on it. Focus loss can't do this: the app's
+    /// menu or window an icon opens takes focus too.
+    fn outside_check(&mut self) {
+        let Some(p) = self.pops.iter().find(|p| p.name == TRAY_FLYOUT) else { unsafe { let _ = KillTimer(self.msg, OUTSIDE); } return };
+        let down = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } as u16 & 0x8000 != 0);
+        let mut pt = POINT::default();
+        unsafe { let _ = GetCursorPos(&mut pt); }
+        if down && hub::now_ms() - p.armed_at > 300.0 && !contains(&p.win.rect(), pt) { self.close(TRAY_FLYOUT); }
     }
 
     fn popup_check(&mut self, bi: usize) {
@@ -460,6 +500,7 @@ impl App {
         let (x, y) = bar::popup_spot(edge, origin, r, s, p.size_px());
         p.move_to(x, y);
         p.show();
+        p.raise(); // a focused popup (the tray flyout) is topmost too and would hide it
         self.shown = Some((bi, id));
     }
 
@@ -486,6 +527,7 @@ impl App {
         let Some(view) = popup::make(name, area) else { return };
         let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
+        if name == "island-panel" { w.grow = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom)); }
         w.update(&self.g, &self.cx, true);
         let px = w.size_px();
         let (x, y) = popup::spot(name, rect, s, px, at, self.cx.bar_edge());
@@ -494,13 +536,16 @@ impl App {
         w.focus();
         w.view.input(Input::Focus(true), &mut self.cx);
         w.update(&self.g, &self.cx, true);
-        self.pops.push(Pop { name: name.into(), win: w, mon: rect, at, armed_at: hub::now_ms(), pinned: is_settings, px });
+        self.pops.push(Pop { name: name.into(), win: w, mon: rect, at, armed_at: hub::now_ms(), pinned: is_settings || name == TRAY_FLYOUT, px });
+        if name == TRAY_FLYOUT { unsafe { SetTimer(self.msg, OUTSIDE, 40, None); } }
         self.frames();
     }
 
     pub fn close(&mut self, name: &str) {
         if let Some(i) = self.pops.iter().position(|p| p.name == name) {
             self.pops.remove(i);
+            self.hide_popup(); // its tooltip goes with it
+            crate::gfx::drop_backdrops();
             hub::set(&format!("zor-ui.closedAt.{name}"), Some(hub::now_ms().to_string()));
             self.frames();
         }
@@ -600,7 +645,11 @@ impl App {
                 self.keys(None, Some(pi), msg, wp);
             }
             WM_DPICHANGED => {}
-            _ => if !self.keys(None, Some(pi), msg, wp) { self.pops[pi].win.mouse(msg, wp, lp, &mut self.cx); },
+            _ => if !self.keys(None, Some(pi), msg, wp) {
+                self.pops[pi].win.mouse(msg, wp, lp, &mut self.cx);
+                // popups with tooltips (the tray flyout) ask for them like the bar does
+                if !matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) { self.popup_check(self.bars.len() + self.wins.len() + pi); }
+            },
         }
         self.cx.ver += 1;
         self.paint_pops(true);
@@ -629,6 +678,7 @@ impl App {
                     self.frames();
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
+                (WM_TIMER, OUTSIDE) => self.outside_check(),
                 (crate::appicon::CALLBACK, _) => match lp.0 as u32 & 0xFFFF {
                     WM_LBUTTONUP => self.open("settings", None, None),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
@@ -637,6 +687,7 @@ impl App {
                         let hwnd = self.msg;
                         self.show_menu(vec![
                             menu::Item::new("settings", "Settings", |cx| cx.actions.push(Action::open("settings"))),
+                            menu::Item::new("visibility", "Recover hidden windows", |_| { std::thread::spawn(|| { crate::log::line(&format!("rescue: uncloaked {} windows", crate::rescue::uncloak_all())); }); }),
                             menu::Item::new("restart_alt", "Restart", |_| restart()),
                             menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); std::process::exit(0); }),
                         ], (p.x, p.y));
@@ -796,6 +847,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn click_inside_or_outside_a_window() {
+        use windows::Win32::Foundation::{POINT, RECT};
+        let r = RECT { left: -100, top: 10, right: 50, bottom: 60 };
+        let at = |x, y| super::contains(&r, POINT { x, y });
+        assert!(at(-100, 10) && at(49, 59)); // edges inside
+        assert!(!at(50, 30) && !at(0, 60) && !at(-101, 30) && !at(0, 9)); // right and bottom edges are outside
+    }
+
     #[test]
     fn banner_click_target() {
         let n = |until: f64, open: &str| Some(super::Notif { app: "a".into(), text: "t".into(), until, open: open.into() });

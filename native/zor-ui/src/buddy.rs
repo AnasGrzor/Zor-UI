@@ -237,7 +237,86 @@ fn clock() -> f32 {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Stand, Walk, Sit, Sleep, Held, Fall }
+enum Mode { Stand, Walk, Sit, Sleep, Held, Fall, Point }
+
+/// A flight to a spot on the screen he was asked to point at (screen help), and the stay there.
+#[derive(Clone, Debug)]
+struct PointJob {
+    /// Feet where he took off and where he lands, and the spot itself (screen px).
+    from: (f32, f32),
+    feet: (f32, f32),
+    to: (f32, f32),
+    label: String,
+    t0: f32,
+    fly: f32,
+    /// Which side of the spot he stands on (-1 left, 1 right); his bubble opens away from the spot.
+    side: f32,
+    /// Set on the frame he lands, so the landing puff and hop happen once.
+    landed: bool,
+}
+
+/// Seconds he stays at the spot after landing.
+const POINT_HOLD: f32 = 8.0;
+
+/// Flight time for `dist` px: 800 px/s, but never snappier than 0.6 s or lazier than 1.4 s.
+fn flight_secs(dist: f32) -> f32 { (dist / 800.0).clamp(0.6, 1.4) }
+
+/// Ease in and out: 0 to 1 with no jerk at either end.
+fn smooth(t: f32) -> f32 { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) }
+
+/// The flight's pace: a gentle takeoff, a fast middle and a soft arrival (ease in-out cubic, steeper than `smooth`).
+fn fly_ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
+}
+
+/// How far he leans into the flight (radians): head toward where he is going, more the faster he goes, at most 0.4.
+fn lean(vx: f32, scale: f32) -> f32 { (vx / (900.0 * scale.max(0.1))).clamp(-1.0, 1.0) * 0.4 }
+
+/// Where the spot's name is drawn, in his window (css px): x, offset below the ring's centre, width, alignment, and whether
+/// it wraps onto two lines.
+#[derive(Debug, PartialEq)]
+struct Label { x: f32, dy: f32, w: f32, left: bool, wrap: bool }
+
+/// The rounded backing of the name: as wide as its text plus 4 px each side but never wider than its box, pushed to the box's
+/// outer end (the screen edge side), and tall enough for its lines. `ry` is the ring's centre.
+fn pill_rect(l: &Label, ry: f32, text_w: f32, text_h: f32) -> R {
+    let w = (text_w + 8.0).min(l.w);
+    R::new(if l.left { l.x } else { l.x + l.w - w }, ry + l.dy - 3.0, w, text_h + 6.0)
+}
+
+/// Where the spot's name goes for a ring at x = `rx`. `room` is the space (css px) between the ring and the screen edge on
+/// the side away from him, `text_w` the name's width. If it fits it sits beside the ring, level with it, on that side, so it
+/// never lands on his legs. If not (the spot is at the screen edge) it goes below the ring, wrapped, ending 4 px inside the
+/// screen and starting no nearer to him than 20 px from the ring.
+fn label_box(rx: f32, side: f32, room: f32, text_w: f32) -> Label {
+    if room >= text_w + 24.0 {
+        let w = text_w + 8.0;
+        return if side < 0.0 { Label { x: rx + 16.0, dy: -8.0, w, left: true, wrap: false } }
+               else { Label { x: rx - 16.0 - w, dy: -8.0, w, left: false, wrap: false } };
+    }
+    let w = (room + 16.0).max(44.0);
+    if side < 0.0 { Label { x: rx + room - 4.0 - w, dy: 20.0, w, left: false, wrap: true } }
+    else { Label { x: rx - room + 4.0, dy: 20.0, w, left: true, wrap: true } }
+}
+
+/// The spot at progress `t` (0 to 1) on a curve from `a` to `b` that bows upward by a quarter of the distance (at most 120 px).
+fn arc(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    let c = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0 - (d * 0.25).min(120.0));
+    let u = 1.0 - t;
+    (u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0, u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1)
+}
+
+/// Where his feet go to point at `to` on a monitor whose left edge is `mon_left` and bottom edge `mon_bottom`: a little
+/// below the spot and to one side, on the side with room for his bubble. His bubble reaches 12 px below his feet, so
+/// near the bottom edge he stands level with the spot instead of below it, rather than being cut off by the screen.
+/// Returns (x, y, side) with side -1 for left of the spot, 1 for right.
+fn point_feet(to: (f32, f32), s: f32, mon_left: f32, mon_bottom: f32) -> (f32, f32, f32) {
+    let off = 34.0 * s;
+    let side = if to.0 - off - 180.0 * s < mon_left { 1.0 } else { -1.0 };
+    (to.0 + side * off, (to.1 + 40.0 * s).min(mon_bottom - 14.0 * s), side)
+}
 
 pub struct Gojo {
     /// Feet, in physical screen px. NaN until the first frame places him.
@@ -316,6 +395,11 @@ pub struct Gojo {
     ground_at: f32,
     focus_said: (&'static str, f32),
     watch: bool,
+    /// The spot he is flying to or standing at, while pointing.
+    job: Option<PointJob>,
+    /// Horizontal speed in flight (px/s, smoothed), for the lean, and his last positions (x, y, time) for the sparkle trail.
+    fly_v: f32,
+    trail: Vec<(f32, f32, f32)>,
 }
 
 impl Gojo {
@@ -330,7 +414,7 @@ impl Gojo {
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
             mon: RECT::default(), scale: 1.0,
             slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), sprite: None, name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
-            work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true,        };
+            work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true, job: None, fly_v: 0.0, trail: vec![],        };
         g
     }
 
@@ -415,7 +499,15 @@ impl Gojo {
         (self.rng >> 40) as f32 / (1u64 << 24) as f32
     }
     fn pick(&mut self, lines: &[&str]) -> String { lines[(self.rand() * lines.len() as f32) as usize % lines.len()].to_string() }
-    fn say(&mut self, s: &str, secs: f32) { self.bubble = Some((s.to_string(), self.t + secs)); speak(s); }
+    fn say(&mut self, s: &str, secs: f32) {
+        self.bubble = Some((s.to_string(), self.t + secs));
+        // each buddy is its own window: lift the speaker above the other one so his bubble isn't hidden behind it
+        let h = HWNDS[self.slot].load(Ordering::Relaxed);
+        if h != 0 {
+            unsafe { let _ = SetWindowPos(HWND(h as *mut _), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+        }
+        speak(s);
+    }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
     fn line(&self) -> f32 {
         let edge = match BAR_EDGE.load(Ordering::Relaxed) { x if x == Edge::Bottom as u8 => Edge::Bottom, x if x == Edge::Left as u8 => Edge::Left, x if x == Edge::Right as u8 => Edge::Right, _ => Edge::Top };
@@ -523,7 +615,8 @@ impl Gojo {
             self.y = self.line();
         }
         let m = monitor(POINT { x: self.x as i32, y: self.y as i32 - 1 }, false);
-        if m != self.mon { self.mon = m; self.perch = None; if self.mode != Mode::Held { self.y = self.line(); } }
+        // while he points he is wherever the spot is, on whatever monitor
+        if m != self.mon { self.mon = m; self.perch = None; if !matches!(self.mode, Mode::Held | Mode::Point) { self.y = self.line(); } }
 
         if self.t >= self.check_at {
             self.check_at = self.t + 1.0;
@@ -554,6 +647,7 @@ impl Gojo {
                 self.mode = Mode::Held;
                 self.dragged = true;
                 self.purple = None;
+                self.job = None; // picking him up ends pointing
                 self.grab = (self.x - px as f32, self.y - py as f32);
                 let l = self.pick(&["Hey! Put me down!", "Whoa, whoa!", "Careful, I'm precious."]);
                 self.say(&l, 2.5);
@@ -573,6 +667,11 @@ impl Gojo {
             if let Some((l, secs)) = assist::next_line() {
                 if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
                 self.say(&l, secs);
+                self.hold_bubble(); // the answer can arrive after he took off
+            }
+            // screen help found something to show you (assist.rs): he flies there
+            if self.mode != Mode::Held {
+                if let Some((px, py, label)) = assist::next_point() { self.start_point((px as f32, py as f32), label); }
             }
         }
 
@@ -600,6 +699,41 @@ impl Gojo {
                     else { self.mode = Mode::Stand; self.wait = 2.0; self.say("Perfect landing.", 2.0); }
                 }
             }
+            Mode::Point => match self.job.clone() {
+                None => { self.mode = Mode::Fall; self.vy = 0.0; self.fly_v = 0.0; self.trail.clear(); }
+                Some(j) => {
+                    let el = self.t - j.t0;
+                    if el < j.fly {
+                        let before = self.x;
+                        let (x, y) = arc(j.from, j.feet, fly_ease(el / j.fly));
+                        if (x - self.x).abs() > 0.5 { self.dir = (x - self.x).signum(); }
+                        (self.x, self.y) = (x, y);
+                        self.fly_v += ((self.x - before) / dt.max(0.001) - self.fly_v) * 0.35;
+                        self.trail.push((self.x, self.y, self.t));
+                    } else {
+                        (self.x, self.y) = j.feet;
+                        self.fly_v = 0.0;
+                        self.dir = -j.side; // facing the spot
+                        if !j.landed {
+                            // touchdown: one puff and one hop
+                            if let Some(job) = &mut self.job { job.landed = true; }
+                            self.hop = Some(self.t);
+                            self.poof = Some(self.t);
+                        }
+                        if el > j.fly + POINT_HOLD {
+                            // done: back to the bar, with the same puff as any teleport
+                            self.job = None;
+                            self.perch = None;
+                            self.poof = Some(self.t);
+                            self.mode = Mode::Fall;
+                            self.vy = 0.0;
+                            self.trail.clear();
+                        }
+                    }
+                    let t = self.t;
+                    self.trail.retain(|p| t - p.2 < 0.3);
+                }
+            },
             Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say("Hm? Oh, you're back.", 3.0); },
             // he only sleeps when nothing is playing: a video is company, and his bubble stays up
             _ if idle_s > 180.0 && !ctx.media.as_ref().is_some_and(|m| m.playing) => { self.mode = Mode::Sleep; self.queued = None; }
@@ -683,8 +817,34 @@ impl Gojo {
 
     fn sitting(&self) -> bool { matches!(self.mode, Mode::Sit | Mode::Sleep) }
 
-    /// Which side of him the speech bubble goes: right unless that runs off the monitor.
-    fn bubble_side(&self) -> f32 { if self.x + 170.0 * self.scale > self.mon.right as f32 { -1.0 } else { 1.0 } }
+    /// Which side of him the speech bubble goes: right unless that runs off the monitor. While he points it opens away
+    /// from the spot, which is on his other side.
+    fn bubble_side(&self) -> f32 {
+        if let (Mode::Point, Some(j)) = (self.mode, &self.job) { return j.side; }
+        if self.x + 170.0 * self.scale > self.mon.right as f32 { -1.0 } else { 1.0 }
+    }
+
+    /// Takes off for the spot `to` (screen px) and points at it until `POINT_HOLD` after landing.
+    fn start_point(&mut self, to: (f32, f32), label: String) {
+        let m = monitor(POINT { x: to.0 as i32, y: to.1 as i32 }, false);
+        let (fx, fy, side) = point_feet(to, self.scale, m.left as f32, m.bottom as f32);
+        let from = (self.x, self.y);
+        let dist = ((fx - from.0).powi(2) + (fy - from.1).powi(2)).sqrt();
+        self.job = Some(PointJob { from, feet: (fx, fy), to, label, t0: self.t, fly: flight_secs(dist), side, landed: false });
+        self.mode = Mode::Point;
+        self.perch = None;
+        self.purple = None;
+        self.sit_after = false;
+        self.poof = Some(self.t);
+        self.fly_v = 0.0;
+        self.trail.clear();
+        self.hold_bubble();
+    }
+
+    /// Keeps what he is saying up for as long as he points, so the answer doesn't vanish while he is still there.
+    fn hold_bubble(&mut self) {
+        if let (Some(j), Some(b)) = (&self.job, &mut self.bubble) { b.1 = b.1.max(j.t0 + j.fly + POINT_HOLD - 0.3); }
+    }
 }
 
 /// Where he's drawn: feet at (ox, oy), facing `dir`, tilted `rot` radians around the feet.
@@ -844,7 +1004,7 @@ impl View for Gojo {
 
     fn frame_ms(&self) -> u32 {
         if self.hidden { return 500; }
-        if matches!(self.mode, Mode::Held | Mode::Fall) || self.purple.is_some() || self.infinity > self.t { 16 }
+        if matches!(self.mode, Mode::Held | Mode::Fall | Mode::Point) || self.purple.is_some() || self.infinity > self.t { 16 }
         else if self.mode == Mode::Walk || self.hop.is_some() || (self.peek > 0.0 && self.peek < 1.0) || self.poof.is_some() { 33 }
         else { 100 }
     }
@@ -888,7 +1048,8 @@ impl View for Gojo {
         let walk = (self.mode == Mode::Walk).then_some(self.x * 0.22);
         let bob = walk.map_or(0.0, |w| (w * 2.0).cos().abs() * 0.8);
         let held = self.mode == Mode::Held;
-        let rot = if held { (t * 4.0).sin() * 0.18 } else if self.mode == Mode::Sleep { 0.07 } else { 0.0 };
+        let flying = self.mode == Mode::Point && self.job.as_ref().is_some_and(|j| t - j.t0 < j.fly);
+        let rot = if held { (t * 4.0).sin() * 0.18 } else if flying { lean(self.fly_v, c.scale) } else if self.mode == Mode::Sleep { 0.07 } else { 0.0 };
         let pt = self.purple.map(|p| t - p);
         let arm = pt.map_or(0.0, |p| (p / 0.3).min(1.0) * if p > 2.0 { (2.6 - p) / 0.6 } else { 1.0 });
         let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
@@ -897,13 +1058,27 @@ impl View for Gojo {
         let sprite = self.load_sprite(c);
         let look = Look {
             walk, sit: self.sit_k, swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
-            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else { -bob }, style: self.style, c: &self.cast, trim: &self.trim,
+            talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else if flying { (t * 12.0).sin() * 0.9 } else { -bob }, style: self.style, c: &self.cast, trim: &self.trim,
         };
 
         if self.infinity > t {
             for i in 0..3 {
                 let r = 24.0 + i as f32 * 7.0 + (t * 10.0) % 7.0;
                 c.arc(FX, FY - 24.0, r, 1.0, 1.0, alpha(self.cast.eye, 0.45 * (1.0 - (r - 24.0) / 24.0)));
+            }
+        }
+        // a streak behind him in flight: a ribbon through his last positions that thins and fades over 0.3 s. Segments, not
+        // dots: at flying speed the positions are 30-70 px apart and only a couple fall inside his window. A glow in the
+        // theme's colour with a white core, so it shows on dark and light desktops.
+        if self.mode == Mode::Point && !self.trail.is_empty() {
+            let glow = cx.theme.c("primary");
+            let at = |&(hx, hy, _): &(f32, f32, f32)| (FX + (hx - self.x) / c.scale, FY - 22.0 + (hy - self.y) / c.scale);
+            let mut pts: Vec<((f32, f32), f32)> = self.trail.iter().map(|p| (at(p), 1.0 - ((t - p.2) / 0.3).clamp(0.0, 1.0))).collect();
+            pts.push(((FX, FY - 22.0), 1.0));
+            for w in pts.windows(2) {
+                let k = w[1].1;
+                c.line(w[0].0, w[1].0, 8.0 * k, alpha(glow, 0.4 * k));
+                c.line(w[0].0, w[1].0, 2.6 * k, alpha(0xFFFFFFFF, 0.85 * k));
             }
         }
         match &self.sprite {
@@ -945,6 +1120,43 @@ impl View for Gojo {
                 for i in 0..6 {
                     let a = i as f32 * 1.047 + p;
                     c.circle(FX + a.cos() * (10.0 + p * 20.0), FY - 20.0 + a.sin() * (10.0 + p * 20.0), 1.4 * (1.0 - p), alpha(self.cast.hair, 1.0 - p));
+                }
+            }
+        }
+        // the spot he points at: a ring that fades in as he arrives and pulses, a ripple at touchdown, and its name beside it
+        if let (Mode::Point, Some(j)) = (self.mode, &self.job) {
+            let el = t - j.t0 - j.fly; // seconds since touchdown, negative while he is still flying
+            let a = smooth((el + 0.25 * j.fly) / (0.25 * j.fly + 0.25)) * if el > POINT_HOLD - 0.4 { ((POINT_HOLD - el) / 0.4).max(0.0) } else { 1.0 };
+            if a > 0.0 {
+                let (rx, ry) = (FX + (j.to.0 - self.x) / c.scale, FY + (j.to.1 - self.y) / c.scale);
+                let (col, pulse) = (cx.theme.c("primary"), (t * 5.0).sin() * 0.5 + 0.5);
+                c.circle(rx, ry, 16.0 + 4.0 * pulse, alpha(col, 0.18 * a)); // soft glow
+                // Three strokes, so the ring shows on any background: dark outside (white pages), white in the middle (dark
+                // pages), the theme's colour inside. The theme colour alone is as pale as 1.7:1 on white in the dark theme.
+                let (r, shade) = (11.0 + 2.0 * pulse, 0xFF101018u32);
+                c.arc(rx, ry, r, 1.0, 5.0, alpha(shade, 0.55 * a));
+                c.arc(rx, ry, r, 1.0, 3.4, alpha(0xFFFFFFFF, 0.95 * a));
+                c.arc(rx, ry, r, 1.0, 1.8, alpha(col, a));
+                c.circle(rx, ry, 6.0, alpha(shade, 0.55 * a));
+                c.circle(rx, ry, 5.0, alpha(0xFFFFFFFF, 0.95 * a));
+                c.circle(rx, ry, 3.4, alpha(col, a));
+                if (0.0..0.6).contains(&el) {
+                    let p = el / 0.6;
+                    c.arc(rx, ry, 6.0 + 44.0 * p, 1.0, 3.0 * (1.0 - p), alpha(0xFFFFFFFF, 0.7 * (1.0 - p)));
+                    c.arc(rx, ry, 6.0 + 44.0 * p, 1.0, 1.6 * (1.0 - p), alpha(col, 0.8 * (1.0 - p)));
+                }
+                if !j.label.is_empty() {
+                    // the name on a small rounded pill in the bubble's colours, which read on any background
+                    let f = txt(11.0, 600);
+                    let room = if j.side < 0.0 { (self.mon.right as f32 - j.to.0) / c.scale } else { (j.to.0 - self.mon.left as f32) / c.scale };
+                    let (tw, th) = c.g.measure(&j.label, f);
+                    let l = label_box(rx, j.side, room, tw);
+                    let text_h = if l.wrap { c.g.measure_wrapped(&j.label, f, (l.w - 8.0).max(10.0)) } else { th };
+                    let pill = pill_rect(&l, ry, tw, text_h);
+                    let (bg, fg) = (alpha(cx.theme.c("surfaceContainerHigh"), 0.96 * a), alpha(cx.theme.c("onSurface"), a));
+                    c.shadow(1.0, 4.0, 0.35 * a, |c, over| c.rect(pill, 8.0, over.unwrap_or(bg)));
+                    let (inner, al) = (R::new(pill.x + 4.0, pill.y + 3.0, pill.w - 8.0, pill.h - 6.0), if l.left { Align::Left } else { Align::Right });
+                    if l.wrap { c.para(&j.label, inner, f, fg, al); } else { c.text(&j.label, inner, f, fg, al); }
                 }
             }
         }
@@ -1099,6 +1311,171 @@ mod tests {
         assert_eq!(k, 0.0);
         assert_eq!(ease_toward(0.5, 1.0, 10.0), 1.0, "a long frame clamps at the target");
     }
+    #[test]
+    fn flights_take_between_a_half_and_one_and_a_half_seconds() {
+        assert_eq!(flight_secs(0.0), 0.6, "a short hop is not instant");
+        assert_eq!(flight_secs(400.0), 0.6);
+        assert!((flight_secs(800.0) - 1.0).abs() < 1e-6);
+        assert_eq!(flight_secs(10_000.0), 1.4, "across three monitors is still quick");
+    }
+
+    #[test]
+    fn the_flight_starts_and_ends_exactly_where_asked() {
+        let (a, b) = ((100.0, 50.0), (1500.0, 700.0));
+        assert_eq!(arc(a, b, 0.0), a);
+        let e = arc(a, b, 1.0);
+        assert!((e.0 - b.0).abs() < 1e-3 && (e.1 - b.1).abs() < 1e-3);
+        let mid = arc(a, b, 0.5);
+        assert!(mid.1 < (a.1 + b.1) / 2.0, "the path bows upward, so he swoops instead of sliding");
+        assert_eq!(arc((5.0, 5.0), (5.0, 5.0), 0.5), (5.0, 5.0), "pointing where he stands doesn't move him");
+    }
+
+    #[test]
+    fn easing_is_flat_at_both_ends_and_never_leaves_0_to_1() {
+        assert_eq!((smooth(0.0), smooth(1.0), smooth(0.5)), (0.0, 1.0, 0.5));
+        assert_eq!((smooth(-3.0), smooth(9.0)), (0.0, 1.0));
+        assert!(smooth(0.1) < 0.1 && smooth(0.9) > 0.9);
+        assert!((0..=100).map(|i| smooth(i as f32 / 100.0)).collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn he_stands_below_the_spot_on_the_side_with_room() {
+        let (x, y, side) = point_feet((1000.0, 500.0), 1.0, 0.0, 1080.0);
+        assert_eq!((x, y, side), (966.0, 540.0, -1.0), "left of the spot, so the ring is on his right");
+        let (x, _, side) = point_feet((100.0, 500.0), 1.0, 0.0, 1080.0);
+        assert_eq!((x, side), (134.0, 1.0), "near the left edge he stands on the right");
+        let (x, y, _) = point_feet((1000.0, 500.0), 2.0, 0.0, 1080.0);
+        assert_eq!((x, y), (932.0, 580.0), "the offsets grow with the screen scale");
+        let (_, _, side) = point_feet((-1000.0, 10.0), 1.0, -1920.0, 1080.0);
+        assert_eq!(side, -1.0, "a monitor to the left of the primary has negative coordinates");
+    }
+
+    #[test]
+    fn near_the_bottom_edge_he_stands_level_instead_of_off_screen() {
+        assert_eq!(point_feet((1000.0, 1040.0), 1.0, 0.0, 1080.0).1, 1066.0, "his bubble stays on the monitor");
+        assert_eq!(point_feet((1000.0, 1040.0), 2.0, 0.0, 1080.0).1, 1052.0, "the margin scales");
+        assert_eq!(point_feet((1000.0, 860.0), 1.0, 0.0, 880.0).1, 866.0, "a monitor that starts above zero counts from its own bottom");
+        assert_eq!(point_feet((1000.0, 10.0), 1.0, 0.0, 1080.0).1, 50.0, "the top edge needs no change");
+        // wherever the spot is, the ring stays inside his 100 px window
+        for s in [1.0f32, 1.5, 2.0] {
+            for to_y in (0..=1080).step_by(20) {
+                let y = point_feet((900.0, to_y as f32), s, 0.0, 1080.0).1;
+                let ring = 56.0 + (to_y as f32 - y) / s;
+                assert!((0.0..=90.0).contains(&ring), "ring at {ring} for a spot at {to_y}, scale {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_flight_has_a_gentle_takeoff_a_fast_middle_and_a_soft_landing() {
+        assert_eq!((fly_ease(0.0), fly_ease(0.5), fly_ease(1.0)), (0.0, 0.5, 1.0));
+        assert_eq!((fly_ease(-1.0), fly_ease(2.0)), (0.0, 1.0));
+        assert!(fly_ease(0.1) < smooth(0.1) && fly_ease(0.9) > smooth(0.9), "slower at the ends than the plain ease");
+        assert!(fly_ease(0.6) - fly_ease(0.4) > smooth(0.6) - smooth(0.4), "faster through the middle");
+        assert!((0..=100).map(|i| fly_ease(i as f32 / 100.0)).collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn he_leans_into_the_flight_and_never_flips_over() {
+        assert_eq!(lean(0.0, 1.0), 0.0);
+        assert!(lean(500.0, 1.0) > 0.0 && lean(-500.0, 1.0) < 0.0, "head toward where he is going");
+        assert!(lean(900.0, 1.0) > lean(300.0, 1.0), "more the faster he goes");
+        assert!((lean(1e9, 1.0) - 0.4).abs() < 1e-6 && (lean(-1e9, 1.0) + 0.4).abs() < 1e-6, "at most 0.4 radians");
+        assert!((lean(900.0, 2.0) - lean(450.0, 1.0)).abs() < 1e-6, "the same flight on a scaled screen leans the same");
+        assert!(lean(500.0, 0.0).is_finite(), "a zero scale does not divide by zero");
+    }
+
+    #[test]
+    fn the_name_goes_beside_the_ring_when_it_fits() {
+        let l = label_box(204.0, -1.0, 600.0, 60.0);
+        assert_eq!(l, Label { x: 220.0, dy: -8.0, w: 68.0, left: true, wrap: false }, "he is left of the spot, so the name is to its right");
+        let l = label_box(136.0, 1.0, 600.0, 60.0);
+        assert_eq!(l, Label { x: 52.0, dy: -8.0, w: 68.0, left: false, wrap: false }, "he is right of the spot, so the name ends before the ring");
+        assert!(label_box(204.0, -1.0, 84.0, 60.0).wrap == false, "exactly enough room still fits beside the ring");
+        assert!(label_box(204.0, -1.0, 83.9, 60.0).wrap, "a hair less does not");
+    }
+
+    #[test]
+    fn at_the_screen_edge_the_name_drops_below_the_ring_and_stays_on_screen() {
+        // right edge: the gear is 30 px from it, and he stands 34 px left of the ring
+        let (rx, room) = (204.0, 30.0);
+        let l = label_box(rx, -1.0, room, 70.0);
+        assert!(l.wrap && l.dy > 0.0 && !l.left, "below the ring, wrapped, pushed against the edge");
+        assert!(l.x + l.w <= rx + room - 4.0 + 1e-3, "ends inside the screen: {l:?}");
+        let buddy_right = rx - 34.0 + 11.0;
+        assert!(l.x >= buddy_right, "and starts clear of him: {l:?} vs his edge {buddy_right}");
+        // left edge, mirrored
+        let l = label_box(136.0, 1.0, room, 70.0);
+        assert!(l.wrap && l.left && l.x >= 136.0 - room + 4.0 - 1e-3, "starts inside the screen: {l:?}");
+        assert!(l.x + l.w <= 136.0 + 34.0 - 11.0, "and ends clear of him on the right: {l:?}");
+        // a target right at the edge still gets a readable width, however little room there is
+        assert!(label_box(204.0, -1.0, 0.0, 70.0).w >= 44.0 && label_box(204.0, -1.0, -10.0, 70.0).w >= 44.0);
+        // either way the box stays inside his 340 px window for any ring a fixed 34 px from the middle
+        for room in [0.0, 10.0, 30.0, 60.0, 90.0, 300.0] {
+            let l = label_box(204.0, -1.0, room, 70.0);
+            assert!(l.x + l.w <= 340.0 && l.x >= 0.0, "room {room}: {l:?}");
+        }
+    }
+
+    #[test]
+    fn the_names_pill_hugs_its_text_and_stays_in_its_box() {
+        // beside the ring: the box is exactly text + 8, so the pill fills it
+        let l = label_box(204.0, -1.0, 600.0, 60.0);
+        let p = pill_rect(&l, 16.0, 60.0, 14.0);
+        assert_eq!((p.x, p.w, p.h), (l.x, 68.0, 20.0));
+        assert_eq!(p.y, 16.0 - 8.0 - 3.0, "centred on the ring's height");
+        // at the right edge the box is wider than a short name: the pill sits at the screen end, not stretched
+        let l = label_box(204.0, -1.0, 30.0, 70.0);
+        let p = pill_rect(&l, 16.0, 30.0, 14.0);
+        assert_eq!(p.w, 38.0);
+        assert_eq!(p.x + p.w, l.x + l.w, "its right end is the box's right end, which is inside the screen");
+        // a long name is held to the box
+        let p = pill_rect(&l, 16.0, 200.0, 28.0);
+        assert_eq!((p.x, p.w), (l.x, l.w), "never wider than the room there is");
+        // left edge, mirrored: it starts at the screen end
+        let l = label_box(136.0, 1.0, 30.0, 70.0);
+        let p = pill_rect(&l, 16.0, 30.0, 14.0);
+        assert_eq!((p.x, p.w), (l.x, 38.0));
+        // taller for two lines
+        assert!(pill_rect(&l, 16.0, 70.0, 28.0).h > pill_rect(&l, 16.0, 70.0, 14.0).h);
+        // always inside his window at any room
+        for room in [0.0, 10.0, 30.0, 60.0, 90.0, 300.0] {
+            for side in [-1.0f32, 1.0] {
+                let rx = if side < 0.0 { 204.0 } else { 136.0 };
+                let (l, p) = (label_box(rx, side, room, 70.0), pill_rect(&label_box(rx, side, room, 70.0), 16.0, 70.0, 14.0));
+                assert!(p.x >= l.x - 1e-3 && p.x + p.w <= l.x + l.w + 1e-3, "room {room} side {side}: {p:?} in {l:?}");
+            }
+        }
+    }
+
+    fn job(t0: f32, fly: f32) -> PointJob { PointJob { from: (0.0, 0.0), feet: (10.0, 10.0), to: (20.0, 10.0), label: "x".into(), t0, fly, side: -1.0, landed: false } }
+
+    #[test]
+    fn saying_a_line_without_a_window_still_sets_the_bubble() {
+        let mut g = Gojo::new();
+        g.say("Hi.", 3.0);
+        assert!(g.talking(), "the raise is skipped for a missing window and the bubble is still made");
+    }
+
+    #[test]
+    fn the_answer_stays_up_for_as_long_as_he_points() {
+        let mut g = Gojo::new();
+        g.job = Some(job(2.0, 1.0));
+        g.bubble = Some(("The File menu is up there.".into(), 9.0));
+        g.hold_bubble();
+        assert_eq!(g.bubble.as_ref().unwrap().1, 2.0 + 1.0 + POINT_HOLD - 0.3, "a 7 second line is stretched to cover the stay");
+        g.bubble = Some(("A long one.".into(), 99.0));
+        g.hold_bubble();
+        assert_eq!(g.bubble.as_ref().unwrap().1, 99.0, "a longer line is left alone");
+        g.bubble = None;
+        g.hold_bubble();
+        assert!(g.bubble.is_none(), "no line means no bubble is made up");
+        g.job = None;
+        g.bubble = Some(("Hi.".into(), 5.0));
+        g.hold_bubble();
+        assert_eq!(g.bubble.as_ref().unwrap().1, 5.0, "ordinary chatter is untouched when he isn't pointing");
+    }
+
     #[test]
     fn rand_stays_in_range() {
         let mut g = Gojo::new();

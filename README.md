@@ -48,7 +48,8 @@ the dock and the Claude usage watcher.
   **Check for updates** button. Options that change how something looks show a live preview next to the control.
 - **Updates and installer.** Zor UI checks GitHub for a newer release once a day and installs it, keeping your
   `config.json`. Set `"autoUpdate": false` to stop that. Releases also ship `ZorUI-Setup.exe`, a one-click
-  installer with `zorui.exe` prebuilt, so the target PC needs no Rust.
+  wizard with `zorui.exe` prebuilt, so the target PC needs no Rust. It has an options page and a progress bar,
+  and adds an Apps & Features entry that uninstalls Zor UI.
 - **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards that snap to each other, with an
   optional glass look. An auto-hiding dock, a window and clipboard overview, and an audio visualizer for the
   island, the bar and the desktop, each with its own color.
@@ -155,7 +156,7 @@ don't have Wallpaper Engine and want video wallpapers.
 
 The installer:
 1. Installs GlazeWM, Flow Launcher, JetBrains Mono Nerd Font (and Lively with `-WithLively`) using winget.
-2. Copies `zorui.exe` (prebuilt in the release, built with `cargo` from a clone) to `%LOCALAPPDATA%\zor-ui` and the fonts to `~\.glzr\zebar\zor-ui`, where `config.json` and `theme.json` also live. It removes the old Zebar pack and Python environment if they are there.
+2. Copies `zorui.exe` (prebuilt in the release, built with `cargo` from a clone) to `%LOCALAPPDATA%\zor-ui` and the fonts to `~\.glzr\zor-ui`, where `config.json` and `theme.json` also live. It moves settings out of an old `~\.glzr\zebar\zor-ui` folder, then removes Zebar (the program, its autostart entries and its folder, which is renamed to `zebar.bak-<time>`), the old widget pack and the Python environment if they are there.
 3. Writes `~\.glzr\glazewm\config.yaml`. Your old config is backed up as `config.yaml.bak-<date>`.
 4. Selects the Zor UI Flow Launcher theme, generates colors from your wallpaper, and starts GlazeWM, which starts the shell.
 
@@ -287,7 +288,7 @@ setup and switch back later.
 
 ## Customize
 
-Everything is in **Settings** (`Mod+I`). It edits `~\.glzr\zebar\zor-ui\config.json`, which you can also open
+Everything is in **Settings** (`Mod+I`). It edits `~\.glzr\zor-ui\config.json`, which you can also open
 from Settings > Config file. Command-line
 equivalents for theming:
 

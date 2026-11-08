@@ -20,6 +20,7 @@ pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         "notifications" => Some(read_notifications(&wpndb(), &dismissed_path())),
         "notifications-dismiss" => Some(dismiss(args, &wpndb(), &dismissed_path())),
         "agents" => Some(json!({ "agents": agents_summary(&agents_dir(), now_s()) })),
+        "agents-dismiss" => Some(json!({ "cleared": agents_dismiss(&agents_dir(), args.first().copied(), now_s()) })),
         _ => None,
     }
 }
@@ -384,6 +385,23 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
     res
 }
 
+/// Marks every `waiting` session of `agent` (all agents if None) as `done`, for a prompt the agent never
+/// cleared itself. The file stays, so the agent's next hook event overwrites it. Returns how many it cleared.
+pub(super) fn agents_dismiss(dir: &Path, agent: Option<&str>, now: f64) -> usize {
+    let mut n = 0;
+    for d in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        if agent.is_some_and(|a| d.file_name().is_none_or(|f| f != a)) { continue; }
+        for f in std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json") && p.file_name().is_some_and(|n| n != "usage.json")) {
+            let mut s = load_json(&f, json!({}));
+            if s["state"] != "waiting" { continue; }
+            s["state"] = json!("done");
+            s["at"] = json!(now);
+            if std::fs::write(&f, s.to_string()).is_ok() { n += 1; }
+        }
+    }
+    n
+}
+
 /// Streams {"agents": [...]} when an agent reports (and every 30 s, for resets and stale sessions).
 fn agents_watch(out: &Sink) {
     let dir = agents_dir();
@@ -504,6 +522,25 @@ mod tests {
             "usage": { "5h": { "resets_at": now + 5.0 }, "none": {} }, "model": "m", "usageAt": 5 }));
         assert!(!a.join("4.json").exists());
         assert_eq!(agent_label("my-agent"), "My-Agent");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dismiss_clears_waiting_only() {
+        let d = tmp("agents-dismiss");
+        let now = 1_000_000.0;
+        for id in ["claude", "codex"] {
+            std::fs::create_dir_all(d.join(id)).unwrap();
+            std::fs::write(d.join(id).join("1.json"), json!({ "state": "waiting", "at": now - 10.0, "message": "ok?" }).to_string()).unwrap();
+        }
+        std::fs::write(d.join("claude/2.json"), json!({ "state": "working", "at": now - 5.0 }).to_string()).unwrap();
+        assert_eq!(agents_dismiss(&d, Some("claude"), now), 1);
+        let r = agents_summary(&d, now);
+        assert_eq!((r[0]["id"].as_str(), r[0]["state"].as_str()), (Some("claude"), Some("working")));
+        assert_eq!(r[1]["state"], "waiting"); // codex untouched
+        assert_eq!(agents_dismiss(&d, None, now), 1);
+        assert_eq!(agents_dismiss(&d, None, now), 0);
+        assert!(agents_summary(&d, now).iter().all(|a| a["state"] != "waiting"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

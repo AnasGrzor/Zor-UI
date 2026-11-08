@@ -48,7 +48,8 @@ the dock and the Claude usage watcher.
   **Check for updates** button. Options that change how something looks show a live preview next to the control.
 - **Updates and installer.** Zor UI checks GitHub for a newer release once a day and installs it, keeping your
   `config.json`. Set `"autoUpdate": false` to stop that. Releases also ship `ZorUI-Setup.exe`, a one-click
-  installer with `zorui.exe` prebuilt, so the target PC needs no Rust.
+  wizard with `zorui.exe` prebuilt, so the target PC needs no Rust. It has an options page and a progress bar,
+  and adds an Apps & Features entry that uninstalls Zor UI.
 - **Desktop widgets, dock, overview, visualizer.** Draggable desktop cards that snap to each other, with an
   optional glass look. An auto-hiding dock, a window and clipboard overview, and an audio visualizer for the
   island, the bar and the desktop, each with its own color.

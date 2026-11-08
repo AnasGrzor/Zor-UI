@@ -32,6 +32,7 @@ const LYRICS: u32 = 9;
 const ASK_LINES: f32 = 4.0;
 const ALLOW: u32 = 10;
 const DENY: u32 = 11;
+const AGENT_CLEAR: u32 = 12;
 const NOTIF: u32 = 100;
 
 enum Sec { Ask(String), Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
@@ -322,6 +323,13 @@ impl Island {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
         c.text("AI agents", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        if list.iter().any(|a| a["state"] == "waiting") {
+            let tw = c.g.measure("Dismiss", txt(12.0, 500)).0.ceil();
+            let b = R::new(x + w - (9.0 + 16.0 + 4.0 + tw + 9.0), y - 3.0, 9.0 + 16.0 + 4.0 + tw + 9.0, 22.0);
+            if c.hit(b, AGENT_CLEAR) { c.rect(b, 11.0, t.c("surfaceContainer")); }
+            c.icon("clear_all", R::new(b.x + 9.0, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
+            c.text("Dismiss", R::new(b.x + 29.0, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
+        }
         let mut y = y + 26.0;
         for a in list {
             let state = s(a, "state");
@@ -460,6 +468,10 @@ impl View for Island {
                 }
                 TIMER_A => timer_act(cx, if self.tkind.1 { "next" } else { "toggle" }, self.tkind.0),
                 TIMER_B => timer_act(cx, "reset", self.tkind.0),
+                AGENT_CLEAR => {
+                    let cfg = Config(cx.cfg.0.clone());
+                    std::thread::spawn(move || { crate::proc::bridge(&cfg, "agents-dismiss", &[]); });
+                }
                 CLEAR => {
                     let ids: Vec<String> = self.notifs.lock().map(|mut n| n.drain(..).filter_map(|i| i["id"].as_str().map(String::from)).collect()).unwrap_or_default();
                     let cfg = Config(cx.cfg.0.clone());

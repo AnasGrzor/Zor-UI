@@ -154,7 +154,7 @@ pub fn mics() -> Vec<String> {
     }
 }
 
-/// Speech models found on this PC (Orca's copy): (folder, name).
+/// Speech models found on this PC: (folder, name).
 pub fn speech_models() -> Vec<(String, String)> {
     let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join(r"orca\speech-models");
     let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };

@@ -871,6 +871,12 @@ fn place_column(heights: &[Vec<f32>; 3], x: f32, w: f32, top: f32, len: f32, tig
     out
 }
 
+/// Islands style fills every group with the plain background, except the island pill: its text uses the
+/// state colour's "on" pair, so it must keep the state fill or the text is unreadable.
+fn islands_fill(p: &Pill, layer0: Color) -> Color {
+    if p.id == ISLAND { p.bg.unwrap_or(layer0) } else { layer0 }
+}
+
 /// Fill, border and shadow of one group for the bar style (bar.html's #bar.<style> / .g-<groups> rules).
 fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) {
     let t = &cx.theme;
@@ -878,7 +884,7 @@ fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) {
     let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
     let border = alpha(t.c("outlineVariant"), 0.45);
     if style == "clear" { return (None, None, false); } // a preset's "transparent" bar: only the contents show
-    if style == "islands" { return (Some(layer0), Some(border), true); } // `#bar.islands .group` outranks the state colours
+    if style == "islands" { return (Some(islands_fill(p, layer0)), Some(border), true); }
     if p.kind != Kind::Group { return (None, None, false); }
     match groups {
         "outlined" => (None, Some(alpha(t.c("outlineVariant"), 0.7)), false),
@@ -1094,6 +1100,11 @@ impl Bar {
             (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
                 if let Some(t) = crate::app::Notif::target(&cx.notif, hub::now_ms()) { crate::bridge::sys::open_and_point(t); }
                 cx.notif = None;
+            }
+            // a click on a stuck "needs you" prompt clears it
+            (ISLAND, Btn::Left) if self.di_state == "agent" && hub::get_json("zor-ui.agents").as_array().is_some_and(|a| a.iter().any(|a| a["state"] == "waiting")) => {
+                let cfg = crate::conf::Config(cx.cfg.0.clone());
+                std::thread::spawn(move || { proc::bridge(&cfg, "agents-dismiss", &[]); });
             }
             (ISLAND, Btn::Left) => { let a = cx.cfg.str("island.click").to_string(); act(self, if a.is_empty() { "panel" } else { &a }, cx) }
             (ISLAND, Btn::Right) => { let a = cx.cfg.str("island.rightClick").to_string(); act(self, if a.is_empty() { "sidebar-left" } else { &a }, cx) }
@@ -1341,6 +1352,15 @@ mod tests {
         crate::conf::set_preview(None);
         assert_ne!(base, previewed);
         assert_eq!(base, theme_key(&t("#4F46E5", "#101010")));
+    }
+
+    #[test]
+    fn islands_style_keeps_the_island_state_fill_only() {
+        let pill = |id, bg| Pill { id, els: vec![], pad: (0.0, 0.0), gap: 0.0, bg, hover: false, fixed: None, kind: Kind::Group, fade: 1.0 };
+        let (plain, state) = (0xFF0F_0E12, 0xFFFB_C8EE);
+        assert_eq!(islands_fill(&pill(ISLAND, Some(state)), plain), state);
+        assert_eq!(islands_fill(&pill(ISLAND, None), plain), plain);
+        assert_eq!(islands_fill(&pill(MEDIA, Some(state)), plain), plain);
     }
 
     #[test]

@@ -853,7 +853,7 @@ impl Settings {
             self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
             let mut models = vec![(json!(""), "Automatic".to_string())];
             models.extend(crate::assist::speech_models().into_iter().map(|(dir, name)| (json!(dir), name)));
-            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC (Orca's Parakeet). Automatic uses the first one", "model_training", 260.0);
+            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC. Automatic uses the first one", "model_training", 260.0);
             p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
         });
         p.h2("favorite", "Partners", "");

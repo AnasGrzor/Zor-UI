@@ -1,4 +1,4 @@
-fn main() {
+pub fn main() {
     println!("cargo:rustc-check-cfg=cfg(personal)");
     println!("cargo:rerun-if-env-changed=ZORUI_PUBLIC");
     println!("cargo:rerun-if-changed=src/cast_personal.rs");

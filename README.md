@@ -12,9 +12,11 @@ the dock and the Claude usage watcher.
 
 ![Desktop](docs/desktop-dark.jpg)
 
-| AI chat | Translator | Anime | Football |
-|:---:|:---:|:---:|:---:|
-| ![AI](docs/left-ai.jpg) | ![Translator](docs/left-translate.jpg) | ![Anime](docs/left-anime.jpg) | ![Football](docs/left-football.jpg) |
+![Dynamic Island panel](docs/island.jpg)
+
+| Home | AI chat | Translator | Anime | Football |
+|:---:|:---:|:---:|:---:|:---:|
+| ![Home](docs/left-home.jpg) | ![AI](docs/left-ai.jpg) | ![Translator](docs/left-translate.jpg) | ![Anime](docs/left-anime.jpg) | ![Football](docs/left-football.jpg) |
 
 | Settings | Wallpaper Engine library | Presets gallery |
 |:---:|:---:|:---:|
@@ -24,7 +26,8 @@ the dock and the Claude usage watcher.
 |:---:|:---:|
 | ![Light](docs/desktop-light.jpg) | ![Overview](docs/overview.jpg) |
 
-> Screenshots were rendered from the real widget code with sample data.
+> The desktop, island, settings, overview and the other sidebar shots are live captures. The Home sidebar, Presets
+> and Wallpapers shots are rendered from the real widget code with sample data.
 
 ## What it has
 

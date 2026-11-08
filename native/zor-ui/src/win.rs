@@ -162,6 +162,8 @@ pub struct Win {
     painted: std::time::Instant,
     /// The last paint left a scroll glide running: needs 16 ms frames until it settles.
     pub gliding: bool,
+    /// The island panel's open animation: when it started, and whether it grows up from the bottom edge.
+    pub grow: Option<(std::time::Instant, bool)>,
 }
 
 struct Drag { start: POINT, from: POINT, moved: bool, snap: Vec<(i32, i32, i32, i32)> }
@@ -199,7 +201,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false })
+                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None })
         }
     }
 
@@ -212,6 +214,11 @@ impl Win {
                 let _ = SetWindowPos(self.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
+    }
+
+    /// Puts a topmost window above the other topmost ones (a tooltip over the popup it describes).
+    pub fn raise(&self) {
+        unsafe { let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
     }
 
     /// Keeps the window where it is: the shell moves windows out of a new app bar strip,
@@ -324,8 +331,21 @@ impl Win {
             drop(c);
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
             let src = POINT::default();
-            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
-            let _ = UpdateLayeredWindow(self.hwnd, None, None, Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
+            let (mut size, mut src, mut alpha, mut dst) = (size, src, 255u8, None);
+            if let Some((t0, bottom)) = self.grow {
+                let (rows, a, done) = crate::anim::grow(t0.elapsed().as_secs_f32(), ph as i32);
+                if done { self.grow = None; } else {
+                    self.gliding = true; // 16 ms frames until it has grown
+                    (size.cy, alpha) = (rows, a);
+                    if bottom {
+                        src.y = ph as i32 - rows;
+                        let (x, y) = self.pos();
+                        dst = Some(POINT { x, y: y + src.y });
+                    }
+                }
+            }
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
+            let _ = UpdateLayeredWindow(self.hwnd, None, dst.as_ref().map(|d| d as *const POINT), Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
         }
         self.painted = std::time::Instant::now();
     }

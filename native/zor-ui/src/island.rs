@@ -28,9 +28,13 @@ const TIMER_A: u32 = 6;
 const TIMER_B: u32 = 7;
 const CLEAR: u32 = 8;
 const LYRICS: u32 = 9;
+/// Lines the buddy's question gets.
+const ASK_LINES: f32 = 3.0;
+const ALLOW: u32 = 10;
+const DENY: u32 = 11;
 const NOTIF: u32 = 100;
 
-enum Sec { Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
+enum Sec { Ask(String), Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -123,9 +127,11 @@ fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { 14.0 + if icon { 24.0 } 
 impl Island {
     fn plan(&self, cx: &Ctx) -> Vec<(Sec, f32)> {
         let mut v = vec![];
+        // the buddy wants a yes or no before he drives (drive.rs): first, always
+        if let Some(q) = crate::drive::pending() { v.push((Sec::Ask(q), 16.0 + 10.0 + lh(13.0) * ASK_LINES + 12.0 + 32.0)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
-        let lyr = cx.cfg.bool("lyrics") && dp(cx, "lyrics");
-        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if lyr { 10.0 + LYR_H } else { 0.0 })); }
+        let ly = Self::lyrics_h(cx);
+        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
         if dp(cx, "recording") && hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
         let t = hub::timer();
         let done = hub::get("zor-ui.timerDone").is_some_and(|d| !d.is_empty());
@@ -151,6 +157,17 @@ impl Island {
         v
     }
 
+    /// Height of the lyrics area under the controls: 0 when off or hidden, one line for the "No lyrics found" note, else the full area.
+    fn lyrics_h(cx: &Ctx) -> f32 {
+        let Some(m) = cx.media.as_ref().filter(|m| !m.title.is_empty()) else { return 0.0 };
+        if !(cx.cfg.bool("lyrics") && dp(cx, "lyrics")) { return 0.0; }
+        Self::lyrics_h_for(&lyrics::get(&Track { title: &m.title, artist: &m.artist, album: &m.album, dur: m.duration }), m)
+    }
+
+    fn lyrics_h_for(l: &Lyr, m: &media::Media) -> f32 {
+        match l { Lyr::Missing if l.hidden_for(m) => 0.0, Lyr::Missing => ROW, _ => LYR_H }
+    }
+
     fn content_h(plan: &[(Sec, f32)]) -> f32 {
         if plan.is_empty() { return 16.0; }
         plan.iter().map(|p| p.1).sum::<f32>() + SEP * (plan.len() - 1) as f32
@@ -165,7 +182,7 @@ impl Island {
         self.art.as_ref().map(|a| a.1.clone())
     }
 
-    fn now_playing(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, lyr: bool) {
+    fn now_playing(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, lyr: f32) {
         let (t, Some(m)) = (&cx.theme, cx.media.as_ref()) else { return };
         let (w, pos) = (W - 2.0 * PAD, self.scrub.get().filter(|_| m.duration > 0.0).map_or(m.now(), |v| v as f64 * m.duration));
         let art = R::new(x, y, 92.0, 92.0);
@@ -195,7 +212,7 @@ impl Island {
         if c.hit(big, PLAY) { c.rect(big, 20.0, alpha(t.c("onPrimary"), 0.08)); }
         c.icon(if m.playing { "pause" } else { "play_arrow" }, big, ico(30.0, true), t.c("onPrimary"));
         ui::icon_btn(c, cx, R::new(cx0 + 124.0, cy + 8.0, 44.0, 44.0), NEXT, "skip_next", ui::IconKind::Plain, 26.0, true);
-        if lyr { self.lyrics(c, cx, R::new(x, cy + 70.0, w, LYR_H), m, pos); }
+        if lyr > 0.0 { self.lyrics(c, cx, R::new(x, cy + 70.0, w, lyr), m, pos); }
     }
 
     /// renderLyrics(): the current synced line stays centred (sliding), the edges fade; plain lyrics scroll.
@@ -236,6 +253,20 @@ impl Island {
                 });
             }
         }
+    }
+
+    /// The buddy's question with Allow and Deny. Answering is the only way a take-over starts or a risky click goes through.
+    fn ask(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, q: &str) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
+        c.text("The buddy is asking", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        let y = y + 26.0;
+        c.para(q, R::new(x, y, w, lh(13.0) * ASK_LINES), txt(13.0, 400), t.c("onSurface"), Align::Left);
+        let y = y + lh(13.0) * ASK_LINES + 12.0;
+        let (la, ld) = ("Allow", "Deny");
+        let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
+        ui::chip(c, cx, x + w - wa - 8.0 - wd, y, ALLOW, Some("check"), la, true);
+        ui::chip(c, cx, x + w - wd, y, DENY, Some("close"), ld, false);
     }
 
     fn rec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
@@ -387,7 +418,7 @@ impl View for Island {
         let plan = self.plan(cx);
         let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
         ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
-        let lyr = cx.cfg.bool("lyrics") && dp(cx, "lyrics");
+        let lyr = Self::lyrics_h(cx);
         let mut y = 12.0 + PAD;
         self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 } else { 0 });
         if plan.is_empty() {
@@ -398,6 +429,7 @@ impl View for Island {
                 c.rect(R::new(x, y - 12.5, W - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
             }
             match sec {
+                Sec::Ask(q) => self.ask(c, cx, x, y, q),
                 Sec::Media => self.now_playing(c, cx, x, y, lyr),
                 Sec::Rec => self.rec(c, cx, x, y),
                 Sec::Timer => self.timer(c, cx, x, y),
@@ -413,6 +445,10 @@ impl View for Island {
         let id = cx.media.as_ref().map(|m| m.id.clone()).unwrap_or_default();
         match ev {
             Input::Click(i, Btn::Left) => match i {
+                ALLOW | DENY => {
+                    crate::drive::answer(i == ALLOW);
+                    cx.actions.push(Action::Close("island-panel".into()));
+                }
                 PREV => media::control_of(&id, "previous"),
                 PLAY => media::control_of(&id, "togglePlayPause"),
                 NEXT => media::control_of(&id, "next"),
@@ -454,6 +490,16 @@ impl View for Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lyrics_area_shrinks_to_the_note_when_there_are_no_lyrics() {
+        let player = media::Media { id: "Spotify".into(), ..Default::default() };
+        let tab = media::Media { id: "chrome".into(), ..Default::default() };
+        assert_eq!(Island::lyrics_h_for(&Lyr::Missing, &player), ROW); // the note only
+        assert_eq!(Island::lyrics_h_for(&Lyr::Missing, &tab), 0.0); // browser tab: nothing at all
+        assert_eq!(Island::lyrics_h_for(&Lyr::Searching, &player), LYR_H);
+        assert_eq!(Island::lyrics_h_for(&Lyr::Found(std::sync::Arc::new(Lyrics::Plain(vec![]))), &player), LYR_H);
+    }
 
     #[test]
     fn ago_units() {

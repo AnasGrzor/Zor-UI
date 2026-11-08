@@ -22,6 +22,11 @@ pub fn click(id: &str, how: Click) {
     if let Some(Ok(t)) = ACT.get().map(|m| m.lock()) { let _ = t.send((id.to_string(), a)); }
 }
 
+pub fn click_btn(id: &str, b: crate::win::Btn) {
+    use crate::win::Btn;
+    click(id, match b { Btn::Left => Click::Left, Btn::Right => Click::Right, Btn::Middle => Click::Middle, Btn::Double => Click::Double });
+}
+
 pub fn start(on: impl Fn(Vec<Icon>) + Send + 'static) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, SystrayIconAction)>();
     // std sender for the UI thread, forwarded into the tokio channel the tray loop waits on

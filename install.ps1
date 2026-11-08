@@ -161,6 +161,8 @@ if (Test-Path $prebuilt) {
   Get-Process end4, zorui -ErrorAction SilentlyContinue | Stop-Process -Force
   Copy-Item -Force $built $native
 } else { throw 'No prebuilt zorui.exe next to install.ps1 and Rust is not installed (rustup.rs).' }
+# zorui-svc.exe, the boot service (step 8), ships next to zorui.exe in the release and is built with it from source.
+$svcSrc = @((Join-Path $Repo 'zorui-svc.exe'), (Join-Path $Repo 'native\zor-ui\target\release\zorui-svc.exe')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 $cfgPath = Join-Path $Pack 'config.json'
 $modKey = if ($Mod -eq 'win') { 'lwin' } else { 'alt' }
@@ -281,32 +283,77 @@ $glaze = @((Join-Path $pf 'glazewm.exe'), (Get-Command glazewm -ErrorAction Sile
 if (-not $glaze) {
   Write-Warning 'GlazeWM not found. Install it, then start it from the Start menu.'
 } else {
-  # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).
-  try {
-    $act = New-ScheduledTaskAction -Execute $glaze
-    $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName 'GlazeWM' -Action $act -Trigger $trg -Settings $set -Force | Out-Null
-    $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
-    if (Test-Path $old) { Remove-Item $old }
-    Info 'GlazeWM starts at login (scheduled task)'
-  } catch {
-    Info "couldn't add the login task ($($_.Exception.Message)); falling back to the Startup folder"
-    $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
-    if (-not (Test-Path $startup)) {
-      $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
-      $sc.TargetPath = $glaze; $sc.Save()
+  # glazewm.exe is a uiAccess exe: Windows refuses to start it from a non-elevated Task Scheduler task (error 740),
+  # and it crashes when started before the shell is up. The ZorShell service (zorui-svc.exe, LocalSystem) starts
+  # zorui, and GlazeWM through `cmd /c start`, in your session at boot once Explorer has settled. Installing it needs admin.
+  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  $svcOk = $false
+  if ($isAdmin -and $svcSrc) {
+    try {
+      $svcDir = Join-Path $env:ProgramFiles 'zor-ui'      # under Program Files: only admins can replace the exe the service runs
+      $svcData = Join-Path $env:ProgramData 'zor-ui'
+      $svcExe = Join-Path $svcDir 'zorui-svc.exe'
+      if (Get-Service ZorShell -ErrorAction SilentlyContinue) { Stop-Service ZorShell -Force; Start-Sleep -Seconds 1 }
+      New-Item -ItemType Directory -Force $svcDir, $svcData | Out-Null
+      Copy-Item -Force $svcSrc $svcExe
+      Write-Text (Join-Path $svcData 'svc.json') (@{ glazewm = $glaze; zorui = $native; settle_ms = 8000 } | ConvertTo-Json)
+      # The service runs as SYSTEM and starts what this file names, so only admins may edit it.
+      Invoke-Native { & icacls $svcData /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null }
+      if (-not (Get-Service ZorShell -ErrorAction SilentlyContinue)) {
+        Invoke-Native { & sc.exe create ZorShell binPath= "`"$svcExe`"" start= auto DisplayName= 'Zor UI shell launcher' | Out-Null }
+      } else {
+        Invoke-Native { & sc.exe config ZorShell binPath= "`"$svcExe`"" start= auto | Out-Null }
+      }
+      Invoke-Native { & sc.exe description ZorShell 'Starts the Zor UI shell (zorui) and GlazeWM when you log on.' | Out-Null }
+      Invoke-Native { & sc.exe failure ZorShell reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null }
+      Start-Service ZorShell
+      # Fast Startup restores the stopped service from the hibernation file instead of starting it, so also start it at every logon.
+      $act = New-ScheduledTaskAction -Execute 'sc.exe' -Argument 'start ZorShell'
+      $trg = New-ScheduledTaskTrigger -AtLogOn
+      $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+      Register-ScheduledTask -TaskName 'ZorShellLogon' -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
+      # the task and Startup shortcut of older installs would race the service
+      if (Get-ScheduledTask -TaskName 'GlazeWM' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'GlazeWM' -Confirm:$false }
+      $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (Test-Path $old) { Remove-Item $old }
+      $svcOk = $true
+      Info 'zorui and GlazeWM start at boot (ZorShell service)'
+    } catch {
+      Info "couldn't install the boot service ($($_.Exception.Message)); falling back to a logon task"
+    }
+  } elseif (-not $isAdmin) {
+    Info 'not running as admin: re-run install.ps1 from an elevated PowerShell to start at boot through a service. Using a logon task.'
+  }
+  if (-not $svcOk) {
+    # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).
+    # `cmd /c start` goes through ShellExecute, which can start the uiAccess glazewm.exe; a task running it directly fails with 740.
+    try {
+      $act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c start `"`" `"$glaze`""
+      $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+      $trg.Delay = 'PT15S'   # glazewm panics when it starts before the shell is ready
+      $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+      Register-ScheduledTask -TaskName 'GlazeWM' -Action $act -Trigger $trg -Settings $set -Force | Out-Null
+      $old = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (Test-Path $old) { Remove-Item $old }
+      Info 'GlazeWM starts at login (scheduled task)'
+    } catch {
+      Info "couldn't add the login task ($($_.Exception.Message)); falling back to the Startup folder"
+      $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'GlazeWM.lnk'
+      if (-not (Test-Path $startup)) {
+        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($startup)
+        $sc.TargetPath = $glaze; $sc.Save()
+      }
     }
   }
   if (Get-Process glazewm -ErrorAction SilentlyContinue) {
     Invoke-Native { & $glaze command wm-reload-config 2>&1 | Out-Null }
-  } else {
+  } elseif (-not $svcOk) {
     Start-Process $glaze   # its startup_commands also start Flow Launcher
   }
   # GlazeWM's startup_commands only run when GlazeWM starts, so start Flow Launcher now if needed.
   $flow = Join-Path $env:LOCALAPPDATA 'FlowLauncher\Flow.Launcher.exe'
   if ((Test-Path $flow) -and -not (Get-Process Flow.Launcher -ErrorAction SilentlyContinue)) { Start-Process $flow }
-  if ((Test-Path $native) -and -not (Get-Process zorui -ErrorAction SilentlyContinue)) { Start-Process $native }
+  if (-not $svcOk -and (Test-Path $native) -and -not (Get-Process zorui -ErrorAction SilentlyContinue)) { Start-Process $native }
 }
 
 $m = if ($Mod -eq 'win') { 'Win' } else { 'Alt' }

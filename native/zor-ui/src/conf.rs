@@ -21,11 +21,11 @@ fn defaults() -> Value {
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
         "frame": { "enabled": false, "thickness": 5, "radius": 20 },
         "dock": { "enabled": false, "side": "bottom", "style": "hug", "iconSize": 30, "radius": 30, "pinned": [] },
-        "bar": { "style": "float", "groups": "filled", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34 },
+        "bar": { "style": "float", "groups": "filled", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3 },
         "font": { "family": "", "size": 1, "weight": 0 },
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
-            "agents": true, "agentWorking": true, "recording": true, "timer": true,
+            "agents": true, "agentWorking": true, "recording": true, "timer": true, "privacy": true,
             "media": true, "art": true, "progress": true, "eq": true, "eqColor": "", "controls": true, "trackSeconds": 3,
             "idle": "auto", "status": true, "badges": true, "textWidth": 170, "wideWidth": 280,
             "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
@@ -34,10 +34,10 @@ fn defaults() -> Value {
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false, "snap": true, "snapLines": true,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
         "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
-            "listen": true, "listenAi": true, "allow": { "search": true, "open": true, "message": true },
+            "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
-        "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "visualizer": true }
+        "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "tray-flyout": true, "visualizer": true }
     }"#).expect("defaults are valid JSON")
 }
 

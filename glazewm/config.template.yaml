@@ -106,6 +106,9 @@ window_rules:
     match:
       - window_class: { regex: '^(UnrealWindow|UnityWndClass|SDL_app|Valve001)$' }
       - window_process: { regex: '^(cod\d*(-cod)?)$' }
+      # Valorant opens Riot Client and Vanguard windows with other classes while it boots.
+      # Tiling them makes the game recreate its window and the bar re-lay out in a loop.
+      - window_process: { regex: '^(VALORANT.*|RiotClientServices|RiotClientUx.*|Riot Client|vgtray)$' }
   # Small utility windows float, like end4's Hyprland window rules.
   - commands: ['set-floating --centered']
     match:

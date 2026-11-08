@@ -124,8 +124,15 @@ pub fn render(back: &Pixmap, rects: &[(f32, f32, f32, f32, f32)], g: &Glass, sca
 }
 
 /// The wallpaper decoded at a monitor's size, kept between cards.
-struct Wall { path: PathBuf, stamp: SystemTime, size: (u32, u32), pix: Arc<Pixmap> }
+struct Wall { path: PathBuf, stamp: SystemTime, size: (u32, u32), pix: Arc<Pixmap>, used: std::time::Instant }
 static WALL: Mutex<Option<Wall>> = Mutex::new(None);
+
+/// Drops the decoded wallpaper once nothing has used it for `idle` (it is 8 MB at 1080p, and only a burst of card
+/// rebuilds needs it). True if it was dropped.
+pub fn trim_idle(idle: std::time::Duration) -> bool {
+    let Ok(mut c) = WALL.lock() else { return false };
+    if c.as_ref().is_some_and(|w| w.used.elapsed() >= idle) { *c = None; true } else { false }
+}
 
 /// The wallpaper `path` under the screen rectangle `win` (x, y, w, h physical px) of the monitor `mon` (left, top,
 /// right, bottom), fitted to the monitor the way the wallpaper is set (cover).
@@ -134,11 +141,11 @@ pub fn backdrop(g: &Gfx, path: &Path, mon: (i32, i32, i32, i32), win: (i32, i32,
     let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let pix = {
         let mut cache = WALL.lock().ok()?;
-        match cache.as_ref().filter(|w| w.path == path && w.stamp == stamp && w.size == size) {
-            Some(w) => w.pix.clone(),
+        match cache.as_mut().filter(|w| w.path == path && w.stamp == stamp && w.size == size) {
+            Some(w) => { w.used = std::time::Instant::now(); w.pix.clone() }
             None => {
                 let pix = Arc::new(g.load_image(path, size.0, size.1)?);
-                *cache = Some(Wall { path: path.to_path_buf(), stamp, size, pix: pix.clone() });
+                *cache = Some(Wall { path: path.to_path_buf(), stamp, size, pix: pix.clone(), used: std::time::Instant::now() });
                 pix
             }
         }
@@ -160,6 +167,14 @@ pub fn backdrop(g: &Gfx, path: &Path, mon: (i32, i32, i32, i32), win: (i32, i32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wallpaper_is_dropped() {
+        *WALL.lock().unwrap() = Some(Wall { path: "x".into(), stamp: SystemTime::now(), size: (1, 1), pix: Arc::new(Pixmap::new(1, 1).unwrap()), used: std::time::Instant::now() });
+        assert!(!trim_idle(std::time::Duration::from_secs(60)), "fresh wallpaper stays");
+        assert!(trim_idle(std::time::Duration::ZERO), "idle wallpaper goes");
+        assert!(WALL.lock().unwrap().is_none());
+    }
 
     fn flat(w: u32, h: u32, rgb: [u8; 3]) -> Pixmap {
         let mut p = Pixmap::new(w, h).unwrap();

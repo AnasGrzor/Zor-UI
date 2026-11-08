@@ -1,6 +1,7 @@
 //! `zorui.exe --render <part> <out.png> [w h scale]`: paints one view offscreen with the real config and
 //! theme and sample media, and writes a PNG, so drawing code can be checked without windows.
-//! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", "gojo", or a popup name.
+//! Parts: a desk card id ("clock", "weather"...), "bar", "dock", "visualizer", "gojo", or a popup name
+//! ("settings:<page>" opens that settings page, e.g. "settings:presets").
 //! w, h are CSS px (default: the view's own size, or the popup preset on a 1920x1080 screen); scale defaults to 1.
 
 use crate::{
@@ -36,6 +37,8 @@ pub fn run(args: &[String]) {
     cx.theme = Theme::parse(&std::fs::read_to_string(pack.join("theme.json")).unwrap_or_default());
     g.set_font(cx.cfg.str("font.family"), cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32, cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
     sample(&mut cx);
+    // settings pages that load from the network draw spinners without sample data
+    if part.starts_with("settings") { std::env::set_var("ZORUI_RENDER_DEMO", "1"); }
     let scale = num(4).unwrap_or(1.0);
     let area = match (num(2), num(3)) { (Some(w), Some(h)) => (w, h), _ => popup::area(part, 1920.0, 1080.0, crate::bar::Edge::Top) };
     let mon = (0, 0, (1920.0 * scale) as i32);

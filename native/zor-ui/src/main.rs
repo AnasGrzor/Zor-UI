@@ -2,6 +2,7 @@
 //! parts it has taken over. `zorui.exe --all` runs every ported part regardless (for testing next to Zebar).
 #![windows_subsystem = "windows"]
 
+mod anim;
 mod app;
 mod appicon;
 mod assist;
@@ -9,6 +10,7 @@ mod bridge;
 mod bar;
 mod conf;
 mod desk;
+mod drive;
 mod dock;
 mod frame;
 mod gfx;
@@ -28,16 +30,21 @@ mod overview;
 mod perf;
 mod pill;
 mod popup;
+mod privacy;
 mod proc;
 mod render;
+mod rescue;
+mod screen;
 mod settings;
 mod sidebar_left;
 mod sidebar_right;
 mod sys;
 mod tray;
+mod tray_flyout;
 mod ui;
 mod util;
 mod viz;
+mod webchat;
 mod weather;
 mod win;
 
@@ -81,6 +88,8 @@ fn main() {
     // agent hooks run on every tool call: answer before any window or COM setup
     if let Some(i) = arg("--agent") { std::process::exit(bridge::agent_hook::cli(&args[i + 1..])); }
     if arg("--install-agents").is_some() { std::process::exit(bridge::agent_hook::cli(&["--install".to_string()])); }
+    log::init();
+    log::line(&format!("zorui {} started", env!("CARGO_PKG_VERSION")));
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

@@ -62,6 +62,9 @@ pub const GOTO: &str = "zor-ui.settingsGoto";
 const FLASH_MS: f64 = 1800.0;
 
 /// `/` jumps to the search box unless a text field is being typed in (the picker has its own Char arm above).
+/// The sidebar avatar shows the picture only when one is chosen and still on disk; otherwise the initial.
+fn avatar_is_picture(file: &str) -> bool { !file.trim().is_empty() && conf::pack_dir().join("images").join(file).exists() }
+
 fn slash_focuses_search(typing: bool, menu_open: bool) -> bool { !typing && !menu_open }
 
 /// "<page>|<section>|<label>" (the label is optional) as the GOTO hub value.
@@ -152,6 +155,13 @@ const MIN_SIZE: (f32, f32) = (720.0, 480.0);
 const MAX_SIZE: (f32, f32) = (4000.0, 3000.0);
 /// shared.json key holding the size the user dragged the window to, "w,h".
 const SIZE_KEY: &str = "settings.size";
+/// shared.json key holding the page key the user was on. Close and Esc remove it, so the next open starts on Quick.
+const PAGE_KEY: &str = "settings.page";
+
+/// Index of the saved page key in PAGES; 0 (Quick) when it is missing or unknown.
+fn page_from_key(key: Option<&str>) -> usize {
+    key.and_then(|k| PAGES.iter().position(|p| p.0 == k)).unwrap_or(0)
+}
 
 /// The error of a preset's switchwall answer, None when the wallpaper / theme step worked (or gave no answer).
 fn theme_failed(theme: &Value) -> Option<String> {
@@ -173,7 +183,7 @@ impl Settings {
     pub fn new(area: (f32, f32)) -> Settings {
         let area = hub::get(SIZE_KEY).and_then(|s| parse_size(&s)).unwrap_or(area);
         let env = std::env::var("ZORUI_RENDER_PAGE").ok();
-        let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or(0);
+        let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or_else(|| page_from_key(hub::get(PAGE_KEY).as_deref()));
         let mut s = Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""),
             over: HashMap::new(), glass_prev: None, acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
@@ -188,8 +198,20 @@ impl Settings {
 
     /// Opens on the page `key` (Mod+/ opens "keys").
     pub fn on_page(mut self, key: &str) -> Settings {
-        if let Some(i) = PAGES.iter().position(|p| p.0 == key) { self.page = i; }
+        if let Some(i) = PAGES.iter().position(|p| p.0 == key) { self.set_page(i); }
         self
+    }
+
+    /// Shows page `i` and remembers it for the next open.
+    fn set_page(&mut self, i: usize) {
+        self.page = i;
+        hub::set(PAGE_KEY, Some(PAGES[i].0.to_string()));
+    }
+
+    /// Close button and Esc: forget the page so the next open starts on Quick, then close.
+    fn close_settings(&mut self, cx: &mut Ctx) {
+        hub::set(PAGE_KEY, None);
+        cx.actions.push(Action::Close("settings".into()));
     }
 
     fn demo(&mut self) {
@@ -304,8 +326,9 @@ impl Settings {
                     });
                 }
             }
-            "services" => {
-                if matches!(self.keys, Load::Idle) {
+            // the buddies page lists the same models, for "Screen help model"
+            "services" | "buddies" => {
+                if PAGES[self.page].0 == "services" && matches!(self.keys, Load::Idle) {
                     self.keys = Load::Loading;
                     store::bridge(cx, &self.inbox, "secret-status", vec![], |s, r| s.keys = Load::Ready(if r["error"].is_string() || r.is_null() { json!({}) } else { r }));
                 }
@@ -359,6 +382,7 @@ impl Settings {
                 "save-name" => self.act(cx, Act::Do("save-preset", String::new())),
                 "seed" => self.act(cx, Act::Do("seed", String::new())),
                 "agent-name" | "agent-dir" | "agent-file" => self.act(cx, Act::Do("add-agent", String::new())),
+                "contact-name" | "contact-value" => self.act(cx, Act::Do("add-contact", String::new())),
                 k if k.starts_with("bname-") => { let slot = &k[6..]; let id = self.gs(cx, &format!("buddies.{slot}.character")); self.act(cx, Act::Do("rename-buddy", format!("{slot}:{id}"))) }
                 k if k.starts_with("key-") => self.act(cx, Act::Do("save-key", k[4..].to_string())),
                 _ => {}
@@ -392,7 +416,7 @@ impl Settings {
     fn act(&mut self, cx: &mut Ctx, a: Act) {
         crate::log::line(&format!("settings: {}", a.label()));
         match a {
-            Act::Page(i) => { self.page = i; self.menu = None; self.bl_focus = None; }
+            Act::Page(i) => { self.set_page(i); self.menu = None; self.bl_focus = None; }
             Act::Switch(path) => {
                 let v = !self.gb(cx, &path);
                 self.set(&path, json!(v));
@@ -410,7 +434,7 @@ impl Settings {
                 if let Some(f) = self.fields.get_mut(SEARCH) { f.tb.set(""); }
                 self.focus = None;
                 hub::set(GOTO, Some(format!("{}|{sect}|{label}", PAGES[i].0)));
-                self.page = i;
+                self.set_page(i);
             }
             Act::Slider(..) | Act::Field(..) => {}
             Act::Do(name, arg) => self.do_named(cx, name, arg),
@@ -482,7 +506,7 @@ impl Settings {
                 });
             }
             "url" => store::open_url(&arg),
-            "close" => cx.actions.push(Action::Close("settings".into())),
+            "close" => self.close_settings(cx),
             "bu" => {
                 let cur = self.garr(cx, "bar.utils");
                 let next: Vec<&str> = ["snip", "pick", "wall", "mode"].into_iter().filter(|v| cur.iter().any(|c| c == v) != (*v == arg)).collect();
@@ -619,6 +643,38 @@ impl Settings {
                 if !cfg!(test) { std::thread::spawn(move || { crate::bridge::agent_hook::auto_install(&custom); }); }
                 self.toast("Agent added. Hooks go in as soon as its folder exists");
             }
+            "contact-app" => { self.fields.entry("contact-app".into()).or_insert_with(|| Field::new(false)).tb.set(&arg); }
+            "add-contact" => {
+                let val = |s: &Self, k: &str| s.fields.get(k).map(|f| f.tb.text.clone()).unwrap_or_default();
+                let app = match val(self, "contact-app").as_str() { "" => "whatsapp".to_string(), a => a.to_string() };
+                let Some(entry) = crate::assist::format_contact(&val(self, "contact-name"), &app, &val(self, "contact-value")) else {
+                    self.toast("Give a name and a number or id, without = or commas");
+                    return;
+                };
+                // after the pencil, "contact-edit" holds the entry being changed: it is replaced where it stands
+                let original = Some(val(self, "contact-edit")).filter(|o| !o.is_empty());
+                let cur = crate::assist::with_contact(&self.garr(cx, "buddies.contacts"), original.as_deref(), entry);
+                self.set("buddies.contacts", json!(cur));
+                for k in ["contact-name", "contact-value", "contact-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
+                if original.is_some() { self.toast("Contact saved"); }
+            }
+            "edit-contact" => {
+                // load the contact into the form; Save then replaces it where it stands
+                let Some((name, app, value)) = crate::assist::parse_contact(&arg) else { return };
+                for (k, v) in [("contact-name", name.as_str()), ("contact-value", value.as_str()), ("contact-app", app.as_str()), ("contact-edit", arg.as_str())] {
+                    self.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v);
+                }
+            }
+            "cancel-edit" => { for k in ["contact-name", "contact-value", "contact-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } } }
+            "del-contact" => {
+                let mut cur = self.garr(cx, "buddies.contacts");
+                cur.retain(|e| *e != arg);
+                self.set("buddies.contacts", json!(cur));
+                // deleting the one being edited ends the edit, so Save can't bring it back
+                if self.fields.get("contact-edit").is_some_and(|f| f.tb.text == arg) {
+                    for k in ["contact-name", "contact-value", "contact-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
+                }
+            }
             "del-agent" => {
                 let mut cur = self.get(cx, "customAgents").as_array().cloned().unwrap_or_default();
                 cur.retain(|a| a["name"] != arg.as_str());
@@ -704,7 +760,8 @@ impl View for Settings {
     /// Any empty spot drags the window (the JS: the rail's empty space or the window's edge).
     fn movable(&self) -> f32 { self.area.1 }
 
-    fn captures_esc(&self) -> bool { self.menu.is_some() || self.picker.is_some() }
+    // always: Esc reaches `input`, which closes through close_settings so the saved page is cleared
+    fn captures_esc(&self) -> bool { true }
 
     fn limits(&self) -> Option<((f32, f32), (f32, f32))> { Some((MIN_SIZE, MAX_SIZE)) }
 
@@ -722,7 +779,7 @@ impl View for Settings {
         let goto = hub::get(GOTO).and_then(|g| parse_goto(&g));
         if let Some((page, _, _)) = &goto {
             hub::set(GOTO, None);
-            if let Some(i) = PAGES.iter().position(|p| p.0 == page) { self.page = i; }
+            if let Some(i) = PAGES.iter().position(|p| p.0 == page) { self.set_page(i); }
         }
         let (w, h) = (c.w, c.h);
         if self.index.is_empty() && !self.query().is_empty() { self.build_index(c, cx); }
@@ -765,7 +822,8 @@ impl View for Settings {
         self.acts = acts;
 
         self.paint_menu(c, cx);
-        if let Some(p) = &mut self.picker { picker::paint(c, cx, p); }
+        let strip = self.pick_path.as_deref().and_then(pages::picker_strip);
+        if let Some(p) = &mut self.picker { picker::paint(c, cx, p, strip.as_deref()); }
         self.paint_ghost(c, cx);
         if let Some((msg, _)) = &self.toast {
             let tw = c.g.measure(msg, txt(13.0, 400)).0.ceil() + 36.0;
@@ -894,10 +952,12 @@ impl View for Settings {
                     }
                 } else if ctrl && (vk == 0x21 || vk == 0x22) {
                     let n = PAGES.len();
-                    self.page = (self.page + if vk == 0x22 { 1 } else { n - 1 }) % n;
+                    self.set_page((self.page + if vk == 0x22 { 1 } else { n - 1 }) % n);
                     self.menu = None;
                 } else if self.menu.is_some() {
                     if vk == 0x1B { self.menu = None; }
+                } else if vk == 0x1B {
+                    self.close_settings(cx);
                 } else if let Some(k) = self.focus.clone() {
                     let e = self.fields.get_mut(&k).map(|f| f.tb.key(vk, ctrl, shift, alt));
                     if e == Some(Edit::Submit) { self.commit(cx, &k, true); }
@@ -966,9 +1026,17 @@ impl Settings {
         let (x, y0, w) = (p.x, p.y, p.w);
         let name = match p.cx.cfg.str("userName") { "" => "You", n => n }.to_string();
         // .me
-        p.c.circle(x + 6.0 + 21.0, y0 + 6.0 + 21.0, 21.0, p.col("primaryContainer"));
-        let init: String = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-        p.c.text(&init, R::new(x + 6.0, y0 + 6.0, 42.0, 42.0), txt(18.0, 600), p.col("onPrimaryContainer"), Align::Center);
+        let av = R::new(x + 6.0, y0 + 6.0, 42.0, 42.0);
+        p.c.circle(av.x + 21.0, av.y + 21.0, 21.0, p.col("primaryContainer"));
+        let file = self.gs(p.cx, "desktop.greet.file"); // the Avatar picture (Desktop > Greeting card)
+        if avatar_is_picture(&file) {
+            self.picture(p, &conf::pack_dir().join("images").join(&file), av, 21.0);
+        } else {
+            let init: String = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            p.c.text(&init, av, txt(18.0, 600), p.col("onPrimaryContainer"), Align::Center);
+        }
+        let id = p.act(Act::Do("pick-image", "greet".into()));
+        p.c.hit(av, id); // click the avatar to choose a picture
         let top = y0 + 6.0 + (42.0 - 14.0 * ui::LH - 11.5 * ui::LH) / 2.0;
         p.c.text(&name, R::new(x + 58.0, top, w - 64.0, 14.0 * ui::LH), txt(14.0, 500), p.col("onSurface"), Align::Left);
         p.c.text("Windows", R::new(x + 58.0, top + 14.0 * ui::LH, w - 64.0, 11.5 * ui::LH), txt(11.5, 400), p.col("onSurfaceVariant"), Align::Left);
@@ -1066,6 +1134,29 @@ mod tests {
     }
 
     #[test]
+    fn saved_page_falls_back_to_quick() {
+        let last = PAGES.len() - 1;
+        assert_eq!(super::page_from_key(Some(PAGES[last].0)), last);
+        assert_eq!(super::page_from_key(Some("nope")), 0);
+        assert_eq!(super::page_from_key(None), 0);
+        assert_eq!(PAGES[0].0, "quick");
+    }
+
+    #[test]
+    fn esc_and_close_clear_the_saved_page_and_close() {
+        for vk in [Some(0x1B), None] {
+            let mut st = Settings::new((1200.0, 800.0));
+            let mut cx = Ctx::new(false);
+            match vk {
+                Some(vk) => st.input(Input::Key { vk, ctrl: false, shift: false, alt: false }, &mut cx),
+                None => st.do_named(&mut cx, "close", String::new()),
+            }
+            assert!(cx.actions.iter().any(|a| matches!(a, Action::Close(n) if n == "settings")));
+            assert_eq!(hub::get(PAGE_KEY), None);
+        }
+    }
+
+    #[test]
     fn every_settings_widget_is_ported() {
         for (id, _) in DESKTOP_WIDGETS.iter() { assert!(crate::desk::PORTED.contains(id), "{id}"); }
     }
@@ -1073,6 +1164,145 @@ mod tests {
     use super::*;
 
     fn s() -> Settings { Settings::new((1200.0, 800.0)) }
+
+    #[test]
+    fn contacts_are_added_replaced_and_deleted() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        let mut add = |st: &mut Settings, cx: &mut Ctx, name: &str, app: &str, value: &str| {
+            for (k, v) in [("contact-name", name), ("contact-value", value)] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
+            st.do_named(cx, "contact-app", app.into());
+            st.do_named(cx, "add-contact", String::new());
+        };
+        add(&mut st, &mut cx, "Ali", "whatsapp", "+92 300");
+        add(&mut st, &mut cx, "Sam", "discord", "123");
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Ali=whatsapp:+92 300", "Sam=discord:123"]);
+        assert_eq!(st.fields["contact-name"].tb.text, "", "the form clears after adding");
+        add(&mut st, &mut cx, "ali", "discord", "9");
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Sam=discord:123", "ali=discord:9"], "same name replaces");
+        add(&mut st, &mut cx, "", "discord", "9");
+        assert_eq!(st.garr(&cx, "buddies.contacts").len(), 2, "an empty name adds nothing");
+        st.do_named(&mut cx, "del-contact", "Sam=discord:123".into());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["ali=discord:9"]);
+    }
+
+    fn put_contact(st: &mut Settings, cx: &mut Ctx, name: &str, app: &str, value: &str) {
+        for (k, v) in [("contact-name", name), ("contact-value", value)] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
+        st.do_named(cx, "contact-app", app.into());
+        st.do_named(cx, "add-contact", String::new());
+    }
+
+    fn two_contacts() -> (Settings, Ctx) {
+        let (mut st, mut cx) = (s(), Ctx::new(false));
+        put_contact(&mut st, &mut cx, "Ali", "whatsapp", "+92 300");
+        put_contact(&mut st, &mut cx, "Sam", "discord", "123");
+        (st, cx)
+    }
+
+    fn field(st: &Settings, k: &str) -> String { st.fields.get(k).map(|f| f.tb.text.clone()).unwrap_or_default() }
+
+    #[test]
+    fn the_pencil_loads_a_contact_into_the_form() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Sam=discord:123".into());
+        assert_eq!((field(&st, "contact-name"), field(&st, "contact-app"), field(&st, "contact-value")), ("Sam".into(), "discord".into(), "123".into()));
+        assert_eq!(field(&st, "contact-edit"), "Sam=discord:123", "it remembers which entry it is changing");
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Ali=whatsapp:+92 300", "Sam=discord:123"], "loading changes nothing yet");
+        st.do_named(&mut cx, "edit-contact", "not a contact".into());
+        assert_eq!(field(&st, "contact-name"), "Sam", "an entry that doesn't parse is ignored");
+    }
+
+    #[test]
+    fn saving_an_edit_changes_the_contact_where_it_stands_and_clears_the_form() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Ali=whatsapp:+92 300".into());
+        st.fields.get_mut("contact-name").unwrap().tb.set("Alice");
+        st.do_named(&mut cx, "contact-app", "whatsappweb".into());
+        st.do_named(&mut cx, "add-contact", String::new());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Alice=whatsappweb:+92 300", "Sam=discord:123"], "same place, new name and app");
+        assert_eq!((field(&st, "contact-name"), field(&st, "contact-value"), field(&st, "contact-edit")), (String::new(), String::new(), String::new()));
+        // the next save is an ordinary add, not another edit of Ali
+        put_contact(&mut st, &mut cx, "Zed", "discord", "9");
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Alice=whatsappweb:+92 300", "Sam=discord:123", "Zed=discord:9"]);
+    }
+
+    #[test]
+    fn renaming_a_contact_onto_another_replaces_that_other_one() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Sam=discord:123".into());
+        st.fields.get_mut("contact-name").unwrap().tb.set("ali");
+        st.do_named(&mut cx, "add-contact", String::new());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["ali=discord:123"]);
+    }
+
+    #[test]
+    fn cancel_leaves_the_list_alone_and_empties_the_form() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Sam=discord:123".into());
+        st.fields.get_mut("contact-name").unwrap().tb.set("Changed");
+        st.do_named(&mut cx, "cancel-edit", String::new());
+        assert_eq!((field(&st, "contact-name"), field(&st, "contact-value"), field(&st, "contact-edit")), (String::new(), String::new(), String::new()));
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Ali=whatsapp:+92 300", "Sam=discord:123"]);
+    }
+
+    #[test]
+    fn deleting_the_contact_being_edited_ends_the_edit() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Sam=discord:123".into());
+        st.do_named(&mut cx, "del-contact", "Sam=discord:123".into());
+        assert_eq!(field(&st, "contact-edit"), "", "Save can't bring it back");
+        assert_eq!(field(&st, "contact-name"), "");
+        st.do_named(&mut cx, "add-contact", String::new());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Ali=whatsapp:+92 300"], "nothing came back");
+        // deleting a different one leaves the edit going
+        st.do_named(&mut cx, "edit-contact", "Ali=whatsapp:+92 300".into());
+        put_contact(&mut st, &mut cx, "", "discord", "");
+        st.do_named(&mut cx, "del-contact", "Other=discord:1".into());
+        assert_eq!(field(&st, "contact-edit"), "Ali=whatsapp:+92 300");
+    }
+
+    #[test]
+    fn an_edit_with_an_empty_name_changes_nothing_and_keeps_editing() {
+        let (mut st, mut cx) = two_contacts();
+        st.do_named(&mut cx, "edit-contact", "Ali=whatsapp:+92 300".into());
+        st.fields.get_mut("contact-name").unwrap().tb.set("");
+        st.do_named(&mut cx, "add-contact", String::new());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Ali=whatsapp:+92 300", "Sam=discord:123"]);
+        assert_eq!(field(&st, "contact-edit"), "Ali=whatsapp:+92 300", "still editing, so the user can fix it");
+    }
+
+    #[test]
+    fn contacts_have_their_own_page_right_after_buddies() {
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let b = keys.iter().position(|k| *k == "buddies").unwrap();
+        assert_eq!(keys[b + 1], "contacts");
+        assert_eq!(PAGES[b + 1].2, "Contacts");
+        assert_eq!(super::page_from_key(Some("contacts")), b + 1);
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "every page key is unique");
+    }
+
+    #[test]
+    fn a_whatsapp_web_contact_is_saved_under_its_own_app() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        for (k, v) in [("contact-name", "Mum"), ("contact-value", "+44 7700 900123")] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
+        st.do_named(&mut cx, "contact-app", "whatsappweb".into());
+        st.do_named(&mut cx, "add-contact", String::new());
+        assert_eq!(st.garr(&cx, "buddies.contacts"), ["Mum=whatsappweb:+44 7700 900123"]);
+        // what the buddy reads back is that app and number, not a plain WhatsApp contact
+        let c = crate::assist::parse_contact(&st.garr(&cx, "buddies.contacts")[0]).unwrap();
+        assert_eq!(c, ("Mum".to_string(), "whatsappweb".to_string(), "+44 7700 900123".to_string()));
+    }
+
+    #[test]
+    fn avatar_needs_a_chosen_file_that_exists() {
+        assert!(!avatar_is_picture(""));
+        assert!(!avatar_is_picture("  "));
+        assert!(!avatar_is_picture("definitely-not-here-0123.png"));
+    }
 
     #[test]
     fn config_values_fall_back_like_core_js() {
@@ -1128,6 +1358,24 @@ mod tests {
         assert_eq!((st.viz_color(&cx, "island.eqColor"), st.viz_color(&cx, "visualizer.barColor")), (0xFF44_5566, 0xFF11_2233));
         st.over.insert("island.eqColor".into(), (json!("nope"), hub::now_ms()));
         assert_eq!(st.viz_color(&cx, "island.eqColor"), 0xFF11_2233);
+    }
+
+    #[test]
+    fn the_preview_follows_the_picker_while_picking_and_reverts_on_cancel() {
+        let mut st = s();
+        let mut cx = Ctx::new(false);
+        let theme = cx.theme.c("primary");
+        st.do_named(&mut cx, "pickcolor", "island.eqColor".into());
+        st.picker.as_mut().unwrap().set_color(0xFF12_3456);
+        assert_eq!((st.viz_color(&cx, "island.eqColor"), st.viz_color(&cx, "visualizer.barColor")), (0xFF12_3456, theme)); // only the picked setting
+        st.close_picker();
+        assert_eq!(st.viz_color(&cx, "island.eqColor"), theme);
+    }
+
+    #[test]
+    fn only_visualizer_colors_get_a_picker_strip() {
+        for p in ["island.eqColor", "visualizer.barColor", "visualizer.desktopColor", "visualizer.color"] { assert!(pages::picker_strip(p).is_some(), "{p}"); }
+        assert!(pages::picker_strip("buddy.color").is_none());
     }
 
     #[test]

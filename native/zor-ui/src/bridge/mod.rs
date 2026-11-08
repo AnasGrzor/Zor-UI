@@ -27,6 +27,15 @@ pub(crate) mod update;
 mod we;
 mod web;
 
+/// Can the chat model with this id be sent pictures? (Screen help asks before it takes a screenshot.)
+pub(crate) fn model_can_see(id: &str) -> bool { web::can_see_model(id) }
+
+/// Can the chat model with this id take pictures, judging by the id alone? (Settings hides the ones that can't.)
+pub(crate) fn model_id_can_see(id: &str) -> bool { web::id_can_see(id) }
+
+/// Standard base64, for pictures in a chat message.
+pub(crate) fn base64(d: &[u8]) -> String { web::b64_encode(d) }
+
 /// Where a streaming command writes its lines; `stopped()` turns true when the caller drops the stream.
 pub struct Sink {
     line: Box<dyn Fn(&str) + Send + Sync>,

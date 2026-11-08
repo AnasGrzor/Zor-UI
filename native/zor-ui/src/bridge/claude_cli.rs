@@ -44,6 +44,25 @@ fn prompt(msgs: &[Value]) -> String {
     format!("{}\n\nAssistant:", turns.join("\n\n"))
 }
 
+/// True when any message carries pictures: the CLI then reads its input as stream-json, the only way to hand it an image
+/// without giving it a tool to open files.
+fn has_images(msgs: &[Value]) -> bool { msgs.iter().any(|m| !super::web::images_of(m).is_empty()) }
+
+/// The stdin line for a conversation with pictures: one user message holding every picture (after its label), then the
+/// conversation as text.
+fn image_input(msgs: &[Value]) -> String {
+    let mut blocks = vec![];
+    for m in msgs {
+        for (mime, data, label) in super::web::images_of(m) {
+            if !label.is_empty() { blocks.push(json!({ "type": "text", "text": label })); }
+            blocks.push(json!({ "type": "image", "source": { "type": "base64", "media_type": mime, "data": data } }));
+        }
+    }
+    let text = prompt(msgs);
+    if !text.trim().is_empty() { blocks.push(json!({ "type": "text", "text": text })); }
+    format!("{}\n", json!({ "type": "user", "message": { "role": "user", "content": blocks } }))
+}
+
 #[derive(Debug, PartialEq)]
 enum Ev { Delta(String), Done(String), Error(String) }
 
@@ -71,15 +90,18 @@ pub fn chat(model_id: &str, msgs: &[Value], system: &str, out: &Sink) {
         out.emit(&json!({ "error": "Claude Code isn't installed, so the subscription can't be used. Install it and run `claude` once to log in." }));
         return;
     };
-    let spawned = hidden(exe)
-        .args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", alias(model_id), "--tools", "",
-               "--system-prompt", system, "--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"])
-        .current_dir(std::env::temp_dir()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+    let pictures = has_images(msgs);
+    let mut cmd = hidden(exe);
+    cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", alias(model_id), "--tools", "",
+              "--system-prompt", system, "--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"]);
+    if pictures { cmd.args(["--input-format", "stream-json"]); }
+    let spawned = cmd.current_dir(std::env::temp_dir()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => { out.emit(&json!({ "error": format!("claude: {e}") })); return; }
     };
-    if let Some(mut si) = child.stdin.take() { let _ = si.write_all(prompt(msgs).as_bytes()); }
+    // dropping stdin after the write ends the input, which is what tells the CLI to answer
+    if let Some(mut si) = child.stdin.take() { let _ = si.write_all(if pictures { image_input(msgs) } else { prompt(msgs) }.as_bytes()); }
     let Some(stdout) = child.stdout.take() else { let _ = child.kill(); return };
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || { for l in BufReader::new(stdout).lines().map_while(Result::ok) { if tx.send(l).is_err() { break; } } });
@@ -126,6 +148,34 @@ mod tests {
         assert_eq!(prompt(&[json!({ "role": "user", "content": "hi" })]), "hi");
         let p = prompt(&[json!({ "role": "user", "content": "a" }), json!({ "role": "assistant", "content": "b" }), json!({ "role": "user", "content": "c" })]);
         assert_eq!(p, "User: a\n\nAssistant: b\n\nUser: c\n\nAssistant:");
+    }
+
+    #[test]
+    fn pictures_go_in_as_one_stream_json_user_message() {
+        let msgs = [json!({ "role": "user", "content": "where is save?", "images": [{ "mime": "image/jpeg", "data": "QUJD", "label": "screen 1" }] })];
+        assert!(has_images(&msgs));
+        let line = image_input(&msgs);
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "one line, so the CLI reads one message");
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["type"], "user");
+        assert_eq!(v["message"]["content"], json!([{ "type": "text", "text": "screen 1" }, { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "QUJD" } }, { "type": "text", "text": "where is save?" }]));
+    }
+
+    #[test]
+    fn earlier_turns_ride_along_as_text() {
+        let msgs = [json!({ "role": "user", "content": "hi" }), json!({ "role": "assistant", "content": "hello" }),
+                    json!({ "role": "user", "content": "and now?", "images": [{ "data": "QQ==" }] })];
+        let v: Value = serde_json::from_str(image_input(&msgs).trim()).unwrap();
+        let c = v["message"]["content"].as_array().unwrap();
+        assert_eq!(c[0]["type"], "image");
+        assert_eq!(c[1]["text"], "User: hi\n\nAssistant: hello\n\nUser: and now?\n\nAssistant:");
+    }
+
+    #[test]
+    fn text_only_chats_keep_the_plain_prompt() {
+        let msgs = [json!({ "role": "user", "content": "hi" })];
+        assert!(!has_images(&msgs));
+        assert!(!has_images(&[json!({ "role": "user", "content": "hi", "images": [{ "data": "" }] })]), "an empty picture is no picture");
     }
 
     #[test]

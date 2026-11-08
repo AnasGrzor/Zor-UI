@@ -44,11 +44,15 @@ pub fn argb_hsv(c: Color) -> (f32, f32, f32) {
 
 /// Where everything sits for a window of `w` x `h` CSS px: the popover hugs the right edge so the page stays visible.
 #[derive(Clone)]
-pub struct Geo { pub bx: R, pub sq: R, pub hue: R, pub hex: R, pub sw: R, pub label: R, pub presets: [(f32, f32); 14], pub cancel: R, pub ok: R }
+pub struct Geo { pub bx: R, pub sq: R, pub hue: R, pub hex: R, pub sw: R, pub label: R, pub presets: [(f32, f32); 14], pub cancel: R, pub ok: R, pub strip: R }
 
-pub fn geo(w: f32, h: f32) -> Geo {
+/// Extra popover height for the preview strip under the buttons.
+const STRIP_H: f32 = 64.0;
+
+/// `strip`: the popover has a preview strip under the buttons.
+pub fn geo(w: f32, h: f32, strip: bool) -> Geo {
     let inner = W - PAD * 2.0;
-    let total = 434.0;
+    let total = 434.0 + if strip { STRIP_H } else { 0.0 };
     let bx = R::new((w - W - 20.0).max(8.0), ((h - total) / 2.0).max(8.0), W, total);
     let (x, y) = (bx.x + PAD, bx.y + PAD);
     let sq = R::new(x, y, inner, 168.0);
@@ -62,7 +66,7 @@ pub fn geo(w: f32, h: f32) -> Geo {
     for (i, p) in presets.iter_mut().enumerate() { *p = (x + pitch * ((i % 7) as f32 + 0.5), row1 + (i / 7) as f32 * 38.0 + 13.0); }
     let by = row1 + 38.0 + 26.0 + 16.0;
     let half = (inner - 8.0) / 2.0;
-    Geo { bx, sq, hue, hex, sw, label, presets, cancel: R::new(x, by, half, 36.0), ok: R::new(x + half + 8.0, by, half, 36.0) }
+    Geo { bx, sq, hue, hex, sw, label, presets, cancel: R::new(x, by, half, 36.0), ok: R::new(x + half + 8.0, by, half, 36.0), strip: R::new(x, by + 36.0 + 12.0, inner, STRIP_H - 12.0) }
 }
 
 /// Hue 0..360, saturation and value 0..1. `grab`: 0 nothing, 1 the square, 2 the hue slider.
@@ -80,7 +84,7 @@ pub struct Picker {
 impl Picker {
     pub fn new(c: Color, area: (f32, f32)) -> Picker {
         let (h, s, v) = argb_hsv(c);
-        let mut p = Picker { h, s, v, grab: 0, g: geo(area.0, area.1), tb: TextBox::new(false), sq_img: None, hue_img: None };
+        let mut p = Picker { h, s, v, grab: 0, g: geo(area.0, area.1, false), tb: TextBox::new(false), sq_img: None, hue_img: None };
         p.tb.set(&p.hex());
         p
     }
@@ -133,8 +137,9 @@ fn bake(w: u32, h: u32, radius: f32, color: impl Fn(f32, f32) -> Color) -> Optio
     Some(pm)
 }
 
-pub fn paint(c: &mut Canvas, cx: &Ctx, p: &mut Picker) {
-    let g = geo(c.w, c.h);
+/// `strip`: draws a preview into the given rect with the color being picked; it adds a strip under the buttons.
+pub fn paint(c: &mut Canvas, cx: &Ctx, p: &mut Picker, strip: Option<&dyn Fn(&mut Canvas, R, Color)>) {
+    let g = geo(c.w, c.h, strip.is_some());
     p.g = g.clone();
     c.hit(R::new(0.0, 0.0, c.w, c.h), BG);
     c.shadow(8.0, 28.0, 0.4, |c, col| if let Some(col) = col { c.rect(g.bx, 22.0, col) });
@@ -187,6 +192,11 @@ pub fn paint(c: &mut Canvas, cx: &Ctx, p: &mut Picker) {
         if hov { c.rect(r, 18.0, alpha(cx.theme.c(fg), 0.12)); }
         c.text(label, r, txt(14.0, 500), cx.theme.c(fg), Align::Center);
     }
+
+    if let Some(draw) = strip {
+        c.rect(g.strip, 12.0, cx.theme.c("surfaceContainer"));
+        draw(c, g.strip, p.color());
+    }
 }
 
 #[cfg(test)]
@@ -215,9 +225,11 @@ mod tests {
 
     #[test]
     fn layout_fits_the_popover_and_stays_on_screen() {
-        let g = geo(900.0, 700.0);
+        let (plain, g) = (geo(900.0, 700.0, false), geo(900.0, 700.0, true));
+        assert_eq!(g.bx.h - plain.bx.h, STRIP_H); // the strip adds its own height and sits under the buttons
+        assert!(g.strip.y >= g.ok.y + g.ok.h);
         assert!(g.bx.x + g.bx.w <= 900.0 && g.bx.y >= 0.0 && g.bx.y + g.bx.h <= 700.0);
-        for r in [g.sq, g.hue, g.hex, g.sw, g.cancel, g.ok] {
+        for r in [g.sq, g.hue, g.hex, g.sw, g.cancel, g.ok, g.strip] {
             assert!(r.x >= g.bx.x && r.x + r.w <= g.bx.x + g.bx.w && r.y >= g.bx.y && r.y + r.h <= g.bx.y + g.bx.h, "{r:?}");
         }
         assert!(g.presets.iter().all(|&(x, y)| g.bx.contains(x - 13.0, y - 13.0) && g.bx.contains(x + 13.0, y + 13.0)));

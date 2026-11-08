@@ -33,11 +33,10 @@ $pid0 = Join-Path $env:LOCALAPPDATA 'zor-ui\caffeine.pid'
 if (Test-Path $pid0) { Stop-Process -Id (Get-Content $pid0) -Force -ErrorAction SilentlyContinue }
 
 Restore-Latest (Join-Path $Glzr 'glazewm\config.yaml')
-Restore-Latest (Join-Path $Glzr 'zebar\settings.json')
 Restore-Latest (Join-Path $env:APPDATA 'FlowLauncher\Settings\Settings.json')
 
 Remove-Item -Recurse -Force 'HKCU:\Software\Classes\Directory\Background\shell\ZorUISettings' -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force (Join-Path $Glzr 'zebar\zor-ui') -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force (Join-Path $Glzr 'zor-ui') -ErrorAction SilentlyContinue
 Remove-Item -Force (Join-Path $env:APPDATA 'FlowLauncher\Themes\zor-ui.xaml') -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\zor-ui') -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $env:LOCALAPPDATA 'zor-ui') -ErrorAction SilentlyContinue

@@ -1,4 +1,4 @@
-//! GlazeWM over its IPC WebSocket (ws://127.0.0.1:6123), like Zebar's glazewm provider: subscribe
+//! GlazeWM over its IPC WebSocket (ws://127.0.0.1:6123): subscribe
 //! to every event and re-query the monitor tree, focus, binding modes and pause state.
 
 use serde_json::Value;

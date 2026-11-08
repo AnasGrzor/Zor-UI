@@ -389,6 +389,7 @@ impl Settings {
             self.slider(p, "font.weight", "Bar & desktop font thickness", Sl { min: -300.0, max: 300.0, step: 50.0, fmt: Fmt::Weight }, "format_bold");
             self.slider(p, "nightLight.kelvin", "Night light warmth", Sl { min: 2500.0, max: 6000.0, step: 100.0, fmt: Fmt::Kelvin }, "nightlight");
             self.sw(p, "syncLockScreen", "Use the wallpaper on the lock screen", "Windows may block this on managed PCs", "lock");
+            self.sw(p, "runOnStartup", "Start Zor UI and GlazeWM at login", "Turn off to start them yourself. Takes effect at the next login", "power_settings_new");
         });
     }
 
@@ -1038,7 +1039,7 @@ impl Settings {
             }
             if let Some(r) = p.row(40.0) {
                 let w = chip_w(p.c, "Edit", true);
-                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zebar\\zor-ui\\config.json" }, w);
+                p.left(r, "", "Config file", if p.cx.cfg.str("scriptsDir").is_empty() { "" } else { "%USERPROFILE%\\.glzr\\zor-ui\\config.json" }, w);
                 p.chip_right(r, Some("edit"), "Edit", Act::Do("editcfg", String::new()));
             }
         });

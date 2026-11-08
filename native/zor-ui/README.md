@@ -4,8 +4,8 @@ The Zor UI widgets (formerly end4-pC) drawn by one small Windows process. The fi
 The bar on two monitors plus four desktop cards take about 32 MB working set (9 MB private) here;
 the same widgets in Zebar used about 1 GB.
 
-It reads `~/.glzr/zebar/zor-ui/config.json`, `theme.json` and the fonts in `assets/fonts` (the folder keeps the name
-from the Zebar days). Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
+It reads `~/.glzr/zor-ui/config.json`, `theme.json` and the fonts in `assets/fonts`.
+Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
 
 ## What it draws
 

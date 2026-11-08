@@ -1,5 +1,5 @@
-//! zor-ui native shell. Replaces the Zebar widget pack part by part; config.json "native" lists the
-//! parts it has taken over. `zorui.exe --all` runs every ported part regardless (for testing next to Zebar).
+//! zor-ui native shell. config.json "native" lists the parts it runs (all of them by default).
+//! `zorui.exe --all` runs every part regardless of that list.
 #![windows_subsystem = "windows"]
 
 mod anim;

@@ -1,4 +1,4 @@
-//! config.json and theme.json from the Zebar pack folder (Settings and end4_theme.py write them).
+//! config.json and theme.json from the pack folder (~.glzrzor-ui) (Settings and end4_theme.py write them).
 
 use crate::gfx::Color;
 use serde_json::{json, Value};
@@ -8,7 +8,7 @@ use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
 fn defaults() -> Value {
     serde_json::from_str(r#"{
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
-        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "customAgents": [],
+        "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "runOnStartup": true, "customAgents": [],
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
         "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
         "translator": { "source": "auto", "target": "en" },
@@ -153,7 +153,7 @@ impl State {
     }
 }
 
-pub fn pack_dir() -> PathBuf { home().join(r".glzr\zebar\zor-ui") }
+pub fn pack_dir() -> PathBuf { home().join(r".glzr\zor-ui") }
 pub fn home() -> PathBuf { PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()) }
 pub fn data_dir() -> PathBuf {
     let d = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("zor-ui");
@@ -171,6 +171,12 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn the_settings_folder_is_not_inside_zebar() {
+        let p = pack_dir().to_string_lossy().to_lowercase();
+        assert!(p.ends_with(r".glzr\zor-ui") && !p.contains("zebar"));
+    }
+
     #[test]
     fn a_preview_palette_overrides_the_theme_until_cleared() {
         let t = Theme::parse("");

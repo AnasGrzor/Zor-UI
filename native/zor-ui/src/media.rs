@@ -1,4 +1,4 @@
-//! Now playing: Windows' media sessions (the same source as Zebar's media provider) and the
+//! Now playing: Windows' media sessions and the
 //! default audio devices' volume. Each runs on its own COM thread and reports through `on`.
 
 use std::{
@@ -62,7 +62,7 @@ static MEDIA: OnceLock<Mutex<mpsc::Sender<Msg>>> = OnceLock::new();
 
 fn send(m: Msg) { if let Some(Ok(t)) = MEDIA.get().map(|m| m.lock()) { let _ = t.send(m); } }
 
-/// "togglePlayPause" | "play" | "pause" | "next" | "previous" on the current session, like Zebar's media provider methods.
+/// "togglePlayPause" | "play" | "pause" | "next" | "previous" on the current session.
 pub fn control(what: &'static str) { send(Msg::Control(None, what)); }
 /// The same on the session `id` (`Media::id`).
 pub fn control_of(id: &str, what: &'static str) { send(Msg::Control(Some(id.into()), what)); }

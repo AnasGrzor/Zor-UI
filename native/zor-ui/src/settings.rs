@@ -420,7 +420,9 @@ impl Settings {
             Act::Switch(path) => {
                 let v = !self.gb(cx, &path);
                 self.set(&path, json!(v));
-
+                if path == "runOnStartup" {
+                    if let Err(e) = write_startup_flag(v) { self.toast(&format!("Couldn't change startup: {e}. Re-run install.ps1 as admin once")); }
+                }
             }
             Act::Seg(path, v) => self.set(&path, v),
             Act::Step(path, d, min, max) => {
@@ -574,7 +576,7 @@ impl Settings {
                 }
             }
             "reset-desk" => {
-                // native cards keep their spots in state.json; Zebar's are in the webview's localStorage (not reachable from here)
+                // native cards keep their spots in state.json
                 cx.state.update(|v| v["deskPos"] = json!({}));
                 self.set("desktop.layoutReset", json!(hub::now_ms() as i64));
                 self.toast("Layout reset");
@@ -1113,8 +1115,23 @@ impl Settings {
     }
 }
 
+/// What zorui-svc reads to decide whether to start Zor UI and GlazeWM at login (%ProgramData%\zor-ui\startup.json).
+fn startup_flag_json(on: bool) -> String { json!({ "run_on_startup": on }).to_string() }
+
+/// install.ps1 lets Users write this one file (svc.json stays admin-only); it holds only the on/off flag.
+fn write_startup_flag(on: bool) -> std::io::Result<()> {
+    let dir = PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("zor-ui");
+    std::fs::write(dir.join("startup.json"), startup_flag_json(on))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_flag_file_holds_the_switch() {
+        assert_eq!(super::startup_flag_json(false), r#"{"run_on_startup":false}"#);
+        assert_eq!(super::startup_flag_json(true), r#"{"run_on_startup":true}"#);
+    }
+
     #[test]
     fn a_failed_theme_step_is_reported() {
         assert_eq!(super::theme_failed(&serde_json::json!({ "ok": false, "error": "no image" })).as_deref(), Some("no image"));

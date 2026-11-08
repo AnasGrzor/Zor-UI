@@ -29,7 +29,7 @@ const TIMER_B: u32 = 7;
 const CLEAR: u32 = 8;
 const LYRICS: u32 = 9;
 /// Lines the buddy's question gets.
-const ASK_LINES: f32 = 3.0;
+const ASK_LINES: f32 = 4.0;
 const ALLOW: u32 = 10;
 const DENY: u32 = 11;
 const NOTIF: u32 = 100;

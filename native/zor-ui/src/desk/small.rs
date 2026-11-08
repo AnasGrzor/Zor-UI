@@ -1,5 +1,5 @@
 //! The small desk cards that edit shared state: "todo", "notes" and "timer" (desktop.js renderTodo / renderNotes / renderTimer).
-//! They read and write the hub keys the Zebar copies and the right sidebar share.
+//! They read and write the hub keys the right sidebar shares.
 
 use super::{h3, LH, W};
 use crate::{

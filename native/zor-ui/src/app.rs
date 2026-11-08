@@ -91,9 +91,9 @@ impl Ctx {
         }
     }
 
-    /// True if this app, not Zebar, draws `part` ("desktop", "bar", ...).
+    /// True if this app draws `part` ("desktop", "bar", ...).
     pub fn native(&self, part: &str) -> bool { self.all || self.cfg.bool(&format!("native.{part}")) }
-    /// The edge the native bar sits on (the Zebar bar is always on top).
+    /// The edge the native bar sits on.
     pub fn bar_edge(&self) -> bar::Edge { if self.native("bar") { bar::Edge::parse(self.cfg.str("bar.position")) } else { bar::Edge::Top } }
     fn island_shown(&self) -> bool { bar::layout(&self.cfg).iter().any(|m| m.0 == "island" && m.1 != "hidden") }
 }
@@ -199,7 +199,7 @@ impl App {
         crate::appicon::add(msg);
 
         std::thread::spawn(|| loop {
-            // Weather every 30 min like the Zebar provider; retry a minute after a failed fetch.
+            // Weather every 30 min; retry a minute after a failed fetch.
             match weather::fetch() {
                 Some(w) => { post(Box::new(move |cx| cx.weather = Some(w))); std::thread::sleep(std::time::Duration::from_secs(1800)); }
                 None => std::thread::sleep(std::time::Duration::from_secs(60)),
@@ -225,7 +225,7 @@ impl App {
         media::start_audio(|a| post(Box::new(move |cx| osd(cx, a))));
         tray::start(|icons| post(Box::new(move |cx| cx.tray = icons)));
         let cfg = &self.cx.cfg;
-        // These ran in the Zebar bar (bar.js); each is a bridge stream.
+        // Each of these is a bridge stream.
         if self.cx.island_shown() {
             self._streams.extend(proc::stream(cfg, "agents-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
@@ -277,7 +277,7 @@ impl App {
             self.bars.push(w);
         }
         // After docking: the tray's stand-in Shell_TrayWnd (systray-util) catches SHAppBarMessage,
-        // and Explorer ignores the app bar messages it forwards. Zebar docks first for the same reason.
+        // and Explorer ignores the app bar messages it forwards.
         self.start_bar_sources();
     }
 

@@ -1,4 +1,4 @@
-//! Weather like Zebar's providers: location from ipinfo.io, current weather from Open-Meteo.
+//! Weather: location from ipinfo.io, current weather from Open-Meteo.
 
 use crate::util::http_get;
 use serde_json::Value;
@@ -12,7 +12,7 @@ pub struct Weather {
     pub sunrise: String, pub sunset: String,
 }
 
-/// Zebar's mapping from WMO weather codes to its status names.
+/// Mapping from WMO weather codes to status names.
 pub fn status(code: u64, day: bool) -> &'static str {
     let dn = |d: &'static str, n: &'static str| if day { d } else { n };
     match code {

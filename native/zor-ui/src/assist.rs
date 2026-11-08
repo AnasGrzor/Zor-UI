@@ -343,7 +343,7 @@ pub fn screen_model(cfg: &Config) -> String {
     [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter().find(|m| !m.is_empty()).unwrap_or_default().to_string()
 }
 
-fn short(s: &str, n: usize) -> String { match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() } }
+pub fn short(s: &str, n: usize) -> String { match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() } }
 
 /// An AI reply that is a JSON action ({"do":"search","arg":"..."}), maybe inside a code fence.
 pub fn ai_action(reply: &str) -> Option<Intent> {
@@ -365,7 +365,7 @@ Otherwise answer in one or two short, friendly sentences, plain text.";
 
 /// Runs one `ai-chat` conversation (the JSON the bridge command reads) and returns the whole reply. Gives up when
 /// nothing arrives for `wait_secs`.
-fn chat(cfg: &Config, convo: &str, wait_secs: u64) -> Result<String, String> {
+pub fn chat(cfg: &Config, convo: &str, wait_secs: u64) -> Result<String, String> {
     let (tx, rx) = mpsc::channel::<Result<String, String>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
@@ -390,15 +390,10 @@ fn chat(cfg: &Config, convo: &str, wait_secs: u64) -> Result<String, String> {
 fn screen_convo(model: &str, said: &str, caps: &[screen::Cap]) -> String { convo_with(model, screen::SYSTEM, said, caps) }
 
 /// One question with a labeled picture per monitor, under the given system prompt.
-fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String {
+pub fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String {
     let images: Vec<Value> = caps.iter().enumerate()
         .map(|(i, c)| json!({ "mime": "image/jpeg", "data": crate::bridge::base64(&c.jpeg), "label": c.label(i, caps.len(), caps.first()) })).collect();
     json!({ "model": model, "messages": [{ "role": "user", "content": said, "images": images }], "system": system, "temperature": 0.2 }).to_string()
-}
-
-/// Asks the model about the pictures under its own system prompt and returns the whole reply (the take-over loop uses this).
-pub fn vision_chat(cfg: &Config, model: &str, system: &str, said: &str, caps: &[screen::Cap], wait_secs: u64) -> Result<String, String> {
-    chat(cfg, &convo_with(model, system, said, caps), wait_secs)
 }
 
 /// Where the buddy should fly for a point the model gave: screen pixels, or None when the model named a screen that isn't there.

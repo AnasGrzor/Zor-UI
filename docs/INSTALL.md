@@ -69,7 +69,7 @@ The installer uses winget to install GlazeWM, Flow Launcher and the JetBrains Mo
    | Where | What |
    |---|---|
    | `%LOCALAPPDATA%\zor-ui\` | `zorui.exe`, your saved state. |
-   | `~\.glzr\zebar\zor-ui\` | `config.json` (your settings), `theme.json` (generated colors) and the fonts. |
+   | `~\.glzr\zor-ui\` | `config.json` (your settings), `theme.json` (generated colors) and the fonts. |
    | `~\.glzr\glazewm\config.yaml` | The GlazeWM config with Zor UI's keybinds. Your old file is saved as `config.yaml.bak-<date>`. |
    | Flow Launcher, Windows Terminal | A color theme named `zor-ui` for each, regenerated whenever the wallpaper changes. |
 

@@ -1,4 +1,4 @@
-//! What Zebar's network, battery, keyboard, cpu, memory and date providers gave the bar.
+//! Network, battery, keyboard, cpu, memory and date info for the bar.
 
 use crate::util::date_fmt;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use windows::Win32::{
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Net {
-    /// "ethernet" | "wifi" | "proprietary_virtual" | "other" (Zebar's interface types).
+    /// "ethernet" | "wifi" | "proprietary_virtual" | "other".
     pub kind: &'static str,
     pub name: String,
     pub ssid: String,
@@ -177,7 +177,7 @@ pub fn memory() -> ((f64, f64), (f64, f64)) {
     (ram, ((commit - ram.0).clamp(0.0, swap_total), swap_total))
 }
 
-/// Luxon's toFormat() tokens, which Zebar's date provider used for config clockFormat.
+/// Luxon's toFormat() tokens, which config clockFormat uses.
 pub fn luxon(fmt: &str, st: &SYSTEMTIME) -> String {
     let chars: Vec<char> = fmt.chars().collect();
     let (mut out, mut i) = (String::new(), 0);

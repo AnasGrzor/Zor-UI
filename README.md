@@ -155,7 +155,7 @@ don't have Wallpaper Engine and want video wallpapers.
 
 The installer:
 1. Installs GlazeWM, Flow Launcher, JetBrains Mono Nerd Font (and Lively with `-WithLively`) using winget.
-2. Copies `zorui.exe` (prebuilt in the release, built with `cargo` from a clone) to `%LOCALAPPDATA%\zor-ui` and the fonts to `~\.glzr\zebar\zor-ui`, where `config.json` and `theme.json` also live. It removes the old Zebar pack and Python environment if they are there.
+2. Copies `zorui.exe` (prebuilt in the release, built with `cargo` from a clone) to `%LOCALAPPDATA%\zor-ui` and the fonts to `~\.glzr\zor-ui`, where `config.json` and `theme.json` also live. It moves settings out of an old `~\.glzr\zebar\zor-ui` folder, then removes Zebar (the program, its autostart entries and its folder, which is renamed to `zebar.bak-<time>`), the old widget pack and the Python environment if they are there.
 3. Writes `~\.glzr\glazewm\config.yaml`. Your old config is backed up as `config.yaml.bak-<date>`.
 4. Selects the Zor UI Flow Launcher theme, generates colors from your wallpaper, and starts GlazeWM, which starts the shell.
 
@@ -287,7 +287,7 @@ setup and switch back later.
 
 ## Customize
 
-Everything is in **Settings** (`Mod+I`). It edits `~\.glzr\zebar\zor-ui\config.json`, which you can also open
+Everything is in **Settings** (`Mod+I`). It edits `~\.glzr\zor-ui\config.json`, which you can also open
 from Settings > Config file. Command-line
 equivalents for theming:
 

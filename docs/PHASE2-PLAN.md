@@ -20,7 +20,7 @@ All code is in `native/zor-ui/src`. The tree is not committed, and other work is
 
 How a spoken command reaches the code: the GlazeWM hotkey `alt+b` runs `zorui.exe --buddy listen`. It records, stops after about 1 s of silence, transcribes with Parakeet on the PC, then calls `assist::ask`. For tests you can send the same text by typing: `zorui.exe --buddy "where is the save button"`.
 
-Config lives in `%USERPROFILE%\.glzr\zebar\zor-ui\config.json`. The installed exe is `%LOCALAPPDATA%\zor-ui\zorui.exe`. Logs and `crash.log` are in `%LOCALAPPDATA%\zor-ui`.
+Config lives in `%USERPROFILE%\.glzr\zor-ui\config.json`. The installed exe is `%LOCALAPPDATA%\zor-ui\zorui.exe`. Logs and `crash.log` are in `%LOCALAPPDATA%\zor-ui`.
 
 ## 2. Goal and scope
 

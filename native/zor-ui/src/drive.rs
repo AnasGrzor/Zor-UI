@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::{
     core::w,
     Win32::{
-        Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{CloseHandle, BOOL, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
         Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
         System::{
             Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
             LibraryLoader::GetModuleHandleW,
-            Threading::{GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
         },
         UI::{
             Accessibility::{CUIAutomation, IUIAutomation},
@@ -34,6 +34,8 @@ pub const MAX_TEXT: usize = 500;
 /// How far (screen px) the pointer may be from where the drive left it before it counts as you moving it, and how long it must rest.
 pub const MOVE_PX: i32 = 24;
 pub const REST_MS: u64 = 150;
+/// Pause after every action: the app moves focus when it handles the click, and keys sent before that go to the old control.
+pub const SETTLE_MS: u64 = 150;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Btn { Left, Right }
@@ -319,7 +321,13 @@ fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
     for round in 1..=max {
         if let Some(s) = g.check() { return s; }
         let caps = match g.h.capture() { Ok(c) => c, Err(e) => return Stop::Error(e) };
-        let text = match g.h.model(goal, &history, &caps) { Ok(t) => t, Err(e) => return Stop::Error(e) };
+        let text = match g.h.model(goal, &history, &caps) {
+            Ok(t) => t,
+            // a model call cut short by Esc, your voice or the clock reports that instead of an error
+            Err(e) => return g.h.halted().or_else(|| (g.h.now_ms().saturating_sub(g.start) > g.limit).then_some(Stop::Time)).unwrap_or(Stop::Error(e)),
+        };
+        // your hand is still on the mouse after the yes, and the model takes seconds: only moves from here on count
+        g.watch.expect(g.h.cursor());
         let Some(reply) = parse_reply(&text) else {
             bad += 1;
             if bad >= 2 { return Stop::Error("I couldn't understand my own plan.".into()); }
@@ -372,6 +380,7 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], a: &Action, approved: &
     g.h.act(a, at).map_err(|e| if e.contains("administrator") { Stop::Refused(e) } else { Stop::Error(e) })?;
     let aimed = at.unwrap_or_else(|| g.h.cursor()); // where we put it, not where it is: a grab during the action must still show
     g.watch.expect(aimed);
+    if let Some(s) = g.pause(SETTLE_MS) { return Err(s); }
     Ok(a.describe())
 }
 
@@ -411,7 +420,7 @@ fn island_open() -> bool {
 
 /// Asks in the island panel and waits for Allow or Deny. No answer in 90 s, Esc, or your voice is a no.
 fn ask_island(q: &str) -> bool {
-    if let Ok(mut a) = ASK.lock() { *a = Some((q.chars().take(150).collect(), None)); }
+    if let Ok(mut a) = ASK.lock() { *a = Some((q.chars().take(260).collect(), None)); }
     // opening a panel that is already open would close it
     if !island_open() { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::open("island-panel")))); }
     let start = std::time::Instant::now();
@@ -471,6 +480,30 @@ impl Drop for EscHook {
     }
 }
 
+/// An extended window style with the click-through flag set or cleared.
+pub fn with_pass_through(ex: isize, on: bool) -> isize {
+    let f = WS_EX_TRANSPARENT.0 as isize;
+    if on { ex | f } else { ex & !f }
+}
+
+/// Makes the buddy windows let mouse clicks through (or not). Their ring and label sit right on the target, and a
+/// click on them is a click on the buddy, not on the app.
+fn pass_through(on: bool) {
+    unsafe extern "system" fn each(h: HWND, data: LPARAM) -> BOOL {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
+            let mut t = [0u16; 64];
+            let n = GetWindowTextW(h, &mut t).max(0) as usize;
+            if String::from_utf16_lossy(&t[..n]).starts_with("Zor UI / gojo") {
+                SetWindowLongPtrW(h, GWL_EXSTYLE, with_pass_through(GetWindowLongPtrW(h, GWL_EXSTYLE), data.0 != 0));
+            }
+        }
+        BOOL(1)
+    }
+    unsafe { let _ = EnumWindows(Some(each), LPARAM(on as isize)); }
+}
+
 fn send(inputs: &[INPUT]) -> bool { inputs.is_empty() || unsafe { SendInput(inputs, size_of::<INPUT>() as i32) as usize == inputs.len() } }
 
 fn virtual_screen() -> (i32, i32, i32, i32) {
@@ -512,13 +545,30 @@ fn focused_is_password() -> bool {
     }
 }
 
-struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, t0: std::time::Instant }
+struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, t0: std::time::Instant, limit_ms: u64 }
 
 impl Host for Live<'_> {
     fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { screen::capture_all() }
     fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap]) -> Result<String, String> {
         let done = if history.is_empty() { "nothing yet".to_string() } else { history.join("\n") };
-        assist::vision_chat(self.cfg, &self.model, SYSTEM, &format!("Goal: {goal}\n\nWhat you did so far:\n{done}\n\nThe screens now are attached. Answer with the JSON."), caps, 90)
+        let convo = assist::convo_with(&self.model, SYSTEM, &format!("Goal: {goal}
+
+What you did so far:
+{done}
+
+The screens now are attached. Answer with the JSON."), caps);
+        // the call runs on its own thread so Esc, your voice and the time limit still work while the model thinks
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cfg = Config(self.cfg.0.clone());
+        std::thread::spawn(move || { let _ = tx.send(assist::chat(&cfg, &convo, 90)); });
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(r) => return r,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("I got no answer from the AI.".into()),
+                Err(_) if ESC.load(Ordering::Relaxed) || VOICE.load(Ordering::Relaxed) || self.now_ms() > self.limit_ms => return Err("stopped while waiting for the AI".into()),
+                Err(_) => {}
+            }
+        }
     }
     fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
         crate::log::line(&format!("drive: {} {:?}", a.describe(), at));
@@ -563,13 +613,16 @@ pub fn start(cfg: &Config, goal: &str) -> String {
     if ACTIVE.swap(true, Ordering::Relaxed) { return "I'm already driving. Press Esc to stop me.".into(); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
-        let mut live = Live { cfg: &cfg, model, held: vec![], t0: std::time::Instant::now() };
+        let lim = limits(&cfg);
+        let mut live = Live { cfg: &cfg, model, held: vec![], t0: std::time::Instant::now(), limit_ms: lim.ms };
         ESC.store(false, Ordering::Relaxed);
         VOICE.store(false, Ordering::Relaxed);
-        let q = format!("Take over your mouse and keyboard to: {goal}. Pictures of your screens go to the AI. Esc stops it.");
+        let q = format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(&goal, 140));
         let line = if !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
             live.t0 = std::time::Instant::now();
-            let stop = run(&mut live, &goal, limits(&cfg));
+            pass_through(true);
+            let stop = run(&mut live, &goal, lim);
+            pass_through(false);
             drop(hook);
             crate::log::line(&format!("drive ended: {stop:?}"));
             stop.message()
@@ -742,6 +795,15 @@ mod tests {
     }
 
     #[test]
+    fn the_buddy_lets_clicks_through_only_while_driving() {
+        let plain = WS_EX_TOPMOST.0 as isize | WS_EX_LAYERED.0 as isize;
+        let on = with_pass_through(plain, true);
+        assert_eq!(on, plain | WS_EX_TRANSPARENT.0 as isize);
+        assert_eq!(with_pass_through(on, false), plain, "the other styles are untouched both ways");
+        assert_eq!(with_pass_through(on, true), on);
+    }
+
+    #[test]
     fn every_stop_says_the_mouse_is_back() {
         for s in [Stop::Done, Stop::Esc, Stop::Voice, Stop::UserMouse, Stop::Rounds, Stop::Time, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
             assert!(s.message().contains("mouse"), "{s:?}");
@@ -763,20 +825,21 @@ mod tests {
     /// A pretend PC: a scripted model, recorded actions, a clock that only moves when asked to sleep.
     struct Fake {
         replies: VecDeque<Result<String, String>>,
-        did: Vec<String>, said: Vec<String>, asked: Vec<String>, models: usize, released: bool,
-        now: u64, mouse: (i32, i32), halt_after: Option<usize>, yes: bool, password: bool, blocked: bool, shaky: bool,
+        did: Vec<String>, did_at: Vec<u64>, said: Vec<String>, asked: Vec<String>, models: usize, released: bool,
+        now: u64, mouse: (i32, i32), halt_after: Option<usize>, yes: bool, password: bool, blocked: bool, shaky: bool, grab_while_thinking: bool, think_ms: u64,
     }
 
     fn fake(replies: &[&str]) -> Fake {
-        Fake { replies: replies.iter().map(|r| Ok(r.to_string())).collect(), did: vec![], said: vec![], asked: vec![], models: 0, released: false,
-               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false }
+        Fake { replies: replies.iter().map(|r| Ok(r.to_string())).collect(), did: vec![], did_at: vec![], said: vec![], asked: vec![], models: 0, released: false,
+               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0 }
     }
 
     impl Host for Fake {
         fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { Ok(vec![cap(0, 1920, true)]) }
-        fn model(&mut self, _: &str, _: &[String], _: &[screen::Cap]) -> Result<String, String> { self.models += 1; self.replies.pop_front().unwrap_or(Ok("{\"done\":true}".into())) }
+        fn model(&mut self, _: &str, _: &[String], _: &[screen::Cap]) -> Result<String, String> { self.models += 1; self.now += self.think_ms; if self.grab_while_thinking { self.mouse = (self.mouse.0 + 500, self.mouse.1 + 200); self.now += 5000; } self.replies.pop_front().unwrap_or(Ok("{\"done\":true}".into())) }
         fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
             self.did.push(a.describe());
+            self.did_at.push(self.now);
             if let Some(p) = at { self.mouse = p; }
             if self.shaky { self.mouse = (self.mouse.0 + 300, self.mouse.1); } // you grabbed the mouse right after
             Ok(())
@@ -835,6 +898,22 @@ mod tests {
     }
 
     #[test]
+    fn typing_waits_for_the_click_to_move_focus() {
+        let mut f = fake(&[r#"{"actions":[{"type":"left_click","x":1,"y":1,"label":"Name box"},{"type":"type","text":"hi"}]}"#, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Done);
+        assert_eq!(f.did.len(), 2);
+        assert!(f.did_at[1] - f.did_at[0] >= SETTLE_MS, "keys sent at once after a click go to the old control: {:?}", f.did_at);
+    }
+
+    #[test]
+    fn moving_the_mouse_while_the_model_thinks_is_not_taking_over() {
+        let mut f = fake(&[CLICK, DONE]);
+        f.grab_while_thinking = true; // your hand was still on the mouse after clicking yes
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Done);
+        assert_eq!(f.did.len(), 1, "the click went ahead");
+    }
+
+    #[test]
     fn it_never_types_into_a_password_field() {
         let mut f = fake(&[r#"{"actions":[{"type":"type","text":"hunter2"}]}"#]);
         f.password = true;
@@ -868,6 +947,18 @@ mod tests {
         let mut f = fake(&[asked, DONE]);
         assert_eq!(run(&mut f, "x", limits_(5, 60_000)), Stop::Done);
         assert_eq!(f.asked, ["Send it?"], "one yes from the model's own ask covers that click");
+    }
+
+    #[test]
+    fn esc_during_a_slow_model_call_still_stops() {
+        let mut f = fake(&[]);
+        f.replies.push_back(Err("stopped while waiting for the AI".into()));
+        f.halt_after = Some(1); // the check at the top of the round passes, the one after the failed call sees Esc
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Esc);
+        let mut f = fake(&[]);
+        f.replies.push_back(Err("stopped while waiting for the AI".into()));
+        f.think_ms = 700_000; // the clock ran out while waiting
+        assert_eq!(run(&mut f, "x", limits_(5, 600_000)), Stop::Time);
     }
 
     #[test]

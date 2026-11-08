@@ -268,7 +268,7 @@ impl Win {
         unsafe { let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); }
     }
 
-    /// Reserves `h` physical px along `edge` of the monitor for this window (Zebar's dockToEdge), so
+    /// Reserves `h` physical px along `edge` of the monitor for this window (dockToEdge), so
     /// maximised windows and GlazeWM's tiling stay clear of it.
     pub fn dock(&mut self, mon: RECT, edge: crate::bar::Edge, h: i32) {
         unsafe {

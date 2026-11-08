@@ -1,4 +1,4 @@
-//! System tray icons through systray-util (the crate Zebar's systray provider uses): it stands in
+//! System tray icons through systray-util: it stands in
 //! for the taskbar's tray so apps send their icons here. Runs on its own thread.
 
 use std::sync::{mpsc, Arc, Mutex, OnceLock};

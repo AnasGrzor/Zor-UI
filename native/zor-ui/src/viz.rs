@@ -39,7 +39,7 @@ pub struct Viz {
     _stream: Option<proc::Stream>,
 }
 
-/// One stream line -> levels (the Zebar page ignores lines of 4 or fewer numbers).
+/// One stream line -> levels (lines of 4 or fewer numbers are ignored).
 pub fn parse_levels(line: &str) -> Option<Vec<f32>> {
     let v: Vec<f32> = line.split_whitespace().map(|s| s.parse().ok()).collect::<Option<_>>()?;
     (v.len() > 4).then_some(v)

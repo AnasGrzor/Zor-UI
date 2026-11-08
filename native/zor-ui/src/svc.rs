@@ -192,6 +192,11 @@ fn now_ms() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// startup.json, `{"run_on_startup": false}`: the Settings switch "Start Zor UI and GlazeWM at login". Missing or unreadable means on.
+fn startup_enabled(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).ok().and_then(|v| v.get("run_on_startup").and_then(|x| x.as_bool())).unwrap_or(true)
+}
+
 fn load_cfg() -> Result<Cfg, String> {
     let p = data_dir().join("svc.json");
     parse_cfg(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?)
@@ -396,6 +401,7 @@ struct Notes {
     explorer: bool,
     ready: bool,
     gate: bool,
+    off: bool,
     cfg_err: Option<String>,
 }
 
@@ -436,6 +442,14 @@ fn step(st: &mut Run) {
         return;
     };
     st.notes.no_user = false;
+    if !startup_enabled(&std::fs::read_to_string(data_dir().join("startup.json")).unwrap_or_default()) {
+        if !st.notes.off {
+            st.notes.off = true;
+            log("startup.json turns run on startup off: starting nothing");
+        }
+        return;
+    }
+    st.notes.off = false;
     let cfg = match load_cfg() {
         Ok(c) => {
             st.notes.cfg_err = None;
@@ -592,6 +606,15 @@ mod tests {
     fn exe_name_is_the_lower_case_file_name() {
         assert_eq!(exe_name("C:\\Program Files\\glzr.io\\GlazeWM\\GlazeWM.exe"), "glazewm.exe");
         assert_eq!(exe_name("zorui.exe"), "zorui.exe");
+    }
+
+    #[test]
+    fn startup_flag_defaults_to_on() {
+        assert!(startup_enabled(""));
+        assert!(startup_enabled("not json"));
+        assert!(startup_enabled("{}"));
+        assert!(startup_enabled(r#"{"run_on_startup": true}"#));
+        assert!(!startup_enabled(r#"{"run_on_startup": false}"#));
     }
 
     #[test]

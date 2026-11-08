@@ -36,7 +36,7 @@ $Repo = $PSScriptRoot
 $Root = Join-Path $env:LOCALAPPDATA 'zor-ui'
 $Scripts = Join-Path $Root 'scripts'
 $Glzr = Join-Path $env:USERPROFILE '.glzr'
-$Pack = Join-Path $Glzr 'zebar\zor-ui'
+$Pack = Join-Path $Glzr 'zor-ui'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Utf8 = New-Object System.Text.UTF8Encoding $false   # no BOM
 
@@ -65,14 +65,17 @@ if ([Environment]::OSVersion.Version.Major -lt 10) { throw 'Zor UI needs Windows
 # Python environment carry over. Runs once: it does nothing when the old folders are gone.
 $oldRoot = Join-Path $env:LOCALAPPDATA 'end4-pC'
 $oldPack = Join-Path $Glzr 'zebar\end4-pC'
+$zebarPack = Join-Path $Glzr 'zebar\zor-ui'   # where the settings lived while the shell ran inside Zebar
 $oldFlow = Join-Path $env:APPDATA 'FlowLauncher\Themes\end4-pC.xaml'
 $oldFrag = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\end4-pC'
-if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
-  Step 'Moving settings from the old end4-pC name'
+if ((Test-Path $oldRoot) -or (Test-Path $oldPack) -or (Test-Path $zebarPack) -or (Test-Path $oldFlow) -or (Test-Path $oldFrag)) {
+  Step 'Moving settings out of the old end4-pC and Zebar folders'
   Get-Process end4, zorui, zebar -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 1
   if ((Test-Path $oldRoot) -and -not (Test-Path $Root)) { Move-Item $oldRoot $Root; Info "moved $oldRoot" }
-  if ((Test-Path $oldPack) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $oldPack $Pack; Info "moved $oldPack" }
+  foreach ($op in $zebarPack, $oldPack) {
+    if ((Test-Path $op) -and -not (Test-Path $Pack)) { New-Item -ItemType Directory -Force (Split-Path $Pack) | Out-Null; Move-Item $op $Pack; Info "moved $op" }
+  }
   if ((Test-Path $oldFlow) -and -not (Test-Path ($oldFlow -replace 'end4-pC', 'zor-ui'))) { Move-Item $oldFlow ($oldFlow -replace 'end4-pC', 'zor-ui') }
   if ((Test-Path $oldFrag) -and -not (Test-Path ($oldFrag -replace 'end4-pC', 'zor-ui'))) {
     Move-Item $oldFrag ($oldFrag -replace 'end4-pC', 'zor-ui')
@@ -90,6 +93,26 @@ foreach ($f in @($stale)) {
   [IO.File]::WriteAllText($f, ([IO.File]::ReadAllText($f) -replace 'end4-pC', 'zor-ui'), $Utf8)
   Info "updated $f"
 }
+
+# ------------------------------------------------------------------ 0b. Zebar
+# Zebar's own default bar would draw a second bar under ours, so remove Zebar and everything that starts it.
+# The settings were moved out of its folder above; the folder itself is renamed, not deleted, in case it holds the user's own widgets.
+Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+if (-not $SkipDeps -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+  Invoke-Native { winget list --id glzr-io.zebar -e --accept-source-agreements 2>&1 | Out-Null }
+  if ($LASTEXITCODE -eq 0) {
+    Step 'Removing Zebar'
+    Invoke-Native { winget uninstall --id glzr-io.zebar -e --silent 2>&1 | Out-Null }
+  }
+}
+Get-ChildItem ([Environment]::GetFolderPath('Startup')) -Filter '*zebar*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+foreach ($n in @((Get-Item $runKey -ErrorAction SilentlyContinue).Property | Where-Object { $_ -match 'zebar' })) {
+  Remove-ItemProperty -Path $runKey -Name $n -ErrorAction SilentlyContinue
+}
+Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'zebar' } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+$zebarDir = Join-Path $Glzr 'zebar'
+if (Test-Path $zebarDir) { Move-Item $zebarDir "$zebarDir.bak-$Stamp" -Force -ErrorAction SilentlyContinue; Info "Zebar folder kept as zebar.bak-$Stamp" }
 
 # ------------------------------------------------------------------ 1. apps
 if (-not $SkipDeps) {
@@ -120,8 +143,7 @@ Copy-Item -Recurse -Force (Join-Path $Repo 'scripts\terminal') $Scripts
 Copy-Item -Recurse -Force (Join-Path $Repo 'flowlauncher') $Root
 New-Item -ItemType Directory -Force -Path $Pack | Out-Null
 Copy-Item -Recurse -Force (Join-Path $Repo 'assets') $Pack
-# The Zebar widget pack and Python helpers of older versions are gone: remove what they left behind.
-Get-Process zebar -ErrorAction SilentlyContinue | Stop-Process -Force
+# The widget pack and Python helpers of older versions are gone: remove what they left behind.
 foreach ($old in 'lib', 'we-thumbs') { Remove-Item -Recurse -Force (Join-Path $Pack $old) -ErrorAction SilentlyContinue }
 foreach ($pat in '*.html', '*.js', 'zpack.json') { Remove-Item -Force (Join-Path $Pack $pat) -ErrorAction SilentlyContinue }
 Remove-Item -Recurse -Force (Join-Path $Root 'venv') -ErrorAction SilentlyContinue
@@ -189,18 +211,6 @@ if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add 
   }
 }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
-
-# Zebar (if still installed) must not start the removed widgets: drop zor-ui from its startup list.
-$zebarSettings = Join-Path $Glzr 'zebar\settings.json'
-if (Test-Path $zebarSettings) {
-  try {
-    $zs = Get-Content $zebarSettings -Raw | ConvertFrom-Json
-    if ($zs.startupConfigs) {
-      $zs.startupConfigs = @($zs.startupConfigs | Where-Object { $_.pack -ne 'zor-ui' })
-      Write-Text $zebarSettings ($zs | ConvertTo-Json -Depth 6)
-    }
-  } catch { Info "couldn't update $zebarSettings" }
-}
 
 # ------------------------------------------------------------------ 4. glazewm config
 Step 'Writing the GlazeWM config'
@@ -299,6 +309,10 @@ if (-not $glaze) {
       Write-Text (Join-Path $svcData 'svc.json') (@{ glazewm = $glaze; zorui = $native; settle_ms = 8000 } | ConvertTo-Json)
       # The service runs as SYSTEM and starts what this file names, so only admins may edit it.
       Invoke-Native { & icacls $svcData /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null }
+      # The Settings switch "Start Zor UI and GlazeWM at login" writes this flag; Users may write only this file. A re-install keeps its value.
+      $flag = Join-Path $svcData 'startup.json'
+      if (-not (Test-Path $flag)) { Write-Text $flag '{"run_on_startup":true}' }
+      Invoke-Native { & icacls $flag /grant:r 'Users:M' | Out-Null }
       if (-not (Get-Service ZorShell -ErrorAction SilentlyContinue)) {
         Invoke-Native { & sc.exe create ZorShell binPath= "`"$svcExe`"" start= auto DisplayName= 'Zor UI shell launcher' | Out-Null }
       } else {

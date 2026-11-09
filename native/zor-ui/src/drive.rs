@@ -832,6 +832,13 @@ fn top_windows() -> Vec<(HWND, String)> {
     v
 }
 
+/// The title of the window in front, or nothing when there is none.
+pub fn front_title() -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetWindowTextW(GetForegroundWindow(), &mut buf) }.max(0) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
 /// The clickable and typeable things in the front window, through UI Automation. Slow or empty for some apps (games, some
 /// Electron ones): then the list is short or empty and the model uses the picture. It stops after `WALK_MS`.
 fn walk_front_window() -> Vec<El> {

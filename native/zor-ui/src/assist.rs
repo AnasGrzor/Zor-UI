@@ -549,7 +549,27 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
 /// Runs `said` on a worker thread and shows the result in the primary buddy's bubble.
 pub fn ask(cfg: &Config, said: &str) {
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
-    std::thread::spawn(move || { say_later("On it…", 3.0); report(run(parse(&said), &cfg)); });
+    std::thread::spawn(move || {
+        say_later("On it…", 3.0);
+        // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
+        let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
+        let r = match run(parse(&said), &cfg) {
+            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask(&cfg, &retry_text(&said, &e)),
+            r => r,
+        };
+        report(r);
+    });
+}
+
+/// True when a fixed command failed and the AI should get the sentence instead. Not when the AI is off, not for a
+/// feature the user turned off in Settings, and not for Message, Screen, Drive or Chat (those asked or went to the AI already).
+pub fn falls_back(intent: &Intent, err: &str, ai_on: bool) -> bool {
+    ai_on && matches!(intent, Intent::Open(_) | Intent::Play { .. } | Intent::Search(_)) && !err.contains("turned off")
+}
+
+/// The sentence the AI gets after a fixed command failed: what was said, and why the fixed command could not do it.
+pub fn retry_text(said: &str, err: &str) -> String {
+    format!("{}\n(I first tried it as a fixed command and it failed: {err} Find another way.)", said.trim())
 }
 
 /// Bridge arguments for the speech model folder and microphone name; empty ones are left out.
@@ -823,6 +843,23 @@ mod tests {
         assert!(format_contact("a=b", "discord", "1").is_none());
         assert!(format_contact("a,b", "discord", "1").is_none());
         assert!(format_contact("a", "discord", "1,2").is_none());
+    }
+
+    #[test]
+    fn a_failed_fixed_command_falls_back_to_the_ai() {
+        let (open, play, search) = (Intent::Open("a timer".into()), Intent::Play { query: "x".into(), service: String::new() }, Intent::Search("x".into()));
+        let err = "No app called a timer.";
+        for i in [&open, &play, &search] { assert!(falls_back(i, err, true), "{i:?}"); }
+        for i in [&open, &play, &search] { assert!(!falls_back(i, err, false), "{i:?}: the AI is off"); }
+        assert!(!falls_back(&open, "Opening apps is turned off in Settings.", true), "a feature turned off stays off");
+        assert!(!falls_back(&Intent::Message { to: "a".into(), text: "b".into(), via: String::new() }, err, true));
+        assert!(!falls_back(&Intent::Chat("hi".into()), err, true));
+        assert!(!falls_back(&Intent::Drive("click save".into()), err, true));
+        assert!(!falls_back(&Intent::Screen("what's on my screen".into()), err, true));
+        let text = retry_text("  start a timer ", err);
+        assert!(text.starts_with("start a timer\n"), "{text}");
+        assert!(text.contains(err), "{text}");
+        assert_eq!(parse("start a timer"), Intent::Open("a timer".into()), "the misfire the fallback catches");
     }
 
     #[test]

@@ -13,6 +13,7 @@ use windows::{
     core::w,
     Win32::{
         Foundation::{CloseHandle, BOOL, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
+        Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
         Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
         System::{
             Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED},
@@ -52,7 +53,18 @@ pub enum Act {
     Wait(u64),
     /// Pause and ask the user a yes/no question.
     Ask(String),
+    /// A direct tool instead of clicking: the argument is a target, an app name or a window title ("" for `Windows`).
+    Tool(Tool, String),
 }
+
+/// Things the buddy can do without driving the screen. `Open` and `Launch` ask you each time and show the exact target.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Tool { Open, Launch, Focus, Windows }
+
+impl Tool {
+    pub fn asks(self) -> bool { matches!(self, Tool::Open | Tool::Launch) }
+}
+
 
 /// One action as the model sent it. `pos` is in the picture's pixels on screen `screen` (default: screen 1).
 #[derive(Debug, PartialEq, Clone)]
@@ -72,8 +84,54 @@ impl Action {
             Act::Scroll(dx, dy) => format!("scrolled {dx},{dy}{at}"),
             Act::Wait(ms) => format!("waited {ms} ms"),
             Act::Ask(q) => format!("asked \"{q}\""),
+            Act::Tool(Tool::Open, t) => format!("opened {}", assist::short(t, 60)),
+            Act::Tool(Tool::Launch, t) => format!("launched {}", assist::short(t, 60)),
+            Act::Tool(Tool::Focus, t) => format!("brought \"{}\" to the front", assist::short(t, 60)),
+            Act::Tool(Tool::Windows, _) => "listed the open windows".to_string(),
         }
     }
+}
+
+/// Longest target, app name or title a tool takes.
+pub const MAX_TARGET: usize = 300;
+
+/// File types `open` refuses: they run code, so they are not "opening" anything. (The Start Menu is what `launch` uses.)
+const NO_OPEN: [&str; 30] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "scr", "lnk", "reg", "hta", "jar", "cpl",
+    "dll", "pif", "url", "docm", "xlsm", "pptm", "appx", "msix", "py", "sh"];
+
+/// A web address or a path that `open` may hand to Windows. Only http(s) links and plain local paths pass: no other protocol
+/// (`ms-settings:`, `file:`, `javascript:`), no network shares (they send your login), no `%VARS%`, no programs.
+pub fn open_target(arg: &str) -> Result<String, String> {
+    let t = arg.trim();
+    if t.is_empty() || t.chars().count() > MAX_TARGET || t.chars().any(|c| c.is_control() || c == '"' || c == '%' || c == '|' || c == '<' || c == '>') {
+        return Err("that is not something I can open".into());
+    }
+    if let Some(i) = t.find(':').filter(|&i| i > 1) {
+        let lower = t.to_lowercase();
+        let host = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://"));
+        return match (&t[..i].to_lowercase()[..], host) {
+            ("http" | "https", Some(h)) if h.chars().next().is_some_and(|c| c.is_alphanumeric()) => Ok(t.to_string()),
+            _ => Err("I only open web links that start with http or https, and files and folders".into()),
+        };
+    }
+    if t.starts_with("\\\\") || t.starts_with("//") { return Err("I don't open network shares".into()); }
+    let ext = t.rsplit(['\\', '/']).next().unwrap_or("").rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    if NO_OPEN.contains(&ext.as_str()) { return Err(format!("I don't open .{ext} files, they run code; use launch for apps")); }
+    Ok(t.to_string())
+}
+
+/// The window title that best fits what the model asked for: an exact match, then one that starts with it, then one that contains it (any case).
+pub fn pick_title(titles: &[String], query: &str) -> Option<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() { return None; }
+    let rank = |t: &str| { let t = t.to_lowercase(); if t == q { Some(0) } else if t.starts_with(&q) { Some(1) } else if t.contains(&q) { Some(2) } else { None } };
+    titles.iter().enumerate().filter_map(|(i, t)| rank(t).map(|r| (r, i))).min().map(|(_, i)| i)
+}
+
+/// Window titles for the model, short and capped.
+pub fn titles_text(titles: &[String]) -> String {
+    if titles.is_empty() { return "no windows are open".into(); }
+    titles.iter().take(25).map(|t| assist::short(t, 60)).collect::<Vec<_>>().join("; ")
 }
 
 /// The virtual-key code for one key name; the aliases people and models use (cmd, opt, esc, return, del ...) all work.
@@ -127,6 +185,12 @@ pub fn parse_action(v: &Value) -> Option<Action> {
         }
         "wait" => act = Some(Act::Wait(v["ms"].as_u64().unwrap_or(500).min(5000))),
         "ask" => act = Some(Act::Ask(text("question").or_else(|| text("text"))?.chars().take(200).collect())),
+        t @ ("open" | "launch" | "focus" | "windows") => {
+            let arg: String = ["target", "text", "name", "title"].iter().find_map(|k| text(k)).unwrap_or("").chars().take(MAX_TARGET).collect();
+            let tool = match t { "open" => Tool::Open, "launch" => Tool::Launch, "focus" => Tool::Focus, _ => Tool::Windows };
+            if arg.is_empty() && tool != Tool::Windows { return None; }
+            act = Some(Act::Tool(tool, arg));
+        }
         _ => {}
     }
     Some(Action { act: act?, pos: p, screen: v["screen"].as_u64().map(|n| n as usize), label: v["label"].as_str().unwrap_or("").chars().take(40).collect() })
@@ -276,6 +340,8 @@ pub trait Host {
     fn point(&mut self, at: (i32, i32), label: &str);
     fn confirm(&mut self, question: &str) -> bool;
     fn password_focused(&self) -> bool;
+    /// Runs one direct tool (the target is already checked and, for `Open` and `Launch`, approved). Returns what the model hears back.
+    fn tool(&mut self, tool: Tool, arg: &str) -> Result<String, String>;
     /// The front window is running as administrator, so it ignores our input.
     fn front_blocks_input(&self) -> bool;
     fn release(&mut self);
@@ -363,6 +429,18 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], a: &Action, approved: &
     if let Act::Wait(ms) = a.act {
         return match g.pause(ms) { Some(s) => Err(s), None => Ok(a.describe()) };
     }
+    if let Act::Tool(tool, arg) = &a.act {
+        // tools send no input, so the password and administrator checks don't apply; opening and launching ask every time
+        let arg = if *tool == Tool::Open { open_target(arg).map_err(Stop::Error)? } else { arg.clone() };
+        if tool.asks() {
+            let q = if *tool == Tool::Open { format!("The buddy wants to open {}. Allow it?", assist::short(&arg, 200)) } else { format!("The buddy wants to start the app \"{}\". Allow it?", assist::short(&arg, 80)) };
+            if !g.h.confirm(&q) { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+            g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
+        }
+        let out = g.h.tool(*tool, &arg).map_err(Stop::Error)?;
+        if let Some(s) = g.pause(if tool.asks() { 1200 } else { SETTLE_MS }) { return Err(s); } // an opened app needs a moment to appear
+        return Ok(format!("{}{}", a.describe(), if out.is_empty() { String::new() } else { format!(": {out}") }));
+    }
     let at = resolve(caps, a).map_err(Stop::Error)?;
     if matches!(a.act, Act::Click(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
         return Err(Stop::Refused("You said no, so I stopped.".into()));
@@ -394,7 +472,10 @@ Set done to true, with an empty actions list, when the goal is reached or cannot
 in the picture's pixels (origin top-left) and screen set to the screen number when there is more than one: \
 {\"type\":\"left_click\",\"x\":0,\"y\":0,\"screen\":1,\"label\":\"2 words naming the target\"}, right_click, double_click, triple_click, mouse_move, \
 {\"type\":\"type\",\"text\":\"...\"}, {\"type\":\"keys\",\"keys\":\"ctrl+s\"}, {\"type\":\"scroll\",\"x\":0,\"y\":0,\"dy\":3} (dy positive scrolls down), \
-{\"type\":\"wait\",\"ms\":500}, {\"type\":\"ask\",\"question\":\"...\"}. Always put a click's label. Look at the new picture after every turn \
+{\"type\":\"wait\",\"ms\":500}, {\"type\":\"ask\",\"question\":\"...\"}. Direct tools are faster and surer than clicking, so use one when it fits and click only when none does: \
+{\"type\":\"launch\",\"target\":\"app name\"} starts an installed app, {\"type\":\"open\",\"target\":\"https://... or a file or folder path\"} opens a link, file or folder \
+(the user is asked each time; programs and scripts are refused), {\"type\":\"focus\",\"target\":\"part of a window title\"} brings a window to the front, \
+{\"type\":\"windows\"} lists the open window titles (they come back in your history). Always put a click's label. Look at the new picture after every turn \
 and only do what you can see. Never type into a password field. Before anything that sends, deletes, buys or pays, or that you cannot undo, \
 use an ask action and wait for the answer. Do only the goal and nothing else. The first thing you say must ask the user to keep their hands off the mouse.";
 
@@ -537,6 +618,27 @@ fn front_blocks() -> bool {
     }
 }
 
+/// Real windows you could switch to: visible, titled, not hidden by Windows, not a popup or tool window, not ours.
+fn top_windows() -> Vec<(HWND, String)> {
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> BOOL {
+        let out = &mut *(l.0 as *mut Vec<(HWND, String)>);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, size_of::<u32>() as u32);
+        let tool = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        if IsWindowVisible(h).as_bool() && cloaked == 0 && !tool && pid != GetCurrentProcessId() && GetWindow(h, GW_OWNER).map_or(true, |o| o.0.is_null()) {
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(h, &mut buf).max(0) as usize;
+            if n > 0 { out.push((h, String::from_utf16_lossy(&buf[..n]))); }
+        }
+        true.into()
+    }
+    let mut v: Vec<(HWND, String)> = vec![];
+    unsafe { let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize)); }
+    v
+}
+
 fn focused_is_password() -> bool {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -575,7 +677,7 @@ The screens now are attached. Answer with the JSON."), caps);
         let fail = |what: &str| format!("Windows refused the {what}; the window in front may run as administrator.");
         if let Some((x, y)) = at { if !send(&[move_input(x, y, virtual_screen())]) { return Err(fail("mouse move")); } }
         let ok = match &a.act {
-            Act::Move | Act::Wait(_) | Act::Ask(_) => true,
+            Act::Move | Act::Wait(_) | Act::Ask(_) | Act::Tool(..) => true,
             Act::Click(b, n) => send(&click_inputs(*b, *n)),
             Act::Scroll(dx, dy) => send(&scroll_inputs(*dx, *dy)),
             Act::Type(t) => send(&text_inputs(t)),
@@ -598,6 +700,28 @@ The screens now are attached. Answer with the JSON."), caps);
     fn point(&mut self, at: (i32, i32), label: &str) { if crate::buddy::on() { assist::point_later(at.0, at.1, label); } }
     fn confirm(&mut self, q: &str) -> bool { ask_island(q) }
     fn password_focused(&self) -> bool { focused_is_password() }
+    fn tool(&mut self, tool: Tool, arg: &str) -> Result<String, String> {
+        crate::log::line(&format!("drive tool: {tool:?} {}", assist::short(arg, 80)));
+        match tool {
+            Tool::Open if crate::bridge::sys::shell_open(arg) => Ok(String::new()),
+            Tool::Open => Err("Windows couldn't open that".into()),
+            Tool::Launch if !assist::allowed(self.cfg, "open") => Err("Opening apps is turned off in Settings".into()),
+            Tool::Launch => assist::launch_app(self.cfg, arg),
+            Tool::Windows => Ok(titles_text(&top_windows().into_iter().map(|w| w.1).collect::<Vec<_>>())),
+            Tool::Focus => {
+                let all = top_windows();
+                let i = pick_title(&all.iter().map(|w| w.1.clone()).collect::<Vec<_>>(), arg).ok_or_else(|| format!("no open window is called \"{}\"; use windows to see the titles", assist::short(arg, 40)))?;
+                let hwnd = all[i].0;
+                unsafe {
+                    if IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_RESTORE); }
+                    let _ = SetForegroundWindow(hwnd);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if GetForegroundWindow() != hwnd { return Err("Windows kept another window in front; click it instead".into()); }
+                }
+                Ok(String::new())
+            }
+        }
+    }
     fn front_blocks_input(&self) -> bool { front_blocks() }
     /// Sends a key-up for every key this drive pressed, then forgets them.
     fn release(&mut self) {
@@ -827,11 +951,13 @@ mod tests {
         replies: VecDeque<Result<String, String>>,
         did: Vec<String>, did_at: Vec<u64>, said: Vec<String>, asked: Vec<String>, models: usize, released: bool,
         now: u64, mouse: (i32, i32), halt_after: Option<usize>, yes: bool, password: bool, blocked: bool, shaky: bool, grab_while_thinking: bool, think_ms: u64,
+        /// Every tool the buddy ran, as "Tool arg".
+        tools: Vec<String>,
     }
 
     fn fake(replies: &[&str]) -> Fake {
         Fake { replies: replies.iter().map(|r| Ok(r.to_string())).collect(), did: vec![], did_at: vec![], said: vec![], asked: vec![], models: 0, released: false,
-               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0 }
+               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0, tools: vec![] }
     }
 
     impl Host for Fake {
@@ -852,6 +978,7 @@ mod tests {
         fn point(&mut self, _: (i32, i32), _: &str) {}
         fn confirm(&mut self, q: &str) -> bool { self.asked.push(q.into()); self.yes }
         fn password_focused(&self) -> bool { self.password }
+        fn tool(&mut self, t: Tool, arg: &str) -> Result<String, String> { self.tools.push(format!("{t:?} {arg}")); Ok("done".into()) }
         fn front_blocks_input(&self) -> bool { self.blocked }
         fn release(&mut self) { self.released = true; }
     }
@@ -859,6 +986,95 @@ mod tests {
     const CLICK: &str = r#"{"say":"Clicking Save.","actions":[{"type":"left_click","x":640,"y":360,"label":"Save"}],"done":false}"#;
     const DONE: &str = r#"{"say":"All done.","actions":[],"done":true}"#;
     fn limits_(rounds: u32, ms: u64) -> Limits { Limits { rounds, ms } }
+
+    #[test]
+    fn tools_parse_and_need_their_target() {
+        assert_eq!(act(json!({"type":"open","target":" https://a.com "})).map(|a| a.act), Some(Act::Tool(Tool::Open, "https://a.com".into())));
+        assert_eq!(act(json!({"type":"launch","name":"Notepad"})).map(|a| a.act), Some(Act::Tool(Tool::Launch, "Notepad".into())));
+        assert_eq!(act(json!({"type":"focus","title":"Chrome"})).map(|a| a.act), Some(Act::Tool(Tool::Focus, "Chrome".into())));
+        assert_eq!(act(json!({"type":"windows"})).map(|a| a.act), Some(Act::Tool(Tool::Windows, String::new())));
+        assert!(act(json!({"type":"open"})).is_none() && act(json!({"type":"launch","target":"  "})).is_none(), "no target, no action");
+        let long = "a".repeat(MAX_TARGET + 50);
+        assert!(matches!(act(json!({"type":"focus","target":long})).map(|a| a.act), Some(Act::Tool(_, t)) if t.chars().count() == MAX_TARGET));
+    }
+
+    #[test]
+    fn open_takes_links_files_and_folders_only() {
+        for ok in ["https://example.com/a?b=1", "HTTP://example.com", r"C:\Users\me\Pictures\cat.png", r"D:\docs", "notes.txt", "/home/me/a.pdf"] {
+            assert_eq!(open_target(ok).as_deref(), Ok(ok), "{ok}");
+        }
+        for bad in ["", "   ", "ms-settings:network", "file:///C:/a.txt", "javascript:alert(1)", "https:/x.com", "https://", "ftp://x.com", r"\\server\share\a.txt", "//server/a",
+                    r"C:\tools\setup.exe", r"C:\a\RUN.BAT", "x.ps1", "mail.docm", "a.LNK", "%USERPROFILE%", "a\"b", "a|b", "line\nbreak"] {
+            assert!(open_target(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(open_target(&"a".repeat(MAX_TARGET + 1)).is_err());
+    }
+
+    #[test]
+    fn a_window_is_found_by_exact_start_or_part_of_its_title() {
+        let t: Vec<String> = ["Inbox - Mail", "Mail settings", "mail", "Notes"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pick_title(&t, "MAIL"), Some(2), "exact wins over start and part");
+        assert_eq!(pick_title(&t, "mail s"), Some(1), "then one that starts with it");
+        assert_eq!(pick_title(&t, "inbox"), Some(0));
+        assert_eq!(pick_title(&t, "nothing"), None);
+        assert_eq!(pick_title(&t, "  "), None);
+        assert_eq!(titles_text(&[]), "no windows are open");
+        let many: Vec<String> = (0..40).map(|i| format!("w{i}")).collect();
+        assert_eq!(titles_text(&many).split("; ").count(), 25, "the list is capped");
+    }
+
+    #[test]
+    fn opening_and_launching_ask_every_time_and_focus_does_not() {
+        let r = r#"{"actions":[{"type":"open","target":"https://example.com"},{"type":"launch","target":"notepad"},{"type":"windows"},{"type":"focus","target":"notes"}],"done":false}"#;
+        let mut f = fake(&[r, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        assert_eq!(f.tools, ["Open https://example.com", "Launch notepad", "Windows ", "Focus notes"]);
+        assert_eq!(f.asked.len(), 2, "one question each for open and launch, none for the harmless two");
+        assert!(f.asked[0].contains("https://example.com") && f.asked[1].contains("notepad"), "the card names the exact target");
+        let two = r#"{"actions":[{"type":"open","target":"https://a.com"},{"type":"open","target":"https://b.com"}],"done":false}"#;
+        let mut f = fake(&[two, DONE]);
+        run(&mut f, "x", limits_(25, 600_000));
+        assert_eq!(f.asked.len(), 2, "a yes to the first link is not a yes to the second");
+    }
+
+    #[test]
+    fn a_no_to_opening_runs_nothing_and_ends_the_drive() {
+        let mut f = fake(&[r#"{"actions":[{"type":"open","target":"https://example.com"}],"done":false}"#]);
+        f.yes = false;
+        assert!(matches!(run(&mut f, "x", limits_(25, 600_000)), Stop::Refused(_)));
+        assert!(f.tools.is_empty() && f.released);
+    }
+
+    #[test]
+    fn a_program_is_refused_before_anyone_is_asked() {
+        let mut f = fake(&[r#"{"actions":[{"type":"open","target":"C:\\tools\\setup.exe"}],"done":false}"#, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done, "the drive goes on, the model is told why");
+        assert!(f.tools.is_empty() && f.asked.is_empty());
+    }
+
+    #[test]
+    fn what_a_tool_returns_goes_into_the_models_history() {
+        struct Spy(Fake, Vec<String>);
+        impl Host for Spy {
+            fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { self.0.capture() }
+            fn model(&mut self, g: &str, h: &[String], c: &[screen::Cap]) -> Result<String, String> { self.1 = h.to_vec(); self.0.model(g, h, c) }
+            fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> { self.0.act(a, at) }
+            fn cursor(&self) -> (i32, i32) { self.0.cursor() }
+            fn now_ms(&self) -> u64 { self.0.now_ms() }
+            fn sleep(&mut self, ms: u64) { self.0.sleep(ms) }
+            fn halted(&mut self) -> Option<Stop> { self.0.halted() }
+            fn say(&mut self, l: &str) { self.0.say(l) }
+            fn point(&mut self, p: (i32, i32), l: &str) { self.0.point(p, l) }
+            fn confirm(&mut self, q: &str) -> bool { self.0.confirm(q) }
+            fn password_focused(&self) -> bool { false }
+            fn tool(&mut self, _: Tool, _: &str) -> Result<String, String> { Ok("Inbox; Notes".into()) }
+            fn front_blocks_input(&self) -> bool { false }
+            fn release(&mut self) { self.0.release() }
+        }
+        let mut s = Spy(fake(&[r#"{"actions":[{"type":"windows"}],"done":false}"#, DONE]), vec![]);
+        run(&mut s, "x", limits_(25, 600_000));
+        assert!(s.1.iter().any(|h| h.contains("listed the open windows: Inbox; Notes")), "{:?}", s.1);
+    }
 
     #[test]
     fn it_works_a_task_then_hands_back() {

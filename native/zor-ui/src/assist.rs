@@ -188,7 +188,17 @@ fn launchables(_cfg: &Config) -> Vec<(String, String)> {
 pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.listen").as_bool().unwrap_or(true) }
 
 /// One action's switch in Settings; on unless turned off.
-fn allowed(cfg: &Config, action: &str) -> bool { cfg.get(&format!("buddies.allow.{action}")).as_bool().unwrap_or(true) }
+/// Starts the installed app or game that best matches `name` (Start Menu shortcuts, Steam games).
+pub fn launch_app(cfg: &Config, name: &str) -> Result<String, String> {
+    let items = launchables(cfg);
+    match best_match(name, &items) {
+        Some((n, target)) if crate::bridge::sys::shell_open(target) => Ok(format!("Opening {}.", short(n, 40))),
+        Some((n, _)) => Err(format!("Windows couldn't open {}.", short(n, 40))),
+        None => Err(format!("I can't find {} on this PC.", short(name, 40))),
+    }
+}
+
+pub(crate) fn allowed(cfg: &Config, action: &str) -> bool { cfg.get(&format!("buddies.allow.{action}")).as_bool().unwrap_or(true) }
 
 /// Contacts from the settings list "ali=whatsapp:+92300..., sam=discord:123": (name, app, number or id).
 fn contacts(cfg: &Config) -> Vec<(String, String, String)> {
@@ -291,13 +301,7 @@ pub fn run(intent: Intent, cfg: &Config) -> String {
             crate::bridge::sys::shell_open(&format!("https://www.google.com/search?q={}", util::url_encode(&q)));
             format!("Searching for {}.", short(&q, 40))
         }
-        Intent::Open(name) => {
-            let items = launchables(cfg);
-            match best_match(&name, &items) {
-                Some((n, target)) => { crate::bridge::sys::shell_open(target); format!("Opening {}.", short(n, 40)) }
-                None => format!("I can't find {} on this PC.", short(&name, 40)),
-            }
-        }
+        Intent::Open(name) => launch_app(cfg, &name).unwrap_or_else(|e| e),
         Intent::Message { to, text } => {
             let all = contacts(cfg);
             let key = to.to_lowercase();
@@ -310,7 +314,7 @@ pub fn run(intent: Intent, cfg: &Config) -> String {
                     match message_link(&app, value, name, &text) {
                         Ok((link, said)) if app == "whatsappweb" => {
                             // the live logged-in WhatsApp tab if there is one, else a new tab
-                            web_reply(name, &crate::webchat::open_whatsapp_web(&link, crate::bridge::sys::shell_open), fell_back, said)
+                            web_reply(name, &crate::webchat::open_whatsapp_web(&link, |u| { crate::bridge::sys::shell_open(u); }), fell_back, said)
                         }
                         Ok((link, said)) => { crate::bridge::sys::shell_open(&link); said }
                         Err(e) => e,

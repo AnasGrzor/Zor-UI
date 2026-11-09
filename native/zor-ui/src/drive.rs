@@ -55,6 +55,10 @@ pub enum Act {
     Ask(String),
     /// A direct tool instead of clicking: the argument is a target, an app name or a window title ("" for `Windows`).
     Tool(Tool, String),
+    /// Press at the action's position and let go at this one (picture pixels, same screen).
+    Drag(f32, f32),
+    /// Hold a key combo for this many ms (at most `MAX_HOLD_MS`), then let go.
+    Hold(Vec<u16>, u64),
 }
 
 /// Things the buddy can do without driving the screen. `Open` and `Launch` ask you each time and show the exact target.
@@ -68,12 +72,18 @@ impl Tool {
 
 /// One action as the model sent it. `pos` is in the picture's pixels on screen `screen` (default: screen 1).
 #[derive(Debug, PartialEq, Clone)]
-pub struct Action { pub act: Act, pub pos: Option<(f32, f32)>, pub screen: Option<usize>, pub label: String }
+pub struct Action { pub act: Act, pub pos: Option<(f32, f32)>, pub screen: Option<usize>, pub label: String,
+    /// Number of an element from the list in the prompt (1 is the first): the click goes to its centre instead of `pos`.
+    pub el: Option<usize> }
 
 impl Action {
     /// A few words for the model's history and the log.
     pub fn describe(&self) -> String {
-        let at = self.pos.map(|(x, y)| format!(" at {},{}", x as i32, y as i32)).unwrap_or_default();
+        let at = match (self.el, self.pos) {
+            (Some(i), _) => format!(" on element {i}"),
+            (None, Some((x, y))) => format!(" at {},{}", x as i32, y as i32),
+            _ => String::new(),
+        };
         match &self.act {
             Act::Move => format!("moved the mouse{at}"),
             Act::Click(Btn::Left, 1) => format!("clicked{at}"),
@@ -88,6 +98,8 @@ impl Action {
             Act::Tool(Tool::Launch, t) => format!("launched {}", assist::short(t, 60)),
             Act::Tool(Tool::Focus, t) => format!("brought \"{}\" to the front", assist::short(t, 60)),
             Act::Tool(Tool::Windows, _) => "listed the open windows".to_string(),
+            Act::Drag(x, y) => format!("dragged{at} to {},{}", *x as i32, *y as i32),
+            Act::Hold(k, ms) => format!("held {} keys for {ms} ms", k.len()),
         }
     }
 }
@@ -134,6 +146,73 @@ pub fn titles_text(titles: &[String]) -> String {
     titles.iter().take(25).map(|t| assist::short(t, 60)).collect::<Vec<_>>().join("; ")
 }
 
+/// Longest a held key may stay down.
+pub const MAX_HOLD_MS: u64 = 3000;
+/// Elements listed for the model; more only make the prompt long.
+pub const MAX_ELEMENTS: usize = 60;
+/// Longest the walk over a window's controls may take; it keeps what it has found.
+pub const WALK_MS: u64 = 400;
+/// Rounds in a row that change nothing before the buddy gives up.
+pub const STUCK_ROUNDS: u32 = 3;
+
+/// One thing you can click or type into in the front window: what it is called, what it is, and where (screen pixels: left, top, right, bottom).
+#[derive(Debug, PartialEq, Clone)]
+pub struct El { pub name: String, pub role: &'static str, pub rect: (i32, i32, i32, i32) }
+
+impl El {
+    pub fn centre(&self) -> (i32, i32) { ((self.rect.0 + self.rect.2) / 2, (self.rect.1 + self.rect.3) / 2) }
+}
+
+/// The role words for the UI Automation control types worth listing; None for everything else (panes, text, images ...).
+pub fn role_of(control_type: i32) -> Option<&'static str> {
+    Some(match control_type {
+        50000 => "button", 50002 => "checkbox", 50003 => "combobox", 50004 => "edit", 50005 => "link", 50007 => "list item",
+        50011 => "menu item", 50013 => "radio", 50019 => "tab", 50024 => "tree item", 50031 => "split button",
+        _ => return None,
+    })
+}
+
+/// What the walk found, made ready for the prompt: no empty or off-screen boxes, nameless ones only when you can type in them,
+/// no twins, top to bottom then left to right, at most `MAX_ELEMENTS`.
+pub fn tidy_elements(mut v: Vec<El>) -> Vec<El> {
+    v.retain(|e| e.rect.2 > e.rect.0 && e.rect.3 > e.rect.1 && (!e.name.trim().is_empty() || e.role == "edit"));
+    v.sort_by_key(|e| (e.rect.1, e.rect.0));
+    v.dedup_by(|b, a| a.rect == b.rect && a.name == b.name);
+    v.truncate(MAX_ELEMENTS);
+    v
+}
+
+/// The list as the model reads it: `[3] button "Save" at 640,360`. The number is what `el` takes.
+pub fn elements_text(els: &[El]) -> String {
+    if els.is_empty() { return "none found, so use the picture".into(); }
+    els.iter().enumerate().map(|(i, e)| { let (x, y) = e.centre(); format!("[{}] {} \"{}\" at {x},{y}", i + 1, e.role, assist::short(e.name.trim(), 40)) }).collect::<Vec<_>>().join("\n")
+}
+
+/// Where an action lands on the real screen: the centre of the element it names, else the picture pixel mapped through its monitor.
+pub fn target(caps: &[screen::Cap], els: &[El], a: &Action) -> Result<Option<(i32, i32)>, String> {
+    match a.el {
+        Some(i) => i.checked_sub(1).and_then(|i| els.get(i)).map(|e| Some(e.centre())).ok_or_else(|| format!("there is no element {i}; the list has {}", els.len())),
+        None => resolve(caps, a),
+    }
+}
+
+/// A cheap fingerprint of what the screens show. Equal fingerprints in a row mean nothing on screen changed.
+/// shortcut: it hashes the picture bytes, so a pointer that moved makes the first dead click look like a change; the second one is caught. Upgrade to a block diff if that is too slow to notice.
+pub fn screen_sig(caps: &[screen::Cap]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in caps { c.jpeg.hash(&mut h); }
+    h.finish()
+}
+
+/// Presses at `from` and lets go at `to`, in small steps so the app sees a drag: (the press, the moves, the release).
+pub fn drag_inputs(from: (i32, i32), to: (i32, i32), v: (i32, i32, i32, i32)) -> (Vec<INPUT>, Vec<INPUT>, Vec<INPUT>) {
+    const STEPS: i32 = 8;
+    let down = vec![move_input(from.0, from.1, v), mouse(0, 0, 0, MOUSEEVENTF_LEFTDOWN)];
+    let moves = (1..=STEPS).map(|i| move_input(from.0 + (to.0 - from.0) * i / STEPS, from.1 + (to.1 - from.1) * i / STEPS, v)).collect();
+    (down, moves, vec![mouse(0, 0, 0, MOUSEEVENTF_LEFTUP)])
+}
+
 /// The virtual-key code for one key name; the aliases people and models use (cmd, opt, esc, return, del ...) all work.
 pub fn vk(name: &str) -> Option<u16> {
     let n = name.trim().to_lowercase();
@@ -170,12 +249,13 @@ pub fn parse_action(v: &Value) -> Option<Action> {
     let pos = || Some((v["x"].as_f64()? as f32, v["y"].as_f64()? as f32));
     let text = |k: &str| v[k].as_str().map(str::trim).filter(|s| !s.is_empty());
     let (mut p, mut act) = (None, None);
+    let el = v["el"].as_u64().filter(|n| *n >= 1).map(|n| n as usize);
     match v["type"].as_str()?.to_lowercase().as_str() {
-        "mouse_move" | "move" => { p = Some(pos()?); act = Some(Act::Move); }
-        "left_click" | "click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 1)); }
-        "right_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Right, 1)); }
-        "double_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 2)); }
-        "triple_click" => { p = Some(pos()?); act = Some(Act::Click(Btn::Left, 3)); }
+        "mouse_move" | "move" => { p = pos().or_else(|| el.map(|_| (0.0, 0.0)))?.into(); act = Some(Act::Move); }
+        "left_click" | "click" => { p = pos().or_else(|| el.map(|_| (0.0, 0.0)))?.into(); act = Some(Act::Click(Btn::Left, 1)); }
+        "right_click" => { p = pos().or_else(|| el.map(|_| (0.0, 0.0)))?.into(); act = Some(Act::Click(Btn::Right, 1)); }
+        "double_click" => { p = pos().or_else(|| el.map(|_| (0.0, 0.0)))?.into(); act = Some(Act::Click(Btn::Left, 2)); }
+        "triple_click" => { p = pos().or_else(|| el.map(|_| (0.0, 0.0)))?.into(); act = Some(Act::Click(Btn::Left, 3)); }
         "type" => act = Some(Act::Type(v["text"].as_str().filter(|s| !s.is_empty())?.chars().take(MAX_TEXT).collect())),
         "keys" | "key" => act = Some(Act::Keys(parse_keys(text("keys").or_else(|| text("text"))?)?)),
         "scroll" => {
@@ -184,6 +264,13 @@ pub fn parse_action(v: &Value) -> Option<Action> {
             act = Some(Act::Scroll(n("dx"), n("dy")));
         }
         "wait" => act = Some(Act::Wait(v["ms"].as_u64().unwrap_or(500).min(5000))),
+        "drag" | "left_click_drag" => {
+            p = pos();
+            let to = (v["to_x"].as_f64()? as f32, v["to_y"].as_f64()? as f32);
+            if p.is_none() && el.is_none() { return None; }
+            act = Some(Act::Drag(to.0, to.1));
+        }
+        "hold_key" | "hold" => act = Some(Act::Hold(parse_keys(text("keys").or_else(|| text("text"))?)?, v["ms"].as_u64().unwrap_or(500).min(MAX_HOLD_MS))),
         "ask" => act = Some(Act::Ask(text("question").or_else(|| text("text"))?.chars().take(200).collect())),
         t @ ("open" | "launch" | "focus" | "windows") => {
             let arg: String = ["target", "text", "name", "title"].iter().find_map(|k| text(k)).unwrap_or("").chars().take(MAX_TARGET).collect();
@@ -193,7 +280,7 @@ pub fn parse_action(v: &Value) -> Option<Action> {
         }
         _ => {}
     }
-    Some(Action { act: act?, pos: p, screen: v["screen"].as_u64().map(|n| n as usize), label: v["label"].as_str().unwrap_or("").chars().take(40).collect() })
+    Some(Action { act: act?, pos: p, el, screen: v["screen"].as_u64().map(|n| n as usize), label: v["label"].as_str().unwrap_or("").chars().take(40).collect() })
 }
 
 /// What the model answered: a short line to say, the actions (at most `MAX_ACTIONS`), and whether the task is finished.
@@ -219,7 +306,7 @@ pub fn risky(label: &str) -> bool {
 
 /// Why a take-over ended.
 #[derive(Debug, PartialEq, Clone)]
-pub enum Stop { Done, Esc, Voice, UserMouse, Rounds, Time, Refused(String), Error(String) }
+pub enum Stop { Done, Esc, Voice, UserMouse, Rounds, Time, Stuck, Refused(String), Error(String) }
 
 impl Stop {
     /// What the buddy says when he hands the mouse back.
@@ -231,6 +318,7 @@ impl Stop {
             Stop::UserMouse => "You took the mouse, so I stopped.".into(),
             Stop::Rounds => "That took more steps than I'm allowed, so I stopped. The mouse is yours.".into(),
             Stop::Time => "I ran out of time and stopped. The mouse is yours.".into(),
+            Stop::Stuck => "Nothing on the screen changed after my last few tries, so I stopped. The mouse is yours.".into(),
             Stop::Refused(why) | Stop::Error(why) => format!("{} The mouse is yours.", why),
         }
     }
@@ -327,9 +415,14 @@ pub struct Limits { pub rounds: u32, pub ms: u64 }
 pub trait Host {
     fn capture(&mut self) -> Result<Vec<screen::Cap>, String>;
     /// One model call: the goal, what has happened so far, the pictures. Returns the model's text.
-    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap]) -> Result<String, String>;
-    /// Runs one action at its screen position (None when it has none).
-    fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String>;
+    /// `els` is the elements list as text, for the prompt.
+    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap], els: &str) -> Result<String, String>;
+    /// What you can click or type into in the front window, if the PC can tell (none: the model uses the picture).
+    fn elements(&mut self) -> Vec<El> { vec![] }
+    /// Runs one action at its screen position (None when it has none); a drag also gets where it lets go.
+    fn act(&mut self, a: &Action, at: Option<(i32, i32)>, to: Option<(i32, i32)>) -> Result<(), String>;
+    /// Puts the pointer back where it was before the take-over.
+    fn restore(&mut self, _at: (i32, i32)) {}
     fn cursor(&self) -> (i32, i32);
     fn now_ms(&self) -> u64;
     fn sleep(&mut self, ms: u64);
@@ -377,17 +470,28 @@ pub fn run<H: Host>(h: &mut H, goal: &str, lim: Limits) -> Stop {
     let mut g = Guard { watch: MouseWatch::new(at), start, limit: lim.ms, h };
     let stop = rounds(&mut g, goal, lim.rounds);
     g.h.release();
+    // the pointer goes home unless you have it: after Esc, your voice or your own move it stays where you are
+    if !matches!(stop, Stop::Esc | Stop::Voice | Stop::UserMouse) && g.h.cursor() != at { g.h.restore(at); }
     stop
 }
 
 fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
     let mut history: Vec<String> = vec![];
-    let mut bad = 0;
+    let (mut bad, mut dead, mut last_sig, mut acted) = (0, 0, None, false);
     g.h.say("Hands off the mouse while I drive. Esc stops me.");
     for round in 1..=max {
         if let Some(s) = g.check() { return s; }
         let caps = match g.h.capture() { Ok(c) => c, Err(e) => return Stop::Error(e) };
-        let text = match g.h.model(goal, &history, &caps) {
+        // the same picture again after actions that should have changed it: tell the model, and give up after a few
+        let sig = screen_sig(&caps);
+        if acted && last_sig == Some(sig) {
+            dead += 1;
+            if dead >= STUCK_ROUNDS { return Stop::Stuck; }
+            history.push(format!("round {round}: the screen looks exactly the same as before your last actions, so they did nothing; try something different"));
+        } else { dead = 0; }
+        last_sig = Some(sig);
+        let els = g.h.elements();
+        let text = match g.h.model(goal, &history, &caps, &elements_text(&els)) {
             Ok(t) => t,
             // a model call cut short by Esc, your voice or the clock reports that instead of an error
             Err(e) => return g.h.halted().or_else(|| (g.h.now_ms().saturating_sub(g.start) > g.limit).then_some(Stop::Time)).unwrap_or(Stop::Error(e)),
@@ -402,10 +506,12 @@ fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
         };
         if !reply.say.is_empty() { g.h.say(&reply.say); }
         let mut approved = false;
+        acted = false;
         for a in &reply.actions {
             if let Some(s) = g.check() { return s; }
-            match step(g, &caps, a, &mut approved) {
-                Ok(note) => history.push(format!("round {round}: {note}")),
+            match step(g, &caps, &els, a, &mut approved) {
+                // only actions that change the screen count: waiting, asking and listing windows do not
+                Ok(note) => { acted |= !matches!(a.act, Act::Wait(_) | Act::Ask(_) | Act::Tool(Tool::Windows, _)); history.push(format!("round {round}: {note}")); }
                 Err(Stop::Error(e)) => { history.push(format!("round {round}: could not do that, {e}")); break; }
                 Err(s) => return s,
             }
@@ -419,7 +525,7 @@ fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
 }
 
 /// Does one action. Err(Stop::Error) means just this action failed (the round ends, the model hears why); any other Err ends the take-over.
-fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], a: &Action, approved: &mut bool) -> Result<String, Stop> {
+fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action, approved: &mut bool) -> Result<String, Stop> {
     if let Act::Ask(q) = &a.act {
         if !g.h.confirm(q) { return Err(Stop::Refused("You said no, so I stopped.".into())); }
         *approved = true;
@@ -441,22 +547,24 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], a: &Action, approved: &
         if let Some(s) = g.pause(if tool.asks() { 1200 } else { SETTLE_MS }) { return Err(s); } // an opened app needs a moment to appear
         return Ok(format!("{}{}", a.describe(), if out.is_empty() { String::new() } else { format!(": {out}") }));
     }
-    let at = resolve(caps, a).map_err(Stop::Error)?;
-    if matches!(a.act, Act::Click(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
+    let at = target(caps, els, a).map_err(Stop::Error)?;
+    // a drag lets go on the same screen the picture names
+    let to = match a.act { Act::Drag(x, y) => resolve(caps, &Action { act: Act::Move, pos: Some((x, y)), el: None, ..a.clone() }).map_err(Stop::Error)?, _ => None };
+    if matches!(a.act, Act::Click(..) | Act::Drag(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
         return Err(Stop::Refused("You said no, so I stopped.".into()));
     }
-    if matches!(a.act, Act::Type(_)) && g.h.password_focused() {
+    if matches!(a.act, Act::Type(_) | Act::Hold(..)) && g.h.password_focused() {
         return Err(Stop::Refused("That's a password field, so type that one yourself.".into()));
     }
     if g.h.front_blocks_input() {
         return Err(Stop::Refused("The window in front runs as administrator and ignores me.".into()));
     }
-    if let (Some(p), Act::Click(..)) = (at, &a.act) {
+    if let (Some(p), Act::Click(..) | Act::Drag(..)) = (at, &a.act) {
         g.h.point(p, &a.label);
         if let Some(s) = g.pause(900) { return Err(s); } // the buddy flies there and rings it first
     }
-    g.h.act(a, at).map_err(|e| if e.contains("administrator") { Stop::Refused(e) } else { Stop::Error(e) })?;
-    let aimed = at.unwrap_or_else(|| g.h.cursor()); // where we put it, not where it is: a grab during the action must still show
+    g.h.act(a, at, to).map_err(|e| if e.contains("administrator") { Stop::Refused(e) } else { Stop::Error(e) })?;
+    let aimed = to.or(at).unwrap_or_else(|| g.h.cursor()); // where we put it, not where it is: a grab during the action must still show
     g.watch.expect(aimed);
     if let Some(s) = g.pause(SETTLE_MS) { return Err(s); }
     Ok(a.describe())
@@ -475,7 +583,9 @@ in the picture's pixels (origin top-left) and screen set to the screen number wh
 {\"type\":\"wait\",\"ms\":500}, {\"type\":\"ask\",\"question\":\"...\"}. Direct tools are faster and surer than clicking, so use one when it fits and click only when none does: \
 {\"type\":\"launch\",\"target\":\"app name\"} starts an installed app, {\"type\":\"open\",\"target\":\"https://... or a file or folder path\"} opens a link, file or folder \
 (the user is asked each time; programs and scripts are refused), {\"type\":\"focus\",\"target\":\"part of a window title\"} brings a window to the front, \
-{\"type\":\"windows\"} lists the open window titles (they come back in your history). Always put a click's label. Look at the new picture after every turn \
+{\"type\":\"windows\"} lists the open window titles (they come back in your history). Also {\"type\":\"drag\",\"x\":0,\"y\":0,\"to_x\":0,\"to_y\":0} and {\"type\":\"hold_key\",\"keys\":\"shift\",\"ms\":800} (at most 3 seconds). \
+Each turn also lists the clickable things in the front window as [number] role \"name\" at x,y. When the thing you want is listed, click it by number, for example \
+{\"type\":\"left_click\",\"el\":3,\"label\":\"Save\"}, instead of guessing pixels; if it is not listed, use the picture. Always put a click's label. Look at the new picture after every turn \
 and only do what you can see. Never type into a password field. Before anything that sends, deletes, buys or pays, or that you cannot undo, \
 use an ask action and wait for the answer. Do only the goal and nothing else. The first thing you say must ask the user to keep their hands off the mouse.";
 
@@ -639,6 +749,34 @@ fn top_windows() -> Vec<(HWND, String)> {
     v
 }
 
+/// The clickable and typeable things in the front window, through UI Automation. Slow or empty for some apps (games, some
+/// Electron ones): then the list is short or empty and the model uses the picture. It stops after `WALK_MS`.
+fn walk_front_window() -> Vec<El> {
+    use windows::Win32::UI::Accessibility::TreeScope_Descendants;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return vec![] };
+        let front = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(front, Some(&mut pid));
+        if pid == GetCurrentProcessId() { return vec![]; } // our own windows are not the task
+        let Ok(root) = uia.ElementFromHandle(front) else { return vec![] };
+        let Ok(cond) = uia.CreateTrueCondition() else { return vec![] };
+        let Ok(all) = root.FindAll(TreeScope_Descendants, &cond) else { return vec![] };
+        let (n, t0) = (all.Length().unwrap_or(0), std::time::Instant::now());
+        let mut out = vec![];
+        for i in 0..n {
+            if t0.elapsed().as_millis() as u64 > WALK_MS { break; }
+            let Ok(e) = all.GetElement(i) else { continue };
+            let Some(role) = e.CurrentControlType().ok().and_then(|c| role_of(c.0)) else { continue };
+            if e.CurrentIsOffscreen().is_ok_and(|b| b.as_bool()) || !e.CurrentIsEnabled().is_ok_and(|b| b.as_bool()) { continue; }
+            let Ok(r) = e.CurrentBoundingRectangle() else { continue };
+            out.push(El { name: e.CurrentName().map(|s| s.to_string()).unwrap_or_default(), role, rect: (r.left, r.top, r.right, r.bottom) });
+        }
+        out
+    }
+}
+
 fn focused_is_password() -> bool {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -647,16 +785,20 @@ fn focused_is_password() -> bool {
     }
 }
 
-struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, t0: std::time::Instant, limit_ms: u64 }
+struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, /// The left button is down because of a drag.
+    button: bool, t0: std::time::Instant, limit_ms: u64 }
 
 impl Host for Live<'_> {
     fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { screen::capture_all() }
-    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap]) -> Result<String, String> {
+    fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap], els: &str) -> Result<String, String> {
         let done = if history.is_empty() { "nothing yet".to_string() } else { history.join("\n") };
         let convo = assist::convo_with(&self.model, SYSTEM, &format!("Goal: {goal}
 
 What you did so far:
 {done}
+
+Clickable things in the front window:
+{els}
 
 The screens now are attached. Answer with the JSON."), caps);
         // the call runs on its own thread so Esc, your voice and the time limit still work while the model thinks
@@ -672,7 +814,14 @@ The screens now are attached. Answer with the JSON."), caps);
             }
         }
     }
-    fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
+    fn elements(&mut self) -> Vec<El> {
+        let t = std::time::Instant::now();
+        let v = tidy_elements(walk_front_window());
+        crate::log::line(&format!("drive: {} elements in {} ms", v.len(), t.elapsed().as_millis()));
+        v
+    }
+    fn restore(&mut self, at: (i32, i32)) { send(&[move_input(at.0, at.1, virtual_screen())]); }
+    fn act(&mut self, a: &Action, at: Option<(i32, i32)>, to: Option<(i32, i32)>) -> Result<(), String> {
         crate::log::line(&format!("drive: {} {:?}", a.describe(), at));
         let fail = |what: &str| format!("Windows refused the {what}; the window in front may run as administrator.");
         if let Some((x, y)) = at { if !send(&[move_input(x, y, virtual_screen())]) { return Err(fail("mouse move")); } }
@@ -685,6 +834,25 @@ The screens now are attached. Answer with the JSON."), caps);
                 self.held = k.clone();
                 let ok = send(&combo_inputs(k).0);
                 self.release(); // the key-ups, even when the downs failed half way
+                ok
+            }
+            Act::Hold(k, ms) => {
+                self.held = k.clone();
+                let ok = send(&combo_inputs(k).0);
+                // short slices so Esc or your voice let go at once
+                let end = std::time::Instant::now() + std::time::Duration::from_millis((*ms).min(MAX_HOLD_MS));
+                while ok && std::time::Instant::now() < end && !ESC.load(Ordering::Relaxed) && !VOICE.load(Ordering::Relaxed) { std::thread::sleep(std::time::Duration::from_millis(25)); }
+                self.release();
+                ok
+            }
+            Act::Drag(..) => {
+                let (Some(from), Some(to)) = (at, to) else { return Err("a drag needs a start and an end".into()) };
+                let (down, moves, _) = drag_inputs(from, to, virtual_screen());
+                self.button = true; // `release` lets go even if we stop half way
+                let mut ok = send(&down);
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                for m in moves { if !ok { break; } ok = send(&[m]); std::thread::sleep(std::time::Duration::from_millis(20)); }
+                self.release();
                 ok
             }
         };
@@ -727,6 +895,7 @@ The screens now are attached. Answer with the JSON."), caps);
     fn release(&mut self) {
         let keys = std::mem::take(&mut self.held);
         send(&combo_inputs(&keys).1);
+        if std::mem::take(&mut self.button) { send(&[mouse(0, 0, 0, MOUSEEVENTF_LEFTUP)]); }
     }
 }
 
@@ -738,7 +907,7 @@ pub fn start(cfg: &Config, goal: &str) -> String {
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
         let lim = limits(&cfg);
-        let mut live = Live { cfg: &cfg, model, held: vec![], t0: std::time::Instant::now(), limit_ms: lim.ms };
+        let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms };
         ESC.store(false, Ordering::Relaxed);
         VOICE.store(false, Ordering::Relaxed);
         let q = format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(&goal, 140));
@@ -792,7 +961,7 @@ mod tests {
     #[test]
     fn actions_parse_and_bad_ones_are_dropped() {
         let c = act(json!({ "type": "left_click", "x": 10.5, "y": 20, "screen": 2, "label": "Save" })).unwrap();
-        assert_eq!(c, Action { act: Act::Click(Btn::Left, 1), pos: Some((10.5, 20.0)), screen: Some(2), label: "Save".into() });
+        assert_eq!(c, Action { act: Act::Click(Btn::Left, 1), pos: Some((10.5, 20.0)), el: None, screen: Some(2), label: "Save".into() });
         assert_eq!(act(json!({ "type": "double_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Left, 2));
         assert_eq!(act(json!({ "type": "triple_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Left, 3));
         assert_eq!(act(json!({ "type": "right_click", "x": 1, "y": 2 })).unwrap().act, Act::Click(Btn::Right, 1));
@@ -883,11 +1052,11 @@ mod tests {
     #[test]
     fn a_click_lands_on_the_monitor_it_names_even_at_negative_x() {
         let caps = [cap(0, 1920, true), cap(-1920, 1920, false)];
-        let click = |screen, x| Action { act: Act::Click(Btn::Left, 1), pos: Some((x, 360.0)), screen, label: String::new() };
+        let click = |screen, x| Action { act: Act::Click(Btn::Left, 1), pos: Some((x, 360.0)), el: None, screen, label: String::new() };
         assert_eq!(resolve(&caps, &click(None, 640.0)), Ok(Some((960, 540))));
         assert_eq!(resolve(&caps, &click(Some(2), 640.0)), Ok(Some((-960, 540))));
         assert!(resolve(&caps, &click(Some(3), 1.0)).unwrap_err().contains("no screen 3"));
-        let type_ = Action { act: Act::Type("x".into()), pos: None, screen: None, label: String::new() };
+        let type_ = Action { act: Act::Type("x".into()), pos: None, el: None, screen: None, label: String::new() };
         assert_eq!(resolve(&caps, &type_), Ok(None));
     }
 
@@ -929,7 +1098,7 @@ mod tests {
 
     #[test]
     fn every_stop_says_the_mouse_is_back() {
-        for s in [Stop::Done, Stop::Esc, Stop::Voice, Stop::UserMouse, Stop::Rounds, Stop::Time, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
+        for s in [Stop::Done, Stop::Esc, Stop::Voice, Stop::UserMouse, Stop::Rounds, Stop::Time, Stop::Stuck, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
             assert!(s.message().contains("mouse"), "{s:?}");
         }
         assert_eq!(Stop::Error("Broke.".into()).message(), "Broke. The mouse is yours.");
@@ -953,20 +1122,28 @@ mod tests {
         now: u64, mouse: (i32, i32), halt_after: Option<usize>, yes: bool, password: bool, blocked: bool, shaky: bool, grab_while_thinking: bool, think_ms: u64,
         /// Every tool the buddy ran, as "Tool arg".
         tools: Vec<String>,
+        /// The elements the front window shows, a counter that makes each picture different (unless frozen), and where the pointer was sent home.
+        els: Vec<El>, shots: u8, frozen: bool, home: Option<(i32, i32)>, dragged: Vec<((i32, i32), (i32, i32))>,
+        /// Where each action with a position landed on the real screen.
+        landed: Vec<(i32, i32)>,
     }
 
     fn fake(replies: &[&str]) -> Fake {
         Fake { replies: replies.iter().map(|r| Ok(r.to_string())).collect(), did: vec![], did_at: vec![], said: vec![], asked: vec![], models: 0, released: false,
-               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0, tools: vec![] }
+               now: 0, mouse: (10, 10), halt_after: None, yes: true, password: false, blocked: false, shaky: false, grab_while_thinking: false, think_ms: 0, tools: vec![], els: vec![], shots: 0, frozen: false, home: None, dragged: vec![], landed: vec![] }
     }
 
     impl Host for Fake {
-        fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { Ok(vec![cap(0, 1920, true)]) }
-        fn model(&mut self, _: &str, _: &[String], _: &[screen::Cap]) -> Result<String, String> { self.models += 1; self.now += self.think_ms; if self.grab_while_thinking { self.mouse = (self.mouse.0 + 500, self.mouse.1 + 200); self.now += 5000; } self.replies.pop_front().unwrap_or(Ok("{\"done\":true}".into())) }
-        fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> {
+        fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { if !self.frozen { self.shots = self.shots.wrapping_add(1); } let mut c = cap(0, 1920, true); c.jpeg = vec![self.shots]; Ok(vec![c]) }
+        fn elements(&mut self) -> Vec<El> { self.els.clone() }
+        fn restore(&mut self, at: (i32, i32)) { self.home = Some(at); self.mouse = at; }
+        fn model(&mut self, _: &str, _: &[String], _: &[screen::Cap], _: &str) -> Result<String, String> { self.models += 1; self.now += self.think_ms; if self.grab_while_thinking { self.mouse = (self.mouse.0 + 500, self.mouse.1 + 200); self.now += 5000; } self.replies.pop_front().unwrap_or(Ok("{\"done\":true}".into())) }
+        fn act(&mut self, a: &Action, at: Option<(i32, i32)>, to: Option<(i32, i32)>) -> Result<(), String> {
+            if let (Act::Drag(..), Some(f), Some(t)) = (&a.act, at, to) { self.dragged.push((f, t)); }
             self.did.push(a.describe());
             self.did_at.push(self.now);
-            if let Some(p) = at { self.mouse = p; }
+            if let Some(p) = at { self.mouse = p; self.landed.push(p); }
+            if let Some(t) = to { self.mouse = t; } // a drag ends where it lets go
             if self.shaky { self.mouse = (self.mouse.0 + 300, self.mouse.1); } // you grabbed the mouse right after
             Ok(())
         }
@@ -1057,8 +1234,8 @@ mod tests {
         struct Spy(Fake, Vec<String>);
         impl Host for Spy {
             fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { self.0.capture() }
-            fn model(&mut self, g: &str, h: &[String], c: &[screen::Cap]) -> Result<String, String> { self.1 = h.to_vec(); self.0.model(g, h, c) }
-            fn act(&mut self, a: &Action, at: Option<(i32, i32)>) -> Result<(), String> { self.0.act(a, at) }
+            fn model(&mut self, g: &str, h: &[String], c: &[screen::Cap], e: &str) -> Result<String, String> { self.1 = h.to_vec(); self.0.model(g, h, c, e) }
+            fn act(&mut self, a: &Action, at: Option<(i32, i32)>, to: Option<(i32, i32)>) -> Result<(), String> { self.0.act(a, at, to) }
             fn cursor(&self) -> (i32, i32) { self.0.cursor() }
             fn now_ms(&self) -> u64 { self.0.now_ms() }
             fn sleep(&mut self, ms: u64) { self.0.sleep(ms) }
@@ -1076,12 +1253,184 @@ mod tests {
         assert!(s.1.iter().any(|h| h.contains("listed the open windows: Inbox; Notes")), "{:?}", s.1);
     }
 
+    fn el(name: &str, role: &'static str, rect: (i32, i32, i32, i32)) -> El { El { name: name.into(), role, rect } }
+
+    #[test]
+    fn a_click_may_name_an_element_and_a_drag_or_hold_parses() {
+        let c = act(json!({ "type": "left_click", "el": 3, "label": "Save" })).unwrap();
+        assert_eq!((c.el, c.act.clone()), (Some(3), Act::Click(Btn::Left, 1)));
+        assert_eq!(c.describe(), "clicked on element 3");
+        assert!(act(json!({ "type": "left_click", "el": 0 })).is_none(), "elements count from 1");
+        assert_eq!(act(json!({ "type": "type", "text": "hi", "el": 2 })).unwrap().el, Some(2));
+        let dr = act(json!({ "type": "drag", "x": 1, "y": 2, "to_x": 30, "to_y": 40 })).unwrap();
+        assert_eq!((dr.act, dr.pos), (Act::Drag(30.0, 40.0), Some((1.0, 2.0))));
+        assert!(act(json!({ "type": "drag", "el": 1, "to_x": 5, "to_y": 6 })).is_some(), "a drag may start on an element");
+        assert!(act(json!({ "type": "drag", "x": 1, "y": 2 })).is_none() && act(json!({ "type": "drag", "to_x": 1, "to_y": 2 })).is_none(), "a drag needs both ends");
+        assert_eq!(act(json!({ "type": "hold_key", "keys": "shift", "ms": 60000 })).unwrap().act, Act::Hold(vec![VK_SHIFT.0], MAX_HOLD_MS), "a held key is let go after at most 3 seconds");
+        assert!(act(json!({ "type": "hold_key", "keys": "banana" })).is_none());
+    }
+
+    #[test]
+    fn only_controls_you_can_use_are_listed_in_reading_order() {
+        assert_eq!((role_of(50000), role_of(50004), role_of(50020), role_of(0)), (Some("button"), Some("edit"), None, None));
+        let tidy = tidy_elements(vec![
+            el("Zed", "button", (300, 100, 400, 140)), el("Save", "button", (20, 20, 120, 60)), el("Save", "button", (20, 20, 120, 60)),
+            el("", "button", (500, 500, 600, 540)), el("", "edit", (20, 80, 320, 110)), el("Flat", "button", (10, 10, 10, 50)), el("Left", "button", (20, 100, 80, 140)),
+        ]);
+        let names: Vec<&str> = tidy.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Save", "", "Left", "Zed"], "twins, empty boxes and nameless buttons are gone; top to bottom, then left to right");
+        let many: Vec<El> = (0..200).map(|i| el(&format!("b{i}"), "button", (0, i * 10, 50, i * 10 + 8))).collect();
+        assert_eq!(tidy_elements(many).len(), MAX_ELEMENTS);
+    }
+
+    #[test]
+    fn the_list_numbers_start_at_one_and_give_the_centre() {
+        let els = tidy_elements(vec![el("Save", "button", (20, 20, 120, 60)), el("Name", "edit", (20, 80, 320, 110))]);
+        assert_eq!(elements_text(&els), "[1] button \"Save\" at 70,40\n[2] edit \"Name\" at 170,95");
+        assert!(elements_text(&[]).contains("use the picture"));
+        let long = [el(&"x".repeat(200), "link", (0, 0, 10, 10))];
+        assert!(elements_text(&long).chars().count() < 80, "a long name is cut");
+    }
+
+    #[test]
+    fn an_element_beats_the_picture_and_a_wrong_number_is_reported() {
+        let caps = [cap(0, 1920, true)];
+        let els = [el("Save", "button", (20, 20, 120, 60)), el("Name", "edit", (20, 80, 320, 110))];
+        let by = |n: usize| Action { act: Act::Click(Btn::Left, 1), pos: Some((640.0, 360.0)), el: Some(n), screen: None, label: String::new() };
+        assert_eq!(target(&caps, &els, &by(2)), Ok(Some((170, 95))), "the element wins over the pixels");
+        assert!(target(&caps, &els, &by(3)).unwrap_err().contains("no element 3"));
+        assert!(target(&caps, &els, &by(0)).is_err());
+        let pix = Action { el: None, ..by(1) };
+        assert_eq!(target(&caps, &els, &pix), Ok(Some((960, 540))), "no element: the picture's pixel as before");
+    }
+
+    #[test]
+    fn a_click_by_element_goes_to_its_centre_and_a_bad_number_is_told_not_fatal() {
+        let r = r#"{"actions":[{"type":"left_click","el":2,"label":"Name"}],"done":false}"#;
+        let mut f = fake(&[r, DONE]);
+        f.els = vec![el("Save", "button", (20, 20, 120, 60)), el("Name", "edit", (20, 80, 320, 110))];
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        assert_eq!(f.did, ["clicked on element 2"]);
+        let bad = r#"{"actions":[{"type":"left_click","el":9,"label":"Name"}],"done":false}"#;
+        let mut f = fake(&[bad, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done, "the drive goes on and the model is told");
+        assert!(f.did.is_empty());
+    }
+
+    #[test]
+    fn the_same_picture_after_actions_is_noticed_and_three_times_ends_it() {
+        let a = [screen::Cap { jpeg: vec![1, 2, 3], ..cap(0, 1920, true) }];
+        let b = [screen::Cap { jpeg: vec![1, 2, 4], ..cap(0, 1920, true) }];
+        assert_eq!(screen_sig(&a), screen_sig(&a));
+        assert_ne!(screen_sig(&a), screen_sig(&b));
+        let mut f = fake(&[CLICK, CLICK, CLICK, CLICK, CLICK]);
+        f.frozen = true;
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Stuck);
+        assert_eq!((f.did.len(), f.models, f.released), (3, 3, true), "stops before a fourth try");
+        assert!(Stop::Stuck.message().contains("mouse"));
+        // a changing screen is not stuck, and neither is waiting or listing windows on a still screen
+        let mut f = fake(&[CLICK, CLICK, CLICK, CLICK, CLICK, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        let idle = r#"{"actions":[{"type":"windows"},{"type":"wait","ms":10}],"done":false}"#;
+        let mut f = fake(&[CLICK, idle, idle, idle, idle, idle, DONE]);
+        f.frozen = true;
+        f.shots = 1;
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+    }
+
+    #[test]
+    fn the_model_is_told_when_its_actions_did_nothing() {
+        struct Spy(Fake, Vec<Vec<String>>);
+        impl Host for Spy {
+            fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { self.0.capture() }
+            fn model(&mut self, g: &str, h: &[String], c: &[screen::Cap], e: &str) -> Result<String, String> { self.1.push(h.to_vec()); self.0.model(g, h, c, e) }
+            fn act(&mut self, a: &Action, at: Option<(i32, i32)>, to: Option<(i32, i32)>) -> Result<(), String> { self.0.act(a, at, to) }
+            fn cursor(&self) -> (i32, i32) { self.0.cursor() }
+            fn now_ms(&self) -> u64 { self.0.now_ms() }
+            fn sleep(&mut self, ms: u64) { self.0.sleep(ms) }
+            fn halted(&mut self) -> Option<Stop> { self.0.halted() }
+            fn say(&mut self, l: &str) { self.0.say(l) }
+            fn point(&mut self, p: (i32, i32), l: &str) { self.0.point(p, l) }
+            fn confirm(&mut self, q: &str) -> bool { self.0.confirm(q) }
+            fn password_focused(&self) -> bool { false }
+            fn tool(&mut self, t: Tool, a: &str) -> Result<String, String> { self.0.tool(t, a) }
+            fn front_blocks_input(&self) -> bool { false }
+            fn release(&mut self) { self.0.release() }
+        }
+        let mut f = fake(&[CLICK, CLICK, DONE]);
+        f.frozen = true;
+        let mut s = Spy(f, vec![]);
+        run(&mut s, "x", limits_(25, 600_000));
+        assert!(!s.1[0].iter().any(|h| h.contains("exactly the same")), "before the first try there is nothing to compare");
+        assert!(s.1[1].iter().any(|h| h.contains("exactly the same")), "{:?}", s.1[1]);
+    }
+
+    #[test]
+    fn a_drag_presses_moves_in_steps_and_lets_go() {
+        let v = (0, 0, 1920, 1080);
+        let (down, moves, up) = drag_inputs((100, 100), (900, 500), v);
+        assert_eq!((down.len(), moves.len(), up.len()), (2, 8, 1));
+        assert_eq!(flags(&down[1]) & MOUSEEVENTF_LEFTDOWN.0, MOUSEEVENTF_LEFTDOWN.0);
+        assert_eq!(flags(&up[0]) & MOUSEEVENTF_LEFTUP.0, MOUSEEVENTF_LEFTUP.0);
+        let at = |i: &INPUT| unsafe { (i.Anonymous.mi.dx, i.Anonymous.mi.dy) };
+        let end = move_input(900, 500, v);
+        assert_eq!(at(moves.last().unwrap()), at(&end), "the last step is the end point");
+        assert!(moves.windows(2).all(|w| at(&w[0]).0 <= at(&w[1]).0), "it moves one way");
+        let drag = r#"{"actions":[{"type":"drag","x":320,"y":180,"to_x":640,"to_y":360,"label":"File"}],"done":false}"#;
+        let mut f = fake(&[drag, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        assert_eq!(f.dragged, [((480, 270), (960, 540))], "both ends are mapped through the monitor");
+        let risky = r#"{"actions":[{"type":"drag","x":1,"y":1,"to_x":2,"to_y":2,"label":"Delete files"}],"done":false}"#;
+        let mut f = fake(&[risky, DONE]);
+        f.yes = false;
+        assert!(matches!(run(&mut f, "x", limits_(25, 600_000)), Stop::Refused(_)));
+        assert!(f.dragged.is_empty() && f.asked[0].contains("Delete files"), "a risky drag asks like a risky click");
+    }
+
+    #[test]
+    fn a_held_key_runs_and_is_never_typed_into_a_password() {
+        let hold = r#"{"actions":[{"type":"hold_key","keys":"shift","ms":900}],"done":false}"#;
+        let mut f = fake(&[hold, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        assert_eq!(f.did, ["held 1 keys for 900 ms"]);
+        let mut f = fake(&[hold, DONE]);
+        f.password = true;
+        assert!(matches!(run(&mut f, "x", limits_(25, 600_000)), Stop::Refused(_)));
+        assert!(f.did.is_empty());
+    }
+
+    #[test]
+    fn the_pointer_goes_home_unless_you_have_it() {
+        let mut f = fake(&[CLICK, DONE]);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Done);
+        assert_eq!((f.home, f.mouse), (Some((10, 10)), (10, 10)), "it started at 10,10");
+        let mut f = fake(&[DONE]);
+        run(&mut f, "x", limits_(25, 600_000));
+        assert_eq!(f.home, None, "nothing moved, nothing to put back");
+        let mut f = fake(&[CLICK, CLICK, CLICK]);
+        f.halt_after = Some(3);
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::Esc);
+        assert_eq!(f.home, None, "after Esc the pointer stays where you are");
+        let mut f = fake(&[CLICK, CLICK]);
+        f.shaky = true;
+        assert_eq!(run(&mut f, "x", limits_(25, 600_000)), Stop::UserMouse);
+        assert_eq!(f.home, None, "and when you grabbed it");
+        let mut f = fake(&[CLICK, CLICK]);
+        assert_eq!(run(&mut f, "x", limits_(1, 600_000)), Stop::Rounds);
+        assert_eq!(f.home, Some((10, 10)), "a failed run still puts it back");
+    }
+
+    #[test]
+    fn the_prompt_teaches_elements_drag_and_hold() {
+        for w in ["\"el\"", "drag", "hold_key", "front window"] { assert!(SYSTEM.contains(w), "{w}"); }
+    }
+
     #[test]
     fn it_works_a_task_then_hands_back() {
         let mut f = fake(&[CLICK, DONE]);
         assert_eq!(run(&mut f, "click save", limits_(25, 60_000)), Stop::Done);
         assert_eq!(f.did, ["clicked at 640,360"]);
-        assert_eq!(f.mouse, (960, 540), "the click was mapped to the real screen");
+        assert_eq!(f.landed, [(960, 540)], "the click was mapped to the real screen");
         assert_eq!(f.said[0], "Hands off the mouse while I drive. Esc stops me.", "the first words ask for your hands off");
         assert!(f.said.contains(&"Clicking Save.".to_string()) && f.released && f.models == 2);
     }

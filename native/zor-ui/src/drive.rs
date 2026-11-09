@@ -590,6 +590,8 @@ and only do what you can see. Never type into a password field. Before anything 
 use an ask action and wait for the answer. Do only the goal and nothing else. The first thing you say must ask the user to keep their hands off the mouse.";
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The buddy is really driving (you said yes): the screen shows a border and the Esc hint (driveframe.rs).
+static DRIVING: AtomicBool = AtomicBool::new(false);
 static ESC: AtomicBool = AtomicBool::new(false);
 static VOICE: AtomicBool = AtomicBool::new(false);
 /// The question the island is showing and the answer once you gave it.
@@ -597,6 +599,17 @@ static ASK: std::sync::Mutex<Option<(String, Option<bool>)>> = std::sync::Mutex:
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
 
 pub fn active() -> bool { ACTIVE.load(Ordering::Relaxed) }
+
+pub fn driving() -> bool { DRIVING.load(Ordering::Relaxed) }
+
+/// Sets the flag and wakes the UI thread, which adds or removes the border.
+fn set_driving(on: bool) {
+    DRIVING.store(on, Ordering::Relaxed);
+    crate::app::post(Box::new(|_| {}));
+}
+
+/// Keeps one of our windows out of the model's screenshots.
+pub fn hide_from_capture(h: HWND) { exclude_window(h, true); }
 /// You spoke to the buddy (the hotkey): a take-over in progress stops.
 pub fn request_stop() { if active() { VOICE.store(true, Ordering::Relaxed); } }
 
@@ -942,7 +955,9 @@ pub fn start(cfg: &Config, goal: &str) -> String {
         let line = if !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
             live.t0 = std::time::Instant::now();
             pass_through(true);
+            set_driving(true);
             let stop = run(&mut live, &goal, lim);
+            set_driving(false);
             pass_through(false);
             exclude_own_windows(false);
             drop(hook);
@@ -1129,6 +1144,15 @@ mod tests {
             exclude_own_windows(false);
             let _ = DestroyWindow(h);
         }
+    }
+
+    #[test]
+    fn the_border_shows_only_between_the_yes_and_the_end() {
+        assert!(!driving(), "idle at start");
+        set_driving(true);
+        assert!(driving());
+        set_driving(false);
+        assert!(!driving());
     }
 
     #[test]

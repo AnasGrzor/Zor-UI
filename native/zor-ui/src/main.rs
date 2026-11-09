@@ -11,6 +11,7 @@ mod bar;
 mod conf;
 mod desk;
 mod drive;
+mod driveframe;
 mod dock;
 mod frame;
 mod gfx;

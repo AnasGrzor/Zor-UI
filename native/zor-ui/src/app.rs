@@ -4,7 +4,7 @@ use crate::{
     assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, pill, privacy, dock, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, privacy, dock, drive, driveframe, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -696,6 +696,7 @@ impl App {
                 },
                 (WM_APP, _) => {
                     while let Ok(job) = self.jobs.try_recv() { job(&mut self.cx); }
+                    driveframe::sync(self); // the border while the buddy drives
                     self.cx.ver += 1;
                     // GlazeWM moved focus to another window: popups opened by a shortcut may never get a WM_ACTIVATE to lose
                     let focus = self.cx.wm.windows.iter().find(|w| w.focus).map(|w| w.id.clone());

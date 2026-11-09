@@ -1021,6 +1021,10 @@ impl Settings {
                 self.num(p, "buddies.driveRounds", "Most steps per take-over", 1, 100, "format_list_numbered");
                 self.num(p, "buddies.driveSecs", "Most seconds per take-over", 10, 900, "timer");
             }
+            self.sw(p, "buddies.browser", "Let the buddy use a browser", "For tasks on websites: the AI clicks and types in its own Edge window, and the pages' text goes to the AI. Needs Node.js", "language");
+            if self.gb(p.cx, "buddies.browser") {
+                p.note("It asks before the first step of each request, and before anything that sends, buys or deletes. It has its own logins: log in to a site once in its window. Passwords are yours to type.", 12.0);
+            }
             self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
             let mut mics = vec![(json!(""), "Windows default".to_string())];
             mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));

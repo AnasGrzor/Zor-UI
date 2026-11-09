@@ -35,7 +35,7 @@ fn defaults() -> Value {
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false, "snap": true, "snapLines": true,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
         "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "listenMode": "auto", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
-            "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true, "media": true, "system": true },
+            "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "browser": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true, "media": true, "system": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
         "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "tray-flyout": true, "visualizer": true }

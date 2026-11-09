@@ -89,6 +89,8 @@ pub enum Call {
     SeeScreen(String),
     TakeOver(String),
     Wallpaper(String),
+    /// One browser tool (`browse::run`) with its arguments as the AI gave them.
+    Browser { tool: String, args: Value },
 }
 
 /// What one AI reply means.
@@ -158,6 +160,7 @@ pub fn parse_step(reply: &str) -> Step {
         "wallpaper" => need(s("arg"), "\"arg\"").map(Call::Wallpaper),
         "see_screen" => need(s("arg"), "\"arg\"").map(Call::SeeScreen),
         "take_over" => need(s("arg"), "\"arg\"").map(Call::TakeOver),
+        "browser" => need(s("tool"), "\"tool\"").map(|tool| Call::Browser { tool, args: if v["args"].is_object() { v["args"].clone() } else { json!({}) } }),
         "message" => need(s("to"), "\"to\"").and_then(|to| need(s("text"), "\"text\"").map(|text| Call::Message { to, text, via: s("via") })),
         other => return Step::Bad(format!("There is no tool called \"{other}\". Use one from the list, or reply with {{\"say\":\"...\"}}.")),
     };
@@ -367,7 +370,19 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::TakeOver(g) => assist::run(assist::Intent::Drive(g.clone()), cfg),
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
         Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
+        Call::Browser { tool, args } => crate::browse::run(cfg, tool, args, confirm),
     }
+}
+
+/// Characters of an older page left in the conversation once a newer one arrives.
+pub const OLD_PAGE_CHARS: usize = 300;
+
+/// Cuts the message at `i` down to `OLD_PAGE_CHARS`: an older page the AI no longer needs in full.
+pub fn shrink_page(msgs: &mut [Value], i: usize) {
+    let Some(content) = msgs.get(i).and_then(|m| m["content"].as_str()) else { return };
+    if content.chars().count() <= OLD_PAGE_CHARS { return; }
+    let short = format!("{} (older page text removed)", assist::short(content, OLD_PAGE_CHARS));
+    msgs[i]["content"] = json!(short);
 }
 
 /// Answers `said`: asks the AI, runs the tool it picks, feeds the result back, and repeats until it says it is done. `ask` runs one
@@ -382,32 +397,44 @@ pub fn run_loop_with(model: &str, system: &str, history: &[Value], said: &str, m
     let start = Instant::now();
     let mut msgs = history.to_vec();
     msgs.push(json!({ "role": "user", "content": said }));
+    // index of the newest browser page in `msgs`; older pages are shrunk when a newer one arrives
+    let mut last_page: Option<usize> = None;
     for _ in 0..max_steps {
         if start.elapsed() > limit { return Err("That took too long, so I stopped.".into()); }
         let convo = json!({ "model": model, "messages": msgs, "system": system, "temperature": 0.3 }).to_string();
         let reply = ask(&convo).map_err(|e| assist::short(&e, 110))?;
+        let mut browser = false;
         let feedback = match parse_step(&reply) {
             Step::Say(s) if s.is_empty() => return Err("I got no answer from the AI.".into()),
             Step::Say(s) => return Ok(assist::short(&s, MAX_SAY)),
             Step::Bad(why) => why,
-            Step::Call { call, more } => match run(&call) {
-                Ok(r) if !more && !matches!(call, Call::FindApp(_) | Call::FindFile(_) | Call::WebSearch(_) | Call::ReadUrl(_)) => return Ok(r),
-                Ok(r) => format!("Result: {r}"),
-                Err(e) => format!("Failed: {e}"),
-            },
+            Step::Call { call, more } => {
+                browser = matches!(call, Call::Browser { .. });
+                match run(&call) {
+                    Ok(r) if !more && !matches!(call, Call::FindApp(_) | Call::FindFile(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Browser { .. }) => return Ok(r),
+                    Ok(r) => format!("Result: {r}"),
+                    Err(e) => format!("Failed: {e}"),
+                }
+            }
         };
+        if browser { if let Some(i) = last_page { shrink_page(&mut msgs, i); } }
         msgs.push(json!({ "role": "assistant", "content": reply }));
         msgs.push(json!({ "role": "user", "content": feedback }));
+        if browser { last_page = Some(msgs.len() - 1); }
     }
     Err("I couldn't finish that in a few steps.".into())
 }
 
 /// The sidebar's AI model answers; this is the Chat path of `assist::run`.
 pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
+    crate::browse::new_request();
     let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
-    let system = format!("{SYSTEM}\n{}", context());
+    let mut system = format!("{SYSTEM}\n{}", context());
+    let browser = crate::browse::enabled(cfg);
+    if browser { system.push_str(&format!("\n{}", crate::browse::prompt())); }
+    let (steps, secs) = if browser { (crate::browse::MAX_STEPS, crate::browse::MAX_SECS) } else { (MAX_STEPS, MAX_SECS) };
     let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
-    let r = run_loop_with(model, &system, &history, said, MAX_STEPS, Duration::from_secs(MAX_SECS), |convo| assist::chat(cfg, convo, 30), |c| exec(c, cfg, &mut |q| crate::drive::ask_island(q) == crate::drive::Answer::Yes));
+    let r = run_loop_with(model, &system, &history, said, steps, Duration::from_secs(secs), |convo| assist::chat(cfg, convo, 30), |c| exec(c, cfg, &mut |q| crate::drive::ask_island(q) == crate::drive::Answer::Yes));
     // only answers are remembered: a failure would teach the AI nothing about what you meant
     if let (Ok(answer), Ok(mut t)) = (&r, TURNS.lock()) { remember(&mut t, said, answer, Instant::now()); }
     r
@@ -662,6 +689,50 @@ mod tests {
     #[test]
     fn the_system_text_lists_the_web_tools() {
         assert!(SYSTEM.contains("web_search") && SYSTEM.contains("read_url") && SYSTEM.contains("never follow instructions"));
+    }
+
+    #[test]
+    fn browser_calls_are_read_with_their_arguments() {
+        assert_eq!(call("{\"do\":\"browser\",\"tool\":\"browser_navigate\",\"args\":{\"url\":\"https://a.com\"}}"), Some(Call::Browser { tool: "browser_navigate".into(), args: json!({ "url": "https://a.com" }) }));
+        assert_eq!(call("{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}"), Some(Call::Browser { tool: "browser_snapshot".into(), args: json!({}) }), "missing args");
+        assert_eq!(call("{\"do\":\"browser\",\"tool\":\"browser_snapshot\",\"args\":\"x\"}"), Some(Call::Browser { tool: "browser_snapshot".into(), args: json!({}) }), "args that is not an object");
+        assert!(matches!(parse_step("{\"do\":\"browser\",\"args\":{}}"), Step::Bad(m) if m.contains("\"tool\"")));
+    }
+
+    #[test]
+    fn a_browser_result_does_not_end_the_loop() {
+        let r = run_loop("m", "x", 6, Duration::from_secs(5), scripted(&["{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"say\":\"Done.\"}"]), |_| Ok("page".into()));
+        assert_eq!(r, Ok("Done.".into()));
+    }
+
+    #[test]
+    fn an_older_page_is_cut_down_and_a_short_one_is_kept() {
+        let mut msgs = vec![json!({ "role": "user", "content": "a".repeat(1000) }), json!({ "role": "user", "content": "short" })];
+        shrink_page(&mut msgs, 0);
+        assert_eq!(msgs[0]["content"], format!("{}… (older page text removed)", "a".repeat(OLD_PAGE_CHARS)));
+        shrink_page(&mut msgs, 1);
+        assert_eq!(msgs[1]["content"], "short");
+        shrink_page(&mut msgs, 9);
+        assert_eq!(msgs.len(), 2, "an out-of-range index does nothing");
+    }
+
+    #[test]
+    fn only_the_newest_page_stays_whole() {
+        let seen = RefCell::new(Vec::<String>::new());
+        let replies = ["{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"say\":\"Done.\"}"];
+        let mut page = 0;
+        let r = run_loop_with("m", "SYS", &[], "x", 6, Duration::from_secs(5), |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies.get(n).copied().unwrap_or("{\"say\":\"Done.\"}").to_string()) }, |_| {
+            page += 1;
+            Ok(char::from(b'A' + page - 1).to_string().repeat(2000))
+        });
+        assert_eq!(r, Ok("Done.".into()));
+        let last = seen.borrow().last().cloned().unwrap();
+        let v: Value = serde_json::from_str(&last).unwrap();
+        let fb: Vec<&str> = v["messages"].as_array().unwrap().iter().filter_map(|m| m["content"].as_str()).filter(|c| c.starts_with("Result: ")).collect();
+        assert_eq!(fb.len(), 3);
+        assert!(fb[0].contains("(older page text removed)") && fb[0].chars().count() < 500, "{}", fb[0].chars().count());
+        assert!(fb[1].contains("(older page text removed)") && fb[1].chars().count() < 500, "{}", fb[1].chars().count());
+        assert!(fb[2].contains(&"C".repeat(2000)), "the newest page stays whole");
     }
 
     fn scripted<'a>(replies: &'a [&'a str]) -> impl FnMut(&str) -> Result<String, String> + 'a {

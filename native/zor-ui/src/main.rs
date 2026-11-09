@@ -2,6 +2,7 @@
 //! `zorui.exe --all` runs every part regardless of that list.
 #![windows_subsystem = "windows"]
 
+mod agent;
 mod anim;
 mod app;
 mod appicon;
@@ -9,8 +10,10 @@ mod assist;
 mod bridge;
 mod bar;
 mod conf;
+mod creator;
 mod desk;
 mod drive;
+mod driveframe;
 mod dock;
 mod frame;
 mod gfx;
@@ -20,6 +23,7 @@ mod glaze;
 mod buddy;
 mod hub;
 mod island;
+mod keymap;
 mod cast;
 mod claude_usage;
 mod log;
@@ -27,8 +31,10 @@ mod lyrics;
 mod media;
 mod menu;
 mod overview;
+mod pack;
 mod perf;
 mod pill;
+mod playsong;
 mod popup;
 mod privacy;
 mod proc;
@@ -40,6 +46,7 @@ mod sidebar_left;
 mod sidebar_right;
 mod sys;
 mod tray;
+mod tokens;
 mod tray_flyout;
 mod ui;
 mod util;

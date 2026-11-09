@@ -4,7 +4,7 @@ use crate::{
     assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, pill, privacy, dock, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, privacy, dock, drive, driveframe, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -72,6 +72,8 @@ pub enum Action {
     /// A right-click menu at a point (physical px).
     Menu(Vec<menu::Item>, (i32, i32)),
     CloseMenu,
+    /// Runs a command as if `zorui.exe --open` had sent it ("buddy listen").
+    Command(String),
 }
 
 impl Action {
@@ -165,6 +167,8 @@ const FRAME: usize = 2;
 const HOVER: usize = 3;
 /// While the tray flyout is open: watches for a click outside it, the only thing that closes it.
 const OUTSIDE: usize = 4;
+/// Hides the tray library's stand-in `Shell_TrayWnd` if something shows it (tray.rs).
+const GUARD: usize = 5;
 
 impl App {
     pub fn start(all: bool) -> windows::core::Result<()> {
@@ -195,7 +199,7 @@ impl App {
         viz::sync(&mut app);
         app.sync_bars();
         APP.with_borrow_mut(|a| *a = Some(app));
-        unsafe { SetTimer(msg, TICK, 1000, None); }
+        unsafe { SetTimer(msg, TICK, 1000, None); SetTimer(msg, GUARD, 300, None); }
         crate::appicon::add(msg);
 
         std::thread::spawn(|| loop {
@@ -205,10 +209,12 @@ impl App {
                 None => std::thread::sleep(std::time::Duration::from_secs(60)),
             }
         });
-        // Claude plan usage for Gojo, every 3 min; a failed fetch keeps the last value.
+        // Claude plan usage for Gojo, the bar chip and auto-switch, every 3 min; a failed fetch keeps the last value.
         std::thread::spawn(|| loop {
-            if buddy::on() {
+            let cfg = conf::Config::load();
+            if buddy::on() || crate::bridge::claude_acct::wanted(&cfg) {
                 if let Some(u) = claude_usage::fetch() { post(Box::new(move |cx| cx.claude = Some(u))); }
+                crate::bridge::claude_acct::auto_tick(&cfg);
             }
             std::thread::sleep(std::time::Duration::from_secs(180));
         });
@@ -291,6 +297,7 @@ impl App {
             let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
             if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
             self.ws_main = Some(m);
+            if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
             changed = true;
         }
         if let Some(t) = self.theme_file.changed() { self.cx.theme = Theme::parse(&t); changed = true; }
@@ -492,12 +499,13 @@ impl App {
         if bar.view.hover_popup().map(|p| p.0) != Some(id) { return; }
         let s = bar.scale();
         let origin = bar.pos();
+        let bar_size = bar.size_px();
         let edge = bar.view.popup_edge().unwrap_or(self.cx.bar_edge());
         if self.popup.is_none() { self.popup = Win::new(Box::new(Popup { id, tip: tip.clone() }), "Zor UI / bar-popup", -32000, -32000, Z::Top, true).ok(); }
         let Some(p) = self.popup.as_mut() else { return };
         p.view = Box::new(Popup { id, tip });
         p.update(&self.g, &self.cx, true);
-        let (x, y) = bar::popup_spot(edge, origin, r, s, p.size_px());
+        let (x, y) = bar::popup_spot(edge, origin, bar_size, r, s, p.size_px());
         p.move_to(x, y);
         p.show();
         p.raise(); // a focused popup (the tray flyout) is topmost too and would hide it
@@ -560,6 +568,7 @@ impl App {
                     Action::TogglePin(n) => if let Some(p) = self.pops.iter_mut().find(|p| p.name == n) { p.pinned = !p.pinned; },
                     Action::Menu(items, at) => self.show_menu(items, at),
                     Action::CloseMenu => { self.menu = None; self.frames(); }
+                    Action::Command(t) => self.command(&t),
                 }
             }
             self.cx.ver += 1;
@@ -601,11 +610,12 @@ impl App {
     /// A message from `zorui.exe --open <name>`.
     pub fn command(&mut self, text: &str) {
         if text == "buddy listen" || text.starts_with("buddy ask ") {
-            if !assist::enabled(&self.cx.cfg) { assist::say_later("Voice commands are off. Turn them on in Settings, Buddies.", 5.0); return; }
-            if text == "buddy listen" && pill::active() { assist::cancel(); return; } // the hotkey toggles
+            if !assist::enabled(&self.cx.cfg) { assist::say_later("Voice commands are off. Turn them on in Settings, Voice.", 5.0); return; }
+            if text == "buddy listen" && pill::active() { if !assist::press_again(&self.cx.cfg) { assist::cancel(); } return; } // the hotkey toggles
             match text.strip_prefix("buddy ask ") { Some(said) => assist::ask(&self.cx.cfg, said), None => { pill::open(self); assist::listen(&self.cx.cfg) } }
             return;
         }
+        if text == "restart" { glaze::command("wm-reload-config"); restart(); return; }
         if let Some(n) = text.strip_prefix("open ").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')) {
             self.open(n, None, None);
             self.run_actions();
@@ -665,6 +675,7 @@ impl App {
         if hwnd == self.msg {
             match (msg, wp.0) {
                 (WM_TIMER, TICK) => self.tick(),
+                (WM_TIMER, GUARD) => if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); },
                 (WM_TIMER, FRAME) => {
                     // each view paints at its own rate: a tile that wants 33 ms frames must not drag the
                     // bar, the desk cards and the island down to 30 fps with it
@@ -696,6 +707,7 @@ impl App {
                 },
                 (WM_APP, _) => {
                     while let Ok(job) = self.jobs.try_recv() { job(&mut self.cx); }
+                    driveframe::sync(self); // the border while the buddy drives
                     self.cx.ver += 1;
                     // GlazeWM moved focus to another window: popups opened by a shortcut may never get a WM_ACTIVATE to lose
                     let focus = self.cx.wm.windows.iter().find(|w| w.focus).map(|w| w.id.clone());

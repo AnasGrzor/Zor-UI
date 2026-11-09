@@ -11,7 +11,7 @@ mod form;
 mod layout;
 mod pages;
 pub(crate) mod store;
-mod picker;
+pub(crate) mod picker;
 
 use crate::{
     app::{Action, Ctx},
@@ -29,9 +29,18 @@ use store::Inbox;
 
 const BG: u32 = 1;
 const MENU_BG: u32 = 2;
+const NAV_BG: u32 = 3;
 const MENU0: u32 = 10;
 /// Room kept free on the page's right edge for the scrollbar.
 const SCROLL_GAP: f32 = 18.0;
+const NAV_ITEM_H: f32 = crate::tokens::NAV_ITEM_H;
+const NAV_STEP: f32 = crate::tokens::NAV_STEP;
+
+/// The rail's scrolling page list: its rect (from `top` down to just above Close) and the full height of all pages.
+fn nav_list(top: f32, win_h: f32) -> (R, f32) {
+    let bottom = win_h - 22.0 - NAV_ITEM_H - 8.0;
+    (R::new(crate::tokens::NAV_X, top, crate::tokens::NAV_W, (bottom - top).max(0.0)), PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H))
+}
 const TOAST_MS: f64 = 3200.0;
 
 #[derive(Default)]
@@ -63,6 +72,15 @@ const FLASH_MS: f64 = 1800.0;
 
 /// `/` jumps to the search box unless a text field is being typed in (the picker has its own Char arm above).
 /// The sidebar avatar shows the picture only when one is chosen and still on disk; otherwise the initial.
+/// Made-up saved Claude logins for the screenshots (demo mode); one is active, one has no usage reading.
+fn demo_claude() -> Value {
+    json!({ "accounts": [
+        { "n": 1, "email": "me@example.com", "plan": "max", "active": true, "session": 38, "week": 12, "ageMin": 0 },
+        { "n": 2, "email": "work@example.com", "plan": "pro", "active": false, "session": null, "week": null, "ageMin": null },
+    ] })
+}
+
+fn avatar_initial(name: &str) -> String { name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default() }
 fn avatar_is_picture(file: &str) -> bool { !file.trim().is_empty() && conf::pack_dir().join("images").join(file).exists() }
 
 fn slash_focuses_search(typing: bool, menu_open: bool) -> bool { !typing && !menu_open }
@@ -86,6 +104,12 @@ pub struct Settings {
     scroll: Scroll,
     content_h: f32,
     view_h: f32,
+    /// The page list in the rail scrolls when the window is too short to show every page.
+    nav_scroll: Scroll,
+    nav_h: f32,
+    nav_view: f32,
+    /// Hit ids `ACT0..ACT0 + nav_n` belong to the rail (the wheel over them scrolls it).
+    nav_n: u32,
     inbox: Inbox,
     /// A copy of the config for background callbacks (they have no `Ctx`).
     cfgc: Config,
@@ -93,6 +117,11 @@ pub struct Settings {
     over: HashMap<String, (Value, f64)>,
     /// The glass preview picture and what it was made from.
     glass_prev: Option<(String, crate::gfx::Pixmap)>,
+    /// The decoded pictures of each buddy slot's preview on the Buddies page.
+    buddy_sprites: [crate::buddy::Sprites; 2],
+    /// The creator page's latest clean-up result (see creator.rs) and the decoded picture of its preview.
+    creator_prev: Option<crate::creator::Preview>,
+    creator_sprites: crate::buddy::Sprites,
     acts: Vec<Act>,
     fields: HashMap<String, Field>,
     focus: Option<String>,
@@ -117,6 +146,10 @@ pub struct Settings {
     we: Load<Value>,
     we_list: Load<Vec<Value>>,
     keys: Load<Value>,
+    /// The Keybinds row waiting for a combo: (bind id, which of its keys).
+    rec: Option<(String, usize)>,
+    /// The saved Claude logins (`claude-accounts` bridge command); Idle until Claude Code is found.
+    claude: Load<Value>,
     mons: Load<Vec<String>>,
     /// What each monitor shows ({ i, w, h, file, custom } from the `wall-monitors` bridge command).
     wmons: Load<Vec<Value>>,
@@ -146,6 +179,10 @@ fn default_for(path: &str) -> Value {
         p if p.ends_with(".shape") && p.starts_with("desktop.images.") => json!("cookie"),
         p if p.ends_with(".size") && p.starts_with("desktop.images.") => json!(280),
         p if p.ends_with(".file") && p.starts_with("desktop.images.") => json!(""),
+        // the creator's draft (Settings > Create a buddy)
+        "buddies.make.height" => json!(64),
+        "buddies.make.trim" => json!(true),
+        "buddies.make.special" => json!("aura"),
         _ => Value::Null,
     }
 }
@@ -185,9 +222,9 @@ impl Settings {
         let env = std::env::var("ZORUI_RENDER_PAGE").ok();
         let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or_else(|| page_from_key(hub::get(PAGE_KEY).as_deref()));
         let mut s = Settings {
-            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, inbox: Inbox::default(), cfgc: Config::parse(""),
-            over: HashMap::new(), glass_prev: None, acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
-            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, mons: Load::Idle, wmons: Load::Idle,
+            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, nav_scroll: Scroll::default(), nav_h: 0.0, nav_view: 0.0, nav_n: 0, inbox: Inbox::default(), cfgc: Config::parse(""),
+            over: HashMap::new(), glass_prev: None, buddy_sprites: Default::default(), creator_prev: None, creator_sprites: Default::default(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
+            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, mons: Load::Idle, wmons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
         };
         if std::env::var("ZORUI_RENDER_DEMO").is_ok() { s.demo(); }
@@ -223,6 +260,7 @@ impl Settings {
             json!({ "id": "2", "title": "Waves", "type": "video", "origin": "mine", "path": "C:\\ws\\2\\project.json", "thumb": "", "rating": "Mature", "tags": [] }),
             json!({ "id": "3", "title": "Forest", "type": "scene", "origin": "workshop", "path": "C:\\ws\\3\\project.json", "thumb": "", "rating": "Everyone", "tags": [] })]);
         self.keys = Load::Ready(json!({ "gemini": true }));
+        self.claude = Load::Ready(demo_claude());
         self.models = Load::Ready(vec![("gemini-2.5-flash".into(), "Gemini 2.5 Flash".into()), ("gpt-4o".into(), "GPT-4o".into())]);
     }
 
@@ -252,7 +290,62 @@ impl Settings {
         Config::parse(&json!({ "scriptsDir": self.cfgc.str("scriptsDir") }).to_string())
     }
 
+    /// The config with the keys written but not yet read back from config.json laid over it (the Keybinds page reads this).
+    pub fn keys_cfg(&self, cx: &Ctx) -> Config {
+        let mut v = cx.cfg.0.clone();
+        for (p, (val, _)) in &self.over { if let Some(id) = p.strip_prefix("keybinds.") { v["keybinds"][id] = val.clone(); } }
+        Config(v)
+    }
+
+    /// Takes the combo the hook recorded for the waiting Keybinds row; gives up when the window loses focus or time runs out.
+    fn rec_sync(&mut self, cx: &Ctx) {
+        let got = crate::keymap::take_recorded();
+        if self.rec.is_some() && got.is_none() && (!self.active || !crate::keymap::recording()) { crate::keymap::record(false); self.rec = None; return; }
+        if let Some(got) = got { self.rec_done(cx, got); }
+    }
+
+    /// The combo for the waiting row: None is Esc. A key another bind uses is refused with a toast.
+    fn rec_done(&mut self, cx: &Ctx, got: Option<String>) {
+        let Some((id, i)) = self.rec.take() else { return };
+        let Some(k) = got else { return };
+        let cfg = self.keys_cfg(cx);
+        match crate::keymap::taken_by(&cfg, &id, &k) {
+            Some(who) => self.toast(&format!("{k} is already used by {who}")),
+            None => { self.set(&format!("keybinds.{id}"), json!(crate::keymap::with_key(&cfg, &id, i, &k))); self.toast("Saved"); }
+        }
+    }
+
     pub fn toast(&mut self, msg: &str) { self.toast = Some((msg.to_string(), hub::now_ms() + TOAST_MS)); }
+
+    /// The creator's clean-up options as they are set right now.
+    pub fn creator_opts(&self, cx: &Ctx) -> crate::creator::Opts {
+        crate::creator::Opts {
+            clean: self.gn(cx, "buddies.make.clean").clamp(0.0, crate::creator::MAX_CLEAN as f64) as u8,
+            trim: self.gb(cx, "buddies.make.trim"),
+            flip: self.gb(cx, "buddies.make.flip"),
+        }
+    }
+
+    /// Saves the creator's buddy as a pack folder under `root`, from the picture the preview wrote to `preview`. `images` is
+    /// where the chosen picture was copied; it is deleted afterwards. The draft (picture and name) is cleared on success.
+    fn make_buddy(&mut self, cx: &Ctx, root: &std::path::Path, preview: &std::path::Path, images: &std::path::Path) {
+        use crate::creator;
+        let (image, name) = (self.gs(cx, "buddies.make.image"), self.gs(cx, "buddies.make.name"));
+        if image.is_empty() { return self.toast("Choose a picture first"); }
+        if name.trim().is_empty() { return self.toast("Give the buddy a name first"); }
+        // what is on disk must be the picture and options on screen
+        let key = self.creator_opts(cx).key(&image);
+        if !self.creator_prev.as_ref().is_some_and(|p| p.key == key && p.pack.is_some()) { return self.toast("The picture isn't ready yet. Check the preview, then try again"); }
+        let Ok(png) = std::fs::read(preview.join("stand.png")) else { return self.toast("The preview picture is missing. Try again") };
+        let id = creator::unique_id(root, &name);
+        let manifest = creator::manifest(&name, self.gn(cx, "buddies.make.height") as u32, &self.gs(cx, "buddies.make.base"), &self.gs(cx, "buddies.make.special"));
+        if let Err(e) = creator::save(root, &id, &png, &manifest) { return self.toast(&e); }
+        crate::pack::forget();
+        if creator::is_own_picture(&image) { let _ = std::fs::remove_file(images.join(&image)); }
+        self.set("buddies.make.image", json!(""));
+        self.set("buddies.make.name", json!(""));
+        self.toast(&format!("Saved {}. Pick it under Buddies > Character", name.trim()));
+    }
 
     fn sync(&mut self, cx: &Ctx) {
         self.cfgc = Config(cx.cfg.0.clone());
@@ -260,6 +353,7 @@ impl Settings {
         self.over.retain(|k, (v, t)| now - *t < 8000.0 && cx.cfg.get(k) != v);
         if self.toast.as_ref().is_some_and(|t| t.1 < now) { self.toast = None; }
         for f in self.inbox.take() { f(self); }
+        self.rec_sync(cx);
         let path = conf::pack_dir().join("theme.json");
         let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if stamp != self.info.stamp || self.info.mode.is_empty() {
@@ -332,6 +426,10 @@ impl Settings {
                     self.keys = Load::Loading;
                     store::bridge(cx, &self.inbox, "secret-status", vec![], |s, r| s.keys = Load::Ready(if r["error"].is_string() || r.is_null() { json!({}) } else { r }));
                 }
+                if PAGES[self.page].0 == "services" && matches!(self.claude, Load::Idle) && crate::bridge::claude_installed() {
+                    self.claude = Load::Loading;
+                    store::bridge(cx, &self.inbox, "claude-accounts", vec![], |s, r| s.claude = Load::Ready(if r.is_null() { json!({}) } else { r }));
+                }
                 if matches!(self.models, Load::Idle) {
                     self.models = Load::Loading;
                     store::bridge(cx, &self.inbox, "ai-models", vec![], |s, r| {
@@ -349,7 +447,7 @@ impl Settings {
     fn loading(&self) -> bool {
         matches!(PAGES[self.page].0, "presets" | "wallpapers" | "services")
             && [matches!(self.online, Load::Loading), matches!(self.local, Load::Loading), matches!(self.we, Load::Loading), matches!(self.we_list, Load::Loading),
-                matches!(self.keys, Load::Loading), matches!(self.models, Load::Loading)].contains(&true)
+                matches!(self.keys, Load::Loading), matches!(self.claude, Load::Loading), matches!(self.models, Load::Loading)].contains(&true)
     }
 
     // ------------------------------------------------------------ text fields
@@ -447,6 +545,14 @@ impl Settings {
         let inbox = self.inbox.clone();
         match name {
             "wall" => { self.wmons = Load::Idle; self.retheme(cx, &[], "wall") }
+            // a Keybinds chip: start recording a combo for that key, or stop if it is the one recording
+            "key-rec" => {
+                let again = self.rec.as_ref().is_some_and(|r| format!("{}:{}", r.0, r.1) == arg);
+                crate::keymap::record(false);
+                self.rec = None;
+                if !again { if let Some((id, i)) = arg.rsplit_once(':').and_then(|(id, i)| Some((id.to_string(), i.parse().ok()?))) { self.rec = Some((id, i)); crate::keymap::record(true); } }
+            }
+            "key-reset" => self.set(&format!("keybinds.{arg}"), json!([])),
             // a picture (or back to the main one) for one monitor; the monitor list is read again afterwards
             "mon-wall" | "mon-clear" => {
                 self.busy = "wall".into();
@@ -555,6 +661,41 @@ impl Settings {
                 for f in look.iter().map(|(f, _)| *f).chain(["name"]) { self.set(&key(f), json!("")); }
                 self.set(&key("character"), json!(id));
                 self.toast(&format!("Created {name}"));
+            }
+            "open-buddies" => open_folder(&crate::pack::buddies_dir()),
+            "make-buddy" => self.make_buddy(cx, &crate::pack::buddies_dir(), &crate::creator::preview_dir(), &conf::pack_dir().join("images")),
+            "open-speech" => open_folder(&crate::conf::speech_dir()),
+            "cancel-speech" => crate::bridge::listen::cancel_download(),
+            "delete-speech" => {
+                use crate::bridge::listen::{delete_model, MODELS};
+                let Some(m) = MODELS.iter().find(|m| m.id == arg) else { return };
+                match delete_model(m.id) {
+                    Ok(()) => {
+                        let path = m.path().to_string_lossy().into_owned();
+                        if self.gs(cx, "buddies.model") == path { self.set("buddies.model", json!("")); } // Automatic again
+                        self.toast("Speech model deleted");
+                    }
+                    Err(e) => self.toast(&format!("Could not delete it: {e}")),
+                }
+            }
+            "download-speech" => {
+                use crate::bridge::listen::{download_model, CANCELLED, MODELS};
+                if !self.busy.is_empty() { return; }
+                let Some(m) = MODELS.iter().find(|m| m.id == arg) else { return };
+                let (id, name, path) = (m.id, m.name, m.path().to_string_lossy().into_owned());
+                self.busy = format!("speech-dl:{id}");
+                self.toast(&format!("Downloading {name} ({} MB). This takes a few minutes", m.mb));
+                std::thread::spawn(move || {
+                    let r = download_model(id);
+                    inbox.send(move |s| {
+                        s.busy.clear();
+                        match r {
+                            Ok(()) => { s.set("buddies.model", json!(path)); s.toast("Speech model installed and in use"); }
+                            Err(e) if e == CANCELLED => s.toast("Download cancelled"),
+                            Err(e) => s.toast(&format!("Speech model download failed: {e}")),
+                        }
+                    });
+                });
             }
             "clear-buddy-image" => self.set(&format!("buddies.{arg}.image"), json!("")),
             "rename-buddy" => {
@@ -682,6 +823,14 @@ impl Settings {
                 cur.retain(|a| a["name"] != arg.as_str());
                 self.set("customAgents", json!(cur));
             }
+            "claude-save" | "claude-switch" | "claude-remove" => {
+                let done = match name { "claude-save" => "Login saved", "claude-switch" => "Switched Claude account", _ => "Account removed" };
+                let args = if name == "claude-save" { vec![] } else { vec![arg] };
+                store::bridge(cx, &inbox, name, args, move |s, r| {
+                    s.claude = Load::Idle;
+                    s.toast(&if r["ok"] == true { done.to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() });
+                });
+            }
             "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| s.keys = Load::Idle),
             "save-key" => {
                 let Some(f) = self.fields.get_mut(&format!("key-{arg}")) else { return };
@@ -788,19 +937,35 @@ impl View for Settings {
         ui::panel(c, cx, R::new(6.0, 6.0, w - 12.0, h - 12.0), 30.0);
 
         // navigation rail
-        c.rect(R::new(238.0, 28.0, 1.0, h - 56.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.5)); // rail | page
-        let mut nav = Pen::new(c, cx, 22.0, 22.0, 210.0, 0.0, h);
-        self.nav(&mut nav);
-        let nav_acts = std::mem::take(&mut nav.acts);
+        c.rect(R::new(crate::tokens::DIVIDER_X, 28.0, 1.0, h - 56.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.5)); // rail | page
+        let mut nav = Pen::new(c, cx, crate::tokens::NAV_X, 22.0, crate::tokens::NAV_W, 0.0, h);
+        let list_top = self.nav(&mut nav);
+        let mut nav_acts = std::mem::take(&mut nav.acts);
+        let (lr, ch) = nav_list(list_top, h);
+        c.hit(lr, NAV_BG);
+        (self.nav_h, self.nav_view) = (ch, lr.h);
+        let mut sc = std::mem::take(&mut self.nav_scroll);
+        sc.region(c, cx, lr, ch, |c, top| {
+            let mut pen = Pen::new(c, cx, crate::tokens::NAV_X, top, crate::tokens::NAV_W, 0.0, h);
+            pen.acts = std::mem::take(&mut nav_acts);
+            for (i, (_, ic, label)) in PAGES.iter().enumerate() {
+                let y = top + i as f32 * NAV_STEP;
+                if y + NAV_ITEM_H < lr.y || y > lr.y + lr.h { continue; } // hit spots ignore the clip
+                self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, crate::tokens::NAV_W, NAV_ITEM_H), ic, label, Act::Page(i), i == self.page);
+            }
+            nav_acts = pen.acts;
+        });
+        self.nav_scroll = sc;
+        self.nav_n = nav_acts.len() as u32;
 
         // page: measure (card heights, content height), then draw what is on screen
-        let r = R::new(246.0, 22.0, w - 268.0, h - 44.0);
+        let r = R::new(crate::tokens::PAGE_X, crate::tokens::PAGE_Y, w - crate::tokens::PAGE_X - 22.0, h - crate::tokens::PAGE_Y - 22.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
-        let (cards, ch, heads, tags) = {
+        let (ch, heads, tags) = {
             let mut dry = Pen::new(c, cx, r.x, r.y, r.w - SCROLL_GAP, r.y, r.y + r.h);
             dry.dry = true;
             self.page(&mut dry);
-            (std::mem::take(&mut dry.measured), dry.y - r.y, dry.heads, dry.tags)
+            (dry.y - r.y, dry.heads, dry.tags)
         };
         (self.content_h, self.view_h) = (ch, r.h);
         let mut acts = nav_acts;
@@ -814,7 +979,6 @@ impl View for Settings {
         let flash = self.flash.as_ref().map(|(s, l, end)| (s.clone(), l.clone(), ((end - now) / FLASH_MS).clamp(0.0, 1.0) as f32));
         sc.region(c, cx, r, ch, |c, top| {
             let mut pen = Pen::new(c, cx, r.x, top, r.w - SCROLL_GAP, r.y, r.y + r.h);
-            pen.cards = cards;
             pen.flash = flash;
             pen.acts = std::mem::take(&mut acts);
             self.page(&mut pen);
@@ -842,6 +1006,7 @@ impl View for Settings {
             Input::Hover(_) => {}
             Input::Wheel(_, d) => match &mut self.menu {
                 Some(m) => { let (ch, vh) = menu_dims(m, self.area.1); m.scroll.wheel(d, ch, vh); }
+                None if matches!(ev, Input::Wheel(id, _) if id == NAV_BG || (ACT0..ACT0 + self.nav_n).contains(&id)) => self.nav_scroll.glide(d, self.nav_h, self.nav_view),
                 None => self.scroll.glide(d, self.content_h, self.view_h),
             },
             Input::Click(id, Btn::Left) => {
@@ -858,7 +1023,13 @@ impl View for Settings {
                 } else if id == MENU_BG { self.menu = None; }
                 else if (MENU0..MENU0 + 980).contains(&id) {
                     if let Some(m) = self.menu.take() {
-                        if let Some((v, _)) = m.opts.get((id - MENU0) as usize) { self.set(&m.path, v.clone()); self.toast("Saved"); }
+                        if let Some((v, _)) = m.opts.get((id - MENU0) as usize) {
+                            self.set(&m.path, v.clone());
+                            self.toast("Saved");
+                            // a Parakeet that isn't on this PC yet is downloaded as soon as it is picked
+                            let todo = (m.path == "buddies.model").then(|| crate::bridge::listen::MODELS.iter().find(|mo| !mo.installed() && v.as_str() == Some(&*mo.path().to_string_lossy()))).flatten();
+                            if let Some(mo) = todo { self.do_named(cx, "download-speech", mo.id.to_string()); }
+                        }
                     }
                 } else if let Some(a) = self.act_at(id) { self.act(cx, a); }
             }
@@ -1024,18 +1195,17 @@ impl Settings {
         });
     }
 
-    fn nav(&mut self, p: &mut Pen) {
+    /// Draws the rail's header, search box and Close button; returns where the page list starts.
+    fn nav(&mut self, p: &mut Pen) -> f32 {
         let (x, y0, w) = (p.x, p.y, p.w);
         let name = match p.cx.cfg.str("userName") { "" => "You", n => n }.to_string();
         // .me
         let av = R::new(x + 6.0, y0 + 6.0, 42.0, 42.0);
         p.c.circle(av.x + 21.0, av.y + 21.0, 21.0, p.col("primaryContainer"));
         let file = self.gs(p.cx, "desktop.greet.file"); // the Avatar picture (Desktop > Greeting card)
-        if avatar_is_picture(&file) {
-            self.picture(p, &conf::pack_dir().join("images").join(&file), av, 21.0);
-        } else {
-            let init: String = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-            p.c.text(&init, av, txt(18.0, 600), p.col("onPrimaryContainer"), Align::Center);
+        // a picture that does not decode leaves the circle empty, so it falls back to the initial like no picture at all
+        if !(avatar_is_picture(&file) && self.picture(p, &conf::pack_dir().join("images").join(&file), av, 21.0)) {
+            p.c.text(&avatar_initial(&name), av, txt(18.0, 600), p.col("onPrimaryContainer"), Align::Center);
         }
         let id = p.act(Act::Do("pick-image", "greet".into()));
         p.c.hit(av, id); // click the avatar to choose a picture
@@ -1052,23 +1222,22 @@ impl Settings {
         if p.c.hit(b, id) { p.c.rect(b, 23.0, alpha(p.col("onSecondaryContainer"), 0.08)); }
         p.c.icon("edit", R::new(x + 16.0, y, 20.0, 48.0), ico(20.0, false), p.col("onSecondaryContainer"));
         p.c.text("Config file", R::new(x + 46.0, y, w - 60.0, 48.0), txt(14.0, 400), p.col("onSecondaryContainer"), Align::Left);
-        y += 48.0 + 10.0 + 4.0;
+        y += 48.0 + 18.0; // air between the Config file button and the search box
         let sb = R::new(x, y, w, 40.0);
         self.field_ui(p, SEARCH, None, Kind::Plain, sb, "Search settings (/)", 20.0, false);
-        y += 40.0 + 10.0;
-        for (i, (_, ic, label)) in PAGES.iter().enumerate() {
-            self.nav_item(p, R::new(x, y, w, 46.0), ic, label, Act::Page(i), i == self.page);
-            y += 50.0;
-        }
-        self.nav_item(p, R::new(x, p.c.h - 22.0 - 46.0, w, 46.0), "close", "Close", Act::Do("close", String::new()), false);
+        y += 40.0 + 14.0;
+        self.nav_item(p, R::new(x, p.c.h - 22.0 - NAV_ITEM_H, w, NAV_ITEM_H), "close", "Close", Act::Do("close", String::new()), false);
+        y
     }
 
     fn nav_item(&mut self, p: &mut Pen, b: R, ic: &str, label: &str, act: Act, sel: bool) {
-        if sel { p.c.rect(b, 23.0, p.col("secondaryContainer")); }
+        use crate::tokens::NAV_R;
+        if sel { p.c.rect(b, NAV_R, p.col("secondaryContainer")); }
         let id = p.act(act);
-        if p.c.hit(b, id) && !sel { p.c.rect(b, 23.0, alpha(p.col("onSurface"), 0.08)); }
+        if p.c.hit(b, id) && !sel { p.c.rect(b, NAV_R, alpha(p.col("onSurface"), crate::tokens::HOVER_A)); }
         let fg = p.col(if sel { "onSecondaryContainer" } else { "onSurfaceVariant" });
-        p.c.icon(ic, R::new(b.x + 16.0, b.y, 20.0, b.h), ico(20.0, false), fg);
+        let icon_col = if sel { ui::accent(p.cx) } else { fg }; // the open page's icon takes the accent
+        p.c.icon(ic, R::new(b.x + 16.0, b.y, 20.0, b.h), ico(20.0, false), icon_col);
         p.c.text(label, R::new(b.x + 50.0, b.y, b.w - 60.0, b.h), txt(13.5, 400), fg, Align::Left);
     }
 
@@ -1124,8 +1293,23 @@ fn write_startup_flag(on: bool) -> std::io::Result<()> {
     std::fs::write(dir.join("startup.json"), startup_flag_json(on))
 }
 
+/// Opens `dir` in File Explorer, making it first so there is something to open.
+fn open_folder(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn demo_claude_accounts_show_both_row_states() {
+        let d = super::demo_claude();
+        let rows = d["accounts"].as_array().unwrap();
+        assert_eq!(rows.iter().filter(|r| r["active"] == true).count(), 1, "exactly one active login");
+        assert_eq!(crate::bridge::claude_acct::summary(&rows[0]), "Max · 5h 38% · 7d 12% · just now");
+        assert_eq!(crate::bridge::claude_acct::summary(&rows[1]), "Pro · usage unavailable");
+    }
+
     #[test]
     fn startup_flag_file_holds_the_switch() {
         assert_eq!(super::startup_flag_json(false), r#"{"run_on_startup":false}"#);
@@ -1312,6 +1496,28 @@ mod tests {
         // what the buddy reads back is that app and number, not a plain WhatsApp contact
         let c = crate::assist::parse_contact(&st.garr(&cx, "buddies.contacts")[0]).unwrap();
         assert_eq!(c, ("Mum".to_string(), "whatsappweb".to_string(), "+44 7700 900123".to_string()));
+    }
+
+    #[test]
+    fn nav_list_scrolls_only_in_a_short_window() {
+        let (r, ch) = nav_list(209.0, 480.0);
+        assert!(ch > r.h && r.h > 0.0, "13 pages do not fit in the smallest window: {ch} in {}", r.h);
+        assert!(r.y + r.h <= 480.0 - 22.0 - NAV_ITEM_H, "the list ends above Close");
+        let (r, ch) = nav_list(209.0, 1200.0);
+        assert!(ch <= r.h, "a tall window shows every page");
+        assert_eq!(nav_list(209.0, 100.0).0.h, 0.0, "never a negative height");
+    }
+
+    #[test]
+    fn every_page_fits_a_default_height_window() {
+        let (r, ch) = nav_list(209.0, 870.0);
+        assert!(ch <= r.h, "{} pages need {ch}, the list has {}", PAGES.len(), r.h);
+    }
+
+    #[test]
+    fn avatar_initial_is_the_first_letter_capitalised() {
+        assert_eq!(avatar_initial("anas"), "A");
+        assert_eq!(avatar_initial(""), "");
     }
 
     #[test]
@@ -1528,6 +1734,85 @@ mod tests {
     }
 
     #[test]
+    fn voice_has_its_own_page_after_the_creator() {
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let c = keys.iter().position(|k| *k == "creator").unwrap();
+        assert_eq!((keys[c + 1], PAGES[c + 1].2), ("voice", "Voice"));
+        assert_eq!(super::page_from_key(Some("voice")), c + 1);
+    }
+
+    #[test]
+    fn the_creator_has_its_own_page_after_contacts_and_sensible_defaults() {
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let c = keys.iter().position(|k| *k == "contacts").unwrap();
+        assert_eq!((keys[c + 1], PAGES[c + 1].2), ("creator", "Create a buddy"));
+        assert_eq!(super::page_from_key(Some("creator")), c + 1);
+        let mut st = s();
+        let cx = Ctx::new(false);
+        assert_eq!((st.gn(&cx, "buddies.make.height"), st.gb(&cx, "buddies.make.trim"), st.gb(&cx, "buddies.make.flip"), st.gs(&cx, "buddies.make.special")), (64.0, true, false, "aura".to_string()));
+        assert_eq!(st.creator_opts(&cx), crate::creator::Opts { clean: 0, trim: true, flip: false });
+        st.set("buddies.make.clean", json!(500));
+        st.set("buddies.make.flip", json!(true));
+        assert_eq!(st.creator_opts(&cx), crate::creator::Opts { clean: 80, trim: true, flip: true }, "the tolerance is held to what the control offers");
+    }
+
+    #[test]
+    fn saving_a_created_buddy_checks_everything_then_writes_a_pack_and_clears_the_draft() {
+        let base = std::env::temp_dir().join(format!("zorui-make-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, preview, images) = (base.join("buddies"), base.join("preview"), base.join("images"));
+        for d in [&preview, &images] { std::fs::create_dir_all(d).unwrap(); }
+        let (mut st, cx) = (s(), Ctx::new(false));
+        let said = |st: &Settings| st.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert_eq!(said(&st), "Choose a picture first");
+        st.set("buddies.make.image", json!("buddy-make-1.png"));
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert_eq!(said(&st), "Give the buddy a name first");
+        st.set("buddies.make.name", json!("  "));
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert_eq!(said(&st), "Give the buddy a name first", "a blank name is no name");
+        st.set("buddies.make.name", json!("Son Goku"));
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert!(said(&st).contains("isn't ready"), "no preview has been made yet");
+        let ready = |st: &mut Settings, opts: &crate::creator::Opts| {
+            let pk = crate::pack::parse("creator", &preview, &crate::creator::manifest("Preview", 64, "", "aura"), 1).unwrap();
+            st.creator_prev = Some(crate::creator::Preview { key: opts.key("buddy-make-1.png"), pack: Some(pk), error: String::new(), stamp: 1 });
+        };
+        let opts = st.creator_opts(&cx);
+        ready(&mut st, &opts);
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert!(said(&st).contains("missing"), "the preview says it is ready but its file is gone: {}", said(&st));
+        std::fs::write(preview.join("stand.png"), b"PNGDATA").unwrap();
+        std::fs::write(images.join("buddy-make-1.png"), b"source").unwrap();
+        std::fs::write(images.join("wallpaper.jpg"), b"not mine").unwrap();
+        st.set("buddies.make.clean", json!(20)); // an option moved since the preview was made
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert!(said(&st).contains("isn't ready") && !root.exists(), "a stale preview saves nothing");
+        st.set("buddies.make.clean", json!(0));
+        st.set("buddies.make.height", json!(90));
+        st.set("buddies.make.base", json!("yuji"));
+        st.set("buddies.make.special", json!("beam"));
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert_eq!(said(&st), "Saved Son Goku. Pick it under Buddies > Character");
+        assert_eq!(std::fs::read(root.join("son-goku").join("stand.png")).unwrap(), b"PNGDATA");
+        let p = crate::pack::read(&root, "son-goku").expect("the bar finds it");
+        assert_eq!((p.name.as_str(), p.height, p.base.as_str(), p.moves.get("special").map(String::as_str)), ("Son Goku", 90.0, "yuji", Some("beam")));
+        assert!(!images.join("buddy-make-1.png").exists() && images.join("wallpaper.jpg").exists(), "only the creator's own picture is deleted");
+        assert_eq!((st.gs(&cx, "buddies.make.image"), st.gs(&cx, "buddies.make.name")), (String::new(), String::new()), "the draft is cleared");
+        // the same name again makes a second buddy, never overwriting the first
+        st.set("buddies.make.image", json!("buddy-make-1.png"));
+        st.set("buddies.make.name", json!("Son Goku"));
+        let opts = st.creator_opts(&cx);
+        ready(&mut st, &opts);
+        std::fs::write(preview.join("stand.png"), b"SECOND").unwrap();
+        st.make_buddy(&cx, &root, &preview, &images);
+        assert_eq!(std::fs::read(root.join("son-goku").join("stand.png")).unwrap(), b"PNGDATA");
+        assert_eq!(std::fs::read(root.join("son-goku-2").join("stand.png")).unwrap(), b"SECOND");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn new_buddy_saves_from_either_slot() {
         let mut st = s();
         let mut cx = Ctx::new(false);
@@ -1565,5 +1850,34 @@ mod tests {
         st.focus = Some("bname-a".into());
         st.blur(&mut cx);
         assert_eq!(st.get(&cx, "buddies.custom"), json!([{ "id": "c1", "name": "New" }]));
+    }
+
+    #[test]
+    fn a_recorded_key_is_saved_refused_or_dropped() {
+        let (mut st, cx) = (s(), Ctx::new(false));
+        let keys = |st: &Settings| st.keys_cfg(&cx).strs("keybinds.files");
+        st.rec = Some(("files".into(), 0));
+        st.rec_done(&cx, Some("Alt+Y".into()));
+        assert_eq!(keys(&st), ["Alt+Y"], "shows at once, before config.json catches up");
+        assert!(st.rec.is_none());
+        st.rec = Some(("files".into(), 0));
+        st.rec_done(&cx, Some("Alt+I".into()));
+        assert_eq!(keys(&st), ["Alt+Y"], "Alt+I belongs to Settings");
+        assert!(st.toast.as_ref().is_some_and(|t| t.0.contains("Settings")));
+        st.rec = Some(("files".into(), 0));
+        st.rec_done(&cx, None);
+        assert_eq!(keys(&st), ["Alt+Y"], "Esc changes nothing");
+        st.rec_done(&cx, Some("Alt+U".into()));
+        assert_eq!(keys(&st), ["Alt+Y"], "no row was waiting");
+    }
+
+    #[test]
+    fn a_reset_key_goes_back_to_its_default() {
+        let (mut st, mut cx) = (s(), Ctx::new(false));
+        st.set("keybinds.files", json!(["Alt+Y"]));
+        st.do_named(&mut cx, "key-reset", "files".into());
+        let cfg = st.keys_cfg(&cx);
+        let b = crate::keymap::BINDS.iter().find(|b| b.id == "files").unwrap();
+        assert_eq!(crate::keymap::keys_of(&cfg, b), ["Alt+E"]);
     }
 }

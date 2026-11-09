@@ -1,7 +1,7 @@
 //! Screen help, the seeing half: grabs every monitor (the one under the pointer first), shrinks each to
 //! 1280 px on its long side as a JPEG for a vision model, and turns the `[POINT:x,y:label:screenN]` tag
 //! the model ends its answer with into a real screen position. Only runs when you ask a screen question
-//! by voice, and only when Settings, Buddies, "Let the buddy see my screen" is on. The buddy does the pointing.
+//! by voice, and only when Settings, Voice, "Let the buddy see my screen" is on. The buddy does the pointing.
 //! Nothing here knows which model or provider answers: the pictures leave as plain chat message images.
 
 use windows::{

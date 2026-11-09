@@ -3,13 +3,13 @@
 use serde_json::{json, Value};
 
 /// (id, default side, label, icon), in default order.
-pub const BAR_MODULES: [(&str, &str, &str, &str); 13] = [
+pub const BAR_MODULES: [(&str, &str, &str, &str); 14] = [
     ("launcher", "left", "Sidebar button", "auto_awesome"), ("window", "left", "Active window", "web_asset"),
     ("resources", "center", "CPU & RAM", "memory"), ("media", "center", "Media", "music_note"),
     ("island", "center", "Dynamic Island", "pill"),
     ("workspaces", "center", "Workspaces", "grid_view"), ("clock", "center", "Clock", "schedule"),
     ("utils", "center", "Utility buttons", "build"), ("weather", "center", "Weather", "partly_cloudy_day"),
-    ("wm", "right", "Tiling status", "view_quilt"), ("netspeed", "hidden", "Network speed", "swap_vert"),
+    ("claude", "hidden", "Claude usage", "smart_toy"), ("wm", "right", "Tiling status", "view_quilt"), ("netspeed", "hidden", "Network speed", "swap_vert"),
     ("tray", "right", "System tray", "apps"), ("system", "right", "Quick settings", "tune"),
 ];
 pub const SIDES: [&str; 4] = ["left", "center", "right", "hidden"];
@@ -66,7 +66,7 @@ mod tests {
     fn layout_fills_in_and_drops() {
         let saved = json!([["clock", "left"], ["bogus", "left"], ["clock", "right"], ["tray", "nowhere"], ["island", "hidden"]]);
         let l = bar_layout(&saved, true);
-        assert_eq!(l.len(), 13);
+        assert_eq!(l.len(), 14);
         assert_eq!(l[0], ("clock".into(), "left".into()));
         assert_eq!(l[1], ("island".into(), "hidden".into()));
         assert_eq!(l.iter().find(|m| m.0 == "netspeed").unwrap().1, "right"); // the old showNetSpeed switch
@@ -90,8 +90,8 @@ mod tests {
         assert_eq!(ids(&p, "left"), ["launcher", "clock", "window"]);
         assert!(!ids(&p, "center").contains(&"clock".to_string()));
         let end = place_module(&l, "clock", "hidden", usize::MAX);
-        assert_eq!(ids(&end, "hidden"), ["netspeed", "clock"]);
-        assert_eq!(p.len(), 13);
+        assert_eq!(ids(&end, "hidden"), ["claude", "netspeed", "clock"]);
+        assert_eq!(p.len(), 14);
         assert_eq!(to_json(&p)[0], json!(["launcher", "left"])); // sides stay grouped left, centre, right, hidden
     }
 }

@@ -59,6 +59,11 @@ impl Media {
 
 enum Msg { Changed, Control(Option<String>, &'static str), Seek(String, f64) }
 static MEDIA: OnceLock<Mutex<mpsc::Sender<Msg>>> = OnceLock::new();
+/// Every media session as of the last change, for worker threads (the UI thread has them in `Ctx.sessions`).
+static SESSIONS: Mutex<Vec<Media>> = Mutex::new(Vec::new());
+
+/// The media sessions right now.
+pub fn sessions() -> Vec<Media> { SESSIONS.lock().map(|s| s.clone()).unwrap_or_default() }
 
 fn send(m: Msg) { if let Some(Ok(t)) = MEDIA.get().map(|m| m.lock()) { let _ = t.send(m); } }
 
@@ -250,7 +255,7 @@ pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
                 .filter_map(|(s, id)| read(s, &mut arts, id, cur_id.as_deref() == Some(id.as_str()), prev.get(id.as_str()), at)).collect();
             arts.retain(|id, _| list.iter().any(|m| &m.id == id));
             let view = (list.iter().find(|m| m.current).cloned(), list);
-            if last.as_ref() != Some(&view) { on(view.0.clone(), view.1.clone()); last = Some(view.clone()); }
+            if last.as_ref() != Some(&view) { if let Ok(mut s) = SESSIONS.lock() { *s = view.1.clone(); } on(view.0.clone(), view.1.clone()); last = Some(view.clone()); }
             prev = view.1.iter().map(|m| (m.id.clone(), m.clone())).collect();
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Msg::Control(id, c)) => {

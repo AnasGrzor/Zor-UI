@@ -51,7 +51,7 @@ pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
         "overview" => ((w * if portrait { 0.94 } else { 0.82 }).round(), (h * if portrait { 0.8 } else { 0.74 }).round()),
         // the pages need about 900 px; a narrow screen gets all it has
         "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).min(900.0).round()), // a portrait screen would stretch it into a tall empty column
-        "island-panel" => (424.0, 560.0),
+        "island-panel" => (crate::tokens::ISLAND_W + 24.0, 560.0), // the panel plus 12 px of shadow each side
         _ => (400.0, 300.0),
     }
 }

@@ -1,7 +1,8 @@
 //! Talk to the primary buddy: `zorui.exe --buddy listen` (a hotkey) records your voice, the speech
-//! recognizer turns it into text with the Parakeet model, and this module does what you asked:
-//! search the web, open an app or Steam game, or start a message. Phrases it doesn't know go to the
-//! AI model from the sidebar, which can also pick one of those actions. Nothing is ever sent for you:
+//! recognizer turns it into text (Windows' own speech recognition, or a Parakeet model if you add one),
+//! and this module does what you asked:
+//! search the web, open an app or Steam game, play music, or start a message. Phrases it doesn't know go to the
+//! AI model from the sidebar, which picks tools and retries when one fails (agent.rs). Nothing is ever sent for you:
 //! messages open in the app and wait for you to press Enter.
 
 use crate::{conf::Config, proc, screen, util};
@@ -16,7 +17,10 @@ use std::{
 pub enum Intent {
     Search(String),
     Open(String),
-    Message { to: String, text: String },
+    /// "play lofi on spotify": `service` is empty when none was named.
+    Play { query: String, service: String },
+    /// `via`: the app you named ("WhatsApp", "Discord"), or empty.
+    Message { to: String, text: String, via: String },
     /// A question about what is on the screen: the AI gets a picture of it.
     Screen(String),
     /// Take over the mouse and keyboard to finish a task (drive.rs). Starts only from these phrases.
@@ -40,6 +44,20 @@ pub fn next_point() -> Option<(i32, i32, String)> { POINT.lock().ok().and_then(|
 /// The next line for the buddy's bubble, if any.
 pub fn next_line() -> Option<(String, f32)> { LINES.lock().ok().and_then(|mut l| (!l.is_empty()).then(|| l.remove(0))) }
 
+/// How long a failure stays in the bubble (s), and in the island banner (ms): long enough to notice after looking away.
+pub const FAIL_SECS: f32 = 30.0;
+const FAIL_BANNER_MS: f64 = 60_000.0;
+
+/// A task failed: a long bubble, plus an island banner that stays up longer than the bubble.
+pub fn fail_later(s: &str) {
+    say_later(s, FAIL_SECS);
+    let text = s.to_string();
+    crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text, until: crate::hub::now_ms() + FAIL_BANNER_MS, open: String::new() })));
+}
+
+/// Says what a task returned: a success is a short bubble, a failure stays (see `fail_later`).
+fn report(r: Result<String, String>) { match r { Ok(s) => say_later(&s, 7.0), Err(e) => fail_later(&e) } }
+
 fn clean(s: &str) -> &str { s.trim().trim_matches(|c: char| ".?!,\"' ".contains(c)) }
 
 /// Splits what you said into an action. Matching is by the first words, so "hey, could you search for
@@ -62,13 +80,21 @@ pub fn parse(said: &str) -> Intent {
             Some((i, n)) => (m[..i].trim(), m[i + n..].trim()),
             None => m.split_once(' ').map_or((m.as_str(), ""), |(a, b)| (a, b)),
         };
-        if !to.is_empty() && !text.is_empty() { return Intent::Message { to: to.to_string(), text: text.to_string() }; }
+        // "Sara on WhatsApp": the app you said they are on
+        let (to, via) = match to.to_lowercase().rfind(" on ") {
+            Some(i) if !to[..i].trim().is_empty() && !to[i + 4..].trim().is_empty() && to[i + 4..].split_whitespace().count() <= 3 => (to[..i].trim(), to[i + 4..].trim()),
+            _ => (to, ""),
+        };
+        if !to.is_empty() && !text.is_empty() { return Intent::Message { to: to.to_string(), text: text.to_string(), via: via.to_string() }; }
     }
-    if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run ", "play "]) {
-        let a = a.strip_prefix("the ").unwrap_or(&a);
-        let a = a.strip_prefix("game ").unwrap_or(a);
-        let a = a.strip_suffix(" game").or_else(|| a.strip_suffix(" app")).unwrap_or(a);
-        return Intent::Open(a.to_string());
+    if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run "]) { return Intent::Open(app_name_of(&a).to_string()); }
+    if let Some(p) = rest(&["play "]) {
+        // "lofi on spotify": the last " on " names the service, unless what follows is too long to be one
+        let (query, service) = match p.to_lowercase().rfind(" on ") {
+            Some(i) if !p[..i].trim().is_empty() && !p[i + 4..].trim().is_empty() && p[i + 4..].split_whitespace().count() <= 2 => (p[..i].trim(), p[i + 4..].trim()),
+            _ => (p.as_str(), ""),
+        };
+        return Intent::Play { query: query.strip_prefix("some ").unwrap_or(query).to_string(), service: service.to_string() };
     }
     if let Some(g) = rest(&["take over and ", "take over to ", "take over, ", "take control and ", "take control to ", "do this for me: ", "do this for me, ", "do this for me ", "click "]) {
         // "click" keeps its word: the goal is the whole sentence
@@ -156,8 +182,7 @@ pub fn mics() -> Vec<String> {
 
 /// Speech models found on this PC: (folder, name).
 pub fn speech_models() -> Vec<(String, String)> {
-    let dir = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join(r"orca\speech-models");
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(crate::conf::speech_dir()) else { return vec![] };
     rd.filter_map(Result::ok).filter(|e| e.path().join("tokens.txt").is_file())
         .map(|e| (e.path().to_string_lossy().into_owned(), e.file_name().to_string_lossy().into_owned())).collect()
 }
@@ -184,11 +209,69 @@ fn launchables(_cfg: &Config) -> Vec<(String, String)> {
     all
 }
 
-/// Voice commands are on (Settings, Buddies, Voice commands).
+/// Voice commands are on (Settings, Voice).
 pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.listen").as_bool().unwrap_or(true) }
 
 /// One action's switch in Settings; on unless turned off.
-fn allowed(cfg: &Config, action: &str) -> bool { cfg.get(&format!("buddies.allow.{action}")).as_bool().unwrap_or(true) }
+/// Starts the installed app or game that best matches `name` (Start Menu shortcuts, Steam games).
+pub fn launch_app(cfg: &Config, name: &str) -> Result<String, String> {
+    let items = launchables(cfg);
+    match best_match(name, &items) {
+        Some((n, target)) if crate::bridge::sys::shell_open(target) => Ok(format!("Opening {}.", short(n, 40))),
+        Some((n, _)) => Err(format!("Windows couldn't open {}.", short(n, 40))),
+        None => match web_version(name) {
+            Some((label, url)) if crate::bridge::sys::shell_open(url) => Ok(format!("{label} isn't installed, so I opened it in your browser.")),
+            Some(_) => Err("Windows couldn't open the browser.".into()),
+            None => Err(format!("I can't find {} on this PC.", short(name, 40))),
+        },
+    }
+}
+
+/// Apps that have a website, for when the app isn't installed: (name you say, label, address).
+const WEB_APPS: [(&str, &str, &str); 9] = [
+    ("spotify", "Spotify", "https://open.spotify.com"),
+    ("youtube music", "YouTube Music", "https://music.youtube.com"),
+    ("youtube", "YouTube", "https://www.youtube.com"),
+    ("netflix", "Netflix", "https://www.netflix.com"),
+    ("discord", "Discord", "https://discord.com/app"),
+    ("whatsapp", "WhatsApp", "https://web.whatsapp.com"),
+    ("gmail", "Gmail", "https://mail.google.com"),
+    ("twitch", "Twitch", "https://www.twitch.tv"),
+    ("telegram", "Telegram", "https://web.telegram.org"),
+];
+
+/// The website for an app name ("Spotify", "spotify app"): an exact match only, so "spotify wrapped" is not Spotify.
+pub fn web_version(name: &str) -> Option<(&'static str, &'static str)> {
+    let n = name.trim().to_lowercase();
+    WEB_APPS.iter().find(|(k, ..)| n == *k).map(|(_, label, url)| (*label, *url))
+}
+
+/// The app or game name inside "open the game Valorant" / "the Steam app".
+pub fn app_name_of(a: &str) -> &str {
+    let a = a.strip_prefix("the ").unwrap_or(a);
+    let a = a.strip_prefix("game ").unwrap_or(a);
+    a.strip_suffix(" game").or_else(|| a.strip_suffix(" app")).unwrap_or(a)
+}
+
+/// Starts the installed app or game whose name begins with `name`; None when there is none (a song title must not start a lookalike app).
+pub fn launch_named(cfg: &Config, name: &str) -> Option<Result<String, String>> {
+    let items = launchables(cfg);
+    let (n, target) = best_match(name, &items).filter(|(n, _)| n.to_lowercase().starts_with(&name.trim().to_lowercase()))?;
+    Some(if crate::bridge::sys::shell_open(target) { Ok(format!("Opening {}.", short(n, 40))) } else { Err(format!("Windows couldn't open {}.", short(n, 40))) })
+}
+
+/// Up to 8 installed apps and games whose names contain every word of `query`.
+pub fn app_names(cfg: &Config, query: &str) -> Vec<String> {
+    let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+    if words.is_empty() { return vec![]; }
+    let mut v: Vec<String> = launchables(cfg).into_iter().map(|(n, _)| n).filter(|n| { let l = n.to_lowercase(); words.iter().all(|w| l.contains(w)) }).collect();
+    v.sort_by_key(|n| n.len());
+    v.dedup();
+    v.truncate(8);
+    v
+}
+
+pub(crate) fn allowed(cfg: &Config, action: &str) -> bool { cfg.get(&format!("buddies.allow.{action}")).as_bool().unwrap_or(true) }
 
 /// Contacts from the settings list "ali=whatsapp:+92300..., sam=discord:123": (name, app, number or id).
 fn contacts(cfg: &Config) -> Vec<(String, String, String)> {
@@ -210,7 +293,7 @@ pub fn format_contact(name: &str, app: &str, value: &str) -> Option<String> {
 
 /// Does some program handle links that start with `scheme://`? Asks Windows the way the shell does when it opens a link. When
 /// nothing does, opening one only brings up Windows' "get an app to open this link" box.
-fn protocol_handled(scheme: &str) -> bool {
+pub(crate) fn protocol_handled(scheme: &str) -> bool {
     use windows::{core::{w, HSTRING, PWSTR}, Win32::UI::Shell::{AssocQueryStringW, ASSOCF_IS_PROTOCOL, ASSOCSTR_EXECUTABLE}};
     let (mut buf, mut n) = ([0u16; 520], 520u32);
     unsafe { AssocQueryStringW(ASSOCF_IS_PROTOCOL, ASSOCSTR_EXECUTABLE, &HSTRING::from(scheme), w!("open"), PWSTR(buf.as_mut_ptr()), &mut n).is_ok() }
@@ -258,6 +341,60 @@ fn web_reply(name: &str, opened: &crate::webchat::Opened, fell_back: bool, said:
     }
 }
 
+/// What an app name you said means: any spelling of WhatsApp Web, WhatsApp, or the lowercase name.
+fn app_name(s: &str) -> String {
+    let l = s.trim().to_lowercase();
+    if l.contains("whatsapp") { (if l.contains("web") { "whatsappweb" } else { "whatsapp" }).into() } else { l }
+}
+
+/// How a saved contact is reached when you also named an app.
+#[derive(Debug, PartialEq)]
+enum Route {
+    /// Open a chat link through this app with the contact's number or id.
+    Link(String),
+    /// The saved number or id is no use in that app: the take-over finds them there by name.
+    Find,
+}
+
+/// The app you named overrides the saved one. WhatsApp and WhatsApp Web share a phone number, so those switch with a link; any
+/// other app needs an id the contact doesn't have, so the take-over looks them up by name.
+fn route(saved_app: &str, via: &str) -> Route {
+    let (saved, said) = (app_name(saved_app), app_name(via));
+    let whatsapp = |a: &str| a.starts_with("whatsapp");
+    if said.is_empty() || said == saved { Route::Link(saved) }
+    else if whatsapp(&saved) && whatsapp(&said) { Route::Link(said) }
+    else { Route::Find }
+}
+
+/// The task the take-over gets for someone who is not in Contacts: find them in the app, check it is them, type the message,
+/// and send it only after the island asks you and you say yes.
+pub fn find_goal(to: &str, text: &str, via: &str) -> String {
+    let on = if via.is_empty() { String::new() } else { format!(" on {via}") };
+    format!("Find {to}{on} and message them. Use the app's search to find the chat with {to}, open it, and check the chat's title is {to}. \
+If no chat matches, or several people match, use an ask action to tell the user and then say done. Type exactly this message in the message box: \"{text}\". \
+Do not send it yet. Use an ask action with the question \"Send to {to}: {text}?\" and press Enter to send only if the user said yes. Then say done.")
+}
+
+/// Opens the app a message goes through before the take-over looks for the person. WhatsApp without the app installed is WhatsApp Web.
+fn open_for_find(cfg: &Config, via: &str) {
+    let v = via.to_lowercase();
+    let (app, _) = effective_app(&v, v != "whatsapp" || protocol_handled("whatsapp"));
+    if app == "whatsappweb" { let _ = crate::webchat::open_whatsapp_web("https://web.whatsapp.com/", |u| { crate::bridge::sys::shell_open(u); }); }
+    else if !v.is_empty() { if let Some((_, target)) = best_match(&v, &launchables(cfg)) { crate::bridge::sys::shell_open(target); } }
+}
+
+/// `to` is not in Contacts: the take-over finds them where you said (or on the screen) and messages them.
+fn find_and_message(cfg: &Config, to: &str, text: &str, via: &str) -> Result<String, String> {
+    if !crate::drive::enabled(cfg) {
+        return Err(format!("I don't have a contact called {to}. Add them under Contacts, or turn on \"Let the buddy take over\" in Settings, Voice, and I'll find them myself."));
+    }
+    if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) { return Err(AI_OFF.into()); }
+    let on = if via.is_empty() { String::new() } else { format!(" on {via}") };
+    let shown = format!("find {to}{on} and message them: \"{text}\"");
+    let (cfg2, via2) = (Config(cfg.0.clone()), via.to_string());
+    crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))))
+}
+
 /// The link that opens a chat with `text` ready, and what to tell you to do next.
 fn message_link(app: &str, value: &str, to: &str, text: &str) -> Result<(String, String), String> {
     match app {
@@ -281,61 +418,60 @@ fn message_link(app: &str, value: &str, to: &str, text: &str) -> Result<(String,
     }
 }
 
-/// Does the action and returns what the buddy says about it.
-pub fn run(intent: Intent, cfg: &Config) -> String {
+/// Does the action and returns what the buddy says about it: `Ok` when it worked, `Err` when it didn't.
+pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
     match intent {
-        Intent::Search(_) if !allowed(cfg, "search") => "Web search is turned off in Settings.".into(),
-        Intent::Open(_) if !allowed(cfg, "open") => "Opening apps is turned off in Settings.".into(),
-        Intent::Message { .. } if !allowed(cfg, "message") => "Messages are turned off in Settings.".into(),
+        Intent::Search(_) if !allowed(cfg, "search") => Err("Web search is turned off in Settings.".into()),
+        Intent::Open(_) | Intent::Play { .. } if !allowed(cfg, "open") => Err("Opening apps is turned off in Settings.".into()),
+        Intent::Message { .. } if !allowed(cfg, "message") => Err("Messages are turned off in Settings.".into()),
         Intent::Search(q) => {
-            crate::bridge::sys::shell_open(&format!("https://www.google.com/search?q={}", util::url_encode(&q)));
-            format!("Searching for {}.", short(&q, 40))
+            if !crate::bridge::sys::shell_open(&format!("https://www.google.com/search?q={}", util::url_encode(&q))) { return Err("Windows couldn't open the browser.".into()); }
+            Ok(format!("Searching for {}.", short(&q, 40)))
         }
-        Intent::Open(name) => {
-            let items = launchables(cfg);
-            match best_match(&name, &items) {
-                Some((n, target)) => { crate::bridge::sys::shell_open(target); format!("Opening {}.", short(n, 40)) }
-                None => format!("I can't find {} on this PC.", short(&name, 40)),
-            }
-        }
-        Intent::Message { to, text } => {
+        Intent::Open(name) => launch_app(cfg, &name),
+        Intent::Play { query, service } => crate::agent::play(cfg, &query, &service),
+        Intent::Message { to, text, via } => {
             let all = contacts(cfg);
             let key = to.to_lowercase();
             let found = all.iter().find(|c| c.0.to_lowercase() == key).or_else(|| all.iter().find(|c| c.0.to_lowercase().starts_with(&key)));
             match found {
-                None => format!("I don't have a contact called {to}. Add them under Contacts in Settings."),
+                None => find_and_message(cfg, &to, &text, &via),
                 Some((name, app, value)) => {
+                    let app = match route(app, &via) { Route::Link(a) => a, Route::Find => return find_and_message(cfg, name, &text, &via) };
                     // only ask Windows about the WhatsApp app when this contact would use it
-                    let (app, fell_back) = effective_app(app, app != "whatsapp" || protocol_handled("whatsapp"));
+                    let (app, fell_back) = effective_app(&app, app != "whatsapp" || protocol_handled("whatsapp"));
                     match message_link(&app, value, name, &text) {
                         Ok((link, said)) if app == "whatsappweb" => {
                             // the live logged-in WhatsApp tab if there is one, else a new tab
-                            web_reply(name, &crate::webchat::open_whatsapp_web(&link, crate::bridge::sys::shell_open), fell_back, said)
+                            let opened = crate::webchat::open_whatsapp_web(&link, |u| { crate::bridge::sys::shell_open(u); });
+                            let r = web_reply(name, &opened, fell_back, said);
+                            if matches!(opened, crate::webchat::Opened::Failed(_)) { Err(r) } else { Ok(r) }
                         }
-                        Ok((link, said)) => { crate::bridge::sys::shell_open(&link); said }
-                        Err(e) => e,
+                        Ok((link, said)) if crate::bridge::sys::shell_open(&link) => Ok(said),
+                        Ok(_) => Err(format!("Windows couldn't open {app} for {name}.")),
+                        Err(e) => Err(e),
                     }
                 }
             }
         }
         // a question that only sounds like it is about the screen is a normal chat while screen help is off
         Intent::Screen(t) if !screen_on(cfg) && !mentions_screen(&t.to_lowercase()) => run(Intent::Chat(t), cfg),
-        Intent::Screen(_) if !screen_on(cfg) => SCREEN_OFF.into(),
-        Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => AI_OFF.into(),
+        Intent::Screen(_) if !screen_on(cfg) => Err(SCREEN_OFF.into()),
+        Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Screen(t) => screen_help(cfg, &t),
-        Intent::Drive(_) if !crate::drive::enabled(cfg) => DRIVE_OFF.into(),
-        Intent::Drive(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => AI_OFF.into(),
+        Intent::Drive(_) if !crate::drive::enabled(cfg) => Err(DRIVE_OFF.into()),
+        Intent::Drive(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Drive(g) => crate::drive::start(cfg, &g),
-        Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => AI_OFF.into(),
-        Intent::Chat(t) => ask_ai(cfg, &t),
+        Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
+        Intent::Chat(t) => crate::agent::ask(cfg, &t),
     }
 }
 
-const AI_OFF: &str = "I only know search, open and message. The AI is off in Settings.";
-const DRIVE_OFF: &str = "Take-over is off. Turn on \"Let the buddy take over\" in Settings, Buddies.";
-const SCREEN_OFF: &str = "Screen help is off. Turn on \"Let the buddy see my screen\" in Settings, Buddies.";
+const AI_OFF: &str = "I only know search, open, play and message. The AI is off in Settings.";
+const DRIVE_OFF: &str = "Take-over is off. Turn on \"Let the buddy take over\" in Settings, Voice.";
+const SCREEN_OFF: &str = "Screen help is off. Turn on \"Let the buddy see my screen\" in Settings, Voice.";
 
-/// Settings, Buddies, "Let the buddy see my screen". Off unless turned on: the pictures leave this PC.
+/// Settings, Voice, "Let the buddy see my screen". Off unless turned on: the pictures leave this PC.
 fn screen_on(cfg: &Config) -> bool { cfg.get("buddies.screen").as_bool().unwrap_or(false) }
 
 /// The model that answers screen questions: the one picked for screen help, else the sidebar's AI model.
@@ -343,25 +479,14 @@ pub fn screen_model(cfg: &Config) -> String {
     [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter().find(|m| !m.is_empty()).unwrap_or_default().to_string()
 }
 
-pub fn short(s: &str, n: usize) -> String { match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() } }
-
-/// An AI reply that is a JSON action ({"do":"search","arg":"..."}), maybe inside a code fence.
-pub fn ai_action(reply: &str) -> Option<Intent> {
-    let (a, b) = (reply.find('{')?, reply.rfind('}')?);
-    let v: Value = serde_json::from_str(reply.get(a..=b)?).ok()?;
-    let s = |k: &str| v[k].as_str().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-    match v["do"].as_str()? {
-        "search" => Some(Intent::Search(s("arg")?)),
-        "open" => Some(Intent::Open(s("arg")?)),
-        "message" => Some(Intent::Message { to: s("to")?, text: s("text")? }),
-        _ => None,
-    }
+/// A screen question from the agent. Nothing is captured while screen help or the AI is switched off.
+pub fn see_screen(cfg: &Config, said: &str) -> Result<String, String> {
+    if !screen_on(cfg) { return Err(SCREEN_OFF.into()); }
+    if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) { return Err(AI_OFF.into()); }
+    screen_help(cfg, said)
 }
 
-const SYSTEM: &str = "You are a small desktop buddy living on the user's taskbar; the user talks to you by voice. \
-If they ask you to search the web, open an app or game, or message someone, answer with ONLY one JSON object: \
-{\"do\":\"search\",\"arg\":\"query\"} or {\"do\":\"open\",\"arg\":\"app or game name\"} or {\"do\":\"message\",\"to\":\"contact name\",\"text\":\"message\"}. \
-Otherwise answer in one or two short, friendly sentences, plain text.";
+pub fn short(s: &str, n: usize) -> String { match s.char_indices().nth(n) { Some((i, _)) => format!("{}…", &s[..i]), None => s.to_string() } }
 
 /// Runs one `ai-chat` conversation (the JSON the bridge command reads) and returns the whole reply. Gives up when
 /// nothing arrives for `wait_secs`.
@@ -402,13 +527,13 @@ fn point_target(caps: &[screen::Cap], p: &screen::Point) -> Option<(i32, i32)> {
 }
 
 /// Answers a question about the screen: looks at every monitor, asks the model, and sends the buddy to the spot it named.
-fn screen_help(cfg: &Config, said: &str) -> String {
+fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     let model = screen_model(cfg);
     // checked first, so nothing is captured or sent for a model that can't use it
-    if !crate::bridge::model_can_see(&model) { return "This model can't see images. Pick another one under Settings, Buddies.".into(); }
-    let caps = match screen::capture_all() { Ok(c) => c, Err(e) => return short(&e, 110) };
-    let reply = match chat(cfg, &screen_convo(&model, said, &caps), 60) { Ok(r) => r, Err(e) => return short(&e, 110) };
-    if reply.trim().is_empty() { return "I got no answer from the AI.".into(); }
+    if !crate::bridge::model_can_see(&model) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
+    let caps = screen::capture_all().map_err(|e| short(&e, 110))?;
+    let reply = chat(cfg, &screen_convo(&model, said, &caps), 60).map_err(|e| short(&e, 110))?;
+    if reply.trim().is_empty() { return Err("I got no answer from the AI.".into()); }
     let (spoken, point) = screen::parse_point(&reply);
     let mut said = if spoken.is_empty() { "Here.".to_string() } else { short(&spoken, 160) }; // the bubble is small
     if let Some(p) = point {
@@ -418,56 +543,58 @@ fn screen_help(cfg: &Config, said: &str) -> String {
             None => {}
         }
     }
-    said
-}
-
-/// Sends `said` to the sidebar's AI model and acts on or returns its answer.
-fn ask_ai(cfg: &Config, said: &str) -> String {
-    let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
-    let convo = json!({ "model": model, "messages": [{ "role": "user", "content": said }], "system": SYSTEM, "temperature": 0.4 }).to_string();
-    let reply = match chat(cfg, &convo, 30) { Ok(r) => r, Err(e) => return short(&e, 110) };
-    match ai_action(&reply) {
-        Some(i) => run(i, cfg),
-        None if reply.trim().is_empty() => "I got no answer from the AI.".into(),
-        None => short(reply.trim(), 160),
-    }
+    Ok(said)
 }
 
 /// Runs `said` on a worker thread and shows the result in the primary buddy's bubble.
 pub fn ask(cfg: &Config, said: &str) {
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
-    std::thread::spawn(move || { say_later("On it…", 3.0); let r = run(parse(&said), &cfg); say_later(&r, 7.0); });
+    std::thread::spawn(move || { say_later("On it…", 3.0); report(run(parse(&said), &cfg)); });
 }
 
 /// Bridge arguments for the speech model folder and microphone name; empty ones are left out.
-fn listen_args(model: &str, mic: &str) -> Vec<String> {
-    [("--model", model), ("--mic", mic)].iter().filter(|(_, v)| !v.trim().is_empty()).flat_map(|(k, v)| [k.to_string(), v.trim().to_string()]).collect()
+fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
+    let mode = if mode == "auto" { "" } else { mode }; // Auto is what the recorder does without the flag
+    [("--model", model), ("--mic", mic), ("--mode", mode)].iter().filter(|(_, v)| !v.trim().is_empty()).flat_map(|(k, v)| [k.to_string(), v.trim().to_string()]).collect()
 }
 
 /// Starts recording: the bridge prints states and then the text, which goes to `ask`.
 pub fn listen(cfg: &Config) {
-    crate::drive::request_stop(); // speaking to the buddy hands a take-over's mouse back
+    // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
+    let answering = crate::drive::waiting();
+    if !answering { crate::drive::request_stop(); }
     let cfg2 = Config(cfg.0.clone());
     let model = cfg.str("buddies.model").to_string();
     let mic = cfg.str("buddies.mic").to_string();
-    let args = listen_args(&model, &mic);
+    crate::pill::set_mode(cfg.str("buddies.listenMode"));
+    let args = listen_args(&model, &mic, cfg.str("buddies.listenMode"));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let s = proc::stream(cfg, "buddy-listen", &args, move |line| {
         let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
-        if let Some(l) = v["level"].as_f64() { crate::pill::level(l as f32); }
+        if let Some(l) = v["level"].as_f64() { crate::pill::meter(l as f32, v["peak"].as_f64().unwrap_or(0.0) as f32, v["floor"].as_f64().unwrap_or(0.0) as f32); }
+        if let Some(t) = v["partial"].as_str() { crate::pill::partial(t); }
         match v["state"].as_str() {
             Some("listening") => crate::pill::set(crate::pill::LISTENING),
             Some("thinking") => crate::pill::set(crate::pill::THINKING),
             _ => {}
         }
-        if let Some(e) = v["error"].as_str() { crate::pill::set(0); say_later(&short(e, 110), 8.0); }
+        if let Some(e) = v["error"].as_str() { crate::pill::set(0); fail_later(&short(e, 110)); }
         if let Some(t) = v["text"].as_str() {
             crate::pill::set(0);
-            if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); } else { ask(&cfg2, t); }
+            if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); }
+            else if answering && crate::drive::reply_spoken(t) {} // the take-over heard you
+            else { ask(&cfg2, t); }
         }
     });
-    if s.is_none() { crate::pill::set(0); say_later("I can't start listening.", 6.0); }
+    if s.is_none() { crate::pill::set(0); fail_later("I can't start listening."); }
     if let Ok(mut l) = LISTENER.lock() { *l = s; } // replacing it stops a recording already running
+}
+
+/// The hotkey pressed again while recording in Toggle mode: stop and send what was said. False in any other mode.
+pub fn press_again(cfg: &Config) -> bool {
+    let toggle = cfg.str("buddies.listenMode") == "toggle" && crate::pill::listening();
+    if toggle { crate::bridge::listen::request_finish(); }
+    toggle
 }
 
 /// Stops a recording in progress and hides the pill (the hotkey pressed a second time).
@@ -489,15 +616,63 @@ mod tests {
         assert_eq!(parse("Google rust lifetimes"), Intent::Search("rust lifetimes".into()));
         assert_eq!(parse("Open the game Valorant."), Intent::Open("Valorant".into()));
         assert_eq!(parse("open Spotify"), Intent::Open("Spotify".into()));
+        assert_eq!(parse("open the Spotify app"), Intent::Open("Spotify".into()), "the web lookup gets the bare name");
+        assert_eq!(web_version("Spotify"), Some(("Spotify", "https://open.spotify.com")));
+        assert_eq!(web_version(" YouTube Music "), Some(("YouTube Music", "https://music.youtube.com")));
+        assert_eq!(web_version("spotify wrapped"), None);
+        assert_eq!(web_version("notepad"), None);
+        for (k, ..) in WEB_APPS { assert!(web_version(k).is_some(), "{k}"); }
+        let play = |q: &str, s: &str| Intent::Play { query: q.into(), service: s.into() };
+        assert_eq!(parse("play lofi on spotify"), play("lofi", "spotify"));
+        assert_eq!(parse("Play some Arctic Monkeys."), play("Arctic Monkeys", ""));
+        assert_eq!(parse("play the weeknd on youtube music"), play("the weeknd", "youtube music"));
+        assert_eq!(parse("play a song that is on the radio today"), play("a song that is on the radio today", ""), "a long tail is part of the title");
         assert_eq!(parse("launch the Counter-Strike game"), Intent::Open("Counter-Strike".into()));
-        assert_eq!(parse("message Ali saying I'll be late"), Intent::Message { to: "Ali".into(), text: "I'll be late".into() });
-        assert_eq!(parse("Send a message to Sam that dinner is ready."), Intent::Message { to: "Sam".into(), text: "dinner is ready".into() });
-        assert_eq!(parse("text mum are you home"), Intent::Message { to: "mum".into(), text: "are you home".into() });
+        assert_eq!(parse("message Ali saying I'll be late"), Intent::Message { to: "Ali".into(), text: "I'll be late".into(), via: String::new() });
+        assert_eq!(parse("Send a message to Sam that dinner is ready."), Intent::Message { to: "Sam".into(), text: "dinner is ready".into(), via: String::new() });
+        assert_eq!(parse("text mum are you home"), Intent::Message { to: "mum".into(), text: "are you home".into(), via: String::new() });
         assert_eq!(parse("message Ali"), Intent::Chat("message Ali".into()), "no text: left to the AI");
         assert_eq!(parse("how's the weather?"), Intent::Chat("how's the weather?".into()));
         assert_eq!(parse("search"), Intent::Chat("search".into()));
         assert_eq!(parse("okay okay please open notepad"), Intent::Open("notepad".into()));
         assert_eq!(parse("tell me a joke"), Intent::Chat("tell me a joke".into()));
+    }
+
+    #[test]
+    fn a_message_can_name_the_app_the_person_is_on() {
+        let m = |to: &str, text: &str, via: &str| Intent::Message { to: to.into(), text: text.into(), via: via.into() };
+        assert_eq!(parse("message Sara on WhatsApp saying I'm late"), m("Sara", "I'm late", "WhatsApp"));
+        assert_eq!(parse("text Sara Khan on Discord that dinner is ready"), m("Sara Khan", "dinner is ready", "Discord"));
+        assert_eq!(parse("message Sara on WhatsApp Web: hi"), m("Sara", "hi", "WhatsApp Web"));
+        assert_eq!(parse("message Sara saying meet me on Friday"), m("Sara", "meet me on Friday", ""), "an 'on' inside the message is not an app");
+        assert_eq!(parse("message on discord saying hi"), m("on discord", "hi", ""), "no name, no app split");
+    }
+
+    #[test]
+    fn someone_not_in_contacts_is_found_by_the_take_over_and_sent_only_after_a_yes() {
+        let g = find_goal("Sara", "I'm late", "WhatsApp");
+        assert!(g.starts_with("Find Sara on WhatsApp and message them."), "{g}");
+        assert!(g.contains("check the chat's title is Sara") && g.contains("\"I'm late\"") && g.contains("Send to Sara: I'm late?"), "{g}");
+        assert!(g.contains("Do not send it yet") && g.contains("only if the user said yes"), "sending waits for the island's yes");
+        assert!(find_goal("Sara", "hi", "").starts_with("Find Sara and message them."), "no app named: the screen shows where");
+        // with the take-over switch off the buddy says how to turn it on, and nothing is opened
+        let off = cfg(json!({ "buddies": { "contacts": [] } }));
+        let said = run(Intent::Message { to: "Sara".into(), text: "hi".into(), via: "WhatsApp".into() }, &off).unwrap_err();
+        assert!(said.contains("don't have a contact called Sara") && said.contains("take over"), "{said}");
+    }
+
+    #[test]
+    fn the_app_you_name_overrides_the_saved_one() {
+        let link = |a: &str| Route::Link(a.to_string());
+        assert_eq!(route("whatsapp", ""), link("whatsapp"), "no app named: the saved one");
+        assert_eq!(route("Discord", " "), link("discord"));
+        assert_eq!(route("whatsapp", "WhatsApp"), link("whatsapp"));
+        assert_eq!(route("whatsapp", "WhatsApp Web"), link("whatsappweb"), "same phone number, so a link works");
+        assert_eq!(route("whatsappweb", "whatsapp"), link("whatsapp"));
+        assert_eq!(route("whatsapp", "web whatsapp"), link("whatsappweb"));
+        assert_eq!(route("whatsapp", "Discord"), Route::Find, "a phone number is not a Discord id");
+        assert_eq!(route("discord", "WhatsApp"), Route::Find, "a Discord id is not a phone number");
+        assert_eq!(route("discord", "Telegram"), Route::Find);
     }
 
     #[test]
@@ -653,10 +828,10 @@ mod tests {
     #[test]
     fn every_switch_turns_its_part_off() {
         let off = |k: &str| cfg(json!({ "buddies": { "allow": { k: false }, "listenAi": false } }));
-        assert!(run(Intent::Search("x".into()), &off("search")).contains("turned off"));
-        assert!(run(Intent::Open("x".into()), &off("open")).contains("turned off"));
-        assert!(run(Intent::Message { to: "a".into(), text: "b".into() }, &off("message")).contains("turned off"));
-        assert!(run(Intent::Chat("hi".into()), &off("none")).contains("AI is off"), "no bridge call when the AI switch is off");
+        assert!(run(Intent::Search("x".into()), &off("search")).unwrap_err().contains("turned off"));
+        assert!(run(Intent::Open("x".into()), &off("open")).unwrap_err().contains("turned off"));
+        assert!(run(Intent::Message { to: "a".into(), text: "b".into(), via: String::new() }, &off("message")).unwrap_err().contains("turned off"));
+        assert!(run(Intent::Chat("hi".into()), &off("none")).unwrap_err().contains("AI is off"), "no bridge call when the AI switch is off");
         assert!(!enabled(&cfg(json!({ "buddies": { "listen": false } }))));
         assert!(enabled(&cfg(json!({}))), "on unless turned off");
     }
@@ -690,9 +865,9 @@ mod tests {
     #[test]
     fn a_take_over_is_off_until_turned_on() {
         let off = cfg(json!({ "buddies": { "listenAi": true } }));
-        assert_eq!(run(Intent::Drive("click save".into()), &off), DRIVE_OFF, "nothing is captured or moved while the switch is off");
+        assert_eq!(run(Intent::Drive("click save".into()), &off), Err(DRIVE_OFF.into()), "nothing is captured or moved while the switch is off");
         let no_ai = cfg(json!({ "buddies": { "drive": true, "listenAi": false } }));
-        assert_eq!(run(Intent::Drive("click save".into()), &no_ai), AI_OFF);
+        assert_eq!(run(Intent::Drive("click save".into()), &no_ai), Err(AI_OFF.into()));
     }
 
     #[test]
@@ -700,10 +875,10 @@ mod tests {
         assert!(!screen_on(&cfg(json!({}))));
         assert!(screen_on(&cfg(json!({ "buddies": { "screen": true } }))));
         let off = cfg(json!({ "buddies": { "listenAi": false } }));
-        assert_eq!(run(Intent::Screen("what's on my screen".into()), &off), SCREEN_OFF, "asking about the screen says how to turn it on");
-        assert_eq!(run(Intent::Screen("where is save".into()), &off), AI_OFF, "a question that only sounds like it falls back to plain chat");
+        assert_eq!(run(Intent::Screen("what's on my screen".into()), &off), Err(SCREEN_OFF.into()), "asking about the screen says how to turn it on");
+        assert_eq!(run(Intent::Screen("where is save".into()), &off), Err(AI_OFF.into()), "a question that only sounds like it falls back to plain chat");
         let on = cfg(json!({ "buddies": { "screen": true, "listenAi": false } }));
-        assert_eq!(run(Intent::Screen("what's on my screen".into()), &on), AI_OFF, "no screenshot is taken when the AI is off");
+        assert_eq!(run(Intent::Screen("what's on my screen".into()), &on), Err(AI_OFF.into()), "no screenshot is taken when the AI is off");
     }
 
     #[test]
@@ -749,20 +924,12 @@ mod tests {
     }
 
     #[test]
-    fn reads_ai_actions() {
-        assert_eq!(ai_action("{\"do\":\"search\",\"arg\":\"cats\"}"), Some(Intent::Search("cats".into())));
-        assert_eq!(ai_action("```json\n{\"do\":\"open\",\"arg\":\"Steam\"}\n```"), Some(Intent::Open("Steam".into())));
-        assert_eq!(ai_action("{\"do\":\"message\",\"to\":\"Ali\",\"text\":\"hi\"}"), Some(Intent::Message { to: "Ali".into(), text: "hi".into() }));
-        assert_eq!(ai_action("{\"do\":\"format c:\",\"arg\":\"x\"}"), None, "only the three known actions");
-        assert_eq!(ai_action("{\"do\":\"search\",\"arg\":\"\"}"), None);
-        assert_eq!(ai_action("It's sunny, enjoy it!"), None);
-    }
-
-    #[test]
     fn listen_arguments_skip_empty_settings() {
-        assert!(listen_args("", " ").is_empty());
-        assert_eq!(listen_args("D:/m", "MR720"), ["--model", "D:/m", "--mic", "MR720"]);
-        assert_eq!(listen_args("", "MR720"), ["--mic", "MR720"]);
+        assert!(listen_args("", " ", "").is_empty());
+        assert!(listen_args("", "", "auto").is_empty());
+        assert_eq!(listen_args("D:/m", "MR720", ""), ["--model", "D:/m", "--mic", "MR720"]);
+        assert_eq!(listen_args("", "MR720", ""), ["--mic", "MR720"]);
+        assert_eq!(listen_args("", "", "hold"), ["--mode", "hold"]);
     }
 
     #[test]
@@ -783,6 +950,19 @@ mod tests {
         assert_eq!(next_line(), Some(("a".into(), 1.0)));
         assert_eq!(next_line(), Some(("b".into(), 2.0)));
         assert_eq!(next_line(), None);
+        // a failure stays in the bubble longer than a success (one test: the queue is shared)
+        report(Ok("Opening Notepad.".into()));
+        report(Err("I can't find Zork on this PC.".into()));
+        assert_eq!(next_line(), Some(("Opening Notepad.".into(), 7.0)));
+        assert_eq!(next_line(), Some(("I can't find Zork on this PC.".into(), FAIL_SECS)));
+        assert!(FAIL_SECS > 7.0);
+    }
+
+    #[test]
+    fn an_app_that_is_not_installed_is_an_error() {
+        let c = cfg(json!({}));
+        let r = run(Intent::Open("zzqx no such app 91".into()), &c);
+        assert!(r.is_err_and(|e| e.contains("can't find")));
     }
 
     /// `cargo test real_machine -- --ignored --nocapture`: what "open X" finds on this PC.

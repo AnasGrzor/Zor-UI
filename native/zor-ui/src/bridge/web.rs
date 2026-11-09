@@ -150,7 +150,7 @@ pub(super) fn b64_encode(d: &[u8]) -> String {
 }
 
 /// Like Python's b64decode: characters outside the alphabet are skipped.
-fn b64_decode(s: &str) -> Vec<u8> {
+pub(super) fn b64_decode(s: &str) -> Vec<u8> {
     let (mut o, mut acc, mut bits) = (Vec::new(), 0u32, 0);
     for ch in s.bytes() {
         let Some(v) = B64.iter().position(|&x| x == ch) else { continue };
@@ -165,7 +165,7 @@ fn b64_decode(s: &str) -> Vec<u8> {
 }
 
 /// CryptProtectData / CryptUnprotectData for the current Windows account (same blobs as the script).
-fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+pub(super) fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB};
     let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
@@ -544,7 +544,7 @@ fn ai_chat(stdin: &str, out: &Sink) {
     let provider = model["provider"].as_str().unwrap_or("openai").to_string();
     let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"]) || !images_of(m).is_empty()).cloned().collect()).unwrap_or_default();
     if !can_see(&provider) && msgs.iter().any(|m| !images_of(m).is_empty()) {
-        out.emit(&json!({ "error": "This model can't see images. Pick another one for screen help in Settings, Buddies." }));
+        out.emit(&json!({ "error": "This model can't see images. Pick another one for screen help in Settings, Voice." }));
         return;
     }
     let system = req["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant inside a Windows desktop sidebar. Use Markdown. Be concise.");
@@ -731,7 +731,7 @@ fn modules_from_end4(layouts: &Value, current: &Value) -> Option<Value> {
         }
     }
     if out.is_empty() { return None; }
-    let all = ["launcher", "window", "resources", "media", "island", "workspaces", "clock", "utils", "weather", "wm", "netspeed", "tray", "system"]; // settings::layout::BAR_MODULES
+    let all = ["launcher", "window", "resources", "media", "island", "workspaces", "clock", "utils", "weather", "claude", "wm", "netspeed", "tray", "system"]; // settings::layout::BAR_MODULES
     let side_now = |id: &str| current.as_array().into_iter().flatten().find(|m| m[0] == id).and_then(|m| m[1].as_str().map(str::to_string));
     let kept: Vec<Value> = all.into_iter().filter(|id| !out.iter().any(|(i, _)| i == id)).map(|id| json!([id, side_now(id).unwrap_or_else(|| "hidden".into())])).collect();
     Some(Value::Array(out.iter().map(|(i, s)| json!([i, s])).chain(kept).collect()))
@@ -1262,12 +1262,12 @@ mod tests {
         assert_eq!(m[0], json!(["workspaces", "center"]));
         assert_eq!(m[5], json!(["system", "center"]));
         assert!(m.as_array().unwrap().contains(&json!(["launcher", "hidden"])));
-        assert_eq!(m.as_array().unwrap().len(), 13);
+        assert_eq!(m.as_array().unwrap().len(), 14);
         assert_eq!(modules_from_end4(&json!({}), &json!([])), None);
         // a module the preset leaves out keeps its place: the island stays shown
         let m = modules_from_end4(&l, &json!([["island", "center"], ["launcher", "hidden"]])).unwrap();
         assert!(m.as_array().unwrap().contains(&json!(["island", "center"])) && m.as_array().unwrap().contains(&json!(["launcher", "hidden"])));
-        assert_eq!(m.as_array().unwrap().len(), 13);
+        assert_eq!(m.as_array().unwrap().len(), 14);
         // a preset never moves the bar
         let b = extras_from_end4(&json!({ "bar": { "bottom": true, "vertical": true, "cornerStyle": 2 } }), &json!({ "bar": { "position": "top", "style": "float" } }));
         assert_eq!(b["bar"]["position"], "top");

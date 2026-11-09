@@ -24,6 +24,7 @@ const NAME: &str = "sidebar-right";
 const ID_SETTINGS: u32 = 1;
 const ID_RELOAD: u32 = 2;
 const ID_POWER: u32 = 3;
+const ID_BG: u32 = 4; // whole panel: gives the wheel a target over empty space
 const ID_POWER_ITEM: u32 = 10; // + 0..5
 const ID_REC_MENU: u32 = 19; // the chevron on the Screen record tile
 const ID_TOGGLE: u32 = 20; // + 0..16
@@ -58,7 +59,13 @@ impl Sc {
 const BOTTOM_MIN: f32 = 340.0;
 
 /// Card height: what is left under the `upper` block of a panel `panel_h` tall, but at least `BOTTOM_MIN`.
-fn bottom_height(panel_h: f32, upper: f32) -> f32 { (panel_h - 13.0 - upper).max(BOTTOM_MIN) }
+fn bottom_height(panel_h: f32, upper: f32) -> f32 { (panel_h - crate::tokens::QP_PAD - upper).max(BOTTOM_MIN) }
+
+/// Height of the 16 toggle tiles: eight rows of two with a gap between rows.
+fn tiles_h() -> f32 { 8.0 * crate::tokens::TILE_H + 7.0 * crate::tokens::TILE_GAP }
+
+/// Height of `n` stacked sliders (0 when there are none).
+fn sliders_h(n: usize) -> f32 { if n == 0 { 0.0 } else { n as f32 * (crate::tokens::QP_SLIDER_H + crate::tokens::QP_SLIDER_GAP) - crate::tokens::QP_SLIDER_GAP } }
 
 pub struct SidebarRight {
     area: (f32, f32),
@@ -316,14 +323,14 @@ impl SidebarRight {
         };
         let defs = defs(&i);
         self.tg = defs.iter().map(|d| (d.id, d.settings)).collect();
-        let tw = (cw - 6.0) / 2.0;
+        let tw = (cw - crate::tokens::TILE_GAP) / 2.0;
         for (k, d) in defs.iter().enumerate() {
-            let r = R::new(x0 + (k % 2) as f32 * (tw + 6.0), y + (k / 2) as f32 * 64.0, tw, 58.0);
+            let r = R::new(x0 + (k % 2) as f32 * (tw + crate::tokens::TILE_GAP), y + (k / 2) as f32 * (crate::tokens::TILE_H + crate::tokens::TILE_GAP), tw, crate::tokens::TILE_H);
             let busy = s.busy.contains(d.id);
             let a = |col| if busy { alpha(col, 0.6) } else { col };
             let over = c.hit(r, ID_TOGGLE + k as u32);
             let (bg, fg, sub, bub) = if d.on {
-                (t.c("primary"), t.c("onPrimary"), alpha(t.c("onPrimary"), 0.75), alpha(t.c("onPrimary"), 0.16))
+                (ui::accent(cx), t.c("onPrimary"), alpha(t.c("onPrimary"), 0.75), alpha(t.c("onPrimary"), 0.16))
             } else {
                 (if over { t.c("surfaceContainerHigh") } else { t.c("surfaceContainer") }, t.c("onSurface"), t.c("onSurfaceVariant"), t.c("surfaceContainerHighest"))
             };
@@ -358,9 +365,9 @@ impl SidebarRight {
         let mut h = 0.0;
         for (id, icon, v) in list {
             let Some(v) = v else { continue };
-            if h > 0.0 { h += 6.0; }
-            self.slider(c, cx, R::new(x0, y + h, cw, 44.0), id, Some(icon), v, None);
-            h += 44.0;
+            if h > 0.0 { h += crate::tokens::QP_SLIDER_GAP; }
+            self.slider(c, cx, R::new(x0, y + h, cw, crate::tokens::QP_SLIDER_H), id, Some(icon), v, None);
+            h += crate::tokens::QP_SLIDER_H;
         }
         h
     }
@@ -451,16 +458,17 @@ impl View for SidebarRight {
         let (w, h) = self.area;
         let p = R::new(6.0, 6.0, w - 12.0, h - 12.0);
         ui::panel(c, cx, p, 30.0);
-        let (x0, cw) = (p.x + 13.0, p.w - 26.0);
+        c.hit(p, ID_BG);
+        let (x0, cw) = (p.x + crate::tokens::QP_PAD, p.w - 2.0 * crate::tokens::QP_PAD);
         let sliders = [cx.audio.map(|a| a.volume), cx.audio.and_then(|a| a.mic_volume), s.brightness].iter().flatten().count();
-        let slider_h = if sliders == 0 { 0.0 } else { sliders as f32 * 50.0 - 6.0 };
+        let slider_h = sliders_h(sliders);
         let mixer_h = if !self.mixer_open { 0.0 } else if s.mixer.is_empty() { 27.0 } else { (s.mixer.len() as f32 * 50.0 - 6.0).min(240.0) + 10.0 };
-        let upper = 13.0 + 52.0 + if self.power_open { 68.0 } else { 0.0 } + 8.0 * 58.0 + 7.0 * 6.0 + 10.0 + slider_h + 10.0 + 42.0 + mixer_h;
+        let upper = crate::tokens::QP_PAD + 52.0 + if self.power_open { 68.0 } else { 0.0 } + tiles_h() + 10.0 + slider_h + 10.0 + 42.0 + mixer_h;
         // the card keeps a usable height; the panel scrolls when the screen is too short for both
         let bottom_h = bottom_height(p.h, upper);
         let mut sc = std::mem::take(&mut self.sc_main);
-        sc.region(c, cx, p, upper + bottom_h + 13.0, |c, top| {
-            let mut y = top + 13.0;
+        sc.region(c, cx, p, upper + bottom_h + crate::tokens::QP_PAD, |c, top| {
+            let mut y = top + crate::tokens::QP_PAD;
             self.paint_header(c, cx, &s, x0, y, cw);
             y += 42.0 + 10.0;
             if self.power_open {
@@ -468,7 +476,7 @@ impl View for SidebarRight {
                 y += 58.0 + 10.0;
             }
             self.paint_toggles(c, cx, &s, x0, y, cw);
-            y += 8.0 * 58.0 + 7.0 * 6.0 + 10.0; // 16 toggles, two per row
+            y += tiles_h() + 10.0; // 16 toggles, two per row
             y += self.paint_sliders(c, cx, &s, x0, y, cw) + 10.0;
             ui::chip(c, cx, x0, y, ID_MIXER_BTN, Some("tune"), "App volume", self.mixer_open);
             y += 32.0 + 10.0;
@@ -527,7 +535,19 @@ mod tests {
     #[test]
     fn card_keeps_its_minimum_height_on_a_short_panel() {
         assert_eq!(bottom_height(600.0, 700.0), BOTTOM_MIN);
-        assert_eq!(bottom_height(1400.0, 700.0), 1400.0 - 13.0 - 700.0);
+        assert_eq!(bottom_height(1400.0, 700.0), 1400.0 - crate::tokens::QP_PAD - 700.0);
+        assert_eq!(sliders_h(0), 0.0);
+        assert_eq!(sliders_h(3), 3.0 * 44.0 + 2.0 * crate::tokens::QP_SLIDER_GAP, "gaps go between sliders, not after the last");
+        assert_eq!(tiles_h(), 8.0 * 58.0 + 7.0 * crate::tokens::TILE_GAP);
+    }
+
+    #[test]
+    fn background_id_is_unique_and_main_scroll_moves_on_wheel() {
+        assert!(![ID_SETTINGS, ID_RELOAD, ID_POWER].contains(&ID_BG));
+        assert!(!(ID_TOGGLE..ID_TOGGLE + 16).contains(&ID_BG));
+        let mut sc = Sc { content: 2000.0, view: 500.0, ..Default::default() };
+        sc.wheel(-120);
+        assert!(sc.s.moving());
     }
 
     #[test]

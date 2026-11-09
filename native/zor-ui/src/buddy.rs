@@ -1,7 +1,7 @@
 //! A small Gojo who lives on the bar: walks along it, sits on its edge with his legs hanging, falls
 //! asleep when you're away, and turns to look at the pointer when it comes near the bar.
-//! Hover: he lifts the blindfold. Click: he talks. Double-click: Hollow Purple. Right-click: Infinity
-//! (for 10 s the pointer can't reach him). Drag him anywhere; let go and he falls back onto the bar,
+//! Hover: he lifts the blindfold. Click: he talks. Double-click and right-click play the character's moves: Gojo's are
+//! Hollow Purple and Infinity (for 10 s the pointer can't reach him); see `cast::Move`. Drag him anywhere; let go and he falls back onto the bar,
 //! or teleports back if you dropped him below it.
 //! He also watches the desktop and comments on what happens: a new track, the volume, the battery, the
 //! network, the weather, notifications, a busy CPU.
@@ -11,14 +11,16 @@ use crate::{
     app::{App, Ctx},
     assist,
     bar::{pretty_app, Edge},
-    cast::{self, Cast, Hair, Trim},
+    cast::{self, Cast, Hair, Move, Say, Trim},
     desk::greeting,
     gfx::{alpha, polygon, txt, Align, Canvas, Color, Gfx, R},
+    pack::{self, Pack},
     util,
     win::{Btn, Input, View, Win, Z},
 };
 use std::{
-    sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering},
+    collections::HashMap,
+    sync::{atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering}, Arc},
     time::Instant,
 };
 use windows::Win32::{
@@ -65,6 +67,8 @@ pub fn on() -> bool { ON.load(Ordering::Relaxed) }
 const W: f32 = 340.0;
 const H: f32 = 100.0;
 const FX: f32 = W / 2.0;
+/// The feet's height in the window for the drawn figure; a taller picture raises it (`Gojo::fy`) and the window grows
+/// upward with it, keeping `H - FY` below the feet.
 const FY: f32 = 56.0;
 /// The bar's height (bar.rs docks 56 px).
 const BAR: f32 = 56.0;
@@ -121,48 +125,52 @@ impl Around {
     }
 }
 
-/// What he'd say about a change since `old`; None when nothing worth a line happened.
-fn notice(old: &Around, new: &Around) -> Option<String> {
+/// What he'd say about a change since `old`, in the words of `s`; None when nothing worth a line happened. A reaction
+/// whose line is empty is skipped, so a pack can silence one.
+fn notice(old: &Around, new: &Around, s: &Say) -> Option<String> {
+    let say = |t: &str, pairs: &[(&str, &str)]| -> Option<String> {
+        (!t.is_empty()).then(|| pairs.iter().fold(t.to_string(), |l, (k, v)| l.replace(k, v)))
+    };
     let low = |a: &Around| a.battery.is_some_and(|p| p <= 15) && a.charging != Some(true);
-    if low(new) && !low(old) { return Some("Battery's low. Find a plug, would you?".into()); }
+    if low(new) && !low(old) { if let Some(l) = say(s.low_battery, &[]) { return Some(l); } }
     // only on the way up: a window resetting back to 0 % needs no remark
     if claude_tier(new.claude) > claude_tier(old.claude) {
         let p = new.claude.unwrap_or(0);
-        return Some(if p >= 95 { format!("Claude's at {p}%. Even I can't beat a rate limit.") } else { format!("Claude's at {p}% of the limit. Pace yourself.") });
+        if let Some(l) = say(if p >= 95 { s.claude_high } else { s.claude_near }, &[("{pct}", &p.to_string())]) { return Some(l); }
     }
     if !new.note.is_empty() && new.note != old.note {
-        return Some(format!("Word from {}.", pretty_app(new.note.split('\t').next().unwrap_or(""))));
+        if let Some(l) = say(s.note, &[("{app}", &pretty_app(new.note.split('\t').next().unwrap_or("")))]) { return Some(l); }
     }
     if !new.track.is_empty() && new.track != old.track {
-        return Some(format!("{}, huh? Good taste.", cut(new.track.split('\t').next().unwrap_or(""), 28)));
+        if let Some(l) = say(s.track, &[("{track}", &cut(new.track.split('\t').next().unwrap_or(""), 28))]) { return Some(l); }
     }
     if new.playing != old.playing && !new.track.is_empty() {
-        return Some(if new.playing { "Music's on. Turn it up~".into() } else { "Aw, the music stopped.".to_string() });
+        if let Some(l) = say(if new.playing { s.music_on } else { s.music_off }, &[]) { return Some(l); }
     }
     if let (Some(a), Some(b)) = (old.muted, new.muted) {
-        if a != b { return Some(if b { "Muted? I can't hear a thing.".into() } else { "Sound's back.".to_string() }); }
+        if a != b { if let Some(l) = say(if b { s.muted } else { s.unmuted }, &[]) { return Some(l); } }
     }
     if let (Some(a), Some(b)) = (old.volume, new.volume) {
         if !new.muted.unwrap_or(false) && (a as i16 - b as i16).abs() >= 20 {
-            return Some(if b > a { "That's loud. I approve.".into() } else { "Too quiet in here.".to_string() });
+            if let Some(l) = say(if b > a { s.loud } else { s.quiet }, &[]) { return Some(l); }
         }
     }
     if new.online != old.online {
-        return Some(if new.online { "We're back online.".into() } else { "The internet's gone. Not my doing.".to_string() });
+        if let Some(l) = say(if new.online { s.online } else { s.offline }, &[]) { return Some(l); }
     }
     if let (Some(a), Some(b)) = (old.charging, new.charging) {
-        if a != b { return Some(if b { "Charging. Good.".into() } else { "On battery? Better be quick.".to_string() }); }
+        if a != b { if let Some(l) = say(if b { s.charging } else { s.unplugged }, &[]) { return Some(l); } }
     }
     if new.weather != old.weather {
         let line = match new.weather {
-            s if s.starts_with("thunder") => "Thunder outside? Even I'd stay in.",
-            s if s.starts_with("snow") => "It's snowing. Cute.",
-            s if s.contains("rain") => "It's raining out there. Stay in.",
+            w if w.starts_with("thunder") => s.thunder,
+            w if w.starts_with("snow") => s.snow,
+            w if w.contains("rain") => s.rain,
             _ => "",
         };
-        if !line.is_empty() { return Some(line.into()); }
+        if let Some(l) = say(line, &[]) { return Some(l); }
     }
-    if new.busy && !old.busy { return Some("Whatever's running is working hard.".into()); }
+    if new.busy && !old.busy { if let Some(l) = say(s.busy, &[]) { return Some(l); } }
     None
 }
 
@@ -238,6 +246,68 @@ fn clock() -> f32 {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode { Stand, Walk, Sit, Sleep, Held, Fall, Point }
+
+/// Seconds a move plays. A shield isn't timed here: it lasts as long as `infinity` says.
+fn move_secs(m: Move) -> f32 { match m { Move::Orbs => 2.6, Move::Beam => 2.4, Move::Aura => 2.0, Move::Shield | Move::None => 0.0 } }
+
+/// The beam's state `p` seconds into its move of `dur`: how charged the ball is (0 to 1), how long the beam is (CSS px,
+/// nothing until the ball is charged, then out to `BEAM_MAX` in a quarter second) and how visible it is (fading out
+/// over the last half second). It stays inside his 340 px window.
+struct Beam { charge: f32, len: f32, alpha: f32 }
+const BEAM_CHARGE: f32 = 0.9;
+const BEAM_MAX: f32 = 140.0;
+fn beam(p: f32, dur: f32) -> Beam {
+    Beam { charge: (p / BEAM_CHARGE).clamp(0.0, 1.0), len: BEAM_MAX * smooth((p - BEAM_CHARGE) / 0.25), alpha: ((dur - p) / 0.5).clamp(0.0, 1.0) }
+}
+
+/// How strong the aura is `p` seconds into its move of `dur`: it swells in over 0.3 s and fades over the last 0.5 s.
+fn aura(p: f32, dur: f32) -> f32 { smooth(p / 0.3) * smooth((dur - p) / 0.5) }
+
+/// The decoded frames of one pack at one height: (pack id, manifest stamp), height in px, and each file's pixmap
+/// (None if it can't be read, so it isn't retried every frame). Dropped when any of the three changes.
+#[derive(Default)]
+pub struct Sprites { key: (String, u64), h: u32, map: HashMap<String, Option<tiny_skia::Pixmap>> }
+
+impl Sprites {
+    /// The picture of `p` to draw for the state `want` ("stand", "walk", ...) at `t` seconds, `h_css` CSS px tall, loaded
+    /// and kept: its file name and whether it is a real animation (more than one frame of its own state), which switches
+    /// off the breathing squash. None when the file can't be read, so the drawn figure stands in and the failure isn't
+    /// retried every frame.
+    pub fn pick(&mut self, g: &Gfx, scale: f32, p: &Pack, want: &str, t: f32, h_css: f32) -> Option<(String, bool)> {
+        let h = (h_css * scale).round() as u32;
+        if self.key.0 != p.id || self.key.1 != p.stamp || self.h != h { *self = Sprites { key: (p.id.clone(), p.stamp), h, map: HashMap::new() }; }
+        let (m, exact) = p.resolve(want)?;
+        let frames = &p.frames[m];
+        let file = &frames[pack::frame_index(frames.len(), p.fps, t)];
+        let img = self.map.entry(file.clone()).or_insert_with(|| {
+            let path = p.dir.join(file);
+            // never wider than his window (a very wide picture is cropped at the sides, not squeezed)
+            let max_w = (4 * h).min(((W - 40.0) * scale) as u32).max(1);
+            g.image_size(&path).filter(|&(w, h)| w > 0 && h > 0)
+                .and_then(|(iw, ih)| g.load_image(&path, ((h as f32 * iw as f32 / ih as f32).round() as u32).clamp(1, max_w), h))
+        });
+        img.is_some().then(|| (file.clone(), exact && frames.len() > 1))
+    }
+
+    /// The decoded picture of a file `pick` returned.
+    pub fn image(&self, file: &str) -> Option<&tiny_skia::Pixmap> { self.map.get(file)?.as_ref() }
+}
+
+/// (picture height, feet height in the window), CSS px, for a picture `height` tall with `room` above his feet on the
+/// screen: a tall one is cut down to fit under the screen's top (on a top bar there are only 54 px), and the window
+/// grows upward to hold what is left, never shorter than the drawn figure's.
+fn fit(height: f32, room: f32) -> (f32, f32) {
+    let h = height.min(room).max(pack::MIN_H);
+    (h, (h + 4.0).max(FY))
+}
+
+/// The pack a buddy looks like: the folder named by a "pack:" character, else the single picture chosen in Settings.
+/// `cur` is the pack already in use, kept when it is still the right one so its frames aren't dropped every second.
+fn pack_for(character: &str, image: &str, cur: Option<Arc<Pack>>) -> Option<Arc<Pack>> {
+    if let Some(id) = character.strip_prefix("pack:") { return pack::load(id); }
+    if image.is_empty() { return None; }
+    cur.filter(|p| p.id == format!("image:{image}")).or_else(|| Some(Arc::new(pack::single(image))))
+}
 
 /// A flight to a spot on the screen he was asked to point at (screen help), and the stay there.
 #[derive(Clone, Debug)]
@@ -336,7 +406,9 @@ pub struct Gojo {
     peek_said: f32,
     bubble: Option<(String, f32)>,
     infinity: f32,
-    purple: Option<f32>,
+    /// When the move he is playing started, and which move it is.
+    move_t: Option<f32>,
+    playing: Move,
     poof: Option<f32>,
     hop: Option<f32>,
     /// Left button: where it went down over him, and the grab offset once it's a drag.
@@ -371,8 +443,17 @@ pub struct Gojo {
     style: Hair,
     /// Skin, glasses, ears and the picture that replaces the drawn figure.
     trim: Trim,
-    /// The decoded picture: (file, height in px, pixmap; None if it can't be read, so it isn't retried every frame). Reloaded when the file or the screen scale changes.
-    sprite: Option<(String, u32, Option<tiny_skia::Pixmap>)>,
+    /// What he looks like when he is a picture: the pack's frames (None: the drawn figure), or the single picture
+    /// chosen in Settings.
+    pack: Option<Arc<Pack>>,
+    /// The decoded frames of that pack.
+    sprites: Sprites,
+    /// Height of his picture in CSS px (the pack's, cut down so he fits under the screen top), and where his feet sit
+    /// in his window: the window grows upward for a tall picture.
+    sprite_h: f32,
+    fy: f32,
+    /// Half the width and the height (CSS px) of what you can grab: the figure's, or the picture's.
+    body: (f32, f32),
     /// Empty: the cast's own name.
     name: String,
     walk: bool,
@@ -410,10 +491,10 @@ impl Gojo {
         let g = Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
-            purple: None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
+            move_t: None, playing: Move::None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
             mon: RECT::default(), scale: 1.0,
-            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), sprite: None, name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
+            slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), pack: None, sprites: Sprites::default(), sprite_h: pack::DEFAULT_H, fy: FY, body: (11.0, 48.0), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
             work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true, job: None, fly_v: 0.0, trail: vec![],        };
         g
     }
@@ -421,11 +502,11 @@ impl Gojo {
     /// Reads this buddy's settings from config (once a second, so Settings changes show at once).
     fn tune(&mut self, cx: &Ctx) {
         let k = ["a", "b"][self.slot];
-        (self.cast, self.style) = cast::pick(&cx.cfg, cx.cfg.str(&format!("buddies.{k}.character")));
-        let s = |f: &str| cx.cfg.str(&format!("buddies.{k}.{f}")).to_string();
-        self.cast.dress(&s("hair"), &s("shirt"), &s("pants"), &s("eyes"), &s("bun"));
-        if let Some(h) = Hair::parse(&s("style")) { self.style = h; }
-        self.trim = if cast::custom_on(&cx.cfg) { Trim::read(&cast::trim(&cx.cfg, cx.cfg.str(&format!("buddies.{k}.character"))), |f| s(f)) } else { Trim::default() };
+        let a = appearance(cx.cfg.str(&format!("buddies.{k}.character")), cast::custom_on(&cx.cfg), cx.cfg.get("buddies.custom"),
+            &|f| cx.cfg.str(&format!("buddies.{k}.{f}")).to_string(), self.pack.take());
+        (self.cast, self.style, self.trim, self.pack) = (a.cast, a.style, a.trim, a.pack);
+        let room = (self.line() - self.mon.top as f32) / self.scale.max(0.1) - 2.0; // above his feet on the screen, so he isn't cut off
+        (self.sprite_h, self.fy) = self.pack.as_ref().map_or((pack::DEFAULT_H, FY), |p| fit(p.height, room));
         self.name = cx.cfg.str(&format!("buddies.{k}.name")).trim().to_string();
         self.walk = cx.cfg.get(&format!("buddies.{k}.walk")).as_bool().unwrap_or(true);
         self.chatty = match cx.cfg.str(&format!("buddies.{k}.chatty")) { "quiet" => 0.0, "chatty" => 2.0, _ => 1.0 };
@@ -436,17 +517,15 @@ impl Gojo {
         // the first look at the config is also when they greet you, in the chosen character's words
         if !std::mem::replace(&mut self.greeted, true) { self.say(&format!("{} {}!", self.cast.greet, greeting(util::now().wHour)), 4.0); }
     }
-    /// Loads (or keeps) the picture named by the look options; false when there is none or it can't be read.
-    fn load_sprite(&mut self, c: &Canvas) -> bool {
-        let h = (SPRITE_H * c.scale).round() as u32;
-        if self.trim.image.is_empty() { self.sprite = None; return false; }
-        if let Some((f, ph, img)) = &self.sprite { if *f == self.trim.image && *ph == h { return img.is_some(); } }
-        let path = crate::conf::pack_dir().join("images").join(&self.trim.image);
-        let loaded = c.g.image_size(&path).filter(|&(w, h)| w > 0 && h > 0)
-            .and_then(|(iw, ih)| c.g.load_image(&path, ((h as f32 * iw as f32 / ih as f32).round() as u32).clamp(1, 4 * h), h));
-        let ok = loaded.is_some();
-        self.sprite = Some((self.trim.image.clone(), h, loaded));
-        ok
+    /// The picture to draw now (see `Sprites::pick`); None when he is the drawn figure.
+    fn pick_sprite(&mut self, c: &Canvas) -> Option<(String, bool)> {
+        let p = self.pack.clone()?;
+        let mode = match self.mode {
+            Mode::Walk => "walk", Mode::Sit => "sit", Mode::Sleep => "sleep", Mode::Fall => "fall", Mode::Held => "held", Mode::Point => "point",
+            Mode::Stand if self.bubble.as_ref().is_some_and(|b| b.1 > self.t) && p.frames.contains_key("talk") => "talk",
+            Mode::Stand => "stand",
+        };
+        self.sprites.pick(c.g, c.scale, &p, mode, self.t, self.sprite_h)
     }
     fn shown_name(&self) -> String { if self.name.is_empty() { self.cast.label.to_string() } else { self.name.clone() } }
 
@@ -500,6 +579,7 @@ impl Gojo {
     }
     fn pick(&mut self, lines: &[&str]) -> String { lines[(self.rand() * lines.len() as f32) as usize % lines.len()].to_string() }
     fn say(&mut self, s: &str, secs: f32) {
+        if s.is_empty() { return; } // a pack can silence a line
         self.bubble = Some((s.to_string(), self.t + secs));
         // each buddy is its own window: lift the speaker above the other one so his bubble isn't hidden behind it
         let h = HWNDS[self.slot].load(Ordering::Relaxed);
@@ -524,7 +604,7 @@ impl Gojo {
             if cx.net.is_some() || self.t > 15.0 { self.primed = true; self.around = now; }
             return;
         }
-        if let Some(l) = notice(&self.around, &now) { self.queued = Some(l); }
+        if let Some(l) = notice(&self.around, &now, &self.cast.say) { self.queued = Some(l); }
         self.watch_focus(cx);
         self.around = now;
         if self.t < self.quiet || self.talking() { return; }
@@ -542,12 +622,13 @@ impl Gojo {
         let kind = cx.wm.window.as_ref().map_or("", |(title, proc)| focus_kind(title, proc));
         if kind != self.focus { self.focus = kind; self.focus_since = self.t; return; }
         if kind.is_empty() || self.t - self.focus_since < 20.0 || (self.focus_said.0 == kind && self.t - self.focus_said.1 < 900.0) { return; }
+        let s = self.cast.say;
         let lines: &[&str] = match kind {
-            "code" => &["Coding? Don't let a bug beat you.", "Writing code again. I'll be here if it breaks."],
-            "video" => &["Watching something? Don't forget to blink.", "Is it any good? Move over."],
-            "social" => &["Scrolling again? Just a little, okay?", "Social media time. Don't lose an hour."],
-            "chat" => &["Chatting with someone? Say hi from me.", "Busy talking, I see."],
-            "game" => &["A game! Show them what you've got.", "Game time. Go win."],
+            "code" => s.focus_code,
+            "video" => s.focus_video,
+            "social" => s.focus_social,
+            "chat" => s.focus_chat,
+            "game" => s.focus_game,
             _ => return,
         };
         self.focus_said = (kind, self.t);
@@ -575,13 +656,13 @@ impl Gojo {
             self.mode = Mode::Stand;
             self.wait = 2.0;
             self.hidden = false;
-            if self.leads() { let l = self.pick(&["A game! I'll watch from here. Go win.", "Game time. I'm on the other screen, cheering."]); self.say(&l, 5.0); }
+            if self.leads() { let l = self.pick(self.cast.say.game_start); self.say(&l, 5.0); }
         } else if let Some((x, y, game_win)) = self.away_from {
             // he stays until the game's window is gone, so clicking the other monitor doesn't call him back
             if unsafe { IsWindow(HWND(game_win as *mut _)) }.as_bool() { return; }
             self.away_from = None;
             self.x = x; self.y = y; self.perch = None;
-            if self.leads() { self.say("Good game? Welcome back.", 4.0); }
+            if self.leads() && !self.cast.say.game_end.is_empty() { self.say(self.cast.say.game_end, 4.0); }
         }
     }
 
@@ -592,7 +673,7 @@ impl Gojo {
         let mins = (self.work / 60.0).round() as u32;
         self.work = 0.0;
         if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
-        let l = self.pick(&["Stand up, stretch, drink some water.", "Look away from the screen for a minute.", "Take a walk. The code will wait."]);
+        let l = self.pick(self.cast.say.break_tips);
         self.say(&format!("{mins} minute{} straight. Break time! {l}", if mins == 1 { "" } else { "s" }), 7.0);
     }
 
@@ -635,7 +716,7 @@ impl Gojo {
         let buddy_x = self.partner();
 
         // his body, screen px
-        let (bl, br, bt, bb) = (self.x - 11.0 * s, self.x + 11.0 * s, self.y - 48.0 * s, self.y + if self.sitting() { 11.0 } else { 1.0 } * s);
+        let (bl, br, bt, bb) = (self.x - self.body.0 * s, self.x + self.body.0 * s, self.y - self.body.1 * s, self.y + if self.sitting() { 11.0 } else { 1.0 } * s);
         self.hovered = !self.hidden && cx >= bl && cx < br && cy >= bt && cy < bb;
 
         // left button: press over him, then a drag past 6 px picks him up
@@ -646,10 +727,10 @@ impl Gojo {
             if self.mode != Mode::Held && (cur.x - px).pow(2) + (cur.y - py).pow(2) > 36 {
                 self.mode = Mode::Held;
                 self.dragged = true;
-                self.purple = None;
+                self.move_t = None;
                 self.job = None; // picking him up ends pointing
                 self.grab = (self.x - px as f32, self.y - py as f32);
-                let l = self.pick(&["Hey! Put me down!", "Whoa, whoa!", "Careful, I'm precious."]);
+                let l = self.pick(self.cast.say.held);
                 self.say(&l, 2.5);
             }
         }
@@ -685,7 +766,7 @@ impl Gojo {
                     self.poof = Some(self.t);
                     self.mode = Mode::Stand;
                     self.wait = 2.0;
-                    self.say("Teleport~", 1.5);
+                    self.say(self.cast.say.teleport, 1.5);
                 } else { self.mode = Mode::Fall; self.vy = 0.0; }
             }
             Mode::Fall => {
@@ -696,7 +777,7 @@ impl Gojo {
                     self.y = ground;
                     self.hop = Some(self.t);
                     if std::mem::take(&mut self.sit_after) { self.mode = Mode::Sit; self.wait = 8.0 + self.rand() * 14.0; }
-                    else { self.mode = Mode::Stand; self.wait = 2.0; self.say("Perfect landing.", 2.0); }
+                    else { self.mode = Mode::Stand; self.wait = 2.0; self.say(self.cast.say.landed, 2.0); }
                 }
             }
             Mode::Point => match self.job.clone() {
@@ -734,7 +815,7 @@ impl Gojo {
                     self.trail.retain(|p| t - p.2 < 0.3);
                 }
             },
-            Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say("Hm? Oh, you're back.", 3.0); },
+            Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say(self.cast.say.back, 3.0); },
             // he only sleeps when nothing is playing: a video is company, and his bubble stays up
             _ if idle_s > 180.0 && !ctx.media.as_ref().is_some_and(|m| m.playing) => { self.mode = Mode::Sleep; self.queued = None; }
             Mode::Walk => {
@@ -751,7 +832,7 @@ impl Gojo {
             }
             Mode::Stand | Mode::Sit => {
                 self.wait -= dt;
-                if self.wait <= 0.0 && self.purple.is_none() {
+                if self.wait <= 0.0 && self.move_t.is_none() {
                     let r = self.rand();
                     if self.mode == Mode::Sit {
                         self.mode = Mode::Stand; self.wait = 1.0 + self.rand() * 2.0;
@@ -799,23 +880,44 @@ impl Gojo {
             let l = self.pick(self.cast.peek);
             self.say(&l, 3.0);
         }
-        if self.purple.is_some_and(|p| self.t - p > 2.6) { self.purple = None; }
+        if self.move_t.is_some_and(|p| self.t - p > move_secs(self.playing)) { self.move_t = None; }
         if self.t > self.chat_at {
             self.chat_at = self.t + (150.0 + self.rand() * 150.0) / self.chatty.max(0.1);
             if self.chatty > 0.0 && !self.talking() && matches!(self.mode, Mode::Stand | Mode::Sit | Mode::Walk) {
-                let l = if util::now().wHour < 5 { "It's late. Even I sleep sometimes.".to_string() } else { self.pick(self.cast.chat) };
+                let l = if util::now().wHour < 5 && !self.cast.say.late.is_empty() { self.cast.say.late.to_string() } else { self.pick(self.cast.chat) };
                 self.say(&l, 4.0);
             }
         }
 
         let hwnd = HWND(HWNDS[self.slot].load(Ordering::Relaxed) as *mut _);
         unsafe {
-            let _ = SetWindowPos(hwnd, None, (self.x - FX * s).round() as i32, (self.y - FY * s).round() as i32, 0, 0,
+            let _ = SetWindowPos(hwnd, None, (self.x - FX * s).round() as i32, (self.y - self.fy * s).round() as i32, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 
     fn sitting(&self) -> bool { matches!(self.mode, Mode::Sit | Mode::Sleep) }
+
+    /// Plays move `m` (his double-click's or right-click's); false for `Move::None`, so the caller can say a line instead.
+    /// A shield turns on or off; the others start unless one is already playing.
+    fn start_move(&mut self, m: Move) -> bool {
+        match m {
+            Move::None => return false,
+            Move::Shield => {
+                if self.infinity > self.t { self.infinity = 0.0; self.say(self.cast.say.shield_off, 2.0); }
+                else { self.infinity = self.t + 10.0; self.say(self.cast.say.shield_on, 3.0); }
+            }
+            _ if self.move_t.is_some() => {}
+            _ => {
+                if self.mode == Mode::Walk || self.sitting() { self.mode = Mode::Stand; }
+                self.wait = 4.0;
+                self.playing = m;
+                self.move_t = Some(self.t);
+                self.say(self.cast.shout, move_secs(m));
+            }
+        }
+        true
+    }
 
     /// Which side of him the speech bubble goes: right unless that runs off the monitor. While he points it opens away
     /// from the spot, which is on his other side.
@@ -833,7 +935,7 @@ impl Gojo {
         self.job = Some(PointJob { from, feet: (fx, fy), to, label, t0: self.t, fly: flight_secs(dist), side, landed: false });
         self.mode = Mode::Point;
         self.perch = None;
-        self.purple = None;
+        self.move_t = None;
         self.sit_after = false;
         self.poof = Some(self.t);
         self.fly_v = 0.0;
@@ -890,8 +992,6 @@ impl Ink<'_, '_> {
 }
 
 const SKIN: Color = 0xFFF7E0D3;
-/// Height of a picture buddy in CSS px, about the drawn figure's.
-const SPRITE_H: f32 = 52.0;
 const BAND: Color = 0xFF16161D;
 const EYE_DARK: Color = 0xFF20202A;
 const SHOE: Color = 0xFF09090D;
@@ -999,12 +1099,59 @@ fn figure(k: &mut Ink, l: &Look<'_>) {
     else { k.line((-1.2 + f, -24.4 + u), (2.4 + f, -25.2 + u), 0.75, MOUTH); }
 }
 
+/// What `Gojo::tune` and the Settings preview both work out from a buddy's options: `character` is the picked id, `custom` the
+/// saved buddies (a JSON list, used when `custom_on`), `slot` reads the slot's own fields ("hair", "shirt", "pants", "eyes",
+/// "bun", "style", "skin", "glasses", "ears", "image") and `cur` is the pack already in use, kept while it is still the right one.
+pub struct Appearance { pub cast: Cast, pub style: Hair, pub trim: Trim, pub pack: Option<Arc<Pack>> }
+
+pub fn appearance(character: &str, custom_on: bool, custom: &serde_json::Value, slot: &dyn Fn(&str) -> String, cur: Option<Arc<Pack>>) -> Appearance {
+    let (mut cast, mut style) = cast::pick_with(custom_on, custom, character);
+    cast.dress(&slot("hair"), &slot("shirt"), &slot("pants"), &slot("eyes"), &slot("bun"));
+    if let Some(h) = Hair::parse(&slot("style")) { style = h; }
+    let trim = if custom_on { Trim::read(&cast::trim_with(custom_on, custom, character), |f| slot(f)) } else { Trim::default() };
+    let pack = pack_for(character, &trim.image, cur);
+    Appearance { cast, style, trim, pack }
+}
+
+/// Draws the body: the picture when there is one (`animated`: it has frames of its own for this moment, so it doesn't breathe),
+/// else the drawn figure, with its soft shadow when `shadow` (the preview leaves it out: it needs a window-sized mask).
+/// Returns half the width and the height (CSS px) of what you can grab. The bar and the Settings preview both draw through this.
+fn draw_body(c: &mut Canvas, look: &Look<'_>, pose: Pose, sprite: Option<(&tiny_skia::Pixmap, bool)>, sway: f32, talking: bool, t: f32, shadow: bool) -> (f32, f32) {
+    match sprite {
+        // a picture stands where the figure's feet would be and sits a little lower on a ledge; one with no animation of its
+        // own for this moment breathes, squashes when it sits and pulses while it talks
+        Some((img, animated)) => {
+            let (sx, sy) = if animated { (1.0, 1.0) } else { pack::squash(t, look.sit, talking) };
+            c.sprite_scaled(img, pose.ox, pose.oy + 4.0 * look.sit, pose.dir, pose.rot + sway, sx, sy);
+            ((img.width() as f32 / c.scale / 2.0 * 0.8).max(8.0), img.height() as f32 / c.scale)
+        }
+        None => {
+            if shadow { c.shadow(0.6, 2.4, 0.7, |c, over| figure(&mut Ink { c, pose, over }, look)); }
+            else { figure(&mut Ink { c, pose, over: None }, look); }
+            (11.0, 48.0)
+        }
+    }
+}
+
+/// One buddy for the Settings preview with his feet at (`x`, `y`) CSS px, `stance` "stand", "walk" or "sit", `t` seconds in; a
+/// picture is at most `max_h` tall. The same drawing as on the bar.
+pub fn draw_preview(c: &mut Canvas, ap: &Appearance, sprites: &mut Sprites, x: f32, y: f32, stance: &str, t: f32, max_h: f32) {
+    let (walk, sit) = match stance { "walk" => (Some(t * 6.0), 0.0), "sit" => (None, 1.0), _ => (None, 0.0) };
+    let drawn = ap.pack.as_ref().and_then(|p| sprites.pick(c.g, c.scale, p, stance, t, p.height.min(max_h)));
+    let img = drawn.as_ref().and_then(|(f, animated)| sprites.image(f).map(|i| (i, *animated)));
+    let look = Look { walk, sit, swing: t * 1.5, peek: 0.0, arm: 0.0, talk: false, hair: 0.0, style: ap.style, c: &ap.cast, trim: &ap.trim };
+    draw_body(c, &look, Pose { ox: x, oy: y, dir: 1.0, rot: 0.0 }, img, 0.0, false, t, false);
+}
+
 impl View for Gojo {
-    fn size(&self, _g: &Gfx, _cx: &Ctx, _s: f32) -> (f32, f32) { (W, H) }
+    fn size(&self, g: &Gfx, _cx: &Ctx, _s: f32) -> (f32, f32) {
+        let bubble = self.bubble.as_ref().filter(|b| b.1 > self.t).map(|b| bubble_dims(g, &b.0).3);
+        (W, window_h(self.fy + (H - FY), bubble))
+    }
 
     fn frame_ms(&self) -> u32 {
         if self.hidden { return 500; }
-        if matches!(self.mode, Mode::Held | Mode::Fall | Mode::Point) || self.purple.is_some() || self.infinity > self.t { 16 }
+        if matches!(self.mode, Mode::Held | Mode::Fall | Mode::Point) || self.move_t.is_some() || self.infinity > self.t { 16 }
         else if self.mode == Mode::Walk || self.hop.is_some() || (self.peek > 0.0 && self.peek < 1.0) || self.poof.is_some() { 33 }
         else { 100 }
     }
@@ -1015,22 +1162,14 @@ impl View for Gojo {
         match b {
             Btn::Left if self.t - std::mem::replace(&mut self.last_click, self.t) < 0.45 => self.input(Input::Click(1, Btn::Double), _cx),
             Btn::Left => {
-                if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; self.say("Five more minutes...", 2.5); return; }
+                if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; self.say(self.cast.say.wake_click, 2.5); return; }
                 self.hop = Some(self.t);
                 let l = self.pick(self.cast.click);
                 self.say(&l, 3.5);
             }
-            Btn::Double => {
-                if self.purple.is_some() { return; }
-                if self.mode == Mode::Walk || self.sitting() { self.mode = Mode::Stand; }
-                self.wait = 4.0;
-                self.purple = Some(self.t);
-                self.say(self.cast.shout, 2.6);
-            }
-            Btn::Right if !self.cast.blindfold => { let l = self.pick(self.cast.right); self.say(&l, 2.5); }
+            Btn::Double => { if !self.start_move(self.cast.special) { self.say(self.cast.shout, 2.0); } }
             Btn::Right => {
-                if self.infinity > self.t { self.infinity = 0.0; self.say("Fine, you can touch me.", 2.0); }
-                else { self.infinity = self.t + 10.0; self.say("Infinity. You can't touch me~", 3.0); }
+                if !self.start_move(self.cast.alt) && !self.cast.right.is_empty() { let l = self.pick(self.cast.right); self.say(&l, 2.5); }
             }
             Btn::Middle => {}
         }
@@ -1050,12 +1189,17 @@ impl View for Gojo {
         let held = self.mode == Mode::Held;
         let flying = self.mode == Mode::Point && self.job.as_ref().is_some_and(|j| t - j.t0 < j.fly);
         let rot = if held { (t * 4.0).sin() * 0.18 } else if flying { lean(self.fly_v, c.scale) } else if self.mode == Mode::Sleep { 0.07 } else { 0.0 };
-        let pt = self.purple.map(|p| t - p);
-        let arm = pt.map_or(0.0, |p| (p / 0.3).min(1.0) * if p > 2.0 { (2.6 - p) / 0.6 } else { 1.0 });
-        let pose = Pose { ox: FX, oy: FY - hop.max(0.0) - bob, dir: self.dir, rot };
+        let pt = self.move_t.map(|p| t - p);
+        // the front arm points forward while he fires orbs or a beam
+        let arm = pt.filter(|_| matches!(self.playing, Move::Orbs | Move::Beam)).map_or(0.0, |p| { let dur = move_secs(self.playing); (p / 0.3).min(1.0) * if p > dur - 0.6 { (dur - p) / 0.6 } else { 1.0 } });
+        // where his feet are in the window, and how much taller than the drawn figure he is (the effects scale with it)
+        let fy = self.fy;
+        let k = self.sprite_h.max(pack::DEFAULT_H) / pack::DEFAULT_H;
+        let pose = Pose { ox: FX, oy: fy - hop.max(0.0) - bob, dir: self.dir, rot };
         self.sit_k = ease_toward(self.sit_k, if self.sitting() { 1.0 } else { 0.0 }, (t - self.k_t).clamp(0.0, 0.1));
         self.k_t = t;
-        let sprite = self.load_sprite(c);
+        let sprite = self.pick_sprite(c);
+        let talking = self.talking();
         let look = Look {
             walk, sit: self.sit_k, swing: t * if self.mode == Mode::Sleep { 1.2 } else { 1.5 }, peek: self.peek.clamp(0.0, 1.0), arm,
             talk: self.talking() && (t * 7.0).sin() > 0.0 && self.mode != Mode::Sleep, hair: if held { (t * 9.0).sin() * 1.2 } else if flying { (t * 12.0).sin() * 0.9 } else { -bob }, style: self.style, c: &self.cast, trim: &self.trim,
@@ -1064,7 +1208,7 @@ impl View for Gojo {
         if self.infinity > t {
             for i in 0..3 {
                 let r = 24.0 + i as f32 * 7.0 + (t * 10.0) % 7.0;
-                c.arc(FX, FY - 24.0, r, 1.0, 1.0, alpha(self.cast.eye, 0.45 * (1.0 - (r - 24.0) / 24.0)));
+                c.arc(FX, fy - 24.0 * k, r, 1.0, 1.0, alpha(self.cast.eye, 0.45 * (1.0 - (r - 24.0) / 24.0)));
             }
         }
         // a streak behind him in flight: a ribbon through his last positions that thins and fades over 0.3 s. Segments, not
@@ -1072,54 +1216,78 @@ impl View for Gojo {
         // theme's colour with a white core, so it shows on dark and light desktops.
         if self.mode == Mode::Point && !self.trail.is_empty() {
             let glow = cx.theme.c("primary");
-            let at = |&(hx, hy, _): &(f32, f32, f32)| (FX + (hx - self.x) / c.scale, FY - 22.0 + (hy - self.y) / c.scale);
+            let at = |&(hx, hy, _): &(f32, f32, f32)| (FX + (hx - self.x) / c.scale, fy - 22.0 * k + (hy - self.y) / c.scale);
             let mut pts: Vec<((f32, f32), f32)> = self.trail.iter().map(|p| (at(p), 1.0 - ((t - p.2) / 0.3).clamp(0.0, 1.0))).collect();
-            pts.push(((FX, FY - 22.0), 1.0));
+            pts.push(((FX, fy - 22.0 * k), 1.0));
             for w in pts.windows(2) {
                 let k = w[1].1;
                 c.line(w[0].0, w[1].0, 8.0 * k, alpha(glow, 0.4 * k));
                 c.line(w[0].0, w[1].0, 2.6 * k, alpha(0xFFFFFFFF, 0.85 * k));
             }
         }
-        match &self.sprite {
-            // a picture stands where the figure's feet would be, and sits a little lower on a ledge
-            Some((_, _, Some(img))) if sprite => {
-                let sway = walk.map_or(0.0, |w| (w * 2.0).sin() * 0.05);
-                c.sprite(img, FX, pose.oy + 4.0 * self.sit_k, self.dir, rot + sway);
-            }
-            _ => c.shadow(0.6, 2.4, 0.7, |c, over| figure(&mut Ink { c, pose, over }, &look)),
-        }
-        c.hit(R::new(FX - 11.0, FY - 48.0, 22.0, if self.sitting() { 59.0 } else { 49.0 }), 1);
+        let drawn = sprite.as_ref().and_then(|(f, animated)| self.sprites.image(f).map(|img| (img, *animated)));
+        let sway = walk.map_or(0.0, |w| (w * 2.0).sin() * 0.05);
+        let body = draw_body(c, &look, pose, drawn, sway, talking, t, true);
+        self.body = body;
+        c.hit(R::new(FX - body.0, fy - body.1, body.0 * 2.0, body.1 + if self.sitting() { 11.0 } else { 1.0 }), 1);
 
-        // Hollow Purple: blue and red gather, meet in front of him, and fire
+        // the move: orbs gather and fire (Hollow Purple), a ball charges and a beam shoots, or an aura glows around him
         if let Some(p) = pt {
-            let d = self.dir;
+            let (d, orbs, dur) = (self.dir, self.cast.orbs, move_secs(self.playing));
             let orb = |c: &mut Canvas, x: f32, y: f32, r: f32, col: Color, a: f32| {
                 c.circle(x, y, r * 2.2, alpha(col, 0.22 * a));
                 c.circle(x, y, r, alpha(col, a));
                 c.circle(x, y, r * 0.5, alpha(0xFFFFFFFF, 0.85 * a));
             };
-            let y = FY - 26.0;
-            if p < 1.4 {
-                let g = (p / 0.9).min(1.0);
-                let m = ((p - 0.9) / 0.5).clamp(0.0, 1.0);
-                let r = 6.0 * g;
-                let at = |side: f32| FX + d * (14.0 + (side * 40.0 - 14.0) * (1.0 - m * m));
-                orb(c, at(-1.0), y, r, self.cast.orbs.0, 1.0);
-                orb(c, at(1.0), y, r, self.cast.orbs.1, 1.0);
-            } else {
-                let q = p - 1.4;
-                let a = if q > 0.7 { (1.2 - q).max(0.0) / 0.5 } else { 1.0 };
-                orb(c, FX + d * (14.0 + q * q * 300.0), y, 7.0 + q * 12.0, self.cast.orbs.2, a);
+            let y = fy - 26.0 * k;
+            match self.playing {
+                Move::Orbs => {
+                    if p < 1.4 {
+                        let g = (p / 0.9).min(1.0);
+                        let m = ((p - 0.9) / 0.5).clamp(0.0, 1.0);
+                        let r = 6.0 * g;
+                        let at = |side: f32| FX + d * (14.0 + (side * 40.0 - 14.0) * (1.0 - m * m));
+                        orb(c, at(-1.0), y, r, orbs.0, 1.0);
+                        orb(c, at(1.0), y, r, orbs.1, 1.0);
+                    } else {
+                        let q = p - 1.4;
+                        let a = if q > 0.7 { (1.2 - q).max(0.0) / 0.5 } else { 1.0 };
+                        orb(c, FX + d * (14.0 + q * q * 300.0), y, 7.0 + q * 12.0, orbs.2, a);
+                    }
+                }
+                Move::Beam => {
+                    let b = beam(p, dur);
+                    let x0 = FX + d * 14.0;
+                    if b.len <= 0.0 { orb(c, x0, y, 2.0 + 5.0 * b.charge, orbs.0, 1.0); } else {
+                        let (x1, pulse) = (x0 + d * b.len, 1.0 + 0.12 * (t * 40.0).sin());
+                        c.line((x0, y), (x1, y), 16.0 * pulse, alpha(orbs.0, 0.25 * b.alpha));
+                        c.line((x0, y), (x1, y), 8.0 * pulse, alpha(orbs.2, 0.8 * b.alpha));
+                        c.line((x0, y), (x1, y), 3.0, alpha(0xFFFFFFFF, 0.95 * b.alpha));
+                        orb(c, x0, y, 7.0, orbs.0, b.alpha);
+                    }
+                }
+                Move::Aura => {
+                    let (env, cy) = (aura(p, dur), fy - 22.0 * k);
+                    c.circle(FX, cy, 30.0 * k, alpha(orbs.2, 0.16 * env));
+                    for i in 0..3 {
+                        let q = (p * 1.1 + i as f32 / 3.0) % 1.0;
+                        c.arc(FX, cy, (10.0 + q * 30.0) * k, 1.0, 0.4 + 2.0 * (1.0 - q), alpha(orbs.0, 0.8 * env * (1.0 - q)));
+                    }
+                    for i in 0..6 {
+                        let q = (p * 0.9 + i as f32 / 6.0) % 1.0;
+                        c.circle(FX + (i as f32 * 2.3).sin() * 14.0, fy - (6.0 + q * 44.0) * k, 1.4 * (1.0 - q), alpha(0xFFFFFFFF, env * (1.0 - q)));
+                    }
+                }
+                Move::Shield | Move::None => {}
             }
         }
         if let Some(p0) = self.poof {
             let p = (t - p0) / 0.5;
             if p >= 1.0 { self.poof = None; } else {
-                c.arc(FX, FY - 20.0, 8.0 + p * 22.0, 1.0, 2.0 * (1.0 - p), alpha(self.cast.eye, 1.0 - p));
+                c.arc(FX, fy - 20.0 * k, 8.0 + p * 22.0, 1.0, 2.0 * (1.0 - p), alpha(self.cast.eye, 1.0 - p));
                 for i in 0..6 {
                     let a = i as f32 * 1.047 + p;
-                    c.circle(FX + a.cos() * (10.0 + p * 20.0), FY - 20.0 + a.sin() * (10.0 + p * 20.0), 1.4 * (1.0 - p), alpha(self.cast.hair, 1.0 - p));
+                    c.circle(FX + a.cos() * (10.0 + p * 20.0), fy - 20.0 * k + a.sin() * (10.0 + p * 20.0), 1.4 * (1.0 - p), alpha(self.cast.hair, 1.0 - p));
                 }
             }
         }
@@ -1128,7 +1296,7 @@ impl View for Gojo {
             let el = t - j.t0 - j.fly; // seconds since touchdown, negative while he is still flying
             let a = smooth((el + 0.25 * j.fly) / (0.25 * j.fly + 0.25)) * if el > POINT_HOLD - 0.4 { ((POINT_HOLD - el) / 0.4).max(0.0) } else { 1.0 };
             if a > 0.0 {
-                let (rx, ry) = (FX + (j.to.0 - self.x) / c.scale, FY + (j.to.1 - self.y) / c.scale);
+                let (rx, ry) = (FX + (j.to.0 - self.x) / c.scale, fy + (j.to.1 - self.y) / c.scale);
                 let (col, pulse) = (cx.theme.c("primary"), (t * 5.0).sin() * 0.5 + 0.5);
                 c.circle(rx, ry, 16.0 + 4.0 * pulse, alpha(col, 0.18 * a)); // soft glow
                 // Three strokes, so the ring shows on any background: dark outside (white pages), white in the middle (dark
@@ -1163,7 +1331,7 @@ impl View for Gojo {
         if self.mode == Mode::Sleep {
             for i in 0..3 {
                 let p = (t * 0.6 + i as f32 / 3.0) % 1.0;
-                let r = R::new(FX + 9.0 + p * 10.0, FY - 22.0 - p * 26.0, 20.0, 16.0);
+                let r = R::new(FX + 9.0 + p * 10.0, fy - 22.0 * k - p * 26.0, 20.0, 16.0);
                 c.text("z", r, txt(8.0 + p * 6.0, 700), alpha(cx.theme.c("onSurface"), 1.0 - p), Align::Left);
             }
         }
@@ -1172,12 +1340,10 @@ impl View for Gojo {
         if let Some((text, until)) = self.bubble.clone() {
             if until <= t { self.bubble = None; return; }
             let f = txt(11.0, 500);
-            let tw = c.g.measure(&text, f).0.min(W - FX - 17.0 - 16.0 - 4.0); // the bubble must fit in the window
-            let th = c.g.measure_wrapped(&text, f, tw + 1.0);
-            let (bw, bh) = (tw + 16.0, th + 10.0);
+            let (tw, th, bw, bh) = bubble_dims(c.g, &text);
             let side = self.bubble_side();
             let bx = if side > 0.0 { FX + 17.0 } else { FX - 17.0 - bw };
-            let by = (FY - 30.0 - bh / 2.0 - hop.max(0.0)).max(2.0);
+            let by = bubble_top(fy - 30.0 * k - bh / 2.0 - hop.max(0.0), bh, c.h);
             let fade = ((until - t) / 0.3).min(1.0);
             let (bg, fg) = (alpha(cx.theme.c("surfaceContainerHigh"), fade), alpha(cx.theme.c("onSurface"), fade));
             c.shadow(1.0, 4.0, 0.35 * fade, |c, over| {
@@ -1191,6 +1357,23 @@ impl View for Gojo {
         }
     }
 }
+
+/// The widest a bubble's text gets: the bubble must fit beside him in the window.
+const BUBBLE_MAX_W: f32 = W - FX - 17.0 - 16.0 - 4.0;
+
+/// (text width, text height, bubble width, bubble height) for `text`: one line if it fits, else wrapped at `BUBBLE_MAX_W`.
+fn bubble_dims(g: &Gfx, text: &str) -> (f32, f32, f32, f32) {
+    let f = txt(11.0, 500);
+    let tw = g.measure(text, f).0.min(BUBBLE_MAX_W);
+    let th = g.measure_wrapped(text, f, tw + 1.0);
+    (tw, th, tw + 16.0, th + 10.0)
+}
+
+/// Window height: room for the feet, and for a bubble of height `bubble` (a long line wraps tall) with 2 px to spare.
+fn window_h(base: f32, bubble: Option<f32>) -> f32 { base.max(bubble.map_or(0.0, |b| b + 4.0)) }
+
+/// The bubble's top: where `want` puts it, kept inside a window `win_h` tall (2 px margins).
+fn bubble_top(want: f32, bh: f32, win_h: f32) -> f32 { want.min(win_h - bh - 2.0).max(2.0) }
 
 /// Moves `k` towards `target` at a constant rate, so a full sit or stand takes `SIT_SECS`.
 fn ease_toward(k: f32, target: f32, dt: f32) -> f32 {
@@ -1270,6 +1453,262 @@ pub fn fullscreen_monitor() -> Option<RECT> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `notice` in Gojo's words, which these tests were written against.
+    fn notice(old: &Around, new: &Around) -> Option<String> { super::notice(old, new, &cast::GOJO_SAY) }
+
+    #[test]
+    fn a_pack_speaks_in_its_own_words_and_can_be_silenced() {
+        let a = calm();
+        let mut b = a.clone();
+        b.volume = Some(75);
+        let mut say = cast::NEUTRAL_SAY;
+        assert_eq!(super::notice(&a, &b, &say).as_deref(), Some("That's loud."), "neutral words, not Gojo's");
+        say.loud = "OVER 9000!";
+        assert_eq!(super::notice(&a, &b, &say).as_deref(), Some("OVER 9000!"));
+        say.loud = "";
+        assert_eq!(super::notice(&a, &b, &say), None, "an empty line says nothing");
+        // the rule is skipped, not the ones after it: going offline in the same look still gets its line
+        b.online = false;
+        assert_eq!(super::notice(&a, &b, &say).as_deref(), Some("The internet is gone."));
+        let mut c = a.clone();
+        c.claude = Some(96);
+        say.claude_high = "Ki at {pct}%.";
+        assert_eq!(super::notice(&a, &c, &say).as_deref(), Some("Ki at 96%."), "the percentage is filled in");
+        let mut d = a.clone();
+        d.track = "Cha-La\tHead".into();
+        say.track = "{track}? {track}!";
+        assert_eq!(super::notice(&a, &d, &say).as_deref(), Some("Cha-La? Cha-La!"));
+    }
+
+    #[test]
+    fn a_tall_picture_grows_the_window_but_is_cut_to_fit_under_the_screen_top() {
+        assert_eq!(fit(52.0, 54.0), (52.0, FY), "the default picture changes nothing");
+        assert_eq!(fit(80.0, 54.0), (54.0, 58.0), "a top bar leaves 54 px above the feet; the 4 px margin sits above the screen's edge");
+        assert_eq!(fit(80.0, 900.0), (80.0, 84.0), "elsewhere it is whole and the window grows to hold it");
+        assert_eq!(fit(100.0, -5.0).0, pack::MIN_H, "no room at all still gives a visible one");
+        assert!(fit(pack::MAX_H, 1e6).1 + (H - FY) <= 220.0, "the largest window stays modest");
+    }
+
+    #[test]
+    fn a_chosen_picture_is_one_pack_kept_while_it_stays_chosen() {
+        assert!(pack_for("gojo", "", None).is_none(), "no picture, no pack");
+        let p = pack_for("gojo", "a.png", None).unwrap();
+        assert_eq!(p.id, "image:a.png");
+        let again = pack_for("gojo", "a.png", Some(p.clone())).unwrap();
+        assert!(Arc::ptr_eq(&p, &again), "the same picture keeps its decoded frames");
+        let other = pack_for("gojo", "b.png", Some(p.clone())).unwrap();
+        assert_eq!(other.id, "image:b.png");
+        assert!(pack_for("gojo", "", Some(p)).is_none(), "clearing the picture drops it");
+        assert!(pack_for("pack:no-such-folder-zorui", "a.png", None).is_none(), "a missing pack is the drawn figure, not the old picture");
+    }
+
+    #[test]
+    fn a_tall_bubble_gets_a_window_that_holds_it() {
+        let base = FY + (H - FY);
+        assert_eq!(window_h(base, None), base, "no bubble: the usual window");
+        assert_eq!(window_h(base, Some(30.0)), base, "a short bubble fits already");
+        assert_eq!(window_h(base, Some(130.0)), 134.0, "a tall one grows the window, with 2 px spare each side");
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let long = "Opening the message box for Shahmeer and typing the message, without sending it yet. Then I will wait for you to check it.";
+        let (_, _, bw, bh) = bubble_dims(&g, long);
+        assert!(bw <= BUBBLE_MAX_W + 16.0 && bh > 60.0, "the long line wraps to several lines: {bw} x {bh}");
+        let (_, _, _, one) = bubble_dims(&g, "Hi.");
+        assert!(one < bh / 2.0, "a short line is a single line");
+        let h = window_h(base, Some(bh));
+        let top = bubble_top(-50.0, bh, h);
+        assert!(top >= 2.0 && top + bh <= h - 2.0, "inside the window: {top} + {bh} in {h}");
+        assert_eq!(bubble_top(1000.0, bh, h), h - bh - 2.0, "never below the window");
+    }
+
+    #[test]
+    fn a_silenced_line_makes_no_bubble() {
+        let mut g = Gojo::new();
+        g.say("", 3.0);
+        assert!(!g.talking() && g.bubble.is_none());
+        g.say("Hi.", 3.0);
+        assert!(g.talking());
+    }
+
+    #[test]
+    fn every_say_line_is_filled_in_for_both_defaults() {
+        for s in [cast::GOJO_SAY, cast::NEUTRAL_SAY] {
+            for list in [s.held, s.break_tips, s.game_start, s.focus_code, s.focus_video, s.focus_social, s.focus_chat, s.focus_game] {
+                assert!(!list.is_empty() && list.iter().all(|l| !l.is_empty()), "a list that can be picked from is never empty");
+            }
+            assert!(s.claude_high.contains("{pct}") && s.claude_near.contains("{pct}") && s.note.contains("{app}") && s.track.contains("{track}"));
+        }
+    }
+
+    fn slot<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> String + 'a {
+        move |f| pairs.iter().find(|(k, _)| *k == f).map_or(String::new(), |(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn the_bar_and_the_preview_work_out_a_look_the_same_way() {
+        let none = serde_json::json!([]);
+        // a slot's colours and hairstyle change the built-in character
+        let ap = appearance("geto", false, &none, &slot(&[("hair", "#102030"), ("style", "mohawk"), ("bun", "no")]), None);
+        assert_eq!((ap.cast.id, ap.cast.hair, ap.style, ap.cast.bun), ("geto", 0xFF10_2030, Hair::Mohawk, false));
+        assert!(ap.pack.is_none());
+        // saved buddies, skin and the picture need the flag: off, a saved id is Gojo and the picture is ignored
+        let saved = serde_json::json!([{"id": "c1", "name": "X", "base": "yuji", "skin": "#102030"}]);
+        let off = appearance("c1", false, &saved, &slot(&[("image", "a.png"), ("skin", "#FFFFFF")]), None);
+        assert_eq!((off.cast.id, off.trim.clone(), off.pack.is_none()), ("gojo", Trim::default(), true));
+        let on = appearance("c1", true, &saved, &slot(&[("image", "a.png")]), None);
+        assert_eq!((on.cast.label, on.trim.skin, on.trim.image.as_str()), ("X", Some(0xFF10_2030), "a.png"));
+        assert_eq!(on.pack.as_ref().unwrap().id, "image:a.png", "a chosen picture becomes his pack");
+        let again = appearance("c1", true, &saved, &slot(&[("image", "a.png")]), on.pack.clone());
+        assert!(Arc::ptr_eq(on.pack.as_ref().unwrap(), again.pack.as_ref().unwrap()), "the pack in use is kept");
+        let gone = appearance("pack:no-such-folder-zorui", false, &none, &slot(&[]), None);
+        assert!(gone.pack.is_none() && gone.cast.id == "gojo", "a pack that isn't there is the drawn Gojo");
+    }
+
+    #[test]
+    fn tune_reads_the_slots_options_through_that_same_look() {
+        let mut cx = Ctx::new(false);
+        cx.cfg = crate::conf::Config::parse(r##"{"buddies":{"a":{"character":"yuji","hair":"#102030","style":"long"}}}"##);
+        let mut g = Gojo::new();
+        g.tune(&cx);
+        assert_eq!((g.cast.id, g.cast.hair, g.style, g.pack.is_none()), ("yuji", 0xFF10_2030, Hair::Long, true));
+    }
+
+    /// A PNG of `w` x `h` solid opaque red, by hand (stored deflate blocks), since the PNG encoder isn't built in.
+    fn red_png(w: u32, h: u32) -> Vec<u8> {
+        fn crc(d: &[u8]) -> u32 { let mut c = !0u32; for b in d { c ^= *b as u32; for _ in 0..8 { c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 }; } } !c }
+        let chunk = |kind: &[u8; 4], data: &[u8]| { let mut v = (data.len() as u32).to_be_bytes().to_vec(); let body = [&kind[..], data].concat(); v.extend(&body); v.extend(crc(&body).to_be_bytes()); v };
+        let raw: Vec<u8> = (0..h).flat_map(|_| std::iter::once(0u8).chain((0..w).flat_map(|_| [255u8, 0, 0, 255]))).collect();
+        let (mut a, mut b) = (1u32, 0u32);
+        for x in &raw { a = (a + *x as u32) % 65521; b = (b + a) % 65521; }
+        let mut z = vec![0x78, 0x01, 1];
+        z.extend((raw.len() as u16).to_le_bytes());
+        z.extend((!(raw.len() as u16)).to_le_bytes());
+        z.extend(&raw);
+        z.extend(((b << 16) | a).to_be_bytes());
+        let mut ihdr = [w.to_be_bytes(), h.to_be_bytes()].concat();
+        ihdr.extend([8, 6, 0, 0, 0]);
+        [b"\x89PNG\r\n\x1a\n".to_vec(), chunk(b"IHDR", &ihdr), chunk(b"IDAT", &z), chunk(b"IEND", &[])].concat()
+    }
+
+    /// How many pixels `draw_preview` paints for `ap` in `stance` on a blank 120 x 120 canvas.
+    fn painted(ap: &Appearance, stance: &str) -> usize {
+        use crate::gfx::{Canvas, Gfx};
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0u8; 120 * 120 * 4];
+        let mut c = Canvas::new(&g, &mut px, 120, 120, 1.0, 0).unwrap();
+        draw_preview(&mut c, ap, &mut Sprites::default(), 60.0, 100.0, stance, 0.0, 64.0);
+        drop(c);
+        px.chunks(4).filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn the_preview_draws_the_figure_in_every_stance() {
+        let ap = appearance("gojo", false, &serde_json::json!([]), &slot(&[]), None);
+        let (stand, walk, sit) = (painted(&ap, "stand"), painted(&ap, "walk"), painted(&ap, "sit"));
+        assert!(stand > 300 && walk > 300 && sit > 300, "{stand} {walk} {sit}");
+        assert_ne!(stand, sit, "sitting is not the standing pose");
+        let tinted = appearance("gojo", false, &serde_json::json!([]), &slot(&[("style", "long")]), None);
+        assert_ne!(painted(&tinted, "stand"), stand, "a Settings change shows in the preview");
+    }
+
+    #[test]
+    fn the_preview_draws_a_packs_picture_at_the_packs_height() {
+        let dir = std::env::temp_dir().join(format!("zorui-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stand.png"), red_png(16, 32)).unwrap();
+        let pk = |height: u32| Arc::new(pack::parse("t", &dir, &format!(r#"{{"height":{height},"frames":{{"stand":["stand.png"]}}}}"#), 1).unwrap());
+        let with = |p: Arc<Pack>| Appearance { cast: cast::get("gojo").clone(), style: Hair::default(), trim: Trim::default(), pack: Some(p) };
+        let tall = painted(&with(pk(40)), "stand");
+        let short = painted(&with(pk(20)), "stand");
+        // the picture is 1:2, so 40 px tall is 20 x 40 = 800 px (breathing makes it a few more or fewer) and 20 px tall is 200
+        assert!((700..=900).contains(&tall) && (150..=260).contains(&short), "tall {tall}, short {short}");
+        assert_eq!(painted(&with(pk(100)), "stand"), painted(&with(pk(64)), "stand"), "the preview caps a tall picture");
+        // the same picture stands in for the states it has none for
+        assert!(painted(&with(pk(40)), "sit") > 600, "sitting uses the standing picture");
+        let missing = Appearance { pack: Some(Arc::new(pack::parse("t", &dir, r#"{"frames":{"stand":["nope.png"]}}"#, 1).unwrap())), ..with(pk(40)) };
+        assert!(painted(&missing, "stand") > 300, "a picture that can't be read leaves the drawn figure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_beam_charges_then_shoots_then_fades() {
+        let dur = move_secs(Move::Beam);
+        let b = beam(0.0, dur);
+        assert_eq!((b.charge, b.len, b.alpha), (0.0, 0.0, 1.0));
+        assert_eq!((beam(0.45, dur).charge, beam(0.9, dur).charge, beam(5.0, dur).charge), (0.5, 1.0, 1.0));
+        assert_eq!((beam(0.5, dur).len, beam(BEAM_CHARGE, dur).len), (0.0, 0.0), "nothing shoots while the ball is charging");
+        assert_eq!(beam(BEAM_CHARGE + 0.25, dur).len, BEAM_MAX);
+        let lens: Vec<f32> = (0..=240).map(|i| beam(i as f32 * 0.01, dur).len).collect();
+        assert!(lens.windows(2).all(|w| w[0] <= w[1]) && lens.iter().all(|l| (0.0..=BEAM_MAX).contains(l)), "it only grows, and never past its limit");
+        assert_eq!((beam(dur - 0.5, dur).alpha, beam(dur, dur).alpha, beam(dur + 1.0, dur).alpha), (1.0, 0.0, 0.0));
+        assert!(14.0 + BEAM_MAX < FX, "the beam ends inside his window on either side");
+    }
+
+    #[test]
+    fn the_aura_swells_in_and_fades_out() {
+        let dur = move_secs(Move::Aura);
+        assert_eq!((aura(0.0, dur), aura(dur, dur)), (0.0, 0.0));
+        assert_eq!(aura(dur / 2.0, dur), 1.0);
+        assert!(aura(0.1, dur) > 0.0 && aura(0.1, dur) < 1.0 && aura(dur - 0.2, dur) < 1.0);
+        assert!((0..=200).all(|i| (0.0..=1.0).contains(&aura(i as f32 * 0.01, dur))));
+    }
+
+    #[test]
+    fn each_timed_move_has_a_length_and_a_shield_or_none_has_none() {
+        assert_eq!(move_secs(Move::Orbs), 2.6, "Hollow Purple plays as long as it always did");
+        assert!(move_secs(Move::Beam) > 1.5 && move_secs(Move::Aura) > 1.0);
+        assert_eq!((move_secs(Move::Shield), move_secs(Move::None)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_move_starts_once_and_a_shield_toggles() {
+        let _l = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = Gojo::new();
+        g.mode = Mode::Walk;
+        assert!(!g.start_move(Move::None) && g.move_t.is_none() && g.mode == Mode::Walk, "no move does nothing and says it did nothing");
+        assert!(g.start_move(Move::Beam));
+        assert_eq!((g.playing, g.mode, g.move_t.is_some(), g.talking()), (Move::Beam, Mode::Stand, true, true), "he stops walking, plays it and shouts");
+        assert!(g.start_move(Move::Aura));
+        assert_eq!(g.playing, Move::Beam, "a second move waits until the first is over");
+        g.t = 10.0;
+        assert!(g.start_move(Move::Shield) && g.infinity == 20.0, "the shield lasts 10 s");
+        assert_eq!(g.bubble.as_ref().unwrap().0, cast::GOJO_SAY.shield_on);
+        assert!(g.start_move(Move::Shield) && g.infinity == 0.0);
+        assert_eq!(g.bubble.as_ref().unwrap().0, cast::GOJO_SAY.shield_off);
+        assert_eq!(g.playing, Move::Beam, "the shield doesn't touch the move that is playing");
+    }
+
+    #[test]
+    fn the_buttons_play_the_characters_own_moves() {
+        let _l = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cx = Ctx::new(false);
+        // Gojo: double-click is Hollow Purple, right-click is Infinity, as before
+        let mut g = Gojo::new();
+        g.input(Input::Click(1, Btn::Double), &mut cx);
+        assert_eq!((g.playing, g.move_t.is_some(), g.talking()), (Move::Orbs, true, true));
+        g.input(Input::Click(1, Btn::Right), &mut cx);
+        assert!(g.infinity > g.t, "right-click turned the shield on");
+        // Geto has no right-click move: he says one of his lines and nothing else happens
+        let mut geto = Gojo::new();
+        geto.cast = cast::get("geto").clone();
+        geto.input(Input::Click(1, Btn::Right), &mut cx);
+        assert!(geto.infinity <= geto.t && geto.move_t.is_none());
+        assert!(cast::get("geto").right.contains(&geto.bubble.as_ref().unwrap().0.as_str()));
+        // a character whose double-click does nothing still shouts, with no effect
+        let mut still = Gojo::new();
+        still.cast.special = Move::None;
+        still.input(Input::Click(1, Btn::Double), &mut cx);
+        assert!(still.move_t.is_none() && still.bubble.as_ref().unwrap().0 == still.cast.shout);
+        // no right-click move and no lines: silence, not a crash
+        let mut quiet = Gojo::new();
+        quiet.cast.alt = Move::None;
+        assert!(quiet.cast.right.is_empty());
+        quiet.input(Input::Click(1, Btn::Right), &mut cx);
+        assert!(quiet.bubble.is_none());
+    }
+
     #[test]
     fn feet_stand_on_the_bar_wherever_it_is() {
         // 1080p monitor, 1.0 scale: a top bar's bottom, a bottom bar's top, a side bar leaves the monitor's bottom

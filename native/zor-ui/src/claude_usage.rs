@@ -27,7 +27,10 @@ fn parse(body: &str) -> Option<Usage> {
     Some(Usage { session: pct("five_hour")?, week: pct("seven_day")? })
 }
 
-pub fn fetch() -> Option<Usage> {
+pub fn fetch() -> Option<Usage> { fetch_with(token()?) }
+
+/// The same read for a given OAuth access token (Settings reads each saved Claude account this way).
+pub fn fetch_with(token: String) -> Option<Usage> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // the header goes in through stdin so the token never shows in the process list
     let mut child = Command::new("curl.exe")
@@ -35,7 +38,7 @@ pub fn fetch() -> Option<Usage> {
         .stdin(Stdio::piped()).stdout(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn().ok()?;
-    child.stdin.take()?.write_all(format!("Authorization: Bearer {}\nanthropic-beta: oauth-2025-04-20\n", token()?).as_bytes()).ok()?;
+    child.stdin.take()?.write_all(format!("Authorization: Bearer {token}\nanthropic-beta: oauth-2025-04-20\n").as_bytes()).ok()?;
     let out = child.wait_with_output().ok()?;
     parse(&String::from_utf8_lossy(&out.stdout)).filter(|_| out.status.success())
 }

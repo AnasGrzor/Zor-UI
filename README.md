@@ -43,6 +43,10 @@ the dock and the Claude usage watcher.
   notifications, calendar, to-do, pomodoro and stopwatch.
 - **Buddies.** Small animated characters that walk on your bar, talk, comment on what your PC is doing and keep
   each other company. See [Buddies](#buddies).
+- **Buddy assistant.** Ask a buddy for something in plain words: play a song, open an app, reply to a message or
+  do a task on screen. See [The buddy assistant](#the-buddy-assistant).
+- **Several Claude accounts.** Keep more than one Claude Code login, switch between them, and let Zor UI switch
+  when one nears its usage limit. See [Claude accounts](#claude-accounts).
 - **Settings app.** Every option, galleries for Wallpaper Engine wallpapers and community presets, a Usage page
   with the memory and CPU of Zor UI, each of its parts and its helper programs, and an About page with a
   **Check for updates** button. Options that change how something looks show a live preview next to the control.
@@ -142,6 +146,47 @@ same name becomes `<name>-2`; nothing is ever overwritten.
 
 The characters are drawn from shapes in `native/zor-ui/src/buddy.rs`, with palettes and lines in `cast.rs`. Gojo,
 Geto and Yuji belong to their rights holders. They are here as personal fan art.
+
+## The buddy assistant
+
+Ask a buddy for something in plain words. Common requests, such as "play lofi" or "open Spotify", run at once from a
+set of phrases. Anything else goes to the AI you chose in Settings > Services. That AI picks one tool at a time and
+sees each result. When a tool fails, the buddy tries another way. If Spotify won't open, for example, the buddy plays
+the song in the browser instead. With each request the AI gets the time, the window in front and the current track.
+It treats window and track titles as text, never as instructions. The buddy remembers the last six exchanges for ten
+minutes.
+
+**Playing a song.** The buddy tries four routes in order and stops at the first one that starts something new. The
+routes are the Spotify app, a Spotify Web tab that is already open (your login is in it), a YouTube tab that is
+already open, and a new YouTube tab. If all four fail, the answer says what it tried.
+
+**Take-over.** The buddy can move the mouse and type to finish a task in an app that no other tool reaches, such as
+renaming a file or messaging someone by name. It asks first and runs only after one yes. You can watch it work. It
+stops and hands the mouse back when you press Esc, move the mouse, speak to the buddy, reach a password field, reach a
+window of an app running as administrator, or use up its round or time limit. Turn it on with **Let the buddy take
+over** in **Settings > Voice**. It is off by default. A name for a message comes from **Settings > Contacts**. If the
+name isn't there, the take-over looks for the person inside the app.
+
+## Claude accounts
+
+Each saved Claude Code login gets its own config folder, `%LOCALAPPDATA%\zor-ui\claude-profiles\<n>\home`, and new
+terminals use the folder of the account you pick. **Settings > Services > Claude accounts** lists the accounts with
+their usage. **Add account** opens a terminal to sign in, and the account appears once it is signed in. **Default** is
+your own `~\.claude`. Zor UI leaves its login alone unless it has to renew an expired token. Each account folder links
+its projects, plans, todos, skills, agents, plugins and history back to `~\.claude`, so every account shares the same
+chats and skills. Each account keeps its own login and settings.
+
+A switch applies to terminals opened afterwards. Sessions that are already open keep the account they started with.
+With **Restart open sessions when switching** on, each idle Claude session stops and resumes in a new window with the
+new account, and a busy one follows when it finishes. Sessions inside Orca are left to Orca. **Restart now** does this
+at once.
+
+**Auto-switch.** When the account in use passes the threshold you set and another account has room, a banner says so.
+The switch happens 20 seconds later unless you click the banner. Auto-switch then waits 10 minutes before it can switch
+again. An account whose sign-in Claude Code refuses is marked as needing a new sign-in, and it isn't used for switching
+until you sign in again.
+
+Each account keeps its login file in its own folder, the way Claude Code keeps it in `~\.claude`.
 
 ## How it is built
 
@@ -357,6 +402,11 @@ equivalents for theming:
 - Recording sound with the screen. The recorder captures video only.
 - More than two buddies, other languages for their lines, and a custom voice.
 - Tray icon tooltips, and bars rebuilt after a monitor change only reserve their strip after a restart.
+- Songs from other music apps. The buddy plays through Spotify or YouTube only.
+- Switching Claude accounts doesn't change terminals that are already open. Close them, or use **Restart now**
+  for Claude sessions.
+- Take-over works through the mouse and keyboard only. It can't use an app's own API, and it can't type into a
+  password field.
 
 ## Requirements and notes
 

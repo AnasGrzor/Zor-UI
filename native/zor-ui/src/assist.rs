@@ -55,8 +55,11 @@ pub fn fail_later(s: &str) {
     crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text, until: crate::hub::now_ms() + FAIL_BANNER_MS, open: String::new() })));
 }
 
+/// Seconds a line stays in the bubble: long answers stay longer, between 7 and 30.
+pub fn say_secs(s: &str) -> f32 { (s.chars().count() as f32 / 14.0).clamp(7.0, 30.0) }
+
 /// Says what a task returned: a success is a short bubble, a failure stays (see `fail_later`).
-fn report(r: Result<String, String>) { match r { Ok(s) => say_later(&s, 7.0), Err(e) => fail_later(&e) } }
+fn report(r: Result<String, String>) { match r { Ok(s) => say_later(&s, say_secs(&s)), Err(e) => fail_later(&e) } }
 
 fn clean(s: &str) -> &str { s.trim().trim_matches(|c: char| ".?!,\"' ".contains(c)) }
 
@@ -993,6 +996,13 @@ mod tests {
         assert_eq!(next_line(), Some(("Opening Notepad.".into(), 7.0)));
         assert_eq!(next_line(), Some(("I can't find Zork on this PC.".into(), FAIL_SECS)));
         assert!(FAIL_SECS > 7.0);
+    }
+
+    #[test]
+    fn a_long_answer_stays_longer() {
+        assert_eq!(say_secs("Done."), 7.0);
+        assert_eq!(say_secs(&"a".repeat(280)), 20.0);
+        assert_eq!(say_secs(&"a".repeat(2000)), 30.0);
     }
 
     #[test]

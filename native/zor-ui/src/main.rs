@@ -53,6 +53,7 @@ mod util;
 mod viz;
 mod webchat;
 mod weather;
+mod webread;
 mod win;
 
 use windows::{

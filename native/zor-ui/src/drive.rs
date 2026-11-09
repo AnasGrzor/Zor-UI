@@ -695,6 +695,30 @@ fn pass_through(on: bool) {
     unsafe { let _ = EnumWindows(Some(each), LPARAM(on as isize)); }
 }
 
+/// Hides one of this app's windows from screenshots, or shows it again. True when the window changed.
+fn exclude_window(h: HWND, on: bool) -> bool {
+    unsafe {
+        let mut now = 0u32;
+        if GetWindowDisplayAffinity(h, &mut now).is_err() || (now == WDA_EXCLUDEFROMCAPTURE.0) == on { return false; }
+        SetWindowDisplayAffinity(h, if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }).is_ok()
+    }
+}
+
+/// Keeps this app's windows (buddy, island, bar, bubbles) out of the pictures the model gets, so it never mistakes its own ring or
+/// island for the task. Only while driving: your own screenshots and recordings must still show them. Returns how many windows changed.
+fn exclude_own_windows(on: bool) -> usize {
+    unsafe extern "system" fn each(h: HWND, data: LPARAM) -> BOOL {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let (on, count) = &mut *(data.0 as *mut (bool, usize));
+        if pid == GetCurrentProcessId() && exclude_window(h, *on) { *count += 1; }
+        BOOL(1)
+    }
+    let mut state = (on, 0usize);
+    unsafe { let _ = EnumWindows(Some(each), LPARAM(&mut state as *mut _ as isize)); }
+    state.1
+}
+
 fn send(inputs: &[INPUT]) -> bool { inputs.is_empty() || unsafe { SendInput(inputs, size_of::<INPUT>() as i32) as usize == inputs.len() } }
 
 fn virtual_screen() -> (i32, i32, i32, i32) {
@@ -789,7 +813,11 @@ struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, /// The left b
     button: bool, t0: std::time::Instant, limit_ms: u64 }
 
 impl Host for Live<'_> {
-    fn capture(&mut self) -> Result<Vec<screen::Cap>, String> { screen::capture_all() }
+    fn capture(&mut self) -> Result<Vec<screen::Cap>, String> {
+        // windows made since the last round (an island question, a bubble) are hidden too; the screen needs a frame to drop them
+        if exclude_own_windows(true) > 0 { std::thread::sleep(std::time::Duration::from_millis(80)); }
+        screen::capture_all()
+    }
     fn model(&mut self, goal: &str, history: &[String], caps: &[screen::Cap], els: &str) -> Result<String, String> {
         let done = if history.is_empty() { "nothing yet".to_string() } else { history.join("\n") };
         let convo = assist::convo_with(&self.model, SYSTEM, &format!("Goal: {goal}
@@ -916,6 +944,7 @@ pub fn start(cfg: &Config, goal: &str) -> String {
             pass_through(true);
             let stop = run(&mut live, &goal, lim);
             pass_through(false);
+            exclude_own_windows(false);
             drop(hook);
             crate::log::line(&format!("drive ended: {stop:?}"));
             stop.message()
@@ -1085,6 +1114,21 @@ mod tests {
         *ASK.lock().unwrap() = None;
         answer(false); // nothing is waiting: no panic, no stray answer
         assert!(ASK.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_window_is_hidden_from_screenshots_only_while_asked() {
+        unsafe {
+            let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("capture test"), WS_POPUP, 0, 0, 10, 10, None, None, None, None).unwrap();
+            let affinity = || { let mut a = 0u32; GetWindowDisplayAffinity(h, &mut a).unwrap(); a };
+            assert_eq!(affinity(), 0, "a new window shows up in screenshots");
+            assert!(exclude_window(h, true) && affinity() == WDA_EXCLUDEFROMCAPTURE.0);
+            assert!(!exclude_window(h, true), "already hidden: nothing changed");
+            assert!(exclude_own_windows(false) >= 1 && affinity() == 0, "the end of a drive shows every window again");
+            assert!(exclude_own_windows(true) >= 1 && affinity() == WDA_EXCLUDEFROMCAPTURE.0, "the sweep finds this process's windows");
+            exclude_own_windows(false);
+            let _ = DestroyWindow(h);
+        }
     }
 
     #[test]

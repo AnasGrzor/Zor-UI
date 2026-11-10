@@ -37,12 +37,28 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// config.json "native": {"gojoVoice": true} turns his spoken voice on; off by default.
 static TALK: AtomicBool = AtomicBool::new(false);
 
-/// Says `s` as Buddy `slot`'s voice through the Voice API (src/voice): the provider, its voice and the queue
-/// are chosen there, so this file names no provider. Off unless "native": {"gojoVoice": true}.
-fn speak(slot: usize, s: &str) {
+/// The voice speaking right now; a new line cuts it off.
+static VOICE: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Says `s` aloud with Windows' built-in voice (System.Speech, preferring a male one). The text goes in
+/// through an environment variable, not the command line, so a track title can't inject script.
+/// shortcut: PowerShell start-up delays the voice ~0.5 s, move to SAPI through the windows crate if it bothers.
+fn speak(s: &str) {
+    use std::os::windows::process::CommandExt;
     if !TALK.load(Ordering::Relaxed) { return; }
-    crate::voice::speak(slot, s, crate::voice::queue::Priority::Reply);
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = "Add-Type -AssemblyName System.Speech; $v = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+                  $v.SelectVoiceByHints('Male'); $v.Speak($env:GOJO_SAY)";
+    let child = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("GOJO_SAY", s)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    let Ok(mut slot) = VOICE.lock() else { return };
+    if let Some(mut old) = slot.take() { let _ = old.kill(); }
+    *slot = child.ok();
 }
+
 
 /// True while Gojo is turned on; the Claude usage poll only runs then.
 pub fn on() -> bool { ON.load(Ordering::Relaxed) }
@@ -186,7 +202,6 @@ pub fn sync(app: &mut App) {
     let wants = [app.cx.native("gojo"), app.cx.native("buddyB") || app.cx.cfg.bool("buddies.b.on")];
     ON.store(wants.iter().any(|&w| w), Ordering::Relaxed);
     TALK.store(app.cx.cfg.bool("native.gojoVoice"), Ordering::Relaxed);
-    crate::voice::configure(app.cx.cfg.get("voice"), app.cx.cfg.str("buddies.a.character"), app.cx.cfg.str("buddies.b.character"));
     BAR_EDGE.store(app.cx.bar_edge() as u8, Ordering::Relaxed);
     PRIMARY.store((app.cx.cfg.str("buddies.primary") == "b") as usize, Ordering::Relaxed);
     for (slot, want) in wants.into_iter().enumerate() {
@@ -572,7 +587,7 @@ impl Gojo {
         if h != 0 {
             unsafe { let _ = SetWindowPos(HWND(h as *mut _), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
         }
-        speak(self.slot, s);
+        speak(s);
     }
     fn talking(&self) -> bool { self.bubble.as_ref().is_some_and(|b| b.1 > self.t) }
     fn line(&self) -> f32 {

@@ -10,16 +10,19 @@ const path = require('path');
 
 const GO = /\b(go ahead|go for it|do it|implement|proceed|start coding|code it|build it|write (it|the|a)|make (it|the change|the changes)|apply (it|the plan|the changes))\b/i;
 const NOTICE = /<task-notification>|\[SYSTEM NOTIFICATION/;
+// Plan files (a .md file in a "plans" folder) are what planning writes, so they are never blocked.
+const PLAN_FILE = /[\\/]plans[\\/][^\\/]+\.md$/i;
 
 let input = {};
 try { input = JSON.parse(fs.readFileSync(0, 'utf8') || '{}'); } catch {}
 const flag = path.join(os.tmpdir(), `claude-go-${input.session_id || 'nosession'}`);
+const isPlanFile = PLAN_FILE.test((input.tool_input && input.tool_input.file_path) || '');
 
 if (process.argv[2] === 'prompt') {
   if (NOTICE.test(input.prompt || '')) {}
   else if (GO.test(input.prompt || '')) fs.writeFileSync(flag, '1');
   else fs.rmSync(flag, { force: true });
-} else if (!fs.existsSync(flag)) {
+} else if (!fs.existsSync(flag) && !isPlanFile) {
   console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',

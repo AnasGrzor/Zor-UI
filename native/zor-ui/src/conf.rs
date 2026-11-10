@@ -10,7 +10,7 @@ fn defaults() -> Value {
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
         "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "runOnStartup": true, "customAgents": [],
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
-        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
+        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true, "nativeTools": false, "memory": true },
         "claude": { "autoSwitch": false, "threshold": 95 },
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },
@@ -38,6 +38,7 @@ fn defaults() -> Value {
             "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "browser": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true, "media": true, "system": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
+        "voice": { "provider": "windows" },
         "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "tray-flyout": true, "visualizer": true }
     }"#).expect("defaults are valid JSON")
 }
@@ -181,7 +182,7 @@ mod tests {
 
     use super::*;
     #[test]
-    fn the_settings_folder_is_not_inside_zebar() {
+    fn the_settings_folder_is_the_zor_ui_folder() {
         let p = pack_dir().to_string_lossy().to_lowercase();
         assert!(p.ends_with(r".glzr\zor-ui") && !p.contains("zebar"));
     }

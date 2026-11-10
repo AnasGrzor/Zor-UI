@@ -10,14 +10,15 @@ use std::sync::{
 };
 
 pub(crate) mod agent_hook;
-mod claude_cli;
+pub(crate) mod claude_cli;
 pub(crate) mod claude_acct;
 pub(crate) mod claude_profile;
 pub(crate) mod agent_restart;
-mod common;
+pub(crate) mod common;
 mod football;
 pub mod listen;
 mod media;
+pub mod native_tools;
 mod sub_cli;
 mod notify;
 mod picker;
@@ -28,7 +29,7 @@ pub(crate) mod theme;
 mod toggles;
 pub(crate) mod update;
 mod we;
-mod web;
+pub(crate) mod web;
 
 /// Is the `claude` command (Claude Code) installed?
 pub(crate) fn claude_installed() -> bool { claude_cli::find().is_some() }

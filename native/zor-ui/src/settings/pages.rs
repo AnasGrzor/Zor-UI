@@ -87,8 +87,10 @@ const IMAGE_SHAPES: [(&str, &str); 7] = [("cookie", "Cookie"), ("flower", "Flowe
 /// Grid sizes ("<rows>x<cols>") for `desktop.sizes.<id>`; "" is the card's own size.
 const CARD_SIZES: [(&str, &str); 9] = [("", "Default"), ("1x1", "1 × 1"), ("1x2", "1 × 2"), ("1x3", "1 × 3"), ("2x1", "2 × 1"), ("2x2", "2 × 2"),
     ("2x3", "2 × 3"), ("3x2", "3 × 2"), ("3x3", "3 × 3")];
-const KEY_PROVIDERS: [(&str, &str); 6] = [("gemini", "Google Gemini"), ("anthropic", "Anthropic (Claude)"), ("openai", "OpenAI"), ("mistral", "Mistral"),
-    ("openrouter", "OpenRouter"), ("wallhaven", "Wallhaven (for NSFW search)")];
+/// The most remembered facts the Settings list shows; the rest are kept, just not listed.
+const MEMORY_ROWS: usize = 30;
+const KEY_PROVIDERS: [(&str, &str); 8] = [("gemini", "Google Gemini"), ("anthropic", "Anthropic (Claude)"), ("openai", "OpenAI"), ("mistral", "Mistral"),
+    ("openrouter", "OpenRouter"), ("elevenlabs", "ElevenLabs (voices)"), ("endpoint", "Custom voice endpoint"), ("wallhaven", "Wallhaven (for NSFW search)")];
 const ISLAND_ACTIONS: [(&str, &str); 6] = [("panel", "Expand the island"), ("sidebar-left", "Left sidebar"), ("sidebar-right", "Right sidebar"),
     ("overview", "Overview"), ("play", "Play / pause"), ("none", "Nothing")];
 /// LANGS in lib/tab-translate.js, without "auto".
@@ -173,6 +175,39 @@ impl Settings {
     }
 
     /// Add or remove agents beyond Claude Code, Codex and Gemini CLI: any tool whose hooks live in a Claude-style JSON file.
+    /// The newest requests and how each ended: state, verdict and tool calls. Read through a cache, like the memory list.
+    fn task_list(&mut self, p: &mut Pen) {
+        let tasks = crate::agent::tasks::listing();
+        if tasks.is_empty() { return; }
+        p.note(&crate::agent::tasks::summary_line(&tasks), 12.0);
+        for t in &tasks {
+            let Some(r) = p.row(44.0) else { continue };
+            let sub = format!("{} · {} · {} tool call(s)", t.status, if t.verdict.is_empty() { "—" } else { &t.verdict }, t.tool_calls);
+            p.left(r, "history", &t.request, &sub, 40.0);
+            // only a request that is still going can be cancelled
+            if matches!(t.status.as_str(), "Planning" | "Running" | "WaitingApproval" | "Verifying") {
+                let id = p.act(Act::Do("cancel-task", String::new()));
+                ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "stop", IconKind::Plain, 20.0, false);
+            }
+        }
+    }
+
+    /// The facts the buddy keeps, newest first, each with a button to forget it. Read through a cache, so a repaint never opens the database.
+    fn memory_list(&mut self, p: &mut Pen) {
+        let facts = crate::agent::memory::listing();
+        if facts.is_empty() {
+            p.note("Nothing kept yet. Ask the buddy to remember something, like \"remember that my sister is called Lina\".", 12.0);
+            return;
+        }
+        p.note(&format!("{} remembered. Delete any you don't want kept.", facts.len()), 12.0);
+        for m in facts.iter().rev().take(MEMORY_ROWS) {
+            let Some(r) = p.row(44.0) else { continue };
+            p.left(r, "psychology", &m.text, "", 40.0);
+            let id = p.act(Act::Do("forget-memory", m.id.to_string()));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "delete", IconKind::Plain, 20.0, false);
+        }
+    }
+
     fn custom_agents(&mut self, p: &mut Pen) {
         p.note("Your own agents. Give a name, its config folder under your user folder (like .myagent) and the hook file in it (like hooks.json). Zor UI adds its hooks there once the folder exists.", 12.0);
         for (key, ic, label, sub, ph) in [("agent-name", "badge", "Name", "Shown in the island", "My Agent"), ("agent-dir", "folder", "Config folder", "Under your user folder", ".myagent"), ("agent-file", "description", "Hook file", "Inside that folder", "hooks.json")] {
@@ -1040,6 +1075,207 @@ impl Settings {
             p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
             p.note("Talk to the primary buddy with the hotkey (default Alt+B). Say \"search for ...\", \"open ...\" with an app or game name, or \"message ... saying ...\" with a contact name. Contact names come from buddies.contacts in config.json. The message opens in the app, and you press Enter to send it.", 12.0);
         });
+        self.speech_output(p);
+        self.voice_library(p);
+        self.voice_create(p);
+        self.voice_studio(p);
+    }
+
+    /// The voice library: built-in and custom voices. Each row previews the voice, puts it on Buddy A or B,
+    /// and (custom voices) renames or deletes it. Changing a voice's look is not a thing here, so no preview.
+    fn voice_library(&mut self, p: &mut Pen) {
+        use crate::voice::{library, profile::{builtin_profiles, VoiceProfile}};
+        let saved: Vec<Value> = self.get(p.cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+        let mut rows = builtin_profiles();
+        rows.extend(saved.iter().filter_map(VoiceProfile::from_json));
+        let a = library::effective(&self.gs(p.cx, "voice.buddies.a"), &self.gs(p.cx, "buddies.a.character"));
+        let b = library::effective(&self.gs(p.cx, "voice.buddies.b"), &self.gs(p.cx, "buddies.b.character"));
+        p.h2("library_music", "Voice library", "");
+        p.card(|p| {
+            for v in &rows { self.voice_row(p, v, &a, &b); }
+        });
+    }
+
+    fn voice_row(&mut self, p: &mut Pen, v: &crate::voice::profile::VoiceProfile, a: &str, b: &str) {
+        use crate::voice::library;
+        let custom = !v.id.starts_with("builtin:");
+        let title = if custom { v.name.clone() } else { cap(&v.name) };
+        let who = match (v.id == a, v.id == b) {
+            (true, true) => " · Buddy A and B",
+            (true, false) => " · Buddy A",
+            (false, true) => " · Buddy B",
+            _ => "",
+        };
+        let sub = format!("{}{who}", library::provider_note(v, &|id| crate::voice::installed(id)));
+        let mut chips: Vec<(&'static str, &str, Act)> = vec![
+            ("play_arrow", "Preview", Act::Do("voice-preview", v.id.clone())),
+            ("person", "Buddy A", Act::Do("voice-assign", format!("a:{}", v.id))),
+            ("person", "Buddy B", Act::Do("voice-assign", format!("b:{}", v.id))),
+        ];
+        if custom { chips.push(("delete", "Delete", Act::Do("voice-delete", v.id.clone()))); }
+        // a recording with no voice on the provider speaking now can be cloned for it
+        let unbound = crate::voice::active_provider().is_none_or(|a| v.binding_for(a).is_none());
+        if v.reference.is_some() && unbound { chips.insert(0, ("auto_awesome", "Clone", Act::Do("voice-clone", v.id.clone()))); }
+        let width: f32 = chips.iter().map(|c| chip_w(p.c, c.1, true) + 6.0).sum();
+        if let Some(mut r) = p.row_sub(44.0, "record_voice_over", &sub, width) {
+            p.left(r, "record_voice_over", &title, &sub, width);
+            for (ic, label, act) in chips.into_iter().rev() {
+                let w = p.chip_right(r, Some(ic), label, act);
+                r.w -= w + 6.0;
+            }
+        }
+        if custom {
+            if let Some(r) = p.row(40.0) {
+                let w = 260.0f32.min(p.w * 0.6);
+                let dy = (r.h - 40.0) / 2.0;
+                p.left(r, "edit", "Name", "Press Enter to save a new name", w);
+                let key = format!("vname-{}", v.id);
+                self.field_ui(p, &key, Some(&v.name), super::Kind::Plain, R::new(r.x + r.w - w, r.y + dy, w, 40.0), "Name", 17.0, false);
+            }
+        }
+        if custom {
+            // speed and model only where the provider has them
+            let mut items = vec![];
+            if let Some(b) = v.bindings.first() {
+                if crate::voice::provider_caps(&b.provider).is_some_and(|c| c.voice.speed) {
+                    for (label, s) in [("Slower", 0.85f32), ("Normal", 1.0), ("Faster", 1.2)] {
+                        let sel = (v.settings.speed - s).abs() < 0.001;
+                        items.push((format!("Speed: {label}"), None, sel, Act::Do("voice-speed", format!("{}:{s}", v.id))));
+                    }
+                }
+                for m in crate::voice::models_for(&b.provider) {
+                    let sel = b.model.as_deref() == Some(*m);
+                    items.push((m.to_string(), None, sel, Act::Do("voice-model", format!("{}:{}:{m}", v.id, b.provider))));
+                }
+            }
+            if !items.is_empty() { p.chips(items); }
+        }
+    }
+
+    /// Custom Voice Studio, from a recording: check it, write down what is said, keep it. A kept recording
+    /// waits until a provider that can clone is installed. Recording from the microphone is not offered yet.
+    fn voice_studio(&mut self, p: &mut Pen) {
+        use crate::voice::reference;
+        let d = reference::draft();
+        let cloners = crate::voice::cloning_providers();
+        p.h2("graphic_eq", "Create from a recording", "");
+        p.card(|p| {
+            p.tag("Recording", "A WAV file of 3 to 120 seconds, 16 kHz or more, of a voice you have permission to use");
+            let note = if d.note.is_empty() { "No recording chosen".to_string() } else { d.note.clone() };
+            let recording = crate::voice::record::recording();
+            let w = chip_w(p.c, "Choose recording", true) + chip_w(p.c, "Record", true) + 18.0
+                + if d.path.is_some() { chip_w(p.c, "Discard", true) + 6.0 } else { 0.0 };
+            if let Some(mut r) = p.row_sub(44.0, "audio_file", &note, w) {
+                p.left(r, "audio_file", if recording { "Recording from the microphone" } else { "Recording" }, &note, w);
+                let mut chips: Vec<(&str, &str, Act)> = vec![
+                    if recording { ("stop", "Stop recording", Act::Do("voice-rec-stop", String::new())) } else { ("mic", "Record", Act::Do("voice-rec-start", String::new())) },
+                    ("folder_open", "Choose recording", Act::Do("voice-pick-ref", String::new())),
+                ];
+                if d.path.is_some() { chips.insert(0, ("delete", "Discard", Act::Do("voice-discard", String::new()))); }
+                for (ic, label, act) in chips.into_iter().rev() {
+                    let cw = p.chip_right(r, Some(ic), label, act);
+                    r.w -= cw + 6.0;
+                }
+            }
+            p.tag("What is said in the recording", "Type it exactly as spoken");
+            if let Some(r) = p.row(40.0) {
+                self.field_ui(p, "ref-transcript", None, super::Kind::Plain, R::new(r.x, r.y + (r.h - 40.0) / 2.0, r.w, 40.0), "Transcript", 17.0, false);
+            }
+            p.tag("Name", "");
+            if let Some(r) = p.row(40.0) {
+                let w = chip_w(p.c, "Keep recording", true);
+                let fw = (r.w - w - 12.0).max(40.0);
+                self.field_ui(p, "ref-name", None, super::Kind::Plain, R::new(r.x, r.y + (r.h - 40.0) / 2.0, fw, 40.0), "Name for the voice", 17.0, false);
+                p.chip_right(r, Some("save"), "Keep recording", Act::Do("voice-save-ref", String::new()));
+            }
+            let line = if cloners.is_empty() {
+                "Cloning needs a provider that can clone voices. None is installed yet, so a kept recording waits for one.".to_string()
+            } else {
+                format!("Clone a kept recording from the library above. Cloning provider: {}", cloners.join(", "))
+            };
+            p.note(&line, 12.0);
+        });
+    }
+
+    /// Makes a custom voice: a provider voice, a speed and a name. Cloning from a recording is not offered yet,
+    /// since no provider here can clone.
+    fn voice_create(&mut self, p: &mut Pen) {
+        use crate::voice::library;
+        let d = library::draft();
+        let voices = crate::voice::provider_voices(&d.provider);
+        p.h2("add_circle", "New custom voice", "");
+        p.card(|p| {
+            p.tag("Provider", "");
+            let providers = [("windows", "Windows"), ("piper", "Piper"), ("openai", "OpenAI"), ("elevenlabs", "ElevenLabs"), ("endpoint", "Custom endpoint")].iter()
+                .map(|(id, label)| (label.to_string(), None, d.provider == *id, Act::Do("voice-draft-provider", id.to_string())))
+                .collect();
+            p.chips(providers);
+            p.tag("Voice", if voices.is_empty() { "Piper's voices appear once it is installed above" } else { "" });
+            let choices = library::choices(&voices).into_iter()
+                .map(|(id, name)| (name, None, d.voice == id, Act::Do("voice-draft-voice", id)))
+                .collect();
+            p.chips(choices);
+            p.tag("Speed", "");
+            let speeds = [("Slower", 0.85f32), ("Normal", 1.0), ("Faster", 1.2)].iter()
+                .map(|(label, s)| (label.to_string(), None, (d.speed - s).abs() < 0.001, Act::Do("voice-draft-speed", s.to_string())))
+                .collect();
+            p.chips(speeds);
+            p.tag("Name", "");
+            if let Some(r) = p.row(40.0) {
+                let w = chip_w(p.c, "Create", true);
+                let fw = (r.w - w - 12.0).max(40.0);
+                self.field_ui(p, "voice-name", None, super::Kind::Plain, R::new(r.x, r.y + (r.h - 40.0) / 2.0, fw, 40.0), "Name for the voice", 17.0, false);
+                p.chip_right(r, Some("add"), "Create", Act::Do("voice-add", String::new()));
+            }
+        });
+    }
+
+    /// Where spoken replies come from: the provider picker, each provider's install state, and a test.
+    /// The picker changes behaviour only (no look), so it has no preview. Installs show their size first.
+    fn speech_output(&mut self, p: &mut Pen) {
+        p.h2("record_voice_over", "Speech output", "");
+        p.card(|p| {
+            let opts = vec![
+                (json!("windows"), "Windows voice (built in)".to_string()),
+                (json!("piper"), "Piper (local voices)".to_string()),
+                (json!("openai"), "OpenAI (cloud voices)".to_string()),
+                (json!("elevenlabs"), "ElevenLabs (cloud voices, cloning)".to_string()),
+                (json!("endpoint"), "Custom endpoint".to_string()),
+            ];
+            self.pick(p, "voice.provider", opts, "Voice provider", "Piper and OpenAI need the steps below first", "record_voice_over", 260.0);
+            let mb = crate::voice::download_bytes("piper").map(|b| (b as f64 / 1_048_576.0).round() as u64).unwrap_or(0);
+            let busy = self.busy == "voice-install:piper";
+            let (sub, chip) = if busy { ("Downloading and unpacking. This takes a few minutes".to_string(), None) }
+                else if crate::voice::installed("piper") { ("Installed. Voice: en_US-lessac-medium".to_string(), Some(("delete", "Remove", Act::Do("voice-remove", "piper".into())))) }
+                else { (format!("Not installed. {mb} MB download"), Some(("download", "Install", Act::Do("voice-install", "piper".into())))) };
+            match chip {
+                Some((ic, label, act)) => {
+                    let w = chip_w(p.c, label, true) + 12.0;
+                    if let Some(r) = p.row_sub(44.0, "storage", &sub, w) {
+                        p.left(r, "storage", "Piper files", &sub, w);
+                        p.chip_right(r, Some(ic), label, act);
+                    }
+                }
+                None => {
+                    if let Some(r) = p.row_sub(44.0, "storage", &sub, 0.0) { p.left(r, "storage", "Piper files", &sub, 0.0); }
+                }
+            }
+            let (sub, ic) = if crate::voice::openai_key_saved() { ("Key saved. Billed per character by OpenAI", "key") }
+                else { ("Add an OpenAI API key under Services first", "key_off") };
+            if let Some(r) = p.row_sub(44.0, ic, sub, 0.0) { p.left(r, ic, "OpenAI voices", sub, 0.0); }
+            let status = crate::voice::status();
+            if !status.is_empty() { p.note(&status, 12.0); }
+            p.tag("Custom endpoint", "An OpenAI-compatible speech server. Its key, if it needs one, is on the Services page");
+            self.text(p, "voice.endpoint.url", "Address", "https://... or http://localhost", "link");
+            self.text(p, "voice.endpoint.model", "Model", "Sent with each request, e.g. tts-1", "model_training");
+            self.text(p, "voice.endpoint.voices", "Voices", "Names separated by commas", "record_voice_over");
+            let sub = "Plays one sentence with the chosen provider";
+            let w = chip_w(p.c, "Test voice", true) + 12.0;
+            if let Some(r) = p.row_sub(44.0, "volume_up", sub, w) {
+                p.left(r, "volume_up", "Test", sub, w);
+                p.chip_right(r, Some("play_arrow"), "Test voice", Act::Do("voice-test", String::new()));
+            }
+        });
     }
 
     fn services(&mut self, p: &mut Pen) {
@@ -1052,8 +1288,16 @@ impl Settings {
         p.h2("neurology", "AI", "");
         p.card(|p| {
             self.sw(p, "ai.claudeCli", "Use my Claude subscription", "Adds Claude Haiku, Sonnet and Opus through Claude Code, no API key. Needs the claude command, signed in. Counts against your plan", "workspace_premium");
+            self.sw(p, "ai.memory", "Remember things", "Buddy keeps the facts you ask it to remember, on this PC only, and recalls them when they fit. Passwords and account numbers are never kept", "psychology");
+            if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) { self.memory_list(p); }
+            self.task_list(p);
+            self.sw(p, "ai.nativeTools","Native tool calling (Claude)", "Claude picks the buddy's tools through the API, and sees their results. Only with a Claude model and the browser off. Off keeps the JSON protocol", "build");
+            let strong: Vec<(Value, String)> = std::iter::once((json!(""), "Off".to_string())).chain(models.iter().cloned()).collect();
             self.pick(p, "ai.model", models, "Default model", "Used by the sidebar and the buddies. Ollama models appear when Ollama is running", "model_training", 260.0);
             self.slider(p, "ai.temperature", "Temperature", Sl { min: 0.0, max: 2.0, step: 0.1, fmt: Fmt::Fixed1 }, "thermostat");
+            self.pick(p, "ai.fallback1", strong.clone(), "First fallback model", "Tried if the model above fails before any tool runs. Off: none", "swap_horiz", 260.0);
+            self.pick(p, "ai.fallback2", strong.clone(), "Second fallback model", "Tried if the first fallback fails the same way. Off: none", "swap_horiz", 260.0);
+            self.pick(p, "ai.strongModel", strong,"Model for multi-step requests", "Used when a request has several steps, like compare and then. Off uses the default model", "model_training", 260.0);
             if let Some(r) = p.row(80.0) {
                 p.left(R::new(r.x, r.y, r.w, 40.0), "description", "System prompt", "Leave empty for the default", 300.0);
                 let init = self.gs(p.cx, "ai.systemPrompt");

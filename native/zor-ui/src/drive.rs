@@ -832,6 +832,14 @@ fn top_windows() -> Vec<(HWND, String)> {
     v
 }
 
+/// The program of the window in front, by its file name (like "notepad.exe"), or nothing when there is none.
+pub fn front_app() -> Option<String> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    if pid == 0 { return None; }
+    crate::playsong::exe_name(pid)
+}
+
 /// The title of the window in front, or nothing when there is none.
 pub fn front_title() -> String {
     let mut buf = [0u16; 256];

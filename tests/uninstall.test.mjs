@@ -52,7 +52,7 @@ test('install.ps1 starts ZorShell at every logon (Fast Startup does not start se
   assert.ok(un.indexOf("'ZorShellLogon'") < un.indexOf('sc.exe delete ZorShell'))
 })
 
-test('install.ps1 removes Zebar, its autostart entries and moves the settings out of its folder first', () => {
+test('install.ps1 cleans up a leftover Zebar and moves settings out of its old folder first', () => {
   const inst = readFileSync(new URL('../install.ps1', import.meta.url), 'utf8')
   assert.match(inst, /\$Pack = Join-Path \$Glzr 'zor-ui'/)
   assert.match(inst, /Get-Process zebar[^\n]*Stop-Process/)
@@ -63,13 +63,13 @@ test('install.ps1 removes Zebar, its autostart entries and moves the settings ou
   assert.ok(inst.indexOf('Move-Item $op $Pack') < inst.indexOf("Move-Item $zebarDir"))
 })
 
-test('uninstall.ps1 removes the settings folder and no longer touches Zebar', () => {
+test('uninstall.ps1 removes the settings folder and leaves Zebar alone', () => {
   const un = readFileSync(new URL('../uninstall.ps1', import.meta.url), 'utf8')
   assert.match(un, /Join-Path \$Glzr 'zor-ui'/)
   assert.doesNotMatch(un, /zebar/i)
 })
 
-test('GlazeWM config template does not start the retired zebar', () => {
+test('GlazeWM config template does not start the leftover zebar', () => {
   const cfg = readFileSync(new URL('../glazewm/config.template.yaml', import.meta.url), 'utf8')
   assert.doesNotMatch(cfg, /shell-exec zebar/)
 })

@@ -492,6 +492,9 @@ impl Settings {
                 "contact-name" | "contact-value" => self.act(cx, Act::Do("add-contact", String::new())),
                 k if k.starts_with("bname-") => { let slot = &k[6..]; let id = self.gs(cx, &format!("buddies.{slot}.character")); self.act(cx, Act::Do("rename-buddy", format!("{slot}:{id}"))) }
                 k if k.starts_with("key-") => self.act(cx, Act::Do("save-key", k[4..].to_string())),
+                "voice-name" => self.act(cx, Act::Do("voice-add", String::new())),
+                "ref-name" => self.act(cx, Act::Do("voice-save-ref", String::new())),
+                k if k.starts_with("vname-") => self.act(cx, Act::Do("voice-rename", k[6..].to_string())),
                 _ => {}
             },
             _ => {}
@@ -706,6 +709,195 @@ impl Settings {
                     });
                 });
             }
+            "voice-install" => {
+                if !self.busy.is_empty() { return; }
+                let Ok(approvals) = crate::voice::approvals_for(&arg) else { return };
+                let mb = crate::voice::download_bytes(&arg).map(|b| (b as f64 / 1_048_576.0).round() as u64).unwrap_or(0);
+                self.busy = format!("voice-install:{arg}");
+                self.toast(&format!("Downloading {mb} MB. This takes a few minutes"));
+                std::thread::spawn(move || {
+                    let id = arg.clone();
+                    let r = crate::voice::install_catalog(&id, &approvals);
+                    inbox.send(move |s| {
+                        s.busy.clear();
+                        match r {
+                            Ok(()) => {
+                                crate::voice::refresh_providers();
+                                // a provider chosen before it was installed could not apply then; apply the saved choice now
+                                let section = s.cfgc.get("voice").clone();
+                                crate::voice::configure(&section, s.cfgc.str("buddies.a.character"), s.cfgc.str("buddies.b.character"));
+                                s.toast("Installed");
+                            }
+                            Err(e) => s.toast(&format!("Install failed: {e}")),
+                        }
+                    });
+                });
+            }
+            "voice-remove" => match crate::voice::remove(&arg) {
+                Ok(()) => {
+                    if self.gs(cx, "voice.provider") == arg { self.set("voice.provider", json!("windows")); }
+                    self.toast("Removed");
+                }
+                Err(e) => self.toast(&format!("Could not remove it: {e}")),
+            },
+            "voice-test" => crate::voice::test_voice(),
+            "voice-pick-ref" => {
+                let inbox = self.inbox.clone();
+                std::thread::spawn(move || {
+                    let Some(picked) = crate::bridge::theme::pick_wav() else { return };
+                    let path = std::path::PathBuf::from(picked);
+                    let result = crate::voice::reference::inspect(&path);
+                    inbox.send(move |s| {
+                        use crate::voice::reference::{set_draft, Draft};
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        match result {
+                            Ok((_, c)) => set_draft(Draft { note: format!("{name}: {:.1} s at {} Hz, ready to keep", c.duration_secs, c.rate), path: Some(path), check: Some(c) }),
+                            Err(e) => set_draft(Draft { note: e, path: None, check: None }),
+                        }
+                        let _ = s;
+                    });
+                });
+            }
+            "voice-save-ref" => {
+                use crate::voice::{library, profile::VoiceProfile, reference};
+                let d = reference::draft();
+                let (Some(path), Some(_)) = (d.path.clone(), d.check.clone()) else { self.toast("Choose a recording first"); return };
+                let name = self.fields.get("ref-name").map(|f| f.tb.text.clone()).unwrap_or_default();
+                let transcript = self.fields.get("ref-transcript").map(|f| f.tb.text.clone()).unwrap_or_default();
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                let existing: Vec<VoiceProfile> = list.iter().filter_map(VoiceProfile::from_json).collect();
+                // the name is checked before anything is copied, so a refused name leaves no file behind
+                if let Err(e) = library::check_name(&existing, &name, None) { self.toast(&e); return; }
+                let (bytes, check) = match reference::inspect(&path) { Ok(b) => b, Err(e) => { self.toast(&e); return; } };
+                let id = crate::voice::profile::new_id();
+                let kept = match reference::keep(&reference::root(), &id, &bytes, &check, &transcript) { Ok(r) => r, Err(e) => { self.toast(&e); return; } };
+                if let Err(e) = library::create_reference(&mut list, &id, &name, kept) { self.toast(&e); return; }
+                self.set("voice.profiles", json!(list));
+                reference::set_draft(reference::Draft::default());
+                for key in ["ref-name", "ref-transcript"] { if let Some(f) = self.fields.get_mut(key) { f.tb.set(""); f.orig.clear(); } }
+                self.toast("Recording kept. It can be cloned once a provider can clone voices");
+            }
+            "voice-clone" => {
+                use crate::voice::profile::VoiceProfile;
+                let Some(mut profile) = self.get(cx, "voice.profiles").as_array()
+                    .and_then(|l| l.iter().filter_map(VoiceProfile::from_json).find(|p| p.id == arg)) else { return };
+                self.toast("Cloning. This can take a minute");
+                let inbox = self.inbox.clone();
+                std::thread::spawn(move || {
+                    let r = crate::voice::clone_profile(&mut profile);
+                    inbox.send(move |s| match r {
+                        Ok(provider) => {
+                            let mut list = s.cfgc.get("voice.profiles").as_array().cloned().unwrap_or_default();
+                            crate::voice::library::put(&mut list, &profile);
+                            s.set("voice.profiles", json!(list));
+                            s.toast(&format!("Cloned with {provider}"));
+                        }
+                        Err(e) => s.toast(&e),
+                    });
+                });
+            }
+            "voice-preview" => { if let Err(e) = crate::voice::preview_voice(&arg) { self.toast(&e); } }
+            "voice-speed" => {
+                use crate::voice::library;
+                let Some((id, s)) = arg.split_once(':') else { return };
+                let Ok(speed) = s.parse::<f32>() else { return };
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                match library::set_speed(&mut list, id, speed) {
+                    Ok(()) => self.set("voice.profiles", json!(list)),
+                    Err(e) => self.toast(&e),
+                }
+            }
+            "voice-model" => {
+                use crate::voice::library;
+                let mut parts = arg.splitn(3, ':');
+                let (Some(id), Some(provider), Some(model)) = (parts.next(), parts.next(), parts.next()) else { return };
+                if !crate::voice::models_for(provider).contains(&model) { self.toast("That provider has no such model"); return; }
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                match library::set_model(&mut list, id, provider, model) {
+                    Ok(()) => self.set("voice.profiles", json!(list)),
+                    Err(e) => self.toast(&e),
+                }
+            }
+            "voice-rec-start" => { if let Err(e) = crate::voice::record::start() { self.toast(&e); } }
+            "voice-rec-stop" => {
+                let inbox = self.inbox.clone();
+                std::thread::spawn(move || {
+                    let result = crate::voice::record::stop()
+                        .and_then(|path| crate::voice::reference::inspect(&path).map(|(_, c)| (path, c)));
+                    inbox.send(move |s| {
+                        use crate::voice::reference::{set_draft, Draft};
+                        let _ = s;
+                        match result {
+                            Ok((path, c)) => set_draft(Draft { note: format!("Recorded {:.1} s, ready to keep", c.duration_secs), path: Some(path), check: Some(c) }),
+                            Err(e) => set_draft(Draft { note: e, path: None, check: None }),
+                        }
+                    });
+                });
+            }
+            "voice-discard" => {
+                use crate::voice::reference;
+                // a recording made here sits in the temp folder; a picked file is the user's and stays
+                if let Some(p) = reference::draft().path.filter(|p| p.starts_with(std::env::temp_dir())) { std::fs::remove_file(p).ok(); }
+                reference::set_draft(Default::default());
+            }
+            "voice-assign" => {
+                let Some((slot, id)) = arg.split_once(':') else { return };
+                let list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                if let Err(e) = crate::voice::can_speak_in(&list, id) { self.toast(&format!("That voice cannot speak yet: {e}")); return; }
+                self.set(if slot == "a" { "voice.buddies.a" } else { "voice.buddies.b" }, json!(id));
+                self.toast("Voice set for that Buddy");
+            }
+            "voice-delete" => {
+                use crate::voice::library;
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                let used = [
+                    library::effective(&self.gs(cx, "voice.buddies.a"), &self.gs(cx, "buddies.a.character")),
+                    library::effective(&self.gs(cx, "voice.buddies.b"), &self.gs(cx, "buddies.b.character")),
+                ];
+                let refs: Vec<&str> = used.iter().map(String::as_str).collect();
+                // the kept recording goes with the voice, but only if it sits in the references folder
+                let recording_dir = list.iter().filter_map(crate::voice::profile::VoiceProfile::from_json).find(|p| p.id == arg)
+                    .and_then(|p| p.reference).and_then(|r| r.path.parent().map(std::path::PathBuf::from))
+                    .filter(|dir| dir.starts_with(crate::voice::reference::root()));
+                match library::delete(&mut list, &arg, &refs) {
+                    Ok(()) => {
+                        if let Some(dir) = recording_dir { std::fs::remove_dir_all(dir).ok(); }
+                        self.set("voice.profiles", json!(list));
+                        self.toast("Voice deleted");
+                    }
+                    Err(e) => self.toast(&e),
+                }
+            }
+            "voice-rename" => {
+                use crate::voice::library;
+                let Some(name) = self.fields.get(&format!("vname-{arg}")).map(|f| f.tb.text.clone()) else { return };
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                match library::rename(&mut list, &arg, &name) {
+                    Ok(()) => { self.set("voice.profiles", json!(list)); self.toast("Renamed"); }
+                    Err(e) => self.toast(&e),
+                }
+            }
+            "voice-draft-provider" => {
+                let first = crate::voice::provider_voices(&arg).first().map(|v| v.id.clone()).unwrap_or_default();
+                crate::voice::library::update_draft(|d| { d.provider = arg.clone(); d.voice = first; });
+            }
+            "voice-draft-voice" => crate::voice::library::update_draft(|d| d.voice = arg.clone()),
+            "voice-draft-speed" => { if let Ok(s) = arg.parse::<f32>() { crate::voice::library::update_draft(|d| d.speed = s); } }
+            "voice-add" => {
+                use crate::voice::library;
+                let name = self.fields.get("voice-name").map(|f| f.tb.text.clone()).unwrap_or_default();
+                let d = library::draft();
+                let mut list = self.get(cx, "voice.profiles").as_array().cloned().unwrap_or_default();
+                let id = crate::voice::profile::new_id();
+                match library::add_custom(&mut list, &id, &name, &d.provider, &d.voice, None, d.speed) {
+                    Ok(()) => {
+                        self.set("voice.profiles", json!(list));
+                        if let Some(f) = self.fields.get_mut("voice-name") { f.tb.set(""); f.orig.clear(); }
+                        self.toast("Voice saved. Put it on a Buddy below");
+                    }
+                    Err(e) => self.toast(&e),
+                }
+            }
             "clear-buddy-image" => self.set(&format!("buddies.{arg}.image"), json!("")),
             "rename-buddy" => {
                 let Some((slot, id)) = arg.split_once(':') else { return };
@@ -826,6 +1018,10 @@ impl Settings {
                 if self.fields.get("contact-edit").is_some_and(|f| f.tb.text == arg) {
                     for k in ["contact-name", "contact-value", "contact-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
                 }
+            }
+            "cancel-task" => crate::agent::cancel_running(),
+            "forget-memory" => {
+                if let Err(e) = arg.parse::<i64>().map_err(|e| e.to_string()).and_then(crate::agent::memory::forget_id) { crate::log::line(&format!("could not forget a memory: {e}")); }
             }
             "del-agent" => {
                 let mut cur = self.get(cx, "customAgents").as_array().cloned().unwrap_or_default();
@@ -1911,3 +2107,6 @@ mod tests {
         assert_eq!(crate::keymap::keys_of(&cfg, b), ["Alt+E"]);
     }
 }
+
+#[cfg(test)]
+mod voice_actions_tests;

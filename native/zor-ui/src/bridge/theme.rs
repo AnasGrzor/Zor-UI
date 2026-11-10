@@ -436,6 +436,26 @@ fn process_running(names: &[&str]) -> bool {
     }
 }
 
+/// Chooses a WAV recording for voice cloning (IFileOpenDialog). None: cancelled. Blocks until the dialog closes,
+/// so call it off the UI thread.
+pub(crate) fn pick_wav() -> Option<String> {
+    std::thread::spawn(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        dlg.SetTitle(w!("Choose a voice recording")).ok()?;
+        let spec = |n: PCWSTR, s: PCWSTR| COMDLG_FILTERSPEC { pszName: n, pszSpec: s };
+        dlg.SetFileTypes(&[spec(w!("WAV recordings"), w!("*.wav")), spec(w!("All files"), w!("*.*"))]).ok()?;
+        dlg.Show(HWND::default()).ok()?;
+        let name = dlg.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
 /// The wallpaper dialog (IFileOpenDialog, on its own STA thread). None: cancelled.
 fn pick_file() -> Option<String> {
     std::thread::spawn(|| unsafe {

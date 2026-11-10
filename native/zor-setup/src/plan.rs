@@ -46,7 +46,7 @@ pub fn step_title(line: &str) -> Option<&str> {
     line.trim().strip_prefix("==> ").map(str::trim).filter(|t| !t.is_empty())
 }
 
-/// How many "==>" phases a typical install prints (the optional ones are the old-name move, the Zebar removal and the taskbar).
+/// How many "==>" phases a typical install prints (the optional ones are the old-name move, the leftover-Zebar cleanup and the taskbar).
 const TYPICAL_STEPS: usize = 8;
 
 /// Progress bar position after `steps` phases started. Stops at 95 so the bar never shows done before the script exits.

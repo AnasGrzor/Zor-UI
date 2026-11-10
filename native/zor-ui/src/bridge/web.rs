@@ -30,7 +30,7 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
     let a = |i: usize| args.get(i).copied().unwrap_or("");
     Some(match name {
         "secret-set" => secret_set(a(0), a(1)),
-        "secret-status" => key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter", "wallhaven"]),
+        "secret-status" => key_status(&["gemini", "openai", "anthropic", "mistral", "openrouter", "wallhaven", "elevenlabs", "endpoint"]),
         "translate" => translate(a(0), a(1), &args.iter().skip(2).copied().collect::<Vec<_>>().join(" ")),
         "booru" => booru(a(0), a(1), args.get(2..).unwrap_or(&[])),
         "download-wallpaper" => download_wallpaper(cfg, a(0), args.get(1..).unwrap_or(&[])),
@@ -184,8 +184,8 @@ pub(super) fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
     }
 }
 
-/// A saved API key, else the ZORUI_<NAME>_KEY environment variable, else "".
-fn secret_get(name: &str) -> String {
+/// The saved key `name` (DPAPI-protected in secrets.json), else ZORUI_<NAME>_KEY, else "".
+pub(crate) fn secret_get(name: &str) -> String {
     let secrets = load_json(&root().join("secrets.json"), json!({}));
     match secrets.get(name) {
         Some(e) if truthy(e) => e.as_str()
@@ -436,6 +436,11 @@ pub(super) fn images_of(m: &Value) -> Vec<(String, String, String)> {
 /// Can this provider's models be sent pictures? The Gemini and Codex command line tools only take text.
 pub(super) fn can_see(provider: &str) -> bool { provider == "claude-cli" || !provider.ends_with("-cli") }
 
+/// The provider that serves the model with this id ("anthropic", "gemini", ...), or None when the model isn't in the list.
+pub(crate) fn provider_of(id: &str) -> Option<String> {
+    all_models().into_iter().find(|m| m["id"].as_str() == Some(id)).and_then(|m| m["provider"].as_str().map(str::to_string))
+}
+
 /// Can the model with this id be sent pictures? A model that isn't in the list is taken as OpenAI-style, as `ai_chat` does.
 pub(super) fn can_see_model(id: &str) -> bool {
     let provider = all_models().into_iter().find(|m| m["id"].as_str() == Some(id)).and_then(|m| m["provider"].as_str().map(str::to_string));
@@ -563,7 +568,8 @@ fn ai_chat(stdin: &str, out: &Sink) {
         out.emit(&json!({ "error": format!("No API key for {provider}. Type /key {provider} YOUR_KEY") }));
         return;
     }
-    let (url, headers, body) = chat_request(&provider, &model, &key, &msgs, system, temp);
+    let (url, headers, mut body) = chat_request(&provider, &model, &key, &msgs, system, temp);
+    if provider == "anthropic" { super::native_tools::add_to_body(&mut body, &req["tools"]); }
     // The key and body go through curl's config on stdin, so they never show up in the process list.
     let mut conf = format!("url = {}\n", cfg_quote(&url));
     for (k, v) in &headers { conf.push_str(&format!("header = {}\n", cfg_quote(&format!("{k}: {v}")))); }
@@ -587,6 +593,7 @@ fn ai_chat(stdin: &str, out: &Sink) {
         }
     });
     let (mut status, mut other, mut finished) = (0u32, String::new(), false);
+    let mut tools = super::native_tools::ToolParser::default();
     loop {
         if out.stopped() { let _ = child.kill(); let _ = child.wait(); return; }
         let line = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -602,6 +609,13 @@ fn ai_chat(stdin: &str, out: &Sink) {
             if data == "[DONE]" { finished = true; break; }
             if let Ok(ev) = serde_json::from_str::<Value>(data) {
                 for e in sse_events(&provider, &ev) { out.emit(&e); }
+                if provider == "anthropic" {
+                    match tools.feed(&ev) {
+                        Some(Ok(t)) => { out.emit(&json!({ "tool_use": { "id": t.id, "name": t.name, "input": t.input } })); }
+                        Some(Err(f)) => { out.emit(&json!({ "tool_error": { "id": f.id, "name": f.name, "message": f.message } })); }
+                        None => {}
+                    }
+                }
             }
         } else if other.len() < 2000 {
             other.push_str(&line);

@@ -82,6 +82,7 @@ windows = { version = "0.58", features = [
   "Win32_System_RemoteDesktop",
   "Win32_System_Environment",
 ] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 
 [profile.release]
 lto = true

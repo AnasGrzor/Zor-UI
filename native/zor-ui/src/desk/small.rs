@@ -6,7 +6,7 @@ use crate::{
     app::Ctx,
     gfx::{alpha, ico, txt, Align, Canvas, R},
     hub,
-    ui::{Edit, TextBox},
+    ui::{self, Edit, TextBox},
     win::{Input, Phase},
 };
 use serde_json::{json, Value};
@@ -35,46 +35,99 @@ pub fn toggled(mut list: Value, i: usize) -> Value {
     list
 }
 
+const EMPTY: &str = "Nothing to do yet. Type a task below.";
+const ADD_GAP: f32 = 12.0; // space between the list (or empty note) and the add field
+const ADD_H: f32 = 40.0; // the add field, same height as the sidebar's
+const DEL: u32 = 1000; // delete button ids: DEL + index (toggle ids are ITEM0 + index)
+const DEL_W: f32 = 28.0; // delete button width, reserved at the row's right edge
+const TEXT_W: f32 = INNER - 26.0 - DEL_W; // a task's text width (after the tick and the delete button)
+
 fn todo_list() -> Vec<(String, bool)> {
-    hub::get_json(TODO).as_array().map(|a| a.iter().take(8).map(|t| (t["text"].as_str().unwrap_or("").to_string(), t["done"].as_bool().unwrap_or(false))).collect()).unwrap_or_default()
+    hub::get_json(TODO).as_array().map(|a| a.iter().map(|t| (t["text"].as_str().unwrap_or("").to_string(), t["done"].as_bool().unwrap_or(false))).collect()).unwrap_or_default()
+}
+
+/// The list with `text` appended as an open task; None when `text` is blank.
+pub fn appended(list: Value, text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty() { return None; }
+    // a missing key reads as Null (get_json): start a new list
+    let mut list = if list.is_array() { list } else { json!([]) };
+    list.as_array_mut()?.push(json!({ "text": text, "done": false }));
+    Some(list)
+}
+
+/// The list without item `i` (out of range: untouched).
+pub fn remove_at(mut list: Value, i: usize) -> Value {
+    if let Some(a) = list.as_array_mut() { if i < a.len() { a.remove(i); } }
+    list
 }
 
 pub fn todo_key() -> String { hub::get(TODO).unwrap_or_default() }
 
-pub fn todo_size(g: &crate::gfx::Gfx) -> f32 {
-    let list = todo_list();
-    let body = if list.is_empty() { g.measure_wrapped("Nothing to do. Add tasks in the right sidebar.", txt(13.0, 400), INNER) }
-        else { list.iter().map(|(t, _)| g.measure_wrapped(t, txt(13.0, 400), INNER - 26.0).max(18.0) + ROW_GAP).sum() };
-    head() + body + 12.0 + 8.0
-}
+/// The to-do card: tick or delete a task, or type in the add field at its foot (focused like Notes).
+pub struct Todo { pub tb: TextBox, pub focused: bool }
 
-pub fn todo_paint(c: &mut Canvas, cx: &Ctx) {
-    let t = &cx.theme;
-    let list = todo_list();
-    let mut y = h3(c, cx, "done_outline", "To do");
-    if list.is_empty() {
-        let h = c.g.measure_wrapped("Nothing to do. Add tasks in the right sidebar.", txt(13.0, 400), INNER);
-        c.para("Nothing to do. Add tasks in the right sidebar.", R::new(18.0, y, INNER, h), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left);
-        return;
+impl Todo {
+    pub fn new() -> Todo { Todo { tb: TextBox::new(false), focused: false } }
+
+    pub fn size(&self, g: &crate::gfx::Gfx) -> f32 {
+        let list = todo_list();
+        let body = if list.is_empty() { g.measure_wrapped(EMPTY, txt(13.0, 400), INNER) }
+            else { list.iter().map(|(t, _)| g.measure_wrapped(t, txt(13.0, 400), TEXT_W).max(18.0) + ROW_GAP).sum() };
+        head() + body + ADD_GAP + ADD_H + 12.0 + 8.0
     }
-    for (i, (text, done)) in list.iter().enumerate() {
-        let h = c.g.measure_wrapped(text, txt(13.0, 400), INNER - 26.0).max(18.0);
-        let row = R::new(18.0, y, INNER, h + ROW_GAP);
-        if c.hit(row, ITEM0 + i as u32) { c.rect(row, 6.0, alpha(t.c("onSurface"), 0.05)); }
-        c.icon(if *done { "check_circle" } else { "radio_button_unchecked" }, R::new(18.0, y + 4.0, 18.0, 18.0), ico(18.0, *done), t.c("primary"));
-        let col = if *done { t.c("onSurfaceVariant") } else { t.c("onSurface") };
-        c.para(text, R::new(44.0, y + 4.0, INNER - 26.0, h), txt(13.0, 400), col, Align::Left);
-        if *done { // text-decoration: line-through (first line)
-            let w = c.g.measure(text, txt(13.0, 400)).0.min(INNER - 26.0);
-            c.line((44.0, y + 4.0 + 13.0 * LH / 2.0), (44.0 + w, y + 4.0 + 13.0 * LH / 2.0), 1.0, col);
+
+    pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
+        let t = &cx.theme;
+        let list = todo_list();
+        let mut y = h3(c, cx, "done_outline", "To do");
+        if list.is_empty() {
+            let h = c.g.measure_wrapped(EMPTY, txt(13.0, 400), INNER);
+            c.para(EMPTY, R::new(18.0, y, INNER, h), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left);
+            y += h;
         }
-        y += h + ROW_GAP;
+        for (i, (text, done)) in list.iter().enumerate() {
+            let h = c.g.measure_wrapped(text, txt(13.0, 400), TEXT_W).max(18.0);
+            let row = R::new(18.0, y, INNER, h + ROW_GAP);
+            if c.hit(row, ITEM0 + i as u32) { c.rect(row, 6.0, alpha(t.c("onSurface"), 0.05)); }
+            c.icon(if *done { "check_circle" } else { "radio_button_unchecked" }, R::new(18.0, y + 4.0, 18.0, 18.0), ico(18.0, *done), t.c("primary"));
+            let col = if *done { t.c("onSurfaceVariant") } else { t.c("onSurface") };
+            c.para(text, R::new(44.0, y + 4.0, TEXT_W, h), txt(13.0, 400), col, Align::Left);
+            if *done { // text-decoration: line-through (first line)
+                let w = c.g.measure(text, txt(13.0, 400)).0.min(TEXT_W);
+                c.line((44.0, y + 4.0 + 13.0 * LH / 2.0), (44.0 + w, y + 4.0 + 13.0 * LH / 2.0), 1.0, col);
+            }
+            // registered after the row, so it wins where the two overlap (hits: last match wins)
+            let del = R::new(18.0 + INNER - DEL_W, y + (h + ROW_GAP - DEL_W) / 2.0, DEL_W, DEL_W);
+            ui::icon_btn(c, cx, del, DEL + i as u32, "close", ui::IconKind::Plain, 16.0, false);
+            y += h + ROW_GAP;
+        }
+        let field = R::new(18.0, y + ADD_GAP, INNER, ADD_H);
+        c.hit(field, AREA);
+        c.rect(field, 20.0, if self.focused { t.c("primary") } else { t.c("outlineVariant") });
+        c.rect(R::new(field.x + 1.0, field.y + 1.0, field.w - 2.0, field.h - 2.0), 19.0, t.c("surfaceContainer"));
+        self.tb.draw(c, cx, R::new(field.x + 12.0, field.y, field.w - 24.0, field.h), txt(13.0, 400), "Add a task", self.focused);
     }
-}
 
-pub fn todo_input(ev: Input) {
-    if let Input::Click(id @ ITEM0..=107, _) = ev {
-        hub::set(TODO, Some(toggled(hub::get_json(TODO), (id - ITEM0) as usize).to_string()));
+    /// `hwnd`: the card's window, which becomes focusable while the add field is typed in.
+    pub fn input(&mut self, ev: Input, hwnd: &Arc<AtomicIsize>) {
+        match ev {
+            Input::Click(id, _) if id >= DEL =>hub::set(TODO, Some(remove_at(hub::get_json(TODO), (id - DEL) as usize).to_string())),
+            Input::Click(id, _) if (ITEM0..DEL).contains(&id) => hub::set(TODO, Some(toggled(hub::get_json(TODO), (id - ITEM0) as usize).to_string())),
+            Input::Drag(AREA, x, y, Phase::Start) => {
+                self.tb.press(x, y);
+                if !self.focused { self.focused = true; set_focus(hwnd.load(Ordering::Relaxed), true); }
+            }
+            Input::Focus(f) => {
+                self.focused = f;
+                if !f { set_focus(hwnd.load(Ordering::Relaxed), false); }
+            }
+            Input::Key { vk, ctrl, shift, alt } if self.focused => if self.tb.key(vk, ctrl, shift, alt) == Edit::Submit {
+                if let Some(list) = appended(hub::get_json(TODO), &self.tb.text) { hub::set(TODO, Some(list.to_string())); self.tb.set(""); }
+            },
+            Input::Char(ch) if self.focused => { self.tb.ch(ch); }
+            _ => {}
+        }
     }
 }
 
@@ -197,6 +250,18 @@ mod tests {
         assert_eq!(l[0], json!({ "text": "a", "done": true, "id": 7 }));
         assert_eq!(toggled(toggled(l, 1), 1)[1]["done"], json!(false));
         assert_eq!(toggled(json!([]), 3), json!([])); // out of range: untouched
+    }
+    #[test]
+    fn todo_add_trims_and_skips_blank() {
+        assert_eq!(appended(json!([]), "  buy milk ").unwrap(), json!([{ "text": "buy milk", "done": false }]));
+        assert_eq!(appended(json!([{ "text": "a", "done": true }]), "b").unwrap()[1], json!({ "text": "b", "done": false }));
+        assert!(appended(json!([]), "   ").is_none());
+        assert_eq!(appended(Value::Null, "first").unwrap(), json!([{ "text": "first", "done": false }])); // no key yet
+    }
+    #[test]
+    fn todo_delete_by_index() {
+        assert_eq!(remove_at(json!([{ "text": "a" }, { "text": "b" }]), 0), json!([{ "text": "b" }]));
+        assert_eq!(remove_at(json!([{ "text": "a" }]), 5), json!([{ "text": "a" }])); // out of range: untouched
     }
     #[test]
     fn pomo_start_pause() {

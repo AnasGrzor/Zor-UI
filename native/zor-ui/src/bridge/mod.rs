@@ -12,6 +12,8 @@ use std::sync::{
 pub(crate) mod agent_hook;
 mod claude_cli;
 pub(crate) mod claude_acct;
+pub(crate) mod claude_profile;
+pub(crate) mod agent_restart;
 mod common;
 mod football;
 pub mod listen;

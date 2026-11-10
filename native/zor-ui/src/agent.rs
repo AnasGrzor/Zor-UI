@@ -403,14 +403,17 @@ pub fn run_loop_with(model: &str, system: &str, history: &[Value], said: &str, m
         if start.elapsed() > limit { return Err("That took too long, so I stopped.".into()); }
         let convo = json!({ "model": model, "messages": msgs, "system": system, "temperature": 0.3 }).to_string();
         let reply = ask(&convo).map_err(|e| assist::short(&e, 110))?;
+        crate::log::line(&format!("buddy AI reply: {}", assist::short(&reply, 300)));
         let mut browser = false;
         let feedback = match parse_step(&reply) {
             Step::Say(s) if s.is_empty() => return Err("I got no answer from the AI.".into()),
             Step::Say(s) => return Ok(assist::short(&s, MAX_SAY)),
-            Step::Bad(why) => why,
+            Step::Bad(why) => { crate::log::line(&format!("buddy step bad: {why}")); why }
             Step::Call { call, more } => {
                 browser = matches!(call, Call::Browser { .. });
-                match run(&call) {
+                let res = run(&call);
+                crate::log::line(&format!("buddy tool {call:?} more={more}: {}", match &res { Ok(r) => format!("ok: {}", assist::short(r, 200)), Err(e) => format!("failed: {}", assist::short(e, 200)) }));
+                match res {
                     Ok(r) if !more && !matches!(call, Call::FindApp(_) | Call::FindFile(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Browser { .. }) => return Ok(r),
                     Ok(r) => format!("Result: {r}"),
                     Err(e) => format!("Failed: {e}"),
@@ -425,16 +428,25 @@ pub fn run_loop_with(model: &str, system: &str, history: &[Value], said: &str, m
     Err("I couldn't finish that in a few steps.".into())
 }
 
+/// The log line for how a request ended: the answer, or why it failed.
+pub fn answer_line(r: &Result<String, String>) -> String {
+    match r { Ok(a) => format!("buddy answer: {}", assist::short(a, 400)), Err(e) => format!("buddy failed: {}", assist::short(e, 200)) }
+}
+
 /// The sidebar's AI model answers; this is the Chat path of `assist::run`.
 pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
     crate::browse::new_request();
+    crate::log::line(&format!("buddy request: {}", assist::short(said, 200)));
     let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
     let mut system = format!("{SYSTEM}\n{}", context());
     let browser = crate::browse::enabled(cfg);
     if browser { system.push_str(&format!("\n{}", crate::browse::prompt())); }
     let (steps, secs) = if browser { (crate::browse::MAX_STEPS, crate::browse::MAX_SECS) } else { (MAX_STEPS, MAX_SECS) };
     let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
-    let r = run_loop_with(model, &system, &history, said, steps, Duration::from_secs(secs), |convo| assist::chat(cfg, convo, 30), |c| exec(c, cfg, &mut |q| crate::drive::ask_island(q) == crate::drive::Answer::Yes));
+    let r = run_loop_with(model, &system, &history, said, steps, Duration::from_secs(secs), |convo| if crate::browse::stopped() { Err(crate::browse::STOPPED.into()) } else { assist::chat(cfg, convo, 30) }, |c| exec(c, cfg, &mut |q| crate::drive::ask_island(q) == crate::drive::Answer::Yes));
+    crate::browse::end_request();
+    crate::browse::close_now();
+    crate::log::line(&answer_line(&r));
     // only answers are remembered: a failure would teach the AI nothing about what you meant
     if let (Ok(answer), Ok(mut t)) = (&r, TURNS.lock()) { remember(&mut t, said, answer, Instant::now()); }
     r
@@ -446,6 +458,14 @@ mod tests {
     use std::cell::RefCell;
 
     fn call(s: &str) -> Option<Call> { match parse_step(s) { Step::Call { call, .. } => Some(call), _ => None } }
+
+    #[test]
+    fn answer_line_logs_the_answer_or_the_failure() {
+        assert_eq!(answer_line(&Ok("Title: X".into())), "buddy answer: Title: X");
+        assert_eq!(answer_line(&Err("stopped".into())), "buddy failed: stopped");
+        let long = "a".repeat(500);
+        assert!(answer_line(&Ok(long)).len() < 420, "a long answer is cut");
+    }
 
     #[test]
     fn remembers_a_few_turns_until_the_conversation_goes_cold() {

@@ -58,8 +58,34 @@ pub fn fail_later(s: &str) {
 /// Seconds a line stays in the bubble: long answers stay longer, between 7 and 30.
 pub fn say_secs(s: &str) -> f32 { (s.chars().count() as f32 / 14.0).clamp(7.0, 30.0) }
 
-/// Says what a task returned: a success is a short bubble, a failure stays (see `fail_later`).
-fn report(r: Result<String, String>) { match r { Ok(s) => say_later(&s, say_secs(&s)), Err(e) => fail_later(&e) } }
+/// The last answer the buddy gave, for "say that again".
+static LAST: Mutex<Option<String>> = Mutex::new(None);
+/// How long an answer stays in the island banner (ms), so one you looked away from can still be read.
+const ANSWER_BANNER_MS: f64 = 60_000.0;
+
+/// Says what a task returned: a success is a short bubble and an island banner, a failure stays (see `fail_later`).
+fn report(r: Result<String, String>) {
+    match r {
+        Ok(s) => {
+            if let Ok(mut l) = LAST.lock() { *l = Some(s.clone()); }
+            say_later(&s, say_secs(&s));
+            let text = s.clone();
+            crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text, until: crate::hub::now_ms() + ANSWER_BANNER_MS, open: String::new() })));
+        }
+        Err(e) => fail_later(&e),
+    }
+}
+
+/// Asks to hear the last answer again: "say that again", "repeat that", "what did you say".
+pub fn is_replay(said: &str) -> bool {
+    let s = said.trim().to_lowercase();
+    ["say that again", "say it again", "repeat that", "what did you say"].iter().any(|p| s.contains(p))
+}
+
+/// The last answer the buddy gave, or a line saying there is none yet.
+fn last_answer() -> String {
+    LAST.lock().ok().and_then(|l| l.clone()).unwrap_or_else(|| "I haven't answered anything yet.".into())
+}
 
 fn clean(s: &str) -> &str { s.trim().trim_matches(|c: char| ".?!,\"' ".contains(c)) }
 
@@ -553,6 +579,7 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
 pub fn ask(cfg: &Config, said: &str) {
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
+        if is_replay(&said) { let a = last_answer(); say_later(&a, say_secs(&a)); return; }
         say_later("On it…", 3.0);
         // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
         let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
@@ -585,7 +612,7 @@ fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
 pub fn listen(cfg: &Config) {
     // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
     let answering = crate::drive::waiting();
-    if !answering { crate::drive::request_stop(); }
+    if !answering { crate::drive::request_stop(); crate::browse::request_stop(); }
     let cfg2 = Config(cfg.0.clone());
     let model = cfg.str("buddies.model").to_string();
     let mic = cfg.str("buddies.mic").to_string();
@@ -629,6 +656,17 @@ pub fn cancel() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeat_requests_are_recognised_and_return_the_last_answer() {
+        assert!(is_replay("Say that again, please"));
+        assert!(is_replay("repeat that"));
+        assert!(!is_replay("open steam"));
+        *LAST.lock().unwrap() = Some("The top story is X.".into());
+        assert_eq!(last_answer(), "The top story is X.");
+        *LAST.lock().unwrap() = None;
+        assert_eq!(last_answer(), "I haven't answered anything yet.");
+    }
 
     fn items(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
 

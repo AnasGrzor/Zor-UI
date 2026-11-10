@@ -42,6 +42,8 @@ fn nav_list(top: f32, win_h: f32) -> (R, f32) {
     (R::new(crate::tokens::NAV_X, top, crate::tokens::NAV_W, (bottom - top).max(0.0)), PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H))
 }
 const TOAST_MS: f64 = 3200.0;
+/// How long a Claude account's Remove stays armed after its first click.
+const CLAUDE_ARM_MS: f64 = 4000.0;
 
 #[derive(Default)]
 pub enum Load<T> { #[default] Idle, Loading, Ready(T) }
@@ -72,12 +74,17 @@ const FLASH_MS: f64 = 1800.0;
 
 /// `/` jumps to the search box unless a text field is being typed in (the picker has its own Char arm above).
 /// The sidebar avatar shows the picture only when one is chosen and still on disk; otherwise the initial.
-/// Made-up saved Claude logins for the screenshots (demo mode); one is active, one has no usage reading.
+/// Made-up saved Claude logins for the screenshots (demo mode); the default is active, the profile has no usage reading.
 fn demo_claude() -> Value {
     json!({ "accounts": [
-        { "n": 1, "email": "me@example.com", "plan": "max", "active": true, "session": 38, "week": 12, "ageMin": 0 },
-        { "n": 2, "email": "work@example.com", "plan": "pro", "active": false, "session": null, "week": null, "ageMin": null },
+        { "n": 0, "default": true, "email": "me@example.com", "plan": "max", "active": true, "dead": false, "session": 38, "week": 12, "ageMin": 0 },
+        { "n": 1, "default": false, "email": "work@example.com", "plan": "pro", "active": false, "dead": false, "session": null, "week": null, "ageMin": null },
     ] })
+}
+
+/// Whether the delete icon of account `n` was clicked less than the arm time ago (the second click removes it).
+fn armed(arm: &Option<(String, f64)>, n: &str, now: f64) -> bool {
+    arm.as_ref().is_some_and(|(k, until)| k == n && now < *until)
 }
 
 fn avatar_initial(name: &str) -> String { name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default() }
@@ -150,6 +157,8 @@ pub struct Settings {
     rec: Option<(String, usize)>,
     /// The saved Claude logins (`claude-accounts` bridge command); Idle until Claude Code is found.
     claude: Load<Value>,
+    /// The account whose Remove is armed: (n, the time the arm runs out in ms). Remove needs a second click in time.
+    claude_arm: Option<(String, f64)>,
     mons: Load<Vec<String>>,
     /// What each monitor shows ({ i, w, h, file, custom } from the `wall-monitors` bridge command).
     wmons: Load<Vec<Value>>,
@@ -224,7 +233,7 @@ impl Settings {
         let mut s = Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, nav_scroll: Scroll::default(), nav_h: 0.0, nav_view: 0.0, nav_n: 0, inbox: Inbox::default(), cfgc: Config::parse(""),
             over: HashMap::new(), glass_prev: None, buddy_sprites: Default::default(), creator_prev: None, creator_sprites: Default::default(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
-            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, mons: Load::Idle, wmons: Load::Idle,
+            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, claude_arm: None, mons: Load::Idle, wmons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
         };
         if std::env::var("ZORUI_RENDER_DEMO").is_ok() { s.demo(); }
@@ -823,12 +832,21 @@ impl Settings {
                 cur.retain(|a| a["name"] != arg.as_str());
                 self.set("customAgents", json!(cur));
             }
-            "claude-save" | "claude-switch" | "claude-remove" => {
-                let done = match name { "claude-save" => "Login saved", "claude-switch" => "Switched Claude account", _ => "Account removed" };
-                let args = if name == "claude-save" { vec![] } else { vec![arg] };
+            "claude-arm" => self.claude_arm = Some((arg, hub::now_ms() + CLAUDE_ARM_MS)),
+            "claude-add" | "claude-relogin" | "claude-switch" | "claude-remove" | "claude-restart" => {
+                // the chip only shows while armed, but a stale click after the window must not remove
+                if name == "claude-remove" {
+                    let ok = armed(&self.claude_arm, &arg, hub::now_ms());
+                    self.claude_arm = None;
+                    if !ok { return; }
+                }
+                let done = match name { "claude-add" | "claude-relogin" => "Sign in in the terminal that opened", "claude-switch" => "New terminals will use this account", "claude-restart" => "No open sessions to restart", _ => "Account removed" };
+                let args = if name == "claude-add" || name == "claude-restart" { vec![] } else { vec![arg] };
                 store::bridge(cx, &inbox, name, args, move |s, r| {
                     s.claude = Load::Idle;
-                    s.toast(&if r["ok"] == true { done.to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() });
+                    // a switch that also restarted sessions says how that went
+                    let ok = r["message"].as_str().filter(|m| !m.is_empty()).unwrap_or(done);
+                    s.toast(&if r["ok"] == true { ok.to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() });
                 });
             }
             "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| s.keys = Load::Idle),
@@ -1306,8 +1324,20 @@ mod tests {
         let d = super::demo_claude();
         let rows = d["accounts"].as_array().unwrap();
         assert_eq!(rows.iter().filter(|r| r["active"] == true).count(), 1, "exactly one active login");
+        assert_eq!(rows[0]["n"], 0, "the default row comes first, with n 0");
+        assert_eq!(rows[0]["default"], true);
+        assert_eq!(rows[1]["default"], false);
         assert_eq!(crate::bridge::claude_acct::summary(&rows[0]), "Max · 5h 38% · 7d 12% · just now");
         assert_eq!(crate::bridge::claude_acct::summary(&rows[1]), "Pro · usage unavailable");
+    }
+
+    #[test]
+    fn remove_is_armed_only_for_the_same_account_within_the_window() {
+        let arm = Some(("2".to_string(), 5000.0));
+        assert!(super::armed(&arm, "2", 4999.0));
+        assert!(!super::armed(&arm, "2", 5000.0), "the window has closed at its end time");
+        assert!(!super::armed(&arm, "3", 1000.0), "another account's icon does not arm this one");
+        assert!(!super::armed(&None, "2", 1000.0));
     }
 
     #[test]

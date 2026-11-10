@@ -53,6 +53,7 @@ mod tray_flyout;
 mod ui;
 mod util;
 mod viz;
+mod voice;
 mod webchat;
 mod weather;
 mod webread;

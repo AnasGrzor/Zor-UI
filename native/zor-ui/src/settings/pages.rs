@@ -1024,6 +1024,7 @@ impl Settings {
             self.sw(p, "buddies.browser", "Let the buddy use a browser", "For tasks on websites: the AI clicks and types in its own Edge window, and the pages' text goes to the AI. Needs Node.js", "language");
             if self.gb(p.cx, "buddies.browser") {
                 p.note("It asks before the first step of each request, and before anything that sends, buys or deletes. It has its own logins: log in to a site once in its window. Passwords are yours to type.", 12.0);
+                self.sw(p, "buddies.bypass", "Bypass permissions", "No yes needed before the first step. It still asks before anything that sends, buys, deletes or presses Enter, and never types passwords", "lock_open");
             }
             self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
             let mut mics = vec![(json!(""), "Windows default".to_string())];
@@ -1087,26 +1088,58 @@ impl Settings {
             p.h2("manage_accounts", "Claude accounts", "");
             p.card(|p| {
                 for a in &rows {
-                    let Some(r) = p.row(44.0) else { continue };
-                    let n = a["n"].as_u64().unwrap_or(0).to_string();
-                    let wsw = chip_w(p.c, "Switch", false);
-                    p.left(r, "person", a["email"].as_str().unwrap_or(""), &crate::bridge::claude_acct::summary(a), wsw + 48.0);
-                    let act = p.act(Act::Do("claude-remove", n.clone()));
-                    ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), act, "delete", IconKind::Plain, 20.0, false);
+                    let n = a["n"].as_u64().unwrap_or(0);
+                    let ns = n.to_string();
+                    let email = a["email"].as_str();
+                    let title = match email {
+                        Some(e) if a["default"] == true => format!("{e} (default)"),
+                        Some(e) => e.to_string(),
+                        None => "Default (not signed in)".to_string(),
+                    };
                     let active = a["active"] == true;
-                    let act = p.act(if active { Act::Do("noop", String::new()) } else { Act::Do("claude-switch", n) });
-                    ui::chip(p.c, p.cx, r.x + r.w - 48.0 - wsw, r.y + 8.0, act, None, if active { "Active" } else { "Switch" }, active);
+                    let (chip, act) = if active { ("Active", Act::Do("noop", String::new())) }
+                        else if a["dead"] == true || email.is_none() { ("Sign in", Act::Do("claude-relogin", ns.clone())) }
+                        else { ("Use", Act::Do("claude-switch", ns.clone())) };
+                    // the delete control: an icon that arms a "Remove?" chip (second click removes), none for the default
+                    let armed_now = n > 0 && super::armed(&self.claude_arm, &ns, crate::hub::now_ms());
+                    let del = if n == 0 { 0.0 } else if armed_now { chip_w(p.c, "Remove?", false) + 12.0 } else { 48.0 };
+                    let wchip = chip_w(p.c, chip, false);
+                    let sub = crate::bridge::claude_acct::summary(a);
+                    let Some(r) = p.row_sub(44.0, "person", &sub, wchip + del) else { continue };
+                    p.left(r, "person", &title, &sub, wchip + del);
+                    let mut end = r.x + r.w;
+                    if n > 0 && armed_now {
+                        let w = chip_w(p.c, "Remove?", false);
+                        let act = p.act(Act::Do("claude-remove", ns.clone()));
+                        ui::chip(p.c, p.cx, end - w, r.y + 8.0, act, None, "Remove?", false);
+                    } else if n > 0 {
+                        let act = p.act(Act::Do("claude-arm", ns.clone()));
+                        ui::icon_btn(p.c, p.cx, R::new(end - 36.0, r.y + 4.0, 36.0, 36.0), act, "delete", IconKind::Plain, 20.0, false);
+                    }
+                    end -= del;
+                    let act = p.act(act);
+                    ui::chip(p.c, p.cx, end - wchip, r.y + 8.0, act, None, chip, active);
                 }
                 self.sw(p, "claude.autoSwitch", "Switch automatically", "When the active login nears its limit, the next one with room takes over. A banner gives you 20 seconds to click it and cancel", "sync_alt");
                 if self.get(p.cx, "claude.autoSwitch") == true {
                     self.slider(p, "claude.threshold", "Switch at", Sl { min: 50.0, max: 100.0, step: 5.0, fmt: Fmt::PctInt }, "speed");
                 }
-                if let Some(r) = p.row(44.0) {
-                    let wsave = chip_w(p.c, "Save current login", false);
-                    p.left(r, "save", "Save the login Claude Code is using", "Run `claude` and sign in first. Don't use /logout, it can end the saved login", wsave);
-                    let act = p.act(Act::Do("claude-save", String::new()));
-                    ui::chip(p.c, p.cx, r.x + r.w - wsave, r.y + 8.0, act, None, "Save current login", false);
+                self.sw(p, "claude.restartSessions", "Restart open sessions when switching", "Each idle Claude session is stopped and resumed in a new window with the new account. Busy ones follow when they finish. Sessions in Orca are left to Orca", "restart_alt");
+                let sub = "Resumes each open Claude session with the account in use now";
+                let wnow = chip_w(p.c, "Restart now", false);
+                if let Some(r) = p.row_sub(44.0, "restart_alt", sub, wnow + 12.0) {
+                    p.left(r, "restart_alt", "Restart open sessions", sub, wnow + 12.0);
+                    let act = p.act(Act::Do("claude-restart", String::new()));
+                    ui::chip(p.c, p.cx, r.x + r.w - wnow, r.y + 8.0, act, None, "Restart now", false);
                 }
+                let sub = "Opens a terminal to sign in. The account appears here once signed in";
+                let wadd = chip_w(p.c, "Add account", false);
+                if let Some(r) = p.row_sub(44.0, "person_add", sub, wadd + 12.0) {
+                    p.left(r, "person_add", "Add an account", sub, wadd + 12.0);
+                    let act = p.act(Act::Do("claude-add", String::new()));
+                    ui::chip(p.c, p.cx, r.x + r.w - wadd, r.y + 8.0, act, None, "Add account", false);
+                }
+                p.note("Switching applies to terminals opened afterwards. Open Claude sessions keep their account.", 12.0);
             });
         }
         p.h2("translate", "Translator", "");

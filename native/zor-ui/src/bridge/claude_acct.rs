@@ -1,24 +1,19 @@
 //! Several Claude Code logins on one PC, and a switch between them (Settings, Services, Claude accounts).
 //!
-//! A login is two things on disk: `claudeAiOauth` in `~\.claude\.credentials.json` (the tokens) and `oauthAccount`
-//! in `~\.claude.json` (who it is). Each saved login is a slot in `%LOCALAPPDATA%\zor-ui\claude-accounts.json`
-//! whose tokens are encrypted with Windows DPAPI, like the API keys in secrets.json. Switching takes the same lock
-//! directories Claude Code takes, copies the live tokens back into the slot they came from (Claude Code rotates
-//! them), then replaces just those two values in the two files. Nothing else in either file is touched: the text
-//! around the value is kept byte for byte, because .claude.json holds all of Claude Code's other state.
+//! Each saved login has its own Claude Code config folder, `claude-profiles\<n>\home`, used as CLAUDE_CONFIG_DIR
+//! (see claude_profile.rs). The Default login is the user's own `~\.claude`. A switch sets which folder new terminals
+//! get, so open sessions keep the account they started with. zor-ui only writes a login file to renew an expired
+//! token, under Claude Code's refresh lock for that folder.
 //!
-//! The layout is Claude Code's own and not a public API. A file that doesn't look as expected is never written.
-//!
-//! Saved logins that aren't in use get their access token renewed here (the active one is Claude Code's to renew),
-//! so their usage can be read and a switch lands on a working login. A renewal gives a new refresh token and the old
-//! one stops working, so the new tokens are written to the slot at once. When the server says the refresh token is
-//! no longer valid the slot is marked `dead` until that login is saved again.
+//! `claude-profiles\state.json` keeps the last usage reading of each account and whether its refresh token was
+//! refused (`dead`). Signing in again clears `dead` once the next read sees a valid token.
 //!
 //! Auto-switch (`auto_tick`, from the usage loop in app.rs): when the active login passes a threshold and another has
 //! room, a banner says so and the switch happens 20 seconds later unless the banner is clicked.
-//! shortcut: CLAUDE_CONFIG_DIR is not honoured (claude_usage.rs doesn't either); add it if anyone sets it.
+//! The old one-file store (`claude-accounts.json`, DPAPI-sealed tokens) is moved into folders once, by `migrate`.
 
-use super::{common::{err, hidden, root, save_json}, web::{b64_decode, b64_encode, dpapi}};
+use super::{common::{err, hidden, load_json, save_json}, web::{b64_decode, dpapi}};
+use super::claude_profile::{self as prof, Root, Files};
 use crate::conf::Config;
 use serde_json::{json, Value};
 use std::{
@@ -29,24 +24,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// One writer of the slot file at a time (Settings, the usage loop and auto-switch all write it).
+/// One writer of state.json (and of the migration) at a time: Settings, the usage loop and auto-switch all write it.
 static STORE: Mutex<()> = Mutex::new(());
 fn store_lock() -> std::sync::MutexGuard<'static, ()> { STORE.lock().unwrap_or_else(|e| e.into_inner()) }
-
-/// Where the files live. Tests point both at a temp folder.
-pub struct Paths { home: PathBuf, store: PathBuf }
-
-impl Paths {
-    pub fn live() -> Paths { Paths { home: crate::conf::home(), store: root().join("claude-accounts.json") } }
-    fn creds(&self) -> PathBuf { self.home.join(".claude").join(".credentials.json") }
-    fn config(&self) -> PathBuf { self.home.join(".claude.json") }
-    /// Claude Code's lock directories (proper-lockfile) and when each counts as abandoned, in the order it takes them.
-    fn locks(&self) -> [(PathBuf, Duration); 3] {
-        [(self.home.join(".claude").join(".oauth_refresh.lock"), Duration::from_secs(60)),
-         (self.home.join(".claude.lock"), Duration::from_secs(60)),
-         (self.home.join(".claude.json.lock"), Duration::from_secs(10))]
-    }
-}
 
 // ------------------------------------------------------------------ locks
 
@@ -76,86 +56,7 @@ fn take(dir: &Path, stale: Duration, budget: Duration) -> Result<(), String> {
     }
 }
 
-fn lock_all(p: &Paths, budget: Duration) -> Result<Lock, String> {
-    let mut held = Lock(vec![]);
-    for (dir, stale) in p.locks() {
-        take(&dir, stale, budget)?; // an early return drops `held`, which frees the ones already taken
-        held.0.push(dir);
-    }
-    Ok(held)
-}
-
-// ------------------------------------------------------------------ editing one value in a JSON text
-
-/// Where the value of top-level `key` starts and ends in the text of a JSON object.
-fn value_span(text: &str, key: &str) -> Option<(usize, usize)> {
-    let b = text.as_bytes();
-    let (mut i, mut depth) = (0, 0i32);
-    while i < b.len() {
-        match b[i] {
-            b'"' => {
-                let start = i + 1;
-                i += 1;
-                while i < b.len() && b[i] != b'"' { if b[i] == b'\\' { i += 1; } i += 1; }
-                if depth == 1 && text.get(start..i) == Some(key) {
-                    let mut j = i + 1;
-                    while j < b.len() && b[j].is_ascii_whitespace() { j += 1; }
-                    if b.get(j) == Some(&b':') {
-                        j += 1;
-                        while j < b.len() && b[j].is_ascii_whitespace() { j += 1; }
-                        return Some((j, value_end(b, j)?));
-                    }
-                }
-            }
-            b'{' | b'[' => depth += 1,
-            b'}' | b']' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-fn value_end(b: &[u8], mut i: usize) -> Option<usize> {
-    let mut depth = 0;
-    while i < b.len() {
-        match b[i] {
-            b'"' => { i += 1; while i < b.len() && b[i] != b'"' { if b[i] == b'\\' { i += 1; } i += 1; } }
-            b'{' | b'[' => depth += 1,
-            b'}' | b']' => {
-                if depth == 0 { return Some(i); }
-                depth -= 1;
-                if depth == 0 { return Some(i + 1); }
-            }
-            b',' if depth == 0 => return Some(i),
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// `text` with the value of top-level `key` replaced by `new` (JSON text); None when the key isn't there.
-fn splice(text: &str, key: &str, new: &str) -> Option<String> {
-    let (s, e) = value_span(text, key)?;
-    Some(format!("{}{}{}", &text[..s], new, &text[e..]))
-}
-
-/// A JSON object file read strictly: a missing, unreadable or non-object file is an error, never an empty default,
-/// so a damaged file can't be "repaired" into an empty one.
-fn read_obj(path: &Path) -> Result<(String, Value), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
-    let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("{} isn't valid JSON: {e}", path.display()))?;
-    if !v.is_object() { return Err(format!("{} isn't a JSON object", path.display())); }
-    Ok((text, v))
-}
-
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension("zor-tmp");
-    std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("can't write {}: {e}", path.display()))
-}
-
-// ------------------------------------------------------------------ logins and slots
+// ------------------------------------------------------------------ who a login is
 
 /// Who a login is: the pair Claude Code itself tells accounts apart by.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,173 +67,56 @@ fn ident(account: &Value) -> Option<Ident> {
     Some(Ident { email: email.into(), org: account["organizationUuid"].as_str().unwrap_or("").into() })
 }
 
-fn slot_ident(s: &Value) -> Option<Ident> {
-    Some(Ident { email: s["email"].as_str()?.into(), org: s["org"].as_str().unwrap_or("").into() })
+fn marker_ident(m: &Value) -> Option<Ident> {
+    let email = m["email"].as_str().filter(|s| !s.is_empty())?;
+    Some(Ident { email: email.into(), org: m["org"].as_str().unwrap_or("").into() })
 }
 
-/// The login Claude Code is using now.
-struct Live { oauth: Value, account: Value }
-
-fn live_of(creds: &Value, config: &Value) -> Option<Live> {
-    let (oauth, account) = (creds["claudeAiOauth"].clone(), config["oauthAccount"].clone());
-    (oauth["accessToken"].as_str().is_some_and(|t| !t.is_empty()) && ident(&account).is_some()).then_some(Live { oauth, account })
+/// The marker written for profile `n`.
+fn marker(n: u64, id: &Ident, account: &Value, oauth: &Value) -> Value {
+    json!({ "n": n, "email": id.email, "org": id.org, "orgName": account["organizationName"], "plan": oauth["subscriptionType"] })
 }
 
-fn live(p: &Paths) -> Option<Live> {
-    live_of(&read_obj(&p.creds()).ok()?.1, &read_obj(&p.config()).ok()?.1)
-}
-
-fn load(p: &Paths) -> Vec<Value> {
-    super::common::load_json(&p.store, json!({}))["slots"].as_array().cloned().unwrap_or_default()
-}
-
-fn store(p: &Paths, slots: &[Value]) -> Result<(), String> {
-    if save_json(&p.store, &json!({ "slots": slots })) { Ok(()) } else { Err(format!("can't write {}", p.store.display())) }
-}
-
-fn seal(oauth: &Value, account: &Value) -> Option<String> {
-    dpapi(json!({ "claudeAiOauth": oauth, "oauthAccount": account }).to_string().as_bytes(), true).map(|b| b64_encode(&b))
-}
-
-fn open(slot: &Value) -> Option<(Value, Value)> {
-    let v: Value = serde_json::from_slice(&dpapi(&b64_decode(slot["blob"].as_str()?), false)?).ok()?;
-    Some((v["claudeAiOauth"].clone(), v["oauthAccount"].clone()))
-}
-
-/// Puts a live login into its slot, adding the slot when it's new. The slot number.
-fn upsert(slots: &mut Vec<Value>, l: &Live) -> Result<u64, String> {
-    let id = ident(&l.account).ok_or("Claude Code isn't signed in")?;
-    let blob = seal(&l.oauth, &l.account).ok_or("Windows couldn't encrypt the login (DPAPI)")?;
-    let plan = l.oauth["subscriptionType"].as_str().unwrap_or("");
-    if let Some(s) = slots.iter_mut().find(|s| slot_ident(s).as_ref() == Some(&id)) {
-        s["blob"] = json!(blob);
-        s["plan"] = json!(plan);
-        s["dead"] = json!(false); // a fresh sign-in revives a slot marked dead
-        return Ok(s["n"].as_u64().unwrap_or(0));
+/// Every login already saved, by row number: the Default login (0) and each profile's marker.
+fn identities(root: &Root) -> Vec<(u64, Ident)> {
+    let mut v = vec![];
+    if let Some((_, account)) = prof::login_of(&Files::of(root, 0)) {
+        if let Some(id) = ident(&account) { v.push((0, id)); }
     }
-    let n = slots.iter().filter_map(|s| s["n"].as_u64()).max().unwrap_or(0) + 1;
-    slots.push(json!({ "n": n, "email": id.email, "org": id.org, "orgName": l.account["organizationName"], "plan": plan, "blob": blob }));
-    Ok(n)
-}
-
-/// Copies the live tokens into the slot of the same login when they differ (Claude Code rotates them as it runs).
-/// True when a slot changed; false when nothing differed or no slot matches.
-fn sync_live(slots: &mut [Value], l: &Live) -> bool {
-    let Some(id) = ident(&l.account) else { return false };
-    let Some(s) = slots.iter_mut().find(|s| slot_ident(s).as_ref() == Some(&id)) else { return false };
-    if open(s).is_some_and(|(o, a)| o == l.oauth && a == l.account) { return false; }
-    match seal(&l.oauth, &l.account) { Some(b) => { s["blob"] = json!(b); true } None => false }
-}
-
-/// Saves the login Claude Code is signed in with.
-pub fn save_current(p: &Paths) -> Result<u64, String> {
-    let l = live(p).ok_or("Claude Code isn't signed in. Run `claude`, log in, then save.")?;
-    let _w = store_lock();
-    let mut slots = load(p);
-    let n = upsert(&mut slots, &l)?;
-    store(p, &slots)?;
-    Ok(n)
-}
-
-/// Makes slot `n` the login Claude Code uses.
-pub fn switch(p: &Paths, n: u64) -> Result<(), String> {
-    let _w = store_lock();
-    let slots = load(p);
-    let target = slots.iter().find(|s| s["n"].as_u64() == Some(n)).ok_or("No such account")?;
-    if target["dead"] == true { return Err("That login has expired. Sign in to it with `claude`, then save it again.".into()); }
-    let (oauth, account) = open(target).ok_or("Can't decrypt that login. It was saved by another Windows user or PC.")?;
-    let tid = ident(&account).ok_or("The saved login has no email")?;
-    let _held = lock_all(p, Duration::from_secs(9))?;
-    // read under the lock, so what Claude Code wrote a moment ago is what we replace
-    let (ctext, cv) = read_obj(&p.creds())?;
-    let (jtext, jv) = read_obj(&p.config())?;
-    let mut slots = load(p);
-    if let Some(l) = live_of(&cv, &jv) {
-        if ident(&l.account).as_ref() == Some(&tid) { return Ok(()); }
-        if !slots.iter().any(|s| slot_ident(s) == ident(&l.account)) {
-            return Err("The login you're using isn't saved yet. Save it first, or switching away would lose it.".into());
-        }
-        if sync_live(&mut slots, &l) { store(p, &slots)?; }
+    for n in root.numbers() {
+        if let Some(id) = prof::read_marker(root, n).as_ref().and_then(marker_ident) { v.push((n, id)); }
     }
-    let new_c = splice(&ctext, "claudeAiOauth", &oauth.to_string()).ok_or("The credentials file has no claudeAiOauth to replace")?;
-    let new_j = splice(&jtext, "oauthAccount", &account.to_string()).ok_or(".claude.json has no oauthAccount to replace")?;
-    write_atomic(&p.creds(), &new_c)?;
-    if let Err(e) = write_atomic(&p.config(), &new_j) {
-        let _ = write_atomic(&p.creds(), &ctext); // never leave the tokens of one account next to the name of another
-        return Err(e);
-    }
-    Ok(())
+    v
 }
 
-pub fn remove(p: &Paths, n: u64) -> Result<(), String> {
-    let _w = store_lock();
-    let mut slots = load(p);
-    slots.retain(|s| s["n"].as_u64() != Some(n));
-    store(p, &slots)
+/// The row, other than `except`, that already holds this login (same email and organization).
+fn taken_by(rows: &[(u64, Ident)], id: &Ident, except: u64) -> Option<u64> {
+    rows.iter().find(|(n, r)| *n != except && r == id).map(|(n, _)| *n)
 }
 
-// ------------------------------------------------------------------ usage and the list for Settings
+// ------------------------------------------------------------------ state.json
 
-fn now_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
+fn read_state(root: &Root) -> Value { load_json(&root.dir.join("state.json"), json!({})) }
 
-/// A token Claude Code still accepts (expiresAt is in milliseconds); one a minute from expiry is as good as expired.
-fn token_ok(oauth: &Value, now_ms: u64) -> Option<String> {
-    let t = oauth["accessToken"].as_str().filter(|t| !t.is_empty())?;
-    (oauth["expiresAt"].as_u64().unwrap_or(0) > now_ms + 60_000).then(|| t.to_string())
+fn write_state(root: &Root, v: &Value) -> Result<(), String> {
+    let p = root.dir.join("state.json");
+    if save_json(&p, v) { Ok(()) } else { Err(format!("can't write {}", p.display())) }
 }
 
-/// The accounts for Settings: one row each, with the last usage that could be read (kept when a read fails).
-pub fn list(p: &Paths) -> Value {
-    let lv = live(p);
-    let lid = lv.as_ref().and_then(|l| ident(&l.account));
-    let now = now_secs();
-    let mut slots = {
-        let _w = store_lock();
-        let mut slots = load(p);
-        if let Some(l) = &lv { if sync_live(&mut slots, l) { let _ = store(p, &slots); } }
-        slots
-    };
-    // renew and read every login side by side (one request or two each)
-    let work: Vec<Option<Work>> = slots.iter().map(|s| {
-        if s["dead"] == true { return None; }
-        let active = lid.is_some() && slot_ident(s) == lid;
-        let (oauth, account) = if active { let l = lv.as_ref()?; (l.oauth.clone(), l.account.clone()) } else { open(s)? };
-        Some(Work { n: s["n"].as_u64().unwrap_or(0), oauth, account, active })
-    }).collect();
-    let outcomes: Vec<Option<Outcome>> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = work.into_iter().map(|w| sc.spawn(move || w.map(|w| renew_and_read(w, now * 1000)))).collect();
-        jobs.into_iter().map(|j| j.join().ok().flatten()).collect()
-    });
-    if outcomes.iter().flatten().any(|o| o.renewed.is_some() || o.dead || o.usage.is_some()) {
-        let _w = store_lock();
-        let mut fresh = load(p); // read again: a switch or save may have run while the requests were out
-        for o in outcomes.iter().flatten() { apply(&mut fresh, o, now); }
-        let _ = store(p, &fresh);
-        slots = fresh;
-    }
-    let rows: Vec<Value> = slots.iter().map(|s| {
-        let u = &s["usage"];
-        json!({
-            "n": s["n"], "email": s["email"], "orgName": s["orgName"], "plan": s["plan"],
-            "active": lid.is_some() && slot_ident(s) == lid,
-            "dead": s["dead"] == true,
-            "session": u["session"], "week": u["week"],
-            "ageMin": u["at"].as_u64().map(|at| now.saturating_sub(at) / 60),
-        })
-    }).collect();
-    json!({ "accounts": rows })
+/// What one account's read or renewal found, as it goes into state.json.
+struct Outcome { n: u64, dead: bool, usage: Option<crate::claude_usage::Usage> }
+
+/// Lays one outcome over the state: `dead` always, and the usage only when a reading was taken (the last one stays otherwise).
+fn apply_outcome(state: &mut Value, o: &Outcome, now: u64) {
+    let s = &mut state[o.n.to_string()];
+    s["dead"] = json!(o.dead);
+    if let Some(u) = &o.usage { s["usage"] = json!({ "session": u.session, "week": u.week, "at": now }); }
 }
 
 // ------------------------------------------------------------------ token renewal
 
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"; // Claude Code's public OAuth client
-
-/// A login to renew and read; `active` ones are Claude Code's to renew.
-struct Work { n: u64, oauth: Value, account: Value, active: bool }
-
-/// What came back: renewed tokens to store, whether the refresh token is no longer valid, the usage read.
-struct Outcome { n: u64, account: Value, renewed: Option<Value>, dead: bool, usage: Option<crate::claude_usage::Usage> }
 
 #[derive(Debug, PartialEq)]
 enum Renewal { New(Value), Dead, Failed }
@@ -369,25 +153,209 @@ fn renew(old: &Value, now_ms: u64) -> Renewal {
     }
 }
 
-fn renew_and_read(w: Work, now_ms: u64) -> Outcome {
-    let (mut oauth, mut renewed, mut dead) = (w.oauth, None, false);
-    if !w.active && token_ok(&oauth, now_ms).is_none() {
-        match renew(&oauth, now_ms) {
-            Renewal::New(o) => { renewed = Some(o.clone()); oauth = o; }
-            Renewal::Dead => dead = true,
-            Renewal::Failed => {}
-        }
-    }
-    let usage = if dead { None } else { token_ok(&oauth, now_ms).and_then(crate::claude_usage::fetch_with) };
-    Outcome { n: w.n, account: w.account, renewed, dead, usage }
+/// A token Claude Code still accepts (expiresAt is in milliseconds); one a minute from expiry is as good as expired.
+fn token_ok(oauth: &Value, now_ms: u64) -> Option<String> {
+    let t = oauth["accessToken"].as_str().filter(|t| !t.is_empty())?;
+    (oauth["expiresAt"].as_u64().unwrap_or(0) > now_ms + 60_000).then(|| t.to_string())
 }
 
-/// Lays one outcome over the slots as they are on disk now.
-fn apply(slots: &mut [Value], o: &Outcome, now: u64) {
-    let Some(s) = slots.iter_mut().find(|s| s["n"].as_u64() == Some(o.n)) else { return };
-    if let Some(r) = &o.renewed { if let Some(b) = seal(r, &o.account) { s["blob"] = json!(b); } }
-    if o.dead { s["dead"] = json!(true); }
-    if let Some(u) = &o.usage { s["usage"] = json!({ "session": u.session, "week": u.week, "at": now }); }
+/// Renews an expired login (when it isn't already known dead) and reads its usage. The renewal holds Claude Code's
+/// refresh lock for that folder, and re-reads the login under it, so one side spends a refresh token at a time.
+fn renew_and_read(n: u64, f: &Files, was_dead: bool, now_ms: u64) -> Outcome {
+    let mut oauth = prof::login_of(f).map(|(o, _)| o);
+    let mut dead = was_dead;
+    if !was_dead && oauth.as_ref().is_some_and(|o| token_ok(o, now_ms).is_none())
+        && take(&f.lock, Duration::from_secs(60), Duration::from_secs(5)).is_ok()
+    {
+        let _held = Lock(vec![f.lock.clone()]);
+        if let Some((cur, account)) = prof::login_of(f) { // the other side may have renewed it while we waited
+            if token_ok(&cur, now_ms).is_some() {
+                oauth = Some(cur);
+            } else {
+                match renew(&cur, now_ms) {
+                    Renewal::New(o) => { let _ = prof::write_login(f, &o, &account); oauth = Some(o); }
+                    Renewal::Dead => dead = true,
+                    Renewal::Failed => {}
+                }
+            }
+        }
+    }
+    let token = oauth.as_ref().and_then(|o| token_ok(o, now_ms));
+    // a refused login that now has a valid token (signed in again) is no longer dead
+    // tests use fake tokens, which must never be sent to the real endpoint
+    let dead = dead && token.is_none();
+    let usage = if cfg!(test) { None } else { token.and_then(crate::claude_usage::fetch_with) };
+    Outcome { n, dead, usage }
+}
+
+// ------------------------------------------------------------------ the list for Settings
+
+fn now_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) }
+
+/// Who a row is: the Default login's account, or a profile's marker.
+fn who(root: &Root, n: u64, f: &Files) -> Value {
+    if n > 0 {
+        let m = prof::read_marker(root, n).unwrap_or(Value::Null);
+        return json!({ "email": m["email"], "orgName": m["orgName"], "plan": m["plan"] });
+    }
+    match prof::login_of(f) {
+        Some((oauth, account)) => json!({ "email": account["emailAddress"], "orgName": account["organizationName"], "plan": oauth["subscriptionType"] }),
+        None => json!({ "email": null, "orgName": null, "plan": null }),
+    }
+}
+
+/// The accounts for Settings: Default first, then each profile. Renews expired tokens and reads usage.
+pub fn list(root: &Root) -> Value {
+    migrate(root, &legacy_file(root));
+    list_with(root, prof::active(root))
+}
+
+/// `list` with the active account passed in, so tests never read the registry.
+fn list_with(root: &Root, active: u64) -> Value {
+    let now = now_secs();
+    let ns: Vec<u64> = std::iter::once(0).chain(root.numbers()).collect();
+    let files: Vec<Files> = ns.iter().map(|&n| Files::of(root, n)).collect();
+    let was_dead: Vec<bool> = {
+        let _w = store_lock();
+        let st = read_state(root);
+        ns.iter().map(|&n| st[n.to_string()]["dead"] == true).collect()
+    };
+    // renew and read every login side by side (one request or two each)
+    let outcomes: Vec<Outcome> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = ns.iter().zip(&files).zip(&was_dead)
+            .map(|((&n, f), &d)| (n, sc.spawn(move || renew_and_read(n, f, d, now * 1000)))).collect();
+        jobs.into_iter().map(|(n, j)| j.join().unwrap_or(Outcome { n, dead: false, usage: None })).collect()
+    });
+    let state = {
+        let _w = store_lock();
+        let mut st = read_state(root);
+        let current = root.numbers(); // a profile removed while the requests were out must not come back
+        for o in outcomes.iter().filter(|o| o.n == 0 || current.contains(&o.n)) { apply_outcome(&mut st, o, now); }
+        let _ = write_state(root, &st);
+        st
+    };
+    let rows: Vec<Value> = ns.iter().zip(&files).map(|(&n, f)| {
+        let w = who(root, n, f);
+        let u = &state[n.to_string()]["usage"];
+        json!({
+            "n": n, "default": n == 0, "email": w["email"], "orgName": w["orgName"], "plan": w["plan"],
+            "active": active == n, "dead": state[n.to_string()]["dead"] == true,
+            "session": u["session"], "week": u["week"],
+            "ageMin": u["at"].as_u64().map(|at| now.saturating_sub(at) / 60),
+        })
+    }).collect();
+    json!({ "accounts": rows })
+}
+
+// ------------------------------------------------------------------ migration from the one-file store
+
+/// The old store, beside the profiles folder. Derived from `root` so tests never reach the real one.
+fn legacy_file(root: &Root) -> PathBuf { root.dir.parent().unwrap_or(&root.dir).join("claude-accounts.json") }
+
+/// Moves the old one-file store into account folders, once. A slot that fails stays in the old file, so the next
+/// list tries again. A slot whose login is already saved (Default or a profile) counts as done.
+fn migrate(root: &Root, file: &Path) {
+    let Ok(text) = std::fs::read_to_string(file) else { return };
+    let Ok(v) = serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) else { return };
+    let _w = store_lock();
+    let mut all_ok = true;
+    for slot in v["slots"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        all_ok &= migrate_slot(root, slot).is_ok();
+    }
+    if all_ok { let _ = std::fs::rename(file, file.with_file_name("claude-accounts.json.migrated")); }
+}
+
+fn migrate_slot(root: &Root, slot: &Value) -> Result<(), String> {
+    let (oauth, account) = open(slot).ok_or("Can't decrypt a saved login. It was saved by another Windows user or PC.")?;
+    let id = ident(&account).ok_or("A saved login has no email")?;
+    if taken_by(&identities(root), &id, u64::MAX).is_some() { return Ok(()); }
+    let n = root.next();
+    let made = (|| -> Result<(), String> {
+        let home = prof::create(root, n)?;
+        prof::write_login(&Files::of_profile(&home), &oauth, &account)?;
+        prof::write_marker(root, n, &marker(n, &id, &account, &oauth))
+    })();
+    if made.is_err() { let _ = prof::remove(root, n); } // never leave a half-made folder behind
+    made
+}
+
+/// DPAPI-decrypts a slot of the old store. Only migration reads it now.
+fn open(slot: &Value) -> Option<(Value, Value)> {
+    let v: Value = serde_json::from_slice(&dpapi(&b64_decode(slot["blob"].as_str()?), false)?).ok()?;
+    Some((v["claudeAiOauth"].clone(), v["oauthAccount"].clone()))
+}
+
+// ------------------------------------------------------------------ add, relogin, remove, switch
+
+/// Creates the next account folder and opens a terminal to sign in there. A watcher then keeps the login as a row.
+pub fn add(root: &Root) -> Result<(), String> {
+    let n = root.next();
+    let made = prof::create(root, n).and_then(|_| prof::open_login(root, n));
+    if let Err(e) = made { let _ = prof::remove(root, n); return Err(e); }
+    std::thread::spawn(move || watch_login(n));
+    Ok(())
+}
+
+/// Waits up to five minutes for the sign-in in account `n`'s folder, then keeps it as a row.
+fn watch_login(n: u64) {
+    let root = Root::live();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_secs(2));
+        if let Some((oauth, account)) = prof::login_of(&Files::of(&root, n)) {
+            finish_add(&root, n, &oauth, &account);
+            return;
+        }
+    }
+    let _ = prof::remove(&root, n);
+}
+
+fn finish_add(root: &Root, n: u64, oauth: &Value, account: &Value) {
+    let Some(id) = ident(account) else { return };
+    if taken_by(&identities(root), &id, n).is_some() {
+        let _ = prof::remove(root, n);
+        banner("That account is already saved".into(), "", 8);
+        return;
+    }
+    match prof::write_marker(root, n, &marker(n, &id, account, oauth)) {
+        Ok(()) => banner(format!("Claude account added: {}", id.email), "", 6),
+        Err(e) => {
+            let _ = prof::remove(root, n);
+            banner(format!("Couldn't save that account: {e}"), "", 8);
+        }
+    }
+}
+
+/// Opens a terminal to sign in again in account `n`'s folder (0 = Default).
+pub fn relogin(root: &Root, n: u64) -> Result<(), String> {
+    if n != 0 && !root.numbers().contains(&n) { return Err("No such account".into()); }
+    prof::open_login(root, n)
+}
+
+/// Why account `n` can't be switched to, if it can't.
+fn switch_error(root: &Root, n: u64, dead: bool) -> Option<String> {
+    if n != 0 && !root.numbers().contains(&n) { return Some("No such account".into()); }
+    if dead { return Some("That login has expired. Use Sign in again.".into()); }
+    if n != 0 && prof::login_of(&Files::of(root, n)).is_none() { return Some("That account isn't signed in. Use Sign in again.".into()); }
+    None
+}
+
+/// Makes account `n` (0 = Default) the one new terminals get.
+pub fn switch(root: &Root, n: u64) -> Result<(), String> {
+    let dead = { let _w = store_lock(); read_state(root)[n.to_string()]["dead"] == true };
+    if let Some(e) = switch_error(root, n, dead) { return Err(e); }
+    prof::select(root, n)
+}
+
+/// Deletes profile `n` (never Default). If it is the active account, Default is selected first.
+pub fn remove(root: &Root, n: u64) -> Result<(), String> {
+    if n == 0 || !root.numbers().contains(&n) { return Err("No such account".into()); }
+    let _w = store_lock();
+    if prof::active(root) == n { prof::select(root, 0)?; }
+    prof::remove(root, n)?;
+    let mut st = read_state(root);
+    if let Some(o) = st.as_object_mut() { o.remove(&n.to_string()); }
+    write_state(root, &st)
 }
 
 // ------------------------------------------------------------------ auto-switch
@@ -423,7 +391,7 @@ pub fn wanted(cfg: &Config) -> bool {
     cfg.get("claude.autoSwitch").as_bool() == Some(true) || crate::bar::layout(cfg).iter().any(|m| m.0 == "claude" && m.1 != "hidden")
 }
 
-fn banner(text: String, open: &str, secs: u64) {
+pub(super) fn banner(text: String, open: &str, secs: u64) {
     let open = open.to_string();
     crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text, until: crate::hub::now_ms() + secs as f64 * 1000.0, open })));
 }
@@ -432,10 +400,10 @@ fn banner(text: String, open: &str, secs: u64) {
 pub fn auto_tick(cfg: &Config) {
     if cfg.get("claude.autoSwitch").as_bool() != Some(true) || !cooled(now_secs(), LAST.load(Ordering::Relaxed)) { return; }
     let threshold = cfg.get("claude.threshold").as_u64().unwrap_or(95).clamp(50, 100);
-    let p = Paths::live();
-    let Some((n, email)) = pick(list(&p)["accounts"].as_array().map(Vec::as_slice).unwrap_or(&[]), threshold) else { return };
+    let root = Root::live();
+    let Some((n, email)) = pick(list(&root)["accounts"].as_array().map(Vec::as_slice).unwrap_or(&[]), threshold) else { return };
     CANCELLED.store(false, Ordering::Relaxed);
-    banner(format!("Claude passed {threshold}%. Switching to {email} in {COUNTDOWN_SECS} s. Click to cancel."), CANCEL, COUNTDOWN_SECS);
+    banner(format!("Claude passed {threshold}%. New sessions will use {email} in {COUNTDOWN_SECS} s. Click to cancel."), CANCEL, COUNTDOWN_SECS);
     for _ in 0..COUNTDOWN_SECS {
         std::thread::sleep(Duration::from_secs(1));
         if CANCELLED.load(Ordering::Relaxed) || crate::conf::Config::load().get("claude.autoSwitch").as_bool() != Some(true) {
@@ -444,9 +412,10 @@ pub fn auto_tick(cfg: &Config) {
         }
     }
     LAST.store(now_secs(), Ordering::Relaxed);
-    match switch(&p, n) {
+    match switch(&root, n) {
         Ok(()) => {
-            banner(format!("Switched Claude to {email}"), "", 6);
+            let restarted = if restart_wanted(cfg) { format!(" {}", restart_sessions(cfg, &root, n)) } else { String::new() };
+            banner(format!("New Claude sessions will use {email}.{restarted}"), "", 8);
             if let Some(u) = crate::claude_usage::fetch() { crate::app::post(Box::new(move |cx| cx.claude = Some(u))); }
         }
         Err(e) => banner(format!("Couldn't switch Claude: {e}"), "", 8),
@@ -455,7 +424,7 @@ pub fn auto_tick(cfg: &Config) {
 
 /// The grey line under an account: plan, the two usage windows, and how old that reading is.
 pub(crate) fn summary(row: &Value) -> String {
-    if row["dead"] == true { return "Login expired. Sign in with `claude`, then save it again".into(); }
+    if row["dead"] == true { return "Login expired. Click Sign in to log in again".into(); }
     let mut parts = vec![];
     if let Some(plan) = row["plan"].as_str().filter(|p| !p.is_empty()) {
         let mut c = plan.chars();
@@ -473,19 +442,35 @@ pub(crate) fn summary(row: &Value) -> String {
 
 fn done(r: Result<(), String>) -> Value { match r { Ok(()) => json!({ "ok": true }), Err(e) => err(e) } }
 
-pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
-    let p = Paths::live();
+fn restart_wanted(cfg: &Config) -> bool { cfg.get("claude.restartSessions").as_bool() == Some(true) }
+
+/// Restarts open Claude sessions so they run as account `n`; one line saying what happened.
+fn restart_sessions(cfg: &Config, root: &Root, n: u64) -> String {
+    let Some(how) = super::agent_hook::resume_of("claude", cfg.get("customAgents")) else { return String::new() };
+    let dir = prof::config_dir_value(root, n).map(|p| p.to_string_lossy().into_owned());
+    let r = super::agent_restart::restart(&super::agent_hook::sessions_dir("claude"), how, vec![("CLAUDE_CONFIG_DIR".into(), dir)]);
+    super::agent_restart::summary(&r)
+}
+
+pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
+    let root = Root::live();
     let n = || args.first().and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
     Some(match name {
-        "claude-accounts" => list(&p),
-        "claude-save" => done(save_current(&p).map(|_| ())),
+        "claude-accounts" => list(&root),
         "claude-switch" => {
-            let r = switch(&p, n());
+            let n = n();
+            let r = switch(&root, n);
             // the bar and Gojo show the active login's usage: read it now instead of at the next 3 minute tick
             if r.is_ok() { if let Some(u) = crate::claude_usage::fetch() { crate::app::post(Box::new(move |cx| cx.claude = Some(u))); } }
-            done(r)
+            match r {
+                Ok(()) if restart_wanted(cfg) => json!({ "ok": true, "message": format!("New terminals will use this account. {}", restart_sessions(cfg, &root, n)) }),
+                r => done(r),
+            }
         }
-        "claude-remove" => done(remove(&p, n())),
+        "claude-restart" => json!({ "ok": true, "message": restart_sessions(cfg, &root, prof::active(&root)) }),
+        "claude-add" => done(add(&root)),
+        "claude-relogin" => done(relogin(&root, n())),
+        "claude-remove" => done(remove(&root, n())),
         _ => return None,
     })
 }
@@ -493,73 +478,136 @@ pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::web::b64_encode;
 
-    const CONFIG: &str = r#"{
-  "numStartups": 7,
-  "projects": { "c:/Code/x": {"a": 1}, "C:/Code/x": {"a": 2} },
-  "oauthAccount": { "emailAddress": "a@x.com", "organizationUuid": "org-a", "note": "}, \"quoted\"" },
-  "tail": [1, 2]
-}"#;
+    const FOREVER: u64 = u64::MAX / 2;
 
-    fn creds(token: &str, expires: u64) -> String {
-        json!({ "mcpOAuth": { "srv": { "k": 1 } }, "claudeAiOauth": { "accessToken": token, "refreshToken": "r", "expiresAt": expires, "subscriptionType": "pro" } }).to_string()
+    /// A fresh temp home and profiles folder. Nothing outside it is read or written.
+    fn temp_root(tag: &str) -> Root {
+        let base = std::env::temp_dir().join(format!("zorui-acct-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = Root { home: base.join("home"), dir: base.join("data").join("claude-profiles") };
+        std::fs::create_dir_all(root.home.join(".claude")).unwrap();
+        std::fs::create_dir_all(&root.dir).unwrap();
+        root
     }
 
-    fn account(email: &str, org: &str) -> String { json!({ "emailAddress": email, "organizationUuid": org, "organizationName": "Org" }).to_string() }
-
-    /// A fake home with Claude Code signed in as `email`.
-    fn setup(tag: &str, email: &str, org: &str, token: &str) -> Paths {
-        let dir = std::env::temp_dir().join(format!("zorui-acct-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("home").join(".claude")).unwrap();
-        let p = Paths { home: dir.join("home"), store: dir.join("data").join("claude-accounts.json") };
-        let config = CONFIG.replace(&account_of_config(), &account(email, org));
-        std::fs::write(p.config(), config).unwrap();
-        std::fs::write(p.creds(), creds(token, u64::MAX / 2)).unwrap();
-        p
+    fn oauth(token: &str, expires_at: u64) -> Value {
+        json!({ "accessToken": token, "refreshToken": "r", "expiresAt": expires_at, "subscriptionType": "max" })
     }
 
-    fn account_of_config() -> String {
-        let (s, e) = value_span(CONFIG, "oauthAccount").unwrap();
-        CONFIG[s..e].to_string()
+    fn account(email: &str, org: &str) -> Value { json!({ "emailAddress": email, "organizationUuid": org, "organizationName": "Org" }) }
+
+    /// A profile folder signed in as `email`, with its marker, as a finished sign-in leaves it.
+    fn make_profile(root: &Root, n: u64, email: &str, org: &str) {
+        let home = prof::create(root, n).unwrap();
+        prof::write_login(&Files::of_profile(&home), &oauth("tok", FOREVER), &account(email, org)).unwrap();
+        prof::write_marker(root, n, &json!({ "n": n, "email": email, "org": org, "orgName": "Org", "plan": "max" })).unwrap();
     }
 
-    /// What Claude Code would see as the signed-in email and token.
-    fn current(p: &Paths) -> (String, String) {
-        let l = live(p).unwrap();
-        (l.account["emailAddress"].as_str().unwrap().into(), l.oauth["accessToken"].as_str().unwrap().into())
+    /// A slot of the old one-file store, sealed the way it was (DPAPI over the two values, then base64).
+    fn sealed(email: &str, org: &str) -> Value {
+        let body = json!({ "claudeAiOauth": oauth(&format!("tok-{email}"), FOREVER), "oauthAccount": account(email, org) });
+        let blob = dpapi(body.to_string().as_bytes(), true).map(|b| b64_encode(&b)).unwrap();
+        json!({ "email": email, "org": org, "blob": blob })
     }
 
-    #[test]
-    fn finds_and_replaces_one_top_level_value() {
-        let (s, e) = value_span(CONFIG, "oauthAccount").unwrap();
-        assert!(CONFIG[s..e].starts_with('{') && CONFIG[s..e].ends_with('}') && CONFIG[s..e].contains("quoted"), "braces inside a string don't end it");
-        let out = splice(CONFIG, "oauthAccount", r#"{"emailAddress":"b@x.com"}"#).unwrap();
-        assert!(out.contains("b@x.com") && !out.contains("a@x.com"));
-        assert_eq!(out.replace(r#"{"emailAddress":"b@x.com"}"#, &CONFIG[s..e]), CONFIG, "everything else is byte for byte the same");
-        assert_eq!(splice(CONFIG, "numStartups", "9").unwrap().matches("\"numStartups\": 9,").count(), 1, "a number value ends at the comma");
-        assert!(splice(CONFIG, "email", "1").is_none() && splice(CONFIG, "emailAddress", "1").is_none(), "nested keys aren't top level");
-        assert!(splice(r#"{"a":1}"#, "missing", "1").is_none());
-        assert!(serde_json::from_str::<Value>(&out).is_ok(), "the result is still JSON, with both case-different project keys");
-    }
+    fn legacy(root: &Root) -> PathBuf { legacy_file(root) }
 
     #[test]
     fn identity_needs_an_email() {
         assert_eq!(ident(&json!({ "emailAddress": "a@x.com", "organizationUuid": "o" })), Some(Ident { email: "a@x.com".into(), org: "o".into() }));
         assert_eq!(ident(&json!({ "emailAddress": "" })), None);
         assert_eq!(ident(&json!({})), None);
-        assert!(live_of(&json!({ "claudeAiOauth": { "accessToken": "t" } }), &json!({})).is_none());
-        assert!(live_of(&json!({}), &json!({ "oauthAccount": { "emailAddress": "a@x.com" } })).is_none());
     }
 
     #[test]
-    fn strict_reads_refuse_damaged_files() {
-        let p = setup("strict", "a@x.com", "o", "t");
-        std::fs::write(p.config(), "{ not json").unwrap();
-        assert!(read_obj(&p.config()).is_err() && live(&p).is_none());
-        std::fs::write(p.config(), "[1]").unwrap();
-        assert!(read_obj(&p.config()).is_err());
-        assert!(read_obj(&p.home.join("missing.json")).is_err());
+    fn same_login_is_matched_by_email_and_org() {
+        let id = |e: &str, o: &str| Ident { email: e.into(), org: o.into() };
+        let rows = [(0, id("a@x.com", "org-a")), (2, id("b@x.com", "org-b"))];
+        assert_eq!(taken_by(&rows, &id("a@x.com", "org-a"), 1), Some(0), "the Default login is taken");
+        assert_eq!(taken_by(&rows, &id("a@x.com", "org-b"), 1), None, "the same email in another organization is another login");
+        assert_eq!(taken_by(&rows, &id("b@x.com", "org-b"), 2), None, "a row never matches itself");
+        assert_eq!(taken_by(&rows, &id("c@x.com", "org-a"), 1), None);
+    }
+
+    #[test]
+    fn state_keeps_usage_and_dead_flags() {
+        let root = temp_root("state");
+        let mut st = json!({});
+        apply_outcome(&mut st, &Outcome { n: 1, dead: false, usage: Some(crate::claude_usage::Usage { session: 5, week: 6 }) }, 1000);
+        assert_eq!(st["1"], json!({ "dead": false, "usage": { "session": 5, "week": 6, "at": 1000 } }));
+        apply_outcome(&mut st, &Outcome { n: 1, dead: true, usage: None }, 2000);
+        assert_eq!((st["1"]["dead"].clone(), st["1"]["usage"]["at"].clone()), (json!(true), json!(1000)), "dead is set and the last reading stays");
+        write_state(&root, &st).unwrap();
+        assert_eq!(read_state(&root), st, "state.json round-trips");
+        apply_outcome(&mut st, &Outcome { n: 1, dead: false, usage: None }, 3000);
+        assert_eq!(st["1"]["dead"], json!(false), "a valid login clears dead");
+    }
+
+    #[test]
+    fn switch_refuses_unknown_expired_and_unsigned_accounts() {
+        let root = temp_root("switch");
+        assert_eq!(switch_error(&root, 9, false).as_deref(), Some("No such account"));
+        assert!(switch_error(&root, 0, true).unwrap().contains("Use Sign in again"));
+        prof::create(&root, 1).unwrap();
+        prof::write_marker(&root, 1, &json!({ "n": 1, "email": "b@x.com", "org": "org-b" })).unwrap();
+        assert!(switch_error(&root, 1, false).unwrap().contains("isn't signed in"), "a folder with no login can't be switched to");
+        make_profile(&root, 2, "c@x.com", "org-c");
+        assert_eq!(switch_error(&root, 2, false), None);
+        assert_eq!(switch_error(&root, 0, false), None, "Default needs no profile login");
+    }
+
+    #[test]
+    fn migration_skips_the_default_login_and_moves_the_rest() {
+        let root = temp_root("migrate");
+        prof::write_login(&Files::of(&root, 0), &oauth("default", FOREVER), &account("a@x.com", "org-a")).unwrap();
+        let file = legacy(&root);
+        std::fs::write(&file, json!({ "slots": [sealed("a@x.com", "org-a"), sealed("b@x.com", "org-b")] }).to_string()).unwrap();
+        migrate(&root, &file);
+        assert_eq!(root.numbers(), vec![1], "the Default login gets no profile; the other one becomes profile 1");
+        assert_eq!(prof::read_marker(&root, 1).unwrap()["email"], "b@x.com");
+        assert_eq!(prof::login_of(&Files::of(&root, 1)).unwrap().1["emailAddress"], "b@x.com");
+        assert!(!file.exists() && file.with_file_name("claude-accounts.json.migrated").exists(), "a finished migration renames the file");
+    }
+
+    #[test]
+    fn a_failed_slot_keeps_the_old_file_and_leaves_no_folder() {
+        let root = temp_root("migrate-fail");
+        let file = legacy(&root);
+        let bad = json!({ "email": "c@x.com", "org": "org-c", "blob": "AAAA" });
+        std::fs::write(&file, json!({ "slots": [sealed("b@x.com", "org-b"), bad] }).to_string()).unwrap();
+        migrate(&root, &file);
+        assert!(file.exists(), "a failed slot keeps the file for the next try");
+        assert_eq!(root.numbers(), vec![1], "the good slot moved and the bad one left no folder");
+        migrate(&root, &file);
+        assert_eq!(root.numbers(), vec![1], "a retry doesn't move the good slot twice");
+    }
+
+    #[test]
+    fn list_has_the_default_row_then_each_profile() {
+        let root = temp_root("list");
+        prof::write_login(&Files::of(&root, 0), &oauth("tok-a", FOREVER), &account("a@x.com", "org-a")).unwrap();
+        make_profile(&root, 1, "b@x.com", "org-b");
+        let v = list_with(&root, 0);
+        let rows = v["accounts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0]["n"].clone(), rows[0]["default"].clone(), rows[0]["email"].clone(), rows[0]["active"].clone()),
+            (json!(0), json!(true), json!("a@x.com"), json!(true))
+        );
+        assert_eq!(
+            (rows[1]["n"].clone(), rows[1]["default"].clone(), rows[1]["email"].clone(), rows[1]["plan"].clone(), rows[1]["active"].clone(), rows[1]["dead"].clone()),
+            (json!(1), json!(false), json!("b@x.com"), json!("max"), json!(false), json!(false))
+        );
+        assert!(rows[1]["session"].is_null(), "no reading comes back for a fake token, so usage is null");
+    }
+
+    #[test]
+    fn remove_refuses_default_and_unknown_accounts() {
+        let root = temp_root("remove");
+        assert!(remove(&root, 0).is_err());
+        assert_eq!(remove(&root, 5), Err("No such account".into()));
     }
 
     #[test]
@@ -575,78 +623,15 @@ mod tests {
     }
 
     #[test]
-    fn lock_guard_frees_every_directory() {
-        let p = setup("guard", "a@x.com", "o", "t");
-        { let _g = lock_all(&p, Duration::from_millis(200)).unwrap(); assert!(p.locks().iter().all(|(d, _)| d.is_dir())); }
-        assert!(p.locks().iter().all(|(d, _)| !d.exists()), "released on drop");
-        std::fs::create_dir(&p.locks()[2].0).unwrap();
-        assert!(lock_all(&p, Duration::from_millis(150)).is_err());
-        assert!(!p.locks()[0].0.exists() && !p.locks()[1].0.exists(), "a failure frees the ones already taken");
-    }
-
-    #[test]
-    fn save_and_switch_round_trip() {
-        let p = setup("swap", "a@x.com", "org-a", "token-a");
-        let (a_cfg, a_cred) = (std::fs::read_to_string(p.config()).unwrap(), std::fs::read_to_string(p.creds()).unwrap());
-        assert_eq!(save_current(&p).unwrap(), 1);
-        assert_eq!(save_current(&p).unwrap(), 1, "the same login keeps its slot");
-        // Claude Code signs in as B
-        std::fs::write(p.config(), CONFIG.replace(&account_of_config(), &account("b@x.com", "org-b"))).unwrap();
-        std::fs::write(p.creds(), creds("token-b", u64::MAX / 2)).unwrap();
-        assert_eq!(save_current(&p).unwrap(), 2);
-        let slots = load(&p);
-        assert!(!std::fs::read_to_string(&p.store).unwrap().contains("token-"), "tokens are encrypted in the store");
-        assert_eq!(slots.len(), 2);
-
-        switch(&p, 1).unwrap();
-        assert_eq!(current(&p), ("a@x.com".into(), "token-a".into()));
-        let (cfg, cred) = (std::fs::read_to_string(p.config()).unwrap(), std::fs::read_to_string(p.creds()).unwrap());
-        assert!(cfg.contains("\"numStartups\": 7") && cfg.contains("\"tail\": [1, 2]") && cfg.contains("\"C:/Code/x\""), "the rest of .claude.json is kept");
-        assert!(cred.contains("mcpOAuth") && cred.contains("\"srv\""), "MCP logins stay");
-        assert_eq!(serde_json::from_str::<Value>(&cfg).unwrap()["oauthAccount"]["emailAddress"], "a@x.com");
-        assert_eq!(serde_json::from_str::<Value>(&a_cfg).unwrap()["projects"], serde_json::from_str::<Value>(&cfg).unwrap()["projects"]);
-        assert_eq!(serde_json::from_str::<Value>(&a_cred).unwrap()["claudeAiOauth"], serde_json::from_str::<Value>(&cred).unwrap()["claudeAiOauth"]);
-
-        switch(&p, 2).unwrap();
-        assert_eq!(current(&p), ("b@x.com".into(), "token-b".into()));
-        assert!(p.locks().iter().all(|(d, _)| !d.exists()), "locks are released");
-    }
-
-    #[test]
-    fn switching_keeps_tokens_claude_code_rotated() {
-        let p = setup("rotate", "a@x.com", "org-a", "old-a");
-        save_current(&p).unwrap();
-        std::fs::write(p.config(), CONFIG.replace(&account_of_config(), &account("b@x.com", "org-b"))).unwrap();
-        std::fs::write(p.creds(), creds("token-b", u64::MAX / 2)).unwrap();
-        save_current(&p).unwrap();
-        switch(&p, 1).unwrap();
-        std::fs::write(p.creds(), creds("new-a", u64::MAX / 2)).unwrap(); // Claude Code refreshed A's token
-        switch(&p, 2).unwrap();
-        switch(&p, 1).unwrap();
-        assert_eq!(current(&p).1, "new-a", "the rotated token came back, not the one saved first");
-    }
-
-    #[test]
-    fn refuses_to_drop_an_unsaved_login_or_write_a_damaged_file() {
-        let p = setup("refuse", "a@x.com", "org-a", "token-a");
-        save_current(&p).unwrap();
-        std::fs::write(p.config(), CONFIG.replace(&account_of_config(), &account("c@x.com", "org-c"))).unwrap();
-        let before = std::fs::read_to_string(p.config()).unwrap();
-        assert!(switch(&p, 1).unwrap_err().contains("isn't saved"));
-        assert_eq!(std::fs::read_to_string(p.config()).unwrap(), before, "nothing was written");
-        save_current(&p).unwrap();
-        std::fs::write(p.config(), "{ not json").unwrap();
-        assert!(switch(&p, 1).is_err());
-        assert_eq!(std::fs::read_to_string(p.config()).unwrap(), "{ not json", "a damaged file is left as it is");
-        assert!(switch(&p, 99).unwrap_err().contains("No such"));
-    }
-
-    #[test]
-    fn remove_forgets_a_slot() {
-        let p = setup("remove", "a@x.com", "org-a", "token-a");
-        save_current(&p).unwrap();
-        remove(&p, 1).unwrap();
-        assert!(load(&p).is_empty());
+    fn lock_guard_removes_its_directory() {
+        let dir = std::env::temp_dir().join(format!("zorui-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = dir.join("x.lock");
+        take(&l, Duration::from_secs(60), Duration::ZERO).unwrap();
+        { let _g = Lock(vec![l.clone()]); assert!(l.is_dir()); }
+        assert!(!l.exists(), "released on drop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -674,37 +659,10 @@ mod tests {
     }
 
     #[test]
-    fn outcomes_land_on_the_slot_as_it_is_on_disk() {
-        let p = setup("apply", "a@x.com", "org-a", "token-a");
-        save_current(&p).unwrap();
-        let account: Value = serde_json::from_str(&account("a@x.com", "org-a")).unwrap();
-        let oauth = json!({ "accessToken": "renewed", "refreshToken": "r2", "expiresAt": 9 });
-        let mut slots = load(&p);
-        let o = Outcome { n: 1, account: account.clone(), renewed: Some(oauth.clone()), dead: false, usage: Some(crate::claude_usage::Usage { session: 5, week: 6 }) };
-        apply(&mut slots, &o, 1000);
-        assert_eq!(open(&slots[0]).unwrap().0, oauth, "the new tokens are what's stored");
-        assert_eq!(slots[0]["usage"], json!({ "session": 5, "week": 6, "at": 1000 }));
-        apply(&mut slots, &Outcome { n: 1, account, renewed: None, dead: true, usage: None }, 2000);
-        assert_eq!((slots[0]["dead"].clone(), slots[0]["usage"]["at"].clone()), (json!(true), json!(1000)), "dead is marked, the last reading stays");
-        apply(&mut slots, &Outcome { n: 7, account: json!({}), renewed: None, dead: true, usage: None }, 0); // a slot removed meanwhile is ignored
-        assert_eq!(slots.len(), 1);
-    }
-
-    #[test]
-    fn dead_slots_refuse_a_switch_until_saved_again() {
-        let p = setup("dead", "a@x.com", "org-a", "token-a");
-        save_current(&p).unwrap();
-        std::fs::write(p.config(), CONFIG.replace(&account_of_config(), &account("b@x.com", "org-b"))).unwrap();
-        std::fs::write(p.creds(), creds("token-b", u64::MAX / 2)).unwrap();
-        save_current(&p).unwrap();
-        let mut slots = load(&p);
-        slots[0]["dead"] = json!(true);
-        store(&p, &slots).unwrap();
-        assert!(switch(&p, 1).unwrap_err().contains("expired"));
-        std::fs::write(p.config(), CONFIG.replace(&account_of_config(), &account("a@x.com", "org-a"))).unwrap();
-        std::fs::write(p.creds(), creds("token-a2", u64::MAX / 2)).unwrap();
-        save_current(&p).unwrap();
-        assert_eq!(load(&p)[0]["dead"], json!(false), "signing in again revives it");
+    fn cooldown_is_ten_minutes() {
+        assert!(cooled(5, 0));
+        assert!(!cooled(1000, 500));
+        assert!(cooled(1100, 500));
     }
 
     fn row(n: u64, active: bool, s: u64, w: u64, age: u64) -> Value { json!({ "n": n, "email": format!("{n}@x.com"), "active": active, "session": s, "week": w, "ageMin": age }) }
@@ -724,15 +682,8 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_is_ten_minutes() {
-        assert!(cooled(5, 0));
-        assert!(!cooled(1000, 500));
-        assert!(cooled(1100, 500));
-    }
-
-    #[test]
     fn summary_line() {
-        assert_eq!(summary(&json!({ "plan": "pro", "dead": true, "session": 1, "week": 1 })), "Login expired. Sign in with `claude`, then save it again");
+        assert_eq!(summary(&json!({ "plan": "pro", "dead": true, "session": 1, "week": 1 })), "Login expired. Click Sign in to log in again");
         assert_eq!(summary(&json!({ "plan": "pro", "session": 23, "week": 4, "ageMin": 0 })), "Pro · 5h 23% · 7d 4% · just now");
         assert_eq!(summary(&json!({ "plan": "max", "session": 1, "week": 2, "ageMin": 12 })), "Max · 5h 1% · 7d 2% · 12 min ago");
         assert_eq!(summary(&json!({ "session": 1, "week": 2, "ageMin": 190 })), "5h 1% · 7d 2% · 3 h ago");

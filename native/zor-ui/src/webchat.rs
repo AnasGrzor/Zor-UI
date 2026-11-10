@@ -62,7 +62,7 @@ fn key(vk: VIRTUAL_KEY, down: bool) -> INPUT {
 
 fn send(keys: &[INPUT]) -> bool { unsafe { SendInput(keys, size_of::<INPUT>() as i32) as usize == keys.len() } }
 
-fn pause(ms: u64) { std::thread::sleep(std::time::Duration::from_millis(ms)); }
+pub(crate) fn pause(ms: u64) { std::thread::sleep(std::time::Duration::from_millis(ms)); }
 
 /// Chromium browser windows: top-level, visible, class Chrome_WidgetWin_1 (Edge, Chrome, Brave and the rest).
 fn browser_windows() -> Vec<HWND> {
@@ -99,6 +99,13 @@ fn tab_items(uia: &IUIAutomation, window: HWND) -> Vec<Tab> {
     out
 }
 
+/// The title of every browser tab in every Chromium window, with whether it is the selected one. Call from a worker thread.
+pub fn tab_titles() -> Vec<(String, bool)> {
+    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    let Ok(uia) = (unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }) else { return vec![] };
+    browser_windows().into_iter().flat_map(|w| tab_items(&uia, w)).map(|t| (t.title, t.selected)).collect()
+}
+
 /// The focused element if it is an address bar showing a page of `host`.
 fn focused_address(uia: &IUIAutomation, host: &str) -> Option<IUIAutomationValuePattern> {
     let el = unsafe { uia.GetFocusedElement() }.ok()?;
@@ -110,7 +117,7 @@ fn focused_address(uia: &IUIAutomation, host: &str) -> Option<IUIAutomationValue
 fn in_front(window: HWND) -> bool { unsafe { GetForegroundWindow() == window } }
 
 /// Brings `window` to the front (a tap on Alt first, which Windows needs before it lets a background program do this).
-fn bring_to_front(window: HWND) -> bool {
+pub(crate) fn bring_to_front(window: HWND) -> bool {
     send(&[key(VK_MENU, true), key(VK_MENU, false)]);
     unsafe { let _ = SetForegroundWindow(window); }
     pause(500);
@@ -118,14 +125,18 @@ fn bring_to_front(window: HWND) -> bool {
 }
 
 /// Opens `url` (a web.whatsapp.com/send link) in the live WhatsApp tab, or with `new_tab` if there is none. Call from a worker thread.
-pub fn open_whatsapp_web(url: &str, new_tab: impl FnOnce(&str)) -> Opened {
+pub fn open_whatsapp_web(url: &str, new_tab: impl FnOnce(&str)) -> Opened { open_in_tab(url, "web.whatsapp.com", pick_tab, new_tab) }
+
+/// Loads `url` in the live browser tab that `pick` chooses (from the tabs' titles and whether each is selected), whose address bar shows a
+/// page of `host`; `new_tab` runs instead when `pick` finds none. Every step checks its result first (see the module doc).
+pub fn open_in_tab(url: &str, host: &str, pick: impl Fn(&[(String, bool)]) -> Option<usize>, new_tab: impl FnOnce(&str)) -> Opened {
     unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
     let Ok(uia) = (unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }) else {
         new_tab(url);
         return Opened::NewTab;
     };
     let tabs: Vec<Tab> = browser_windows().into_iter().flat_map(|w| tab_items(&uia, w)).collect();
-    let Some(i) = pick_tab(&tabs.iter().map(|t| (t.title.clone(), t.selected)).collect::<Vec<_>>()) else {
+    let Some(i) = pick(&tabs.iter().map(|t| (t.title.clone(), t.selected)).collect::<Vec<_>>()) else {
         new_tab(url);
         return Opened::NewTab;
     };
@@ -139,7 +150,7 @@ pub fn open_whatsapp_web(url: &str, new_tab: impl FnOnce(&str)) -> Opened {
     // 2. Ctrl+L, then make sure the focus really is the address bar before typing into it
     if !send(&[key(VK_CONTROL, true), key(VK_L, true), key(VK_L, false), key(VK_CONTROL, false)]) { return fail("I can't press keys"); }
     pause(500);
-    let Some(address) = focused_address(&uia, "web.whatsapp.com") else { return fail("the address bar didn't take focus") };
+    let Some(address) = focused_address(&uia, host) else { return fail("the address bar didn't take focus") };
     // 3. put the link in and load it, if the browser is still in front and the focus hasn't moved
     if unsafe { address.SetValue(&BSTR::from(url)) }.is_err() { return fail("I can't type the link"); }
     pause(250);

@@ -5,7 +5,7 @@
 use crate::{
     app::Ctx,
     gfx::{alpha, ico, txt, Align, Canvas, Color, Font, R},
-    hub, util,
+    hub, tokens as tk, util,
 };
 
 /// Google Sans Flex line height per px of font size.
@@ -17,32 +17,42 @@ pub fn layer0(cx: &Ctx) -> Color { alpha(cx.theme.c("background"), 1.0 - cx.cfg.
 /// The popup background (bar hover popups, sidebars): shadow, 1px border, `--layer0` fill. `r` is the
 /// card; leave ~12 px around it in the window for the shadow.
 pub fn panel(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) {
-    let (outline, fill) = (alpha(cx.theme.c("outlineVariant"), 0.45), layer0(cx));
+    let (outline, fill) = (alpha(cx.theme.c("outlineVariant"), tk::PANEL_EDGE_A), layer0(cx));
     let key = [c.w as u32, c.h as u32, (c.scale * 100.0) as u32, (radius * 100.0) as u32, r.x as u32, r.y as u32, r.w as u32, r.h as u32, outline, fill];
     c.backdrop(&key, |c| {
-        c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(r, radius, col) });
+        c.shadow(tk::SHADOW_DY, tk::SHADOW_BLUR, tk::SHADOW_A, |c, col| if let Some(col) = col { c.rect(r, radius, col) });
         c.rect(r, radius, outline);
         c.rect(R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), radius - 1.0, fill);
     });
 }
 
+/// `primary` pushed toward a brighter, more saturated accent (`tk::ACCENT_*`). Greys stay grey and the hue is kept.
+pub fn boost_accent(c: Color, dark: bool) -> Color {
+    let (h, s, v) = crate::settings::picker::argb_hsv(c);
+    let v = if dark { v * tk::ACCENT_VAL } else { v };
+    crate::settings::picker::hsv_argb(h, s * tk::ACCENT_SAT, v)
+}
+
+/// The accent colour for switches, slider fills and filled icon buttons.
+pub fn accent(cx: &Ctx) -> Color { boost_accent(cx.theme.c("primary"), cx.theme.dark) }
+
 /// `.card`: `--layer1` (surfaceContainerLow) fill, radius 23 by default (--round-lg).
 pub fn card(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) { c.rect(r, radius, cx.theme.c("surfaceContainerLow")); }
 
-fn hover_bg(c: &mut Canvas, cx: &Ctx, r: R, radius: f32, over: bool) { if over { c.rect(r, radius, alpha(cx.theme.c("onSurface"), 0.08)); } }
+fn hover_bg(c: &mut Canvas, cx: &Ctx, r: R, radius: f32, over: bool) { if over { c.rect(r, radius, alpha(cx.theme.c("onSurface"), tk::HOVER_A)); } }
 
 /// `.chip` (height 32, 13 px text, optional icon); `sel` is `.chips .chip.sel`. Returns its rect (x, y is the top-left).
 pub fn chip(c: &mut Canvas, cx: &Ctx, x: f32, y: f32, id: u32, icon: Option<&str>, label: &str, sel: bool) -> R {
     let t = &cx.theme;
-    let iw = if icon.is_some() { 18.0 + 6.0 } else { 0.0 };
-    let r = R::new(x, y, 14.0 + iw + c.g.measure(label, txt(13.0, 400)).0.ceil() + 14.0, 32.0);
-    let (bg, fg) = if sel { (t.c("secondaryContainer"), t.c("onSecondaryContainer")) } else { (t.c("surfaceContainer"), t.c("onSurface")) };
-    c.rect(r, 16.0, bg);
+    let iw = if icon.is_some() { tk::CHIP_ICON + tk::CHIP_ICON_GAP } else { 0.0 };
+    let r = R::new(x, y, tk::CHIP_PAD + iw + c.g.measure(label, txt(13.0, 400)).0.ceil() + tk::CHIP_PAD, tk::CHIP_H);
+    let (bg, fg) = if sel { (t.c("secondaryContainer"), t.c("onSecondaryContainer")) } else { (t.c(tk::CONTROL_SURFACE), t.c("onSurface")) };
+    c.rect(r, tk::CHIP_R, bg);
     let over = c.hit(r, id);
-    hover_bg(c, cx, r, 16.0, over);
-    let mut tx = r.x + 14.0;
-    if let Some(i) = icon { c.icon(i, R::new(tx, r.y, 18.0, 32.0), ico(18.0, false), fg); tx += iw; }
-    c.text(label, R::new(tx, r.y, r.w - 14.0 - (tx - r.x), 32.0), txt(13.0, 400), fg, Align::Left);
+    hover_bg(c, cx, r, tk::CHIP_R, over);
+    let mut tx = r.x + tk::CHIP_PAD;
+    if let Some(i) = icon { c.icon(i, R::new(tx, r.y, tk::CHIP_ICON, tk::CHIP_H), ico(tk::CHIP_ICON, false), fg); tx += iw; }
+    c.text(label, R::new(tx, r.y, r.w - tk::CHIP_PAD - (tx - r.x), tk::CHIP_H), txt(13.0, 400), fg, Align::Left);
     r
 }
 
@@ -56,7 +66,7 @@ pub fn icon_btn(c: &mut Canvas, cx: &Ctx, r: R, id: u32, icon: &str, kind: IconK
     let (bg, fg) = match kind {
         IconKind::Plain => (None, t.c("onSurface")),
         IconKind::Tonal => (Some(t.c("secondaryContainer")), t.c("onSecondaryContainer")),
-        IconKind::Filled => (Some(t.c("primary")), t.c("onPrimary")),
+        IconKind::Filled => (Some(accent(cx)), t.c("onPrimary")),
     };
     if let Some(b) = bg { c.rect(r, r.h / 2.0, b); }
     let over = c.hit(r, id);
@@ -68,11 +78,11 @@ pub fn icon_btn(c: &mut Canvas, cx: &Ctx, r: R, id: u32, icon: &str, kind: IconK
 /// The settings switch, 52x32 at (x, y). Returns its rect.
 pub fn toggle(c: &mut Canvas, cx: &Ctx, x: f32, y: f32, id: u32, on: bool) -> R {
     let t = &cx.theme;
-    let r = R::new(x, y, 52.0, 32.0);
-    let (bg, edge, knob) = if on { (t.c("primary"), t.c("primary"), t.c("onPrimary")) } else { (t.c("surfaceContainerHighest"), t.c("outline"), t.c("outline")) };
-    c.rect(r, 16.0, edge);
-    c.rect(R::new(x + 2.0, y + 2.0, 48.0, 28.0), 14.0, bg);
-    c.circle(x + if on { 36.0 } else { 16.0 }, y + 16.0, if on { 12.0 } else { 8.0 }, knob);
+    let r = R::new(x, y, tk::SWITCH_W, tk::SWITCH_H);
+    let (bg, edge, knob) = if on { (accent(cx), accent(cx), t.c("onPrimary")) } else { (t.c("surfaceContainerHighest"), t.c("outline"), t.c("outline")) };
+    c.rect(r, tk::SWITCH_H / 2.0, edge);
+    c.rect(R::new(x + tk::SWITCH_RING, y + tk::SWITCH_RING, r.w - 2.0 * tk::SWITCH_RING, r.h - 2.0 * tk::SWITCH_RING), tk::SWITCH_H / 2.0 - tk::SWITCH_RING, bg);
+    c.circle(x + if on { 36.0 } else { 16.0 }, y + r.h / 2.0, if on { tk::KNOB_ON_R } else { tk::KNOB_OFF_R }, knob);
     c.hit(r, id);
     r
 }
@@ -82,8 +92,8 @@ pub fn toggle(c: &mut Canvas, cx: &Ctx, x: f32, y: f32, id: u32, on: bool) -> R 
 pub fn slider(c: &mut Canvas, cx: &Ctx, r: R, id: u32, icon: Option<&str>, value: f32, label: &str) {
     let t = &cx.theme;
     let value = value.clamp(0.0, 1.0);
-    c.rect(r, 17.0, t.c("secondaryContainer"));
-    c.clip_round(r, 17.0, |c| c.rect(R::new(r.x, r.y, (r.w * value).max(0.0), r.h), 6.0, t.c("primary")));
+    c.rect(r, tk::SLIDER_R, t.c("secondaryContainer"));
+    c.clip_round(r, tk::SLIDER_R, |c| c.rect(R::new(r.x, r.y, (r.w * value).max(0.0), r.h), tk::SLIDER_FILL_R, accent(cx)));
     if let Some(i) = icon { c.icon(i, R::new(r.x + 12.0, r.y, 20.0, r.h), ico(20.0, false), t.c("onPrimary")); }
     let lw = c.g.measure(label, txt(13.0, 400)).0;
     let high = r.w * value > r.w - 14.0 - lw; // `.slider.high`: the fill reached the label
@@ -381,6 +391,19 @@ impl TextBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accent_boost_keeps_hue_and_never_dulls() {
+        use crate::settings::picker::argb_hsv;
+        let p = 0xFF_80_50_C0;
+        let (h0, s0, v0) = argb_hsv(p);
+        let (h1, s1, v1) = argb_hsv(boost_accent(p, true));
+        assert!((h0 - h1).abs() < 2.0 && s1 > s0 && v1 > v0);
+        let (_, s2, v2) = argb_hsv(boost_accent(p, false));
+        assert!(s2 > s0 && (v2 - v0).abs() < 0.01, "light theme: saturation only");
+        assert_eq!(boost_accent(0xFF_80_80_80, false), 0xFF_80_80_80); // grey stays grey
+        assert_eq!(boost_accent(0xFF_FF_FF_FF, true), 0xFF_FF_FF_FF); // clamped at white
+    }
 
     #[test]
     fn scroll_to_clamps_to_the_content() {

@@ -11,6 +11,7 @@ fn defaults() -> Value {
         "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "runOnStartup": true, "customAgents": [],
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
         "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
+        "claude": { "autoSwitch": false, "threshold": 95 },
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },
         "football": { "leagues": [] },
@@ -21,7 +22,7 @@ fn defaults() -> Value {
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
         "frame": { "enabled": false, "thickness": 5, "radius": 20 },
         "dock": { "enabled": false, "side": "bottom", "style": "hug", "iconSize": 30, "radius": 30, "pinned": [] },
-        "bar": { "style": "float", "groups": "filled", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3 },
+        "bar": { "style": "float", "groups": "filled", "spacing": "cozy", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3 },
         "font": { "family": "", "size": 1, "weight": 0 },
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
@@ -33,8 +34,8 @@ fn defaults() -> Value {
         },
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false, "snap": true, "snapLines": true,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },
-        "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
-            "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true },
+        "buddies": { "pair": true, "primary": "a", "contacts": [], "model": "", "listenMode": "auto", "mic": "", "breaks": true, "breakMins": 50, "watch": true,
+            "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "browser": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true, "media": true, "system": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
         "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "tray-flyout": true, "visualizer": true }
@@ -160,9 +161,17 @@ pub fn data_dir() -> PathBuf {
     let _ = fs::create_dir_all(&d);
     d
 }
+/// Where speech models go: one folder per model, each with its tokens.txt. Not created until something needs it.
+pub fn speech_dir() -> PathBuf { data_dir().join("speech-models") }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speech_models_live_in_the_app_folder_not_in_another_program() {
+        let p = speech_dir().to_string_lossy().to_lowercase();
+        assert!(p.ends_with(r"zor-ui\speech-models") && !p.contains("orca"));
+    }
+
     #[test]
     fn every_part_is_native_unless_turned_off() {
         let c = Config::parse("{\"native\": {\"bar\": false}}");

@@ -95,6 +95,55 @@ undocumented and could change.
 `"gojoVoice": true` under `"native"` in `config.json` to turn it on. It uses an English Windows voice, so it doesn't
 sound like any character, and each new line cuts off the one still playing.
 
+**Buddy packs.** A folder in `~\.glzr\zor-ui\buddies\<name>\` with a `buddy.json` and your own pictures makes a
+buddy that looks like any character. The folder shows up in the Character list of both slots (restart not needed, the
+list refreshes every couple of seconds). **Settings > Buddies** has an "Open folder" button for the packs folder and
+lists each pack with its size, or the reason a `buddy.json` can't be used. Each buddy's card starts with a preview of
+how they look standing, walking and sitting with the options as they are right now, drawn by the same code as the bar.
+A preview shows a picture at most 64 px tall.
+
+```json
+{
+  "name": "Goku", "height": 80, "fps": 8, "base": "",
+  "frames": { "stand": ["stand.png"], "walk": ["walk1.png", "walk2.png"], "sit": ["sit.png"] },
+  "lines": { "greet": "Yo!", "click": ["I'm hungry.", "Wanna spar?"], "landed": "" },
+  "colors": { "hair": "#101010", "eye": "#202020", "orbs": "#4fb4ff,#ff4a5a,#b060ff" },
+  "moves": { "special": "beam", "alt": "none" }
+}
+```
+
+- **Pictures** face right, stand with their bottom centre on the feet, and should have no empty margin. States are
+  `stand`, `walk`, `sit`, `sleep`, `fall`, `held`, `point` and `talk`. Only one picture (`stand`) is needed: a buddy
+  with no pictures of its own for a state stands in with the nearest one and breathes, squashes when it sits and
+  pulses while it talks. File names are plain (letters, digits, space, `.`, `_`, `-`), PNG, WebP, JPG, GIF or BMP.
+- **`height`** is in CSS px (16 to 160, default 52, the size of the drawn figure). On a top bar a buddy can only be
+  54 px tall, because that is the room above the bar. Put the bar at the bottom or a side for a taller one.
+- **`lines`** replace what a buddy says. Anything left out keeps the `base` character's line (`gojo`, `geto`, `yuji`),
+  or plain neutral words when `base` is empty. A single line set to `""` makes that reaction silent. The categories
+  are `greet`, `shout`, `click`, `peek`, `chat`, `right`, `to` (lines to the partner, written `"tease: Hey {p}"`,
+  `invite:`, `love:` or `talk:`, each needing `{p}` for the partner's name), `reply_tease`, `reply_invite`,
+  `reply_love`, `reply_talk`, and the reactions in `Say` in `cast.rs` (`held`, `teleport`, `landed`, `back`, `late`,
+  `break_tips`, `focus_code`, `low_battery`, `claude_high` with `{pct}`, `note` with `{app}`, `track` with `{track}`,
+  and so on).
+- **`moves`** set what a double-click (`special`) and a right-click (`alt`) do. The moves are `orbs` (two orbs gather,
+  meet and fire: Hollow Purple), `beam` (a ball charges at the hand and a beam shoots across), `aura` (rings and
+  sparks around the body), `shield` (the pointer can't get within 60 px for 10 seconds: Infinity) and `none`. A
+  move left out keeps the base's: Gojo has `orbs` and `shield`, Geto and Yuji have `orbs` and `none`, and a pack with
+  no `base` has `aura` and `none`. A right-click with `none` says one of the `right` lines. `colors.orbs` is three
+  colors: the two orbs and the color they merge into. A beam uses the first and the third, an aura the same.
+- A pack is re-read when its `buddy.json` changes. Change a picture without touching `buddy.json` and the old one
+  stays until you save the manifest or restart.
+- Bring pictures you have the right to use. None are included.
+
+**Creating a buddy without writing JSON.** **Settings > Create a buddy** turns one picture into a pack. Choose a
+picture (PNG, JPG or WebP), raise **Remove background** until the backdrop is gone (it clears every pixel joined to a
+corner by a similar color, like a paint bucket, and keeps anything inside the character; it is not an AI cutout, so busy
+backgrounds need an editor first), cut the empty edges, mirror it if it faces left, set the height and name, pick whose
+lines and double-click move it borrows, and press **Save buddy**. The preview at the top shows the exact picture that
+will be saved, standing, walking and sitting. The result is `buddies\<name>\stand.png` (a compressed PNG, at most 480 px
+a side) and a `buddy.json` you can edit later to add walk and sit pictures or your own lines. A second buddy with the
+same name becomes `<name>-2`; nothing is ever overwritten.
+
 The characters are drawn from shapes in `native/zor-ui/src/buddy.rs`, with palettes and lines in `cast.rs`. Gojo,
 Geto and Yuji belong to their rights holders. They are here as personal fan art.
 
@@ -211,6 +260,8 @@ Re-running `install.ps1` updates everything and keeps your `config.json` setting
 ## Keybinds
 
 `Mod` is Alt by default, or Win with `-Mod win`.
+
+Every key below can be changed in Settings > Keybinds: click a key, press the new combo, Esc cancels. Zor UI handles the keys itself and sends window commands to GlazeWM, so a change works at once. Your choices are stored under `keybinds` in `config.json`.
 
 | Keys | Action |
 |---|---|
@@ -374,7 +425,7 @@ Zor UI is its own project, but these parts come from [end4-pC](https://github.co
 - `native/zor-ui/src/bridge/theme.rs`, a port of end4's `switchwall.sh`.
 - The football sidebar page, which follows end4-pC's `FootballPage.qml`.
 - The Community gallery, which downloads presets from [end4-pCpresets](https://github.com/pctrade/end4-pCpresets).
-- The keybinds in `glazewm/config.template.yaml`, which mirror illogical-impulse on Hyprland.
+- The default keybinds in `native/zor-ui/src/keymap.rs`, which mirror illogical-impulse on Hyprland.
 
 ## License
 

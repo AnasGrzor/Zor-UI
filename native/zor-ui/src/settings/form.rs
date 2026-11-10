@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use std::rc::Rc;
 
 pub const ACT0: u32 = 1000;
+/// Row gap, divider position and card padding live in tokens.rs; re-exported for the Settings pages.
+pub use crate::tokens::{DIVIDER_Y, ROW_GAP};
 
 #[derive(Clone)]
 pub enum Act {
@@ -92,8 +94,7 @@ pub struct Pen<'p, 'a> {
     pub hi: f32,
     /// Measuring pass: lay out only, to learn the card heights and the content height.
     pub dry: bool,
-    pub cards: Vec<f32>,
-    ci: usize,
+    /// Height of each group laid out so far (a test reads it).
     pub measured: Vec<f32>,
     pub acts: Vec<Act>,
     first: bool,
@@ -114,7 +115,7 @@ pub struct Pen<'p, 'a> {
 
 impl<'p, 'a> Pen<'p, 'a> {
     pub fn new(c: &'p mut Canvas<'a>, cx: &'p Ctx, x: f32, y: f32, w: f32, lo: f32, hi: f32) -> Pen<'p, 'a> {
-        Pen { c, cx, x, w, y, lo, hi, dry: false, cards: vec![], ci: 0, measured: vec![], acts: vec![], first: true, heads: vec![], index: vec![], tags: vec![], flash: None, flash_row: None, sect: String::new(), y0: y, t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
+        Pen { c, cx, x, w, y, lo, hi, dry: false, measured: vec![], acts: vec![], first: true, heads: vec![], index: vec![], tags: vec![], flash: None, flash_row: None, sect: String::new(), y0: y, t: (crate::hub::now_ms() % 100_000.0) as f32 / 1000.0 }
     }
     /// Records a control for search (before `row`, which hides rows in the measuring pass).
     pub fn tag(&mut self, label: &str, sub: &str) {
@@ -128,8 +129,8 @@ impl<'p, 'a> Pen<'p, 'a> {
     /// A hairline sits in the gap so each setting reads as its own row.
     fn lead(&mut self) {
         if self.first { self.first = false; return; }
-        if self.show(1.0) { let (x, y, w) = (self.x, self.y + 6.0, self.w); self.c.rect(R::new(x, y, w, 1.0), 0.0, alpha(self.col("outlineVariant"), 0.35)); }
-        self.y += 12.0;
+        if self.show(1.0) { let (x, y, w) = (self.x, self.y + DIVIDER_Y, self.w); self.c.rect(R::new(x, y, w, 1.0), 0.0, alpha(self.col("outlineVariant"), 0.35)); }
+        self.y += ROW_GAP;
     }
 
     /// The page title and a one-line description, above the first section.
@@ -142,36 +143,31 @@ impl<'p, 'a> Pen<'p, 'a> {
         self.y += 66.0;
     }
 
-    /// A `.card` around what `body` lays out: padding 14, 12 between children, 10 below.
+    /// A group of rows with no box around it: a hairline between rows, a little air above the first and below the last.
     pub fn card(&mut self, body: impl FnOnce(&mut Pen)) {
+        use crate::tokens::{SECTION_INSET, SECTION_PAD};
         let (x, w, y0) = (self.x, self.w, self.y);
-        let h = self.cards.get(self.ci).copied().unwrap_or(0.0);
-        self.ci += 1;
-        if h > 0.0 && self.show(h) {
-            let r = R::new(x, y0, w, h);
-            self.c.rect(r, 23.0, alpha(self.col("outlineVariant"), 0.5));
-            ui::card(self.c, self.cx, R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 22.0);
-        }
-        (self.x, self.w, self.y, self.first) = (x + 14.0, w - 28.0, y0 + 14.0, true);
+        (self.x, self.w, self.y, self.first) = (x + SECTION_INSET, w - 2.0 * SECTION_INSET, y0 + SECTION_PAD, true);
         body(self);
-        self.y += 14.0;
+        self.y += SECTION_PAD;
         self.measured.push(self.y - y0);
         (self.x, self.w, self.first) = (x, w, false);
         self.y += 10.0;
     }
 
-    /// `h2`: a 32 px round icon and a 17 px title.
+    /// `h2`: a plain accent icon and a 17 px title.
     pub fn h2(&mut self, icon: &str, title: &str, extra: &str) {
         self.y += if self.y > self.y0 + 1.0 { 20.0 } else { 6.0 };
         self.sect = title.into();
         if self.dry { self.heads.push((title.to_string(), self.y)); self.index.push((title.into(), title.into(), String::new())); }
         if self.show(32.0) {
             let (x, y) = (self.x, self.y);
-            self.c.circle(x + 16.0, y + 16.0, 16.0, self.col("secondaryContainer"));
-            self.c.icon(icon, R::new(x, y, 32.0, 32.0), ico(18.0, false), self.col("onSecondaryContainer"));
+            use crate::tokens::{HEAD_GAP, HEAD_ICON};
+            let tx = x + 4.0 + HEAD_ICON + HEAD_GAP;
+            self.c.icon(icon, R::new(x + 4.0, y, HEAD_ICON, 32.0), ico(HEAD_ICON, false), ui::accent(self.cx));
             let tw = self.c.g.measure(title, txt(17.0, 500)).0.ceil() + 2.0;
-            self.c.text(title, R::new(x + 42.0, y, tw, 32.0), txt(17.0, 500), self.col("onSurface"), Align::Left);
-            if !extra.is_empty() { self.c.text(extra, R::new(x + 42.0 + tw + 10.0, y + 2.0, self.w - tw - 52.0, 32.0), txt(12.0, 400), self.col("onSurfaceVariant"), Align::Left); }
+            self.c.text(title, R::new(tx, y, tw, 32.0), txt(17.0, 500), self.col("onSurface"), Align::Left);
+            if !extra.is_empty() { self.c.text(extra, R::new(tx + tw + 10.0, y + 2.0, self.w - tw - 52.0, 32.0), txt(12.0, 400), self.col("onSurfaceVariant"), Align::Left); }
         }
         self.y += 42.0;
     }
@@ -208,16 +204,27 @@ impl<'p, 'a> Pen<'p, 'a> {
         self.c.polyline(&pts, 3.0, self.col("primary"));
     }
 
-    /// Icon, label and small text on the left of a row, leaving `right` px for its control.
+    /// Width of the label and small text of a row that has an icon (or not) and `right` px for its control.
+    fn left_w(&self, ic: &str, right: f32) -> f32 { (self.w - right - 12.0 - if ic.is_empty() { 0.0 } else { 32.0 }).max(20.0) }
+
+    /// A row slot like `row(h)`, but tall enough for `sub` to wrap onto more lines in the room `left` gives it.
+    pub fn row_sub(&mut self, h: f32, ic: &str, sub: &str, right: f32) -> Option<R> {
+        let sub_h = if sub.is_empty() { 0.0 } else { self.c.g.measure_wrapped(sub, txt(11.5, 400), self.left_w(ic, right)).ceil() };
+        self.row(row_need(h, sub_h))
+    }
+
+    /// Icon, label and small text on the left of a row, leaving `right` px for its control. The small text wraps;
+    /// make the row with `row_sub` so it is tall enough.
     pub fn left(&mut self, r: R, ic: &str, label: &str, sub: &str, right: f32) {
         let mut x = r.x;
         if !ic.is_empty() { self.c.icon(ic, R::new(x, r.y, 20.0, r.h), ico(20.0, false), self.col("onSurfaceVariant")); x += 32.0; }
         let w = (r.x + r.w - right - 12.0 - x).max(20.0);
         if sub.is_empty() { self.c.text(label, R::new(x, r.y, w, r.h), txt(13.5, 400), self.col("onSurface"), Align::Left); return; }
-        let (h1, h2) = (13.5 * LH, 11.5 * LH);
+        let h1 = 13.5 * LH;
+        let h2 = self.c.g.measure_wrapped(sub, txt(11.5, 400), w).ceil().max(11.5 * LH);
         let top = r.y + (r.h - h1 - h2) / 2.0;
         self.c.text(label, R::new(x, top, w, h1), txt(13.5, 400), self.col("onSurface"), Align::Left);
-        self.c.text(sub, R::new(x, top + h1, w, h2), txt(11.5, 400), self.col("onSurfaceVariant"), Align::Left);
+        self.c.para(sub, R::new(x, top + h1, w, h2), txt(11.5, 400), self.col("onSurfaceVariant"), Align::Left);
     }
 
     pub fn field_box(&mut self, r: R, focus: bool, radius: f32) {
@@ -258,6 +265,11 @@ impl<'p, 'a> Pen<'p, 'a> {
     }
 }
 
+/// Height of a row that wants `h` and whose small text is `sub_h` tall (0 for none): grows only when the text wraps.
+fn row_need(h: f32, sub_h: f32) -> f32 {
+    if sub_h <= 0.0 { h } else { h.max(13.5 * LH + sub_h.max(11.5 * LH) + 8.0) }
+}
+
 /// Does option value `opt` stand for the stored value `cur`? An unset value matches "" and []; a stored list
 /// matches a preset list that starts with it (3 saved labels still match the 10-label preset).
 pub fn is_choice(opt: &Value, cur: &Value) -> bool {
@@ -273,11 +285,11 @@ impl Settings {
     /// `sw`: a label with a switch.
     pub fn sw(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str) {
         p.tag(label, sub);
-        let Some(r) = p.row(40.0) else { return };
+        let Some(r) = p.row_sub(40.0, ic, sub, 52.0) else { return };
         let on = self.gb(p.cx, path);
         p.left(r, ic, label, sub, 52.0);
         let id = p.act(Act::Switch(path.into()));
-        ui::toggle(p.c, p.cx, r.x + r.w - 52.0, r.y + 4.0, id, on);
+        ui::toggle(p.c, p.cx, r.x + r.w - 52.0, r.y + (r.h - 40.0) / 2.0 + 4.0, id, on);
     }
 
     /// `seg`: a segmented choice. Options are (value, label).
@@ -325,8 +337,9 @@ impl Settings {
 
     pub fn text_ph(&mut self, p: &mut Pen, path: &str, label: &str, sub: &str, ic: &str, placeholder: &str) {
         p.tag(label, sub);
-        let Some(r) = p.row(40.0) else { return };
-        let w = 300.0f32.min(r.w * 0.6);
+        let w = 300.0f32.min(p.w * 0.6);
+        let Some(r) = p.row_sub(40.0, ic, sub, w) else { return };
+        let dy = (r.h - 40.0) / 2.0;
         p.left(r, ic, label, sub, w);
         let v = self.get(p.cx, path);
         let (init, list) = match &v {
@@ -335,7 +348,7 @@ impl Settings {
             Value::Null => (String::new(), false),
             o => (o.to_string(), false),
         };
-        self.field_ui(p, path, Some(&init), Kind::Text { list }, R::new(r.x + r.w - w, r.y, w, 40.0), placeholder, 17.0, false);
+        self.field_ui(p, path, Some(&init), Kind::Text { list }, R::new(r.x + r.w - w, r.y + dy, w, 40.0), placeholder, 17.0, false);
     }
 
     /// `slider`: a native-style range input with its value on the right.
@@ -358,9 +371,9 @@ impl Settings {
     /// `pick`: a label with a drop-down (the `<select>`); `opts` are (value, label).
     pub fn pick(&mut self, p: &mut Pen, path: &str, opts: Vec<(Value, String)>, label: &str, sub: &str, ic: &str, w: f32) {
         p.tag(label, sub);
-        let Some(r) = p.row(40.0) else { return };
+        let Some(r) = p.row_sub(40.0, ic, sub, w) else { return };
         p.left(r, ic, label, sub, w);
-        self.select_box(p, path, opts, R::new(r.x + r.w - w, r.y, w, 40.0));
+        self.select_box(p, path, opts, R::new(r.x + r.w - w, r.y + (r.h - 40.0) / 2.0, w, 40.0));
     }
 
     /// The color a visualizer setting gives right now (pending edits included): its own, else the shared one, else the theme's.
@@ -430,6 +443,23 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn divider_is_centered_in_the_row_gap() {
+        use super::{DIVIDER_Y, ROW_GAP};
+        assert_eq!(DIVIDER_Y, ROW_GAP - DIVIDER_Y - 1.0, "same air above and below the 1 px line");
+    }
+
+    #[test]
+    fn a_row_grows_only_when_its_small_text_wraps() {
+        use super::{row_need, LH};
+        let one = (11.5 * LH).ceil();
+        assert_eq!(row_need(40.0, 0.0), 40.0); // no small text
+        assert_eq!(row_need(40.0, one), 40.0); // one line fits the usual row
+        assert_eq!(row_need(44.0, one), 44.0);
+        assert!(row_need(40.0, 2.0 * one) > 40.0); // two lines make it taller
+        assert!(row_need(40.0, 3.0 * one) > row_need(40.0, 2.0 * one));
+    }
+
     #[test]
     fn choices_match_like_the_dropdown_shows_them() {
         use super::is_choice;

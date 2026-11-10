@@ -4,7 +4,7 @@
 //! hooks, no MCP servers and no saved session, from the temp folder, so a chat message can't touch your
 //! files or pick up your Claude Code setup.
 
-use super::{common::hidden, Sink};
+use super::{claude_profile::{active, config_dir_value, Root}, common::hidden, Sink};
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -95,6 +95,9 @@ pub fn chat(model_id: &str, msgs: &[Value], system: &str, out: &Sink) {
     cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", alias(model_id), "--tools", "",
               "--system-prompt", system, "--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"]);
     if pictures { cmd.args(["--input-format", "stream-json"]); }
+    // zor-ui's own environment goes stale after an account switch, so take the active account from the registry
+    let root = Root::live();
+    match config_dir_value(&root, active(&root)) { Some(d) => cmd.env("CLAUDE_CONFIG_DIR", d), None => cmd.env_remove("CLAUDE_CONFIG_DIR") };
     let spawned = cmd.current_dir(std::env::temp_dir()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let mut child = match spawned {
         Ok(c) => c,

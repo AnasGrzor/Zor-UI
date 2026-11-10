@@ -647,10 +647,11 @@ impl<'a> Canvas<'a> {
     }
 
     /// A picture decoded at its drawn size, standing with its bottom centre on (x, y): mirrored when `dir` is
-    /// negative and tilted `rot` radians around that point.
-    pub fn sprite(&mut self, img: &Pixmap, x: f32, y: f32, dir: f32, rot: f32) {
+    /// negative, tilted `rot` radians around that point, and stretched by (`sx`, `sy`) around it, so a still picture
+    /// can breathe or squash.
+    pub fn sprite_scaled(&mut self, img: &Pixmap, x: f32, y: f32, dir: f32, rot: f32, sx: f32, sy: f32) {
         let (w, h) = (img.width() as f32, img.height() as f32);
-        let t = Transform::from_translate(x * self.scale, (y + self.dy) * self.scale).pre_rotate(rot.to_degrees()).pre_scale(dir.signum(), 1.0).pre_translate(-w / 2.0, -h);
+        let t = Transform::from_translate(x * self.scale, (y + self.dy) * self.scale).pre_rotate(rot.to_degrees()).pre_scale(dir.signum() * sx, sy).pre_translate(-w / 2.0, -h);
         if let Surface::Pix(px) = &mut self.surf { px.draw_pixmap(0, 0, img.as_ref(), &PixmapPaint::default(), t, self.clip.as_ref()); }
     }
 

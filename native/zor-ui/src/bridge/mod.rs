@@ -11,9 +11,12 @@ use std::sync::{
 
 pub(crate) mod agent_hook;
 mod claude_cli;
+pub(crate) mod claude_acct;
+pub(crate) mod claude_profile;
+pub(crate) mod agent_restart;
 mod common;
 mod football;
-mod listen;
+pub mod listen;
 mod media;
 mod sub_cli;
 mod notify;
@@ -26,6 +29,9 @@ mod toggles;
 pub(crate) mod update;
 mod we;
 mod web;
+
+/// Is the `claude` command (Claude Code) installed?
+pub(crate) fn claude_installed() -> bool { claude_cli::find().is_some() }
 
 /// Can the chat model with this id be sent pictures? (Screen help asks before it takes a screenshot.)
 pub(crate) fn model_can_see(id: &str) -> bool { web::can_see_model(id) }
@@ -70,6 +76,7 @@ pub fn call(cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
         .or_else(|| theme::call(cfg, name, args))
         .or_else(|| picker::call(cfg, name, args))
         .or_else(|| screen_translate::call(cfg, name, args))
+        .or_else(|| claude_acct::call(cfg, name, args))
 }
 
 type Streamer = fn(&Config, &str, &[String], &str, &Sink);

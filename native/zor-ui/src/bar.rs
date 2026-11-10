@@ -8,6 +8,7 @@ use crate::{
     weather,
     win::{Btn, Input, View},
 };
+use crate::tokens as tk;
 use serde_json::Value;
 use crate::anim::{self, Spring};
 use std::{collections::HashMap, time::Instant};
@@ -40,15 +41,18 @@ pub fn strip(area: windows::Win32::Foundation::RECT, edge: Edge, h: i32) -> wind
 }
 
 /// Where a popup `size` px big goes next to the bar group `r` (CSS px in a bar window at `bar`): under it, over it, or beside it.
-pub fn popup_spot(edge: Edge, bar: (i32, i32), r: R, s: f32, size: (i32, i32)) -> (i32, i32) {
+pub fn popup_spot(edge: Edge, bar: (i32, i32), bar_size: (i32, i32), r: R, s: f32, size: (i32, i32)) -> (i32, i32) {
     let at = |v: f32, o: i32| (o as f32 + v * s).round() as i32;
     let (cx, cy) = (at(r.x + r.w / 2.0, bar.0), at(r.y + r.h / 2.0, bar.1));
     let gap = (4.0 * s).round() as i32;
+    // stay inside the bar's span (it covers the monitor) so the popup isn't cut off; the start edge wins if it can't fit
+    let fit_x = |x: i32| x.min(bar.0 + bar_size.0 - size.0).max(bar.0);
+    let fit_y = |y: i32| y.min(bar.1 + bar_size.1 - size.1).max(bar.1);
     match edge {
-        Edge::Top => ((cx - size.0 / 2).max(bar.0), at(r.y + r.h, bar.1) + gap),
-        Edge::Bottom => ((cx - size.0 / 2).max(bar.0), at(r.y, bar.1) - gap - size.1),
-        Edge::Left => (at(r.x + r.w, bar.0) + gap, (cy - size.1 / 2).max(bar.1)),
-        Edge::Right => (at(r.x, bar.0) - gap - size.0, (cy - size.1 / 2).max(bar.1)),
+        Edge::Top => (fit_x(cx - size.0 / 2), at(r.y + r.h, bar.1) + gap),
+        Edge::Bottom => (fit_x(cx - size.0 / 2), at(r.y, bar.1) - gap - size.1),
+        Edge::Left => (at(r.x + r.w, bar.0) + gap, fit_y(cy - size.1 / 2)),
+        Edge::Right => (at(r.x, bar.0) - gap - size.0, fit_y(cy - size.1 / 2)),
     }
 }
 
@@ -66,7 +70,7 @@ pub fn anchor(edge: Edge, bar: (i32, i32), r: R, s: f32) -> (i32, i32) {
 
 // Clickable spots (hit ids). Lists (workspaces, tray, ...) add the item index.
 pub const LAUNCHER: u32 = 1; const WINDOW: u32 = 2; pub const RES: u32 = 3; const MEDIA: u32 = 4; const ISLAND: u32 = 5;
-pub const CLOCK: u32 = 7; const TIMER: u32 = 8; const REC: u32 = 9; pub const WEATHER: u32 = 11; pub const NET: u32 = 13; pub const SYS: u32 = 15;
+pub const CLAUDE: u32 = 19; pub const CLOCK: u32 = 7; const TIMER: u32 = 8; const REC: u32 = 9; pub const WEATHER: u32 = 11; pub const NET: u32 = 13; pub const SYS: u32 = 15;
 const WS: u32 = 0x100; const UTIL: u32 = 0x200; const WMC: u32 = 0x300; const TRAY: u32 = 0x400; const BADGE: u32 = 0x500; const CTL: u32 = 0x600;
 /// The chevron that opens the tray flyout; the last id of the tray range, past any icon index.
 const TRAY_MORE: u32 = TRAY + 0xFF;
@@ -111,13 +115,50 @@ pub fn draw_tray_sample(c: &mut Canvas, cx: &Ctx, x: f32, cy: f32, visible: usiz
     for e in &els { draw_el(c, cx, e, x, cy, u32::MAX); x += el_w(c.g, e) + 2.0; }
     w
 }
+/// Extra space between bar groups for `bar.spacing`: "tight", "cozy" (the default, no change) or "roomy".
+pub fn spacing_extra(s: &str) -> f32 { match s { "tight" => -2.0, "roomy" => 8.0, _ => 0.0 } }
+
+/// Width of one workspace button. The active one is a wider pill, but only on a horizontal bar: a side bar is too narrow.
+pub fn ws_w(active: bool, vertical: bool) -> f32 { if active && !vertical { tk::WS_ACTIVE_W } else { tk::WS_W } }
+
+/// Three sample groups (workspaces, clock, tray) spaced by `bar.spacing`, drawn with the bar's own
+/// `group_look` and `draw_el`, so the Settings preview cannot drift from the bar. Returns the total width.
+pub fn draw_spacing_sample(c: &mut Canvas, cx: &Ctx, x: f32, cy: f32, spacing: &str, style: &str, groups: &str) -> f32 {
+    let t = &cx.theme;
+    let ws = |active: bool, label: &str| {
+        let col = if active { t.c("onPrimary") } else { t.c("onSurface") };
+        El::Btn { id: 0, w: ws_w(active, false), h: tk::WS_W, label: Box::new(El::Txt(label.into(), txt(12.0, if active { 600 } else { 400 }), col, tk::WS_W)),
+            bg: active.then(|| crate::ui::accent(cx)), round: tk::WS_W / 2.0 }
+    };
+    let mk = |els: Vec<El>, pad: f32, gap: f32| Pill { id: 0, els, pad: (pad, pad), gap, bg: None, hover: false, fixed: None, kind: Kind::Group, fade: 1.0 };
+    let sample = [
+        mk(vec![ws(true, "1"), ws(false, "2"), ws(false, "3")], 4.0, 0.0),
+        mk(vec![El::Txt("12:30".into(), txt(13.5, 400), t.c("onSurface"), 60.0)], 10.0, 6.0),
+        mk(tray_sample_colors().iter().take(3).map(|&col| El::Btn { id: 0, w: 24.0, h: 24.0, label: Box::new(El::Dot(14.0, col)), bg: None, round: 6.0 }).collect(), 6.0, 2.0),
+    ];
+    let gap = 6.0 + spacing_extra(spacing);
+    let mut x0 = x;
+    for p in &sample {
+        let w = pill_w(c.g, p);
+        let r = R::new(x0, cy - GH / 2.0, w, GH);
+        let (fill, border, _) = group_look_for(cx, p, style, groups);
+        let rad = r.h / 2.0;
+        if let Some(b) = border { c.rect(r, rad, b); }
+        if let Some(f) = fill { c.rect(if border.is_some() { R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0) } else { r }, rad - 1.0, f); }
+        let mut ex = r.x + p.pad.0;
+        for e in &p.els { draw_el(c, cx, e, ex, cy, u32::MAX); ex += el_w(c.g, e) + p.gap; }
+        x0 += w + gap;
+    }
+    x0 - gap - x
+}
+
 /// Groups with a hover popup (POPUPS in bar.js).
-pub const POPUPS: [u32; 5] = [CLOCK, RES, WEATHER, NET, SYS];
+pub const POPUPS: [u32; 6] = [CLOCK, RES, WEATHER, NET, SYS, CLAUDE];
 
 /// barLayout() in lib/barlayout.js: [(id, side)] in order, unknown ids dropped, missing ones added.
 pub fn layout(cfg: &crate::conf::Config) -> Vec<(String, String)> {
-    const MODULES: [(&str, &str); 13] = [("launcher", "left"), ("window", "left"), ("resources", "center"), ("media", "center"), ("island", "center"),
-        ("workspaces", "center"), ("clock", "center"), ("utils", "center"), ("weather", "center"), ("wm", "right"), ("netspeed", "hidden"), ("tray", "right"), ("system", "right")];
+    const MODULES: [(&str, &str); 14] = [("launcher", "left"), ("window", "left"), ("resources", "center"), ("media", "center"), ("island", "center"),
+        ("workspaces", "center"), ("clock", "center"), ("utils", "center"), ("weather", "center"), ("claude", "hidden"), ("wm", "right"), ("netspeed", "hidden"), ("tray", "right"), ("system", "right")];
     let sides = ["left", "center", "right", "hidden"];
     let mut list: Vec<(String, String)> = vec![];
     for m in cfg.get("bar.modules").as_array().into_iter().flatten() {
@@ -452,7 +493,7 @@ fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (
         let Some(m) = widest else { break };
         *m = (*m - 20.0).max(60.0);
     }
-    for id in [VIZ, WEATHER, NET, UTIL] {
+    for id in [VIZ, CLAUDE, WEATHER, NET, UTIL] {
         if free(sides) >= AIR { break; }
         for s in sides.iter_mut() { s.retain(|p| p.id != id); }
     }
@@ -727,7 +768,7 @@ impl Bar {
                             let col = if active { t.c("onPrimary") } else if occ { fg } else { t.c("outline") };
                             El::Txt(label, txt(12.0, if active { 600 } else { 400 }), col, 26.0)
                         } else if occ { El::Dot(8.0, muted) } else { El::Dot(5.0, alpha(t.c("outline"), 0.55)) };
-                        els.push(El::Btn { id: WS + idx, w: 26.0, h: 26.0, label: Box::new(inner), bg: active.then(|| t.c("primary")), round: 13.0 });
+                        els.push(El::Btn { id: WS + idx, w: ws_w(active, v), h: tk::WS_W, label: Box::new(inner), bg: active.then(|| crate::ui::accent(cx)), round: tk::WS_W / 2.0 });
                     }
                     out.push(group(WS, els, (4.0, 4.0), 0.0));
                 }
@@ -756,6 +797,10 @@ impl Bar {
                 }
                 "weather" => if let Some(w) = &cx.weather {
                     out.push(group(WEATHER, vec![El::Ico(weather::icon(w.status), 18.0, false, fg), El::Txt(weather::temp(w, cx.cfg.str("tempUnit")), txt(13.0, 400), fg, 80.0)], (10.0, 10.0), 4.0));
+                },
+                "claude" => if let Some(u) = &cx.claude {
+                    let f = claude_chip_color(u.worst(), fg, t.c("error"));
+                    out.push(group(CLAUDE, vec![El::Ico("smart_toy", 18.0, false, f), El::Txt(format!("{}%", u.worst()), txt(13.0, 400), f, 60.0)], (10.0, 10.0), 4.0));
                 },
                 "wm" => {
                     self.wm_cmds.clear();
@@ -856,8 +901,7 @@ fn pill_h(p: &Pill) -> f32 {
 fn vpad(p: &Pill) -> f32 { if p.kind == Kind::Plain { 0.0 } else { p.pad.0.clamp(3.0, 8.0) } }
 
 /// Where each group goes on a side bar: left-side groups from the top, centre ones in the middle, right-side ones at the bottom.
-fn place_column(heights: &[Vec<f32>; 3], x: f32, w: f32, top: f32, len: f32, tight: bool) -> Vec<(usize, usize, R)> {
-    let gaps = if tight { [2.0; 3] } else { [6.0, 5.0, 6.0] };
+fn place_column(heights: &[Vec<f32>; 3], x: f32, w: f32, top: f32, len: f32, gaps: [f32; 3]) -> Vec<(usize, usize, R)> {
     let sum = |h: &[f32], gap: f32| h.iter().sum::<f32>() + gap * h.len().saturating_sub(1) as f32;
     // the middle never starts above the end of the top groups
     let mid = (top + (len - sum(&heights[1], gaps[1])) / 2.0).max(top + sum(&heights[0], gaps[0]) + gaps[0]);
@@ -878,11 +922,13 @@ fn islands_fill(p: &Pill, layer0: Color) -> Color {
 }
 
 /// Fill, border and shadow of one group for the bar style (bar.html's #bar.<style> / .g-<groups> rules).
-fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) {
+fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) { group_look_for(cx, p, cx.cfg.str("bar.style"), cx.cfg.str("bar.groups")) }
+
+/// `group_look` for a given style and group setting (the Settings preview passes the values being edited).
+fn group_look_for(cx: &Ctx, p: &Pill, style: &str, groups: &str) -> (Option<Color>, Option<Color>, bool) {
     let t = &cx.theme;
-    let (style, groups) = (cx.cfg.str("bar.style"), cx.cfg.str("bar.groups"));
     let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
-    let border = alpha(t.c("outlineVariant"), 0.45);
+    let border = alpha(t.c("outlineVariant"), tk::GLASS_EDGE_A);
     if style == "clear" { return (None, None, false); } // a preset's "transparent" bar: only the contents show
     if style == "islands" { return (Some(islands_fill(p, layer0)), Some(border), true); }
     if p.kind != Kind::Group { return (None, None, false); }
@@ -942,7 +988,8 @@ impl View for Bar {
         let fit_w = v.then_some(pw - 8.0);
         let mut sides = [self.pills(c, cx, "left", fit_w), self.pills(c, cx, "center", fit_w), self.pills(c, cx, "right", fit_w)];
         let placed: Vec<(usize, usize, R)> = if v {
-            let (avail, gaps) = (bh - 2.0 * pad, [6.0, 5.0, 6.0]);
+            let sp = spacing_extra(cx.cfg.str("bar.spacing"));
+            let (avail, gaps) = (bh - 2.0 * pad, [6.0 + sp, 5.0 + sp, 6.0 + sp]);
             let heights = |sides: &[Vec<Pill>; 3]| [0, 1, 2].map(|i| sides[i].iter().map(pill_h).collect::<Vec<f32>>());
             let mut hs = heights(&sides);
             let need = |hs: &[Vec<f32>; 3], g: [f32; 3]| hs.iter().zip(g).map(|(h, g)| h.iter().sum::<f32>() + g * h.len().saturating_sub(1) as f32).sum::<f32>();
@@ -952,12 +999,13 @@ impl View for Bar {
                 for p in sides.iter_mut().flatten() { p.gap = p.gap.min(2.0); if p.kind != Kind::Plain { p.pad = (3.0, 3.0); } }
                 hs = heights(&sides);
             }
-            place_column(&hs, bx + pad, pw, by + pad, avail, tight)
+            place_column(&hs, bx + pad, pw, by + pad, avail, if tight { [2.0; 3] } else { gaps })
         } else {
             let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
             let (extra, cap) = compact(&mut sides, inner_w, |p| pill_w(c.g, p)); // a narrow (portrait) screen
             self.island_cap = cap;
-            let (g5, g6) = (5.0 + extra, 6.0 + extra);
+            let sp = spacing_extra(cx.cfg.str("bar.spacing"));
+            let (g5, g6) = (5.0 + extra + sp, 6.0 + extra + sp);
             let mut widths: Vec<Vec<f32>> = sides.iter().map(|s| s.iter().map(|p| pill_w(c.g, p)).collect()).collect();
             let sum = |w: &[f32], gap: f32| w.iter().sum::<f32>() + gap * w.len().saturating_sub(1) as f32;
             let cw = sum(&widths[1], g5);
@@ -1098,7 +1146,11 @@ impl Bar {
             }
             // a click on the notification banner goes to that notification
             (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
-                if let Some(t) = crate::app::Notif::target(&cx.notif, hub::now_ms()) { crate::bridge::sys::open_and_point(t); }
+                match crate::app::Notif::target(&cx.notif, hub::now_ms()) {
+                    Some(crate::bridge::claude_acct::CANCEL) => crate::bridge::claude_acct::cancel(), // the auto-switch banner
+                    Some(t) => crate::bridge::sys::open_and_point(t),
+                    None => {}
+                }
                 cx.notif = None;
             }
             // a click on a stuck "needs you" prompt clears it
@@ -1151,6 +1203,16 @@ pub struct Popup { pub id: u32, pub tip: String }
 /// Extra width after a popup title: `Gfx::measure` runs a hair short of the painted width, which clipped the last word.
 const TITLE_SLACK: f32 = 12.0;
 
+/// The Claude chip turns the error color from this percent.
+const CLAUDE_WARN: u8 = 90;
+
+fn claude_chip_color<T>(worst: u8, normal: T, warn: T) -> T { if worst >= CLAUDE_WARN { warn } else { normal } }
+
+/// The two usage rows of the Claude chip's hover popup.
+fn claude_rows(session: u8, week: u8) -> Vec<(String, String, String)> {
+    vec![("timer".into(), "Session (5 h)".into(), format!("{session}%")), ("date_range".into(), "Week (7 d)".into(), format!("{week}%"))]
+}
+
 fn kv_rows(cx: &Ctx, id: u32) -> Option<(&'static str, String, Option<String>, Vec<(String, String, String)>)> {
     let kv = |i: &str, k: &str, v: String| (i.to_string(), k.to_string(), v);
     let tu = cx.cfg.str("tempUnit");
@@ -1168,6 +1230,10 @@ fn kv_rows(cx: &Ctx, id: u32) -> Option<(&'static str, String, Option<String>, V
             let mut rows = vec![kv("cloud", "Sky", weather::text(w.status))];
             if let Some(s) = w.wind { rows.push(kv("air", "Wind", format!("{s:.1} km/h"))); }
             (weather::icon(w.status), if w.city.is_empty() { "Weather".into() } else { w.city.clone() }, Some(weather::temp(w, tu)), rows)
+        }
+        CLAUDE => {
+            let u = cx.claude.as_ref()?;
+            ("smart_toy", "Claude usage".into(), Some(format!("{}%", u.worst())), claude_rows(u.session, u.week))
         }
         NET => {
             let n = cx.net.as_ref()?;
@@ -1380,6 +1446,21 @@ mod tests {
     }
     use super::*;
     #[test]
+    fn spacing_steps_grow_and_the_default_changes_nothing() {
+        assert_eq!(spacing_extra("cozy"), 0.0);
+        assert_eq!(spacing_extra(""), 0.0, "an unset or unknown value is cozy");
+        assert!(spacing_extra("tight") < spacing_extra("cozy") && spacing_extra("cozy") < spacing_extra("roomy"));
+        assert!(5.0 + spacing_extra("tight") >= 3.0, "groups never touch");
+    }
+
+    #[test]
+    fn only_the_active_workspace_is_wide_and_never_on_a_side_bar() {
+        assert_eq!(ws_w(true, false), tk::WS_ACTIVE_W);
+        assert_eq!((ws_w(false, false), ws_w(true, true)), (tk::WS_W, tk::WS_W));
+        assert!(tk::WS_ACTIVE_W > tk::WS_W);
+    }
+
+    #[test]
     fn tray_split_follows_the_setting() {
         assert_eq!(tray_split(8, 3), (3, 5));
         assert_eq!(tray_split(8, 0), (8, 0)); // 0 shows every icon, no chevron
@@ -1428,8 +1509,24 @@ mod tests {
         let l = layout(&cfg);
         assert_eq!(l[0], ("clock".to_string(), "left".to_string()));
         assert_eq!(l.iter().filter(|m| m.0 == "clock").count(), 1);
-        assert_eq!(l.len(), 13);
+        assert_eq!(l.len(), 14);
         assert_eq!(l.iter().find(|m| m.0 == "netspeed").unwrap().1, "hidden");
+    }
+    #[test]
+    fn claude_chip_warns_from_ninety_and_the_module_starts_hidden() {
+        assert_eq!(claude_chip_color(89, "ok", "warn"), "ok");
+        assert_eq!(claude_chip_color(90, "ok", "warn"), "warn");
+        assert_eq!(claude_rows(38, 12), vec![("timer".to_string(), "Session (5 h)".to_string(), "38%".to_string()), ("date_range".to_string(), "Week (7 d)".to_string(), "12%".to_string())]);
+        assert_eq!(layout(&crate::conf::Config::parse("{}")).iter().find(|m| m.0 == "claude").unwrap().1, "hidden");
+        assert!(POPUPS.contains(&CLAUDE));
+    }
+    #[test]
+    fn wanted_follows_the_chip_and_auto_switch() {
+        let on = |s: &str| crate::bridge::claude_acct::wanted(&crate::conf::Config::parse(s));
+        assert!(!on("{}"));
+        assert!(on(r#"{"claude":{"autoSwitch":true}}"#));
+        assert!(on(r#"{"bar":{"modules":[["claude","right"]]}}"#));
+        assert!(!on(r#"{"bar":{"modules":[["claude","hidden"]]}}"#));
     }
     #[test]
     fn bar_edges() {
@@ -1448,13 +1545,20 @@ mod tests {
     #[test]
     fn popups_open_into_the_screen() {
         let g = R::new(100.0, 10.0, 80.0, 34.0); // centre (140, 27)
-        assert_eq!(popup_spot(Edge::Top, (0, 0), g, 1.0, (200, 100)), (40, 48));
-        assert_eq!(popup_spot(Edge::Bottom, (0, 1000), g, 1.0, (200, 100)), (40, 1010 - 4 - 100));
+        let (hb, vb) = ((1920, 46), (46, 1080)); // bar sizes: horizontal and vertical
+        assert_eq!(popup_spot(Edge::Top, (0, 0), hb, g, 1.0, (200, 100)), (40, 48));
+        assert_eq!(popup_spot(Edge::Bottom, (0, 1000), hb, g, 1.0, (200, 100)), (40, 1010 - 4 - 100));
         // a group at the bar's start can't push the popup off the monitor
-        assert_eq!(popup_spot(Edge::Top, (0, 0), R::new(0.0, 10.0, 40.0, 34.0), 1.0, (200, 100)).0, 0);
+        assert_eq!(popup_spot(Edge::Top, (0, 0), hb, R::new(0.0, 10.0, 40.0, 34.0), 1.0, (200, 100)).0, 0);
+        // a group at the bar's end can't either: the popup ends at the monitor edge
+        let end = R::new(1880.0, 10.0, 40.0, 34.0);
+        assert_eq!(popup_spot(Edge::Top, (0, 0), hb, end, 1.0, (290, 100)).0, 1920 - 290);
+        assert_eq!(popup_spot(Edge::Top, (1920, 0), hb, end, 1.0, (290, 100)).0, 1920 + 1920 - 290); // second monitor
         let v = R::new(6.0, 100.0, 46.0, 40.0); // centre y 120
-        assert_eq!(popup_spot(Edge::Left, (0, 0), v, 1.0, (200, 100)), (56, 70));
-        assert_eq!(popup_spot(Edge::Right, (1000, 0), v, 1.0, (200, 100)), (1006 - 4 - 200, 70));
+        assert_eq!(popup_spot(Edge::Left, (0, 0), vb, v, 1.0, (200, 100)), (56, 70));
+        assert_eq!(popup_spot(Edge::Right, (1000, 0), vb, v, 1.0, (200, 100)), (1006 - 4 - 200, 70));
+        let low = R::new(6.0, 1040.0, 46.0, 40.0);
+        assert_eq!(popup_spot(Edge::Left, (0, 0), vb, low, 1.0, (200, 100)).1, 1080 - 100);
         assert_eq!(anchor(Edge::Top, (0, 0), g, 1.0), (140, 46));
         assert_eq!(anchor(Edge::Bottom, (0, 1000), g, 1.0), (140, 1008));
         assert_eq!(anchor(Edge::Left, (0, 0), v, 1.0), (54, 120));
@@ -1471,13 +1575,16 @@ mod tests {
     #[test]
     fn side_bar_columns() {
         // top group from the top, centre group in the middle, bottom group against the bottom
-        let p = place_column(&[vec![34.0, 40.0], vec![100.0], vec![60.0]], 5.0, 46.0, 5.0, 500.0, false);
+        let p = place_column(&[vec![34.0, 40.0], vec![100.0], vec![60.0]], 5.0, 46.0, 5.0, 500.0, [6.0, 5.0, 6.0]);
         let at = |si, pi| p.iter().find(|x| x.0 == si && x.1 == pi).unwrap().2;
         assert_eq!((at(0, 0).y, at(0, 1).y), (5.0, 45.0));
         assert_eq!(at(1, 0).y, 5.0 + (500.0 - 100.0) / 2.0);
         assert_eq!(at(2, 0).y + at(2, 0).h, 505.0);
         // not enough room: gaps shrink and the middle group stays clear of the top ones
-        let t = place_column(&[vec![200.0, 200.0], vec![150.0], vec![100.0]], 0.0, 46.0, 0.0, 600.0, true);
+        let t = place_column(&[vec![200.0, 200.0], vec![150.0], vec![100.0]], 0.0, 46.0, 0.0, 600.0, [2.0; 3]);
+        // roomy spacing widens the gap between the two top groups
+        let r = place_column(&[vec![34.0, 40.0], vec![], vec![]], 0.0, 46.0, 0.0, 500.0, [14.0, 13.0, 14.0]);
+        assert_eq!(r.iter().find(|x| x.1 == 1).unwrap().2.y, 34.0 + 14.0);
         let y = |si, pi| t.iter().find(|x| x.0 == si && x.1 == pi).unwrap().2.y;
         assert_eq!((y(0, 1), y(1, 0)), (202.0, 404.0));
         assert!(p.iter().all(|x| x.2.x == 5.0 && x.2.w == 46.0));

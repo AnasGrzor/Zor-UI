@@ -72,9 +72,11 @@ fn config_set(config: &Path, key: &str, value_json: &str) -> Value {
 // ---------------------------------------------------------------- open / launch
 
 /// ShellExecute "open" on a URL or path (default browser / default app).
-pub(crate) fn shell_open(target: &str) {
+/// True if Windows accepted it: ShellExecute returns a value above 32 on success.
+pub(crate) fn shell_open(target: &str) -> bool {
     let t = wide(target);
-    unsafe { ShellExecuteW(HWND::default(), windows::core::w!("open"), PCWSTR(t.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL); }
+    let r = unsafe { ShellExecuteW(HWND::default(), windows::core::w!("open"), PCWSTR(t.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    r.0 as isize > 32
 }
 
 /// Where the pointer should jump: the center of the window that took the foreground, unless the

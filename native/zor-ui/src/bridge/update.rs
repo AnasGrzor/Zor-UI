@@ -15,6 +15,19 @@ const ASSETS: [&str; 2] = ["zorui-app.zip", "payload.zip"];
 /// Where the download is saved.
 const SAVED: &str = "update.zip";
 
+/// Where the installer's output and errors go.
+const LOG: &str = "update.log";
+/// CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. Never add DETACHED_PROCESS (0x8): powershell.exe has no console
+/// then and exits at once without running the script, which is why updates up to 0.1.9 never installed.
+const SPAWN_FLAGS: u32 = 0x0000_0200 | 0x0800_0000;
+
+/// The PowerShell command that unpacks the downloaded zip in `dir` and runs its install.ps1, logging to `log`.
+fn install_script(dir: &std::path::Path, mod_arg: &str, log: &std::path::Path) -> String {
+    format!(
+        "& {{ try {{ Expand-Archive -Force '{d}\\{SAVED}' '{d}\\x'; & '{d}\\x\\install.ps1' -SkipDeps -Mod {mod_arg} }} catch {{ $_ }} }} *>> '{l}'",
+        d = dir.display(), l = log.display())
+}
+
 /// "v0.2.1" -> [0, 2, 1]; None when any part is not a number.
 fn parse_version(s: &str) -> Option<Vec<u64>> {
     s.trim().trim_start_matches(['v', 'V']).split('.').map(|p| p.parse().ok()).collect()
@@ -58,15 +71,13 @@ pub fn check(cfg: &Config, force: bool) -> Result<Option<String>, String> {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     fs::write(dir.join(SAVED), zip).map_err(|e| e.to_string())?;
-    save_json(&state_path(), &json!({ "tried": tag }));
-    // Detached from this process: install.ps1 kills zorui.exe, so it must not be our child's child.
-    let script = format!(
-        "Expand-Archive -Force '{d}\\{SAVED}' '{d}\\x'; & '{d}\\x\\install.ps1' -SkipDeps -Mod {m}",
-        d = dir.display(), m = mod_arg(cfg));
+    // Own process group and no window, so install.ps1 killing zorui.exe does not take it down.
     let mut c = hidden("powershell.exe");
-    c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
-    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0000_0008 | 0x0000_0200 | 0x0800_0000);
+    c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &install_script(&dir, mod_arg(cfg), &root().join(LOG))]);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, SPAWN_FLAGS);
     c.spawn().map_err(|e| e.to_string())?;
+    // Saved only once the installer is running, so a failed start is retried tomorrow.
+    save_json(&state_path(), &json!({ "tried": tag }));
     Ok(Some(tag.to_string()))
 }
 
@@ -123,6 +134,20 @@ mod tests {
             { "name": "zorui-app.zip", "browser_download_url": "https://x/app" } ] });
         assert_eq!(asset_url(&both), Some("https://x/app"));
         assert_eq!(asset_url(&json!({ "assets": [] })), None);
+    }
+
+    #[test]
+    fn spawn_flags_never_detach_powershell() {
+        assert_eq!(SPAWN_FLAGS & 0x8, 0, "DETACHED_PROCESS makes powershell.exe exit without running");
+        assert_ne!(SPAWN_FLAGS & 0x0800_0000, 0, "needs CREATE_NO_WINDOW");
+    }
+
+    #[test]
+    fn script_unpacks_installs_and_logs() {
+        let s = install_script(std::path::Path::new(r"C:\t\zorui-update"), "win", std::path::Path::new(r"C:\r\update.log"));
+        assert!(s.contains(r"Expand-Archive -Force 'C:\t\zorui-update\update.zip' 'C:\t\zorui-update\x'"));
+        assert!(s.contains(r"& 'C:\t\zorui-update\x\install.ps1' -SkipDeps -Mod win"));
+        assert!(s.ends_with(r"*>> 'C:\r\update.log'"));
     }
 
     #[test]

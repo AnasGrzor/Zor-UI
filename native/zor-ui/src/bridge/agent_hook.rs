@@ -12,6 +12,7 @@
 //! JSON ("rate_limits"), and zor-ui's own {"session", "state": waiting|working|done|ended, "message", "usage"}.
 //! Writes agents\<agent>\<session>.json and usage.json under the data folder; notify.rs reads them.
 
+use super::claude_profile::Root;
 use super::common::{hidden, root};
 use serde_json::{json, Map, Value};
 use std::{
@@ -32,26 +33,42 @@ const GEMINI_EVENTS: &[&str] = &["BeforeAgent", "BeforeTool", "AfterTool", "Noti
 /// An agent whose hooks we can add. Installed means `dir` (under the home folder, or absolute) exists and holds one of
 /// `marks` (empty: the folder is enough). `ms`: the agent reads hook timeouts in milliseconds (Gemini), not seconds.
 /// A new Claude-style agent is one more row, or an entry the user adds under "customAgents" in the settings.
-struct Known { id: String, name: String, dir: String, file: String, marks: Vec<String>, events: Vec<String>, status: bool, ms: bool }
+/// `resume` resumes session {id} (agent_restart.rs); `model_arg` adds the model the session last used, {model}.
+struct Known { id: String, name: String, dir: String, file: String, marks: Vec<String>, events: Vec<String>, status: bool, ms: bool, resume: String, model_arg: String }
 
 fn strs(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
 
 fn known(custom: &Value) -> Vec<Known> {
-    let row = |id: &str, name: &str, dir: &str, file: &str, marks: &[&str], events: &[&str], status, ms| Known {
-        id: id.into(), name: name.into(), dir: dir.into(), file: file.into(), marks: strs(marks), events: strs(events), status, ms };
+    let row = |id: &str, name: &str, dir: &str, file: &str, marks: &[&str], events: &[&str], status, ms, resume: &str, model_arg: &str| Known {
+        id: id.into(), name: name.into(), dir: dir.into(), file: file.into(), marks: strs(marks), events: strs(events), status, ms, resume: resume.into(), model_arg: model_arg.into() };
     let mut all = vec![
-        row("claude", "Claude Code", ".claude", "settings.json", &[], CLAUDE_EVENTS, true, false),
-        row("codex", "Codex", ".codex", "hooks.json", &[], CODEX_EVENTS, false, false),
+        row("claude", "Claude Code", ".claude", "settings.json", &[], CLAUDE_EVENTS, true, false, "claude --resume {id}", "--model {model}"),
+        row("codex", "Codex", ".codex", "hooks.json", &[], CODEX_EVENTS, false, false, "codex resume {id}", "-m {model}"),
         // ~/.gemini also holds other Google tools, so wait for a file only the Gemini CLI writes
-        row("gemini", "Gemini CLI", ".gemini", "settings.json", &["settings.json", "oauth_creds.json"], GEMINI_EVENTS, false, true),
+        row("gemini", "Gemini CLI", ".gemini", "settings.json", &["settings.json", "oauth_creds.json"], GEMINI_EVENTS, false, true, "gemini --resume {id}", "-m {model}"),
     ];
     for c in custom.as_array().into_iter().flatten() {
         let (name, dir, file) = (c["name"].as_str().unwrap_or("").trim(), c["dir"].as_str().unwrap_or("").trim(), c["file"].as_str().unwrap_or("").trim());
         let id = safe(&name.to_lowercase());
         if name.is_empty() || dir.is_empty() || file.is_empty() || all.iter().any(|k| k.id == id) { continue; } // a custom agent can't replace a built-in one
-        all.push(row(&id, name, dir, file, &[], CODEX_EVENTS, false, false));
+        let (resume, model_arg) = (c["resume"].as_str().unwrap_or("").trim(), c["modelArg"].as_str().unwrap_or("").trim());
+        all.push(row(&id, name, dir, file, &[], CODEX_EVENTS, false, false, resume, model_arg));
     }
     all
+}
+
+/// How to resume a session of `agent`: (command template with {id}, model argument with {model}). None for an agent
+/// without a resume command.
+pub(super) fn resume_of(agent: &str, custom: &Value) -> Option<(String, String)> {
+    known(custom).into_iter().find(|k| k.id == agent && !k.resume.is_empty()).map(|k| (k.resume, k.model_arg))
+}
+
+/// The agents' session folder, `agents\<agent>` under the data folder.
+pub(super) fn sessions_dir(agent: &str) -> PathBuf { root().join("agents").join(safe(agent)) }
+
+/// The model a payload names: Claude Code's status line has {"model": {"id"}}, other agents a plain string.
+fn model_of(p: &Value) -> Option<Value> {
+    p["model"]["id"].as_str().or(p["model"].as_str()).filter(|m| !m.is_empty()).map(|m| json!(m))
 }
 
 fn now_s() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
@@ -128,10 +145,29 @@ fn record(agents: &Path, agent: &str, p: &Value) -> std::io::Result<()> {
         let model = p["model"]["display_name"].as_str().unwrap_or("");
         write(&d.join("usage.json"), &json!({ "windows": w, "model": model, "at": now_s() }))?;
     }
-    let Some((state, message)) = state_of(p) else { return Ok(()) };
-    let f = d.join(format!("{}.json", safe(first_str(p, &["session_id", "session", "thread-id"]))));
+    let id = first_str(p, &["session_id", "session", "thread-id"]);
+    let f = d.join(format!("{}.json", safe(id)));
+    let old: Value = std::fs::read_to_string(&f).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let Some((state, message)) = state_of(p) else {
+        // the status line carries no state, but it names the model the session uses now
+        if let (Some(m), true) = (model_of(p), old.is_object()) { let mut rec = old; rec["model"] = m; write(&f, &rec)?; }
+        return Ok(());
+    };
     if state == "ended" { let _ = std::fs::remove_file(f); return Ok(()); }
-    write(&f, &json!({ "state": state, "message": message, "cwd": p["cwd"].as_str().unwrap_or(""), "at": now_s() }))
+    write(&f, &session_record(&old, p, state, &message, id, super::agent_restart::alive, super::agent_restart::capture))
+}
+
+/// One session's record: the new state, plus what earlier events learned (process, environment, model, folder).
+/// `capture` runs only when the recorded process isn't the one running now, so most events skip it.
+fn session_record(old: &Value, p: &Value, state: &str, message: &str, id: &str, alive: impl Fn(&Value) -> bool, capture: impl Fn() -> Option<Value>) -> Value {
+    let cwd = p["cwd"].as_str().filter(|c| !c.is_empty()).or(old["cwd"].as_str()).unwrap_or("");
+    let mut rec = json!({ "state": state, "message": message, "cwd": cwd, "at": now_s(), "id": id });
+    if let Some(m) = model_of(p).or_else(|| Some(old["model"].clone()).filter(|m| !m.is_null())) { rec["model"] = m; }
+    let proc = if old["pid"].is_u64() && alive(old) { Some(old.clone()) } else { capture() };
+    if let Some(c) = proc {
+        for k in ["pid", "start", "exe", "orca", "env"] { if !c[k].is_null() { rec[k] = c[k].clone(); } }
+    }
+    rec
 }
 
 /// `zorui.exe --agent <agent> [json] [--then cmd...]` and `--install-agents`; the exit code.
@@ -222,6 +258,8 @@ fn dirs_of(k: &Known, home: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![home.join(&k.dir)];
     // not in tests: they pass a temp home and must never touch the real Claude config
     if k.id == "claude" && !cfg!(test) { if let Ok(d) = std::env::var("CLAUDE_CONFIG_DIR") { dirs.push(PathBuf::from(d)); } }
+    // profile folders get zor-ui's hooks too, since each one is a Claude Code config folder
+    if k.id == "claude" && !cfg!(test) { let r = Root::live(); for n in r.numbers() { dirs.push(r.profile_home(n)); } }
     dirs.dedup();
     dirs.into_iter().filter(|d| d.is_dir() && (k.marks.is_empty() || k.marks.iter().any(|m| d.join(m).is_file()))).collect()
 }
@@ -342,6 +380,43 @@ mod tests {
         assert!(add_hooks(&f, "zorui --agent gemini", GEMINI_EVENTS, false, 10_000).unwrap());
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
         assert_eq!(v["hooks"]["BeforeTool"][0]["hooks"][0]["timeout"], 10_000);
+    }
+
+    #[test]
+    fn session_record_keeps_what_earlier_events_learned() {
+        let old = json!({ "state": "working", "cwd": "C:/proj", "model": "opus", "pid": 7, "start": 9, "exe": "node.exe", "orca": false, "env": "sealed" });
+        let caught = |_: &Value| true;
+        let never = || -> Option<Value> { panic!("a live recorded process isn't captured again") };
+        let r = session_record(&old, &json!({ "hook_event_name": "Stop" }), "done", "", "s1", caught, never);
+        assert_eq!((r["state"].clone(), r["cwd"].clone(), r["model"].clone(), r["pid"].clone(), r["env"].clone(), r["id"].clone()),
+            (json!("done"), json!("C:/proj"), json!("opus"), json!(7), json!("sealed"), json!("s1")), "folder, model and process carry over");
+        let fresh = || Some(json!({ "pid": 8, "start": 10, "exe": "claude.exe", "orca": true, "env": "new" }));
+        let r = session_record(&old, &json!({ "cwd": "C:/other", "model": { "id": "sonnet" } }), "working", "", "s1", |_: &Value| false, fresh);
+        assert_eq!((r["pid"].clone(), r["orca"].clone(), r["cwd"].clone(), r["model"].clone()), (json!(8), json!(true), json!("C:/other"), json!("sonnet")),
+            "a process that's gone is captured again, and new event data wins");
+        let r = session_record(&Value::Null, &json!({}), "working", "", "s2", |_: &Value| false, || None);
+        assert!(r["pid"].is_null() && r["model"].is_null(), "nothing known, nothing made up");
+    }
+
+    #[test]
+    fn status_line_updates_the_model_of_a_known_session_only() {
+        let d = tmp("model");
+        record(&d, "claude", &json!({ "model": { "id": "opus" }, "session_id": "s1" })).unwrap();
+        assert!(!d.join("claude").join("s1.json").exists(), "no session file is made from a status line alone");
+        record(&d, "claude", &json!({ "hook_event_name": "Stop", "session_id": "s1" })).unwrap();
+        record(&d, "claude", &json!({ "model": { "id": "opus" }, "session_id": "s1" })).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(d.join("claude").join("s1.json")).unwrap()).unwrap();
+        assert_eq!((v["model"].clone(), v["state"].clone()), (json!("opus"), json!("done")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn resume_commands_for_built_in_and_custom_agents() {
+        let cfg = json!([{ "name": "Bot", "dir": ".bot", "file": "h.json", "resume": "bot --continue {id}", "modelArg": "--llm {model}" }, { "name": "Plain", "dir": ".p", "file": "h.json" }]);
+        assert_eq!(resume_of("claude", &cfg), Some(("claude --resume {id}".into(), "--model {model}".into())));
+        assert_eq!(resume_of("codex", &cfg).unwrap().0, "codex resume {id}");
+        assert_eq!(resume_of("bot", &cfg), Some(("bot --continue {id}".into(), "--llm {model}".into())));
+        assert_eq!(resume_of("plain", &cfg), None, "a custom agent without a resume command can't be restarted");
     }
 
     #[test]

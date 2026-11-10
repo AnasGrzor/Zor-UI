@@ -1,12 +1,12 @@
 //! The pages of settings.js, in the same order with the same labels and config keys.
 
 use super::{
-    form::{chip_w, Act, Fmt, Pen, Sl, ACT0},
+    form::{chip_w, Act, Fmt, Pen, Sl, ACT0, ROW_GAP},
     layout::{bar_layout, info, SIDES},
     Load, Settings,
 };
 use crate::{
-    conf,
+    conf, keymap,
     gfx::{alpha, ico, txt, Align, R},
     ui::{self, IconKind, LH},
 };
@@ -65,10 +65,10 @@ const CLOCK_FORMATS: [&str; 7] = ["EEE, dd/MM '•' HH:mm", "HH:mm", "h:mm a", "
 
 static FONTS: OnceLock<Vec<String>> = OnceLock::new();
 
-pub const PAGES: [(&str, &str, &str); 11] = [
+pub const PAGES: [(&str, &str, &str); 13] = [
     ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
     ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("contacts", "contacts", "Contacts"),
-    ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
+    ("creator", "person_add", "Create a buddy"), ("voice", "mic", "Voice"), ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
 ];
 const SCHEMES: [(&str, &str, &str); 10] = [
     ("auto", "auto_awesome", "Auto"), ("content", "image", "Content"), ("expressive", "palette", "Expressive"),
@@ -109,10 +109,17 @@ fn page_blurb(key: &str) -> &'static str {
         "island" => "What the island shows and how it reacts",
         "buddies" => "The characters that live on your desktop",
         "contacts" => "The people the buddy can message by voice",
+        "creator" => "Turn a picture into a buddy that looks like your character",
+        "voice" => "Talk to the buddy, what it may do for you, and the speech model",
         "services" => "API keys, models and sign-ins",
         "usage" => "What the AI tools have used",
         _ => "Version and updates",
     }
+}
+
+/// A speech model's line in the dropdown: its name, size on disk, and "download" when it isn't on this PC yet.
+fn speech_option_label(name: &str, mb: u32, installed: bool) -> String {
+    format!("{name} · {mb} MB{}", if installed { "" } else { " · download" })
 }
 
 fn opts(list: &[(&str, &str)]) -> Vec<(Value, String)> { list.iter().map(|(v, l)| (json!(v), l.to_string())).collect() }
@@ -157,6 +164,8 @@ impl Settings {
             "island" => self.island(p),
             "buddies" => self.buddies(p),
             "contacts" => self.contacts_page(p),
+            "creator" => self.creator_page(p),
+            "voice" => self.voice(p),
             "services" => self.services(p),
             "usage" => self.usage(p),
             _ => self.about(p),
@@ -408,7 +417,8 @@ impl Settings {
                 let (i, w, h) = (m["i"].as_u64().unwrap_or(0), m["w"].as_f64().unwrap_or(1920.0) as f32, m["h"].as_f64().unwrap_or(1080.0) as f32);
                 let custom = m["custom"] == true;
                 let name = m["name"].as_str().unwrap_or("").to_string();
-                let Some(r) = p.row(PREVIEW_H + 24.0) else { continue };
+                // the slider below must run even when this row is off screen (or in the measuring pass), or the card is measured short
+                if let Some(r) = p.row(PREVIEW_H + 24.0) {
                 let (bw, bh) = monitor_box(w, h);
                 let b = R::new(r.x + 12.0 + (PREVIEW_W - bw) / 2.0, r.y + 12.0 + (PREVIEW_H - bh) / 2.0, bw, bh);
                 p.c.rect(b, 10.0, p.col("surfaceContainer"));
@@ -425,6 +435,7 @@ impl Settings {
                 if custom {
                     let a = p.act(Act::Do("mon-clear", i.to_string()));
                     ui::chip(p.c, p.cx, tx + w1 + 12.0, ty + 50.0, a, Some("restart_alt"), "Use main", false);
+                }
                 }
                 if let Some((_, bi)) = bright.iter().find(|(n, _)| *n == name) {
                     self.slider(p, &format!("monitor.{bi}"), "Brightness", Sl { min: 1.0, max: 100.0, step: 1.0, fmt: Fmt::PctInt }, "brightness_6");
@@ -615,6 +626,18 @@ impl Settings {
         crate::bar::draw_tray_sample(p.c, p.cx, b.x + 10.0, b.y + 36.0, visible, edge);
     }
 
+    /// Sample bar groups at the chosen spacing, drawn by the bar's own group code. Follows the style and group settings above it.
+    fn spacing_preview(&mut self, p: &mut Pen) {
+        const H: f32 = 64.0;
+        let Some(r) = p.row(H + 12.0) else { return };
+        let b = R::new(r.x + 12.0, r.y + 6.0, r.w - 24.0, H);
+        p.c.rect(b, 12.0, p.col("surfaceContainerHigh"));
+        p.c.text("Bar", R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
+        let spacing = self.gs(p.cx, "bar.spacing");
+        let (style, groups) = (self.gs(p.cx, "bar.style"), self.gs(p.cx, "bar.groups"));
+        crate::bar::draw_spacing_sample(p.c, p.cx, b.x + 10.0, b.y + 40.0, &spacing, &style, &groups);
+    }
+
     fn bar(&mut self, p: &mut Pen) {
         p.h2("toolbar", "Bar", "");
         p.card(|p| {
@@ -650,6 +673,8 @@ impl Settings {
             p.note("Side bars show icons and short text only (no window title). Moving the bar frees or takes screen space for windows after zorui restarts.", 12.0);
             self.seg(p, "bar.style", &[("float", "Float"), ("flat", "Flat"), ("islands", "Islands"), ("clear", "Clear")], "Bar style", "style");
             self.seg(p, "bar.groups", &[("filled", "Filled"), ("outlined", "Outlined"), ("none", "None")], "Group backgrounds", "rounded_corner");
+            self.seg(p, "bar.spacing", &[("tight", "Tight"), ("cozy", "Cozy"), ("roomy", "Roomy")], "Space between groups", "space_bar");
+            self.spacing_preview(p);
             self.slider(p, "bar.titleWidth", "Window title width", Sl { min: 10.0, max: 40.0, step: 1.0, fmt: Fmt::PctInt }, "width");
             p.note("Drag a part up or down to change its order (top shows first), or into another column. Or click it and use the arrow keys.", 12.0);
             self.bar_columns(p);
@@ -769,6 +794,83 @@ impl Settings {
         });
     }
 
+    /// Buddy `k` ("a" or "b") as the bar draws him, standing, walking and sitting, with the options as they are set right now
+    /// (before config.json catches up). Drawn by `buddy::draw_preview`, the bar's own code, so it can't drift from the real thing.
+    fn buddy_preview(&mut self, p: &mut Pen, k: &str) {
+        if p.dry { p.row(stances_h(64.0) + 12.0); return; }
+        let (custom, list) = (self.gb(p.cx, "buddies.customEnabled"), self.get(p.cx, "buddies.custom"));
+        let ap = crate::buddy::appearance(&self.gs(p.cx, &format!("buddies.{k}.character")), custom, &list, &|f| self.gs(p.cx, &format!("buddies.{k}.{f}")), None);
+        let shown = buddy_label(&self.gs(p.cx, &format!("buddies.{k}.name")), ap.cast.label).to_string();
+        stances_box(p, &format!("On the bar: {shown}"), Some((&ap, &mut self.buddy_sprites[usize::from(k == "b")])), "", 64.0);
+    }
+
+    /// Create a buddy: one picture in, a pack folder out (see creator.rs). The preview comes first and follows every option.
+    fn creator_page(&mut self, p: &mut Pen) {
+        use crate::creator;
+        p.h2("person_add", "Create a buddy", "");
+        let image = self.gs(p.cx, "buddies.make.image");
+        let clean = self.creator_opts(p.cx);
+        // the clean-up runs only when the picture or an option changed, and only when the page is drawn for real
+        if !p.dry && !image.is_empty() {
+            creator::refresh(&mut self.creator_prev, p.c.g, &conf::pack_dir().join("images").join(&image), &clean.key(&image), &clean, &creator::preview_dir());
+        }
+        p.card(|p| {
+            const MAX_H: f32 = 100.0;
+            if p.dry { p.row(stances_h(MAX_H) + 12.0); return; }
+            let prev = self.creator_prev.as_ref().filter(|v| !image.is_empty() && v.key == clean.key(&image));
+            match prev.and_then(|v| v.pack.clone()) {
+                Some(mut pk) => {
+                    pk.height = (self.gn(p.cx, "buddies.make.height") as f32).clamp(crate::pack::MIN_H, crate::pack::MAX_H);
+                    let ap = crate::buddy::Appearance { cast: crate::cast::from_pack(&pk), style: crate::cast::Hair::default(), trim: crate::cast::Trim::default(), pack: Some(std::sync::Arc::new(pk)) };
+                    stances_box(p, "How he will look on the bar", Some((&ap, &mut self.creator_sprites)), "", MAX_H);
+                }
+                None => {
+                    let msg = if image.is_empty() { "Choose a picture to see your buddy here".to_string() } else { prev.map_or("Working on it...".to_string(), |v| v.error.clone()) };
+                    stances_box(p, "How he will look on the bar", None, &msg, MAX_H);
+                }
+            }
+        });
+        p.h2("image", "1. Picture", "");
+        p.card(|p| {
+            if let Some(r) = p.row(44.0) {
+                let (w1, w2) = (chip_w(p.c, "Choose", true), chip_w(p.c, "Clear", true));
+                p.left(r, "image", "Your picture", if image.is_empty() { "A PNG, JPG or WebP of the character. A plain background is fine, step 2 removes it" } else { "Picture chosen" }, w1 + w2 + 24.0);
+                let mut x = r.x + r.w;
+                if !image.is_empty() { x -= w2; let a = p.act(Act::Do("clear-buddy-image", "make".into())); ui::chip(p.c, p.cx, x, r.y + 4.0, a, Some("close"), "Clear", false); x -= 12.0; }
+                x -= w1; let a = p.act(Act::Do("pick-image", format!("buddy-make-{}", crate::hub::now_ms() as i64)));
+                ui::chip(p.c, p.cx, x, r.y + 4.0, a, Some("folder_open"), "Choose", false);
+            }
+        });
+        p.h2("auto_fix_high", "2. Clean up", "");
+        p.card(|p| {
+            self.num(p, "buddies.make.clean", "Remove background", 0, creator::MAX_CLEAN, "ink_eraser");
+            p.note("0 leaves the picture as it is. Raise it until the background is gone: it removes every pixel joined to a corner by a similar color, and keeps anything inside the character. A picture that is already transparent needs 0.", 12.0);
+            self.sw(p, "buddies.make.trim", "Cut off the empty edges", "So his feet stand right on the bar", "crop");
+            self.sw(p, "buddies.make.flip", "Mirror the picture", "Buddies face right. Switch this on if your picture faces left", "flip");
+        });
+        p.h2("height", "3. Size and name", "");
+        p.card(|p| {
+            self.num(p, "buddies.make.height", "Height on the bar", crate::pack::MIN_H as i64, crate::pack::MAX_H as i64, "height");
+            if self.gn(p.cx, "buddies.make.height") > 54.0 { p.note("On a top bar a buddy is at most 54 px tall, because that is the room above the bar. On a bottom or side bar the full height shows.", 12.0); }
+            self.text_ph(p, "buddies.make.name", "Name", "Shown in the Character list", "badge", "My buddy");
+        });
+        p.h2("record_voice_over", "4. Lines and moves", "");
+        p.card(|p| {
+            let mut bases = vec![(json!(""), "Neutral words".to_string())];
+            bases.extend(crate::cast::CASTS.iter().map(|c| (json!(c.id), c.label.to_string())));
+            self.pick(p, "buddies.make.base", bases, "Speaks like", "Whose lines and moves it borrows. Edit its buddy.json afterwards to write your own", "face", 190.0);
+            self.pick(p, "buddies.make.special", opts(&[("orbs", "Orbs (Hollow Purple)"), ("beam", "Beam"), ("aura", "Aura"), ("none", "None")]), "Double-click move", "", "bolt", 190.0);
+        });
+        p.h2("save", "Save", "");
+        p.card(|p| {
+            if let Some(r) = p.row(44.0) {
+                let w = chip_w(p.c, "Save buddy", true);
+                p.left(r, "save", "Save as a buddy", "Makes a folder in the packs folder. It then shows up in Buddies > Character", w + 12.0);
+                p.chip_right(r, Some("save"), "Save buddy", Act::Do("make-buddy", String::new()));
+            }
+        });
+    }
+
     /// Two buddy slots on the bar. Slot 1 is the original `native.gojo` flag, slot 2 is `buddies.b.on`.
     fn buddies(&mut self, p: &mut Pen) {
         let custom = self.gb(p.cx, "buddies.customEnabled"); // feature flag, off by default
@@ -777,6 +879,7 @@ impl Settings {
         for (k, title, on) in [("a", "Buddy 1", "native.gojo"), ("b", "Buddy 2", "buddies.b.on")] {
             p.h2("pets", title, "");
             p.card(|p| {
+                self.buddy_preview(p, k);
                 self.sw(p, on, "Show on the bar", "Turn the buddy off and it goes away", "visibility");
                 self.pick(p, &format!("buddies.{k}.character"), casts.clone(), "Character", "Their look and what they say", "face", 190.0);
                 self.text_ph(p, &format!("buddies.{k}.name"), "Name", "What their partner calls them", "badge", "Character's own name");
@@ -795,9 +898,10 @@ impl Settings {
                 let colors: Vec<(Value, String)> = COLORS.iter().map(|(h, n)| (json!(h), n.to_string())).collect();
                 self.pick(p, &format!("buddies.{k}.skin"), colors, "Skin color", "", "palette", 190.0);
                 let img = self.gs(p.cx, &format!("buddies.{k}.image"));
-                if let Some(r) = p.row(40.0) {
-                    let (w1, w2) = (chip_w(p.c, "Choose", true), chip_w(p.c, "Clear", true));
-                    p.left(r, "image", "Use a picture", if img.is_empty() { "A PNG with a transparent background replaces the drawn figure" } else { "Picture chosen. It replaces the drawn figure" }, 130.0 + w1 + w2 + 24.0);
+                let (w1, w2) = (chip_w(p.c, "Choose", true), chip_w(p.c, "Clear", true));
+                let sub = if img.is_empty() { "A PNG with a transparent background replaces the drawn figure" } else { "Picture chosen. It replaces the drawn figure" };
+                if let Some(r) = p.row_sub(40.0, "image", sub, 130.0 + w1 + w2 + 24.0) {
+                    p.left(r, "image", "Use a picture", sub, 130.0 + w1 + w2 + 24.0);
                     let mut x = r.x + r.w;
                     if !img.is_empty() { x -= w2; let a = p.act(Act::Do("clear-buddy-image", k.into())); ui::chip(p.c, p.cx, x, r.y + 4.0, a, Some("close"), "Clear", false); x -= 12.0; }
                     x -= w1; let a = p.act(Act::Do("pick-image", format!("buddy-{k}-{}", crate::hub::now_ms() as i64)));
@@ -828,33 +932,21 @@ impl Settings {
                 }
             }
         }); }
-        p.h2("mic", "Voice commands", "");
+        p.h2("folder", "Buddy packs", "");
         p.card(|p| {
-            self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say", "mic");
-            self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
-            self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
-            self.sw(p, "buddies.allow.message", "Start messages", "\"message <name> saying ...\" opens the chat with the text ready. You press Enter to send", "chat");
-            self.sw(p, "buddies.listenAi", "Ask the AI for other requests", "Sends what you said to the sidebar's AI model. Off: only the phrases above work", "auto_awesome");
-            self.sw(p, "buddies.screen", "Let the buddy see my screen", "\"where is ...\" or \"what's on my screen\" sends a picture of each monitor to the AI. Off: nothing is captured", "screenshot_monitor");
-            if self.gb(p.cx, "buddies.screen") {
-                // only models that can read images are offered; blank follows the sidebar's AI model
-                let current = self.gs(p.cx, "buddies.screenModel");
-                let vision = screen_model_choices(match &self.models { Load::Ready(m) => m.as_slice(), _ => &[] }, &current);
-                self.pick(p, "buddies.screenModel", vision, "Screen help model", "Models that can't read images are hidden", "model_training", 260.0);
+            let w = chip_w(p.c, "Open folder", true);
+            let sub = "A folder with a buddy.json and your pictures makes a character. See the README";
+            if let Some(r) = p.row_sub(44.0, "folder_open", sub, w + 12.0) {
+                p.left(r, "folder_open", "Packs folder", sub, w + 12.0);
+                p.chip_right(r, Some("folder_open"), "Open folder", Act::Do("open-buddies", String::new()));
             }
-            self.sw(p, "buddies.drive", "Let the buddy take over", "\"take over and ...\" or \"click ...\": after you say yes, the AI moves the mouse and types for one task, using the screen model below. Esc, your mouse or your voice stops it. Needs screen help", "smart_toy");
-            if self.gb(p.cx, "buddies.drive") {
-                self.num(p, "buddies.driveRounds", "Most steps per take-over", 1, 100, "format_list_numbered");
-                self.num(p, "buddies.driveSecs", "Most seconds per take-over", 10, 900, "timer");
+            let found = crate::pack::scan();
+            for (id, res) in &found {
+                if let Some(r) = p.row(44.0) {
+                    match res { Ok(pk) => p.left(r, "face", &pk.name, &pk.summary(), 0.0), Err(e) => p.left(r, "error", &format!("{id}: not used"), e, 0.0) }
+                }
             }
-            self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
-            let mut mics = vec![(json!(""), "Windows default".to_string())];
-            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
-            self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
-            let mut models = vec![(json!(""), "Automatic".to_string())];
-            models.extend(crate::assist::speech_models().into_iter().map(|(dir, name)| (json!(dir), name)));
-            self.pick(p, "buddies.model", models, "Speech model", "Found on this PC. Automatic uses the first one", "model_training", 260.0);
-            p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
+            if found.is_empty() { p.note("No packs yet. Each folder in the packs folder shows up in the Character list above once its buddy.json is valid.", 12.0); }
         });
         p.h2("favorite", "Partners", "");
         p.card(|p| {
@@ -863,8 +955,90 @@ impl Settings {
             self.sw(p, "buddies.breaks", "Remind me to take breaks", "The primary buddy speaks up after a long stretch of work", "coffee");
             self.num(p, "buddies.breakMins", "Minutes of work between breaks", 1, 240, "timer");
             self.sw(p, "buddies.watch", "Comment on what I'm doing", "The primary buddy reacts to the app in front, like an editor, a video or a game", "visibility");
-            p.note("Talk to the primary buddy with the hotkey (default Alt+B): say \"search for ...\", \"open <app or game>\" or \"message <name> saying ...\". Names come from buddies.contacts in config.json, e.g. {\"ali\": {\"app\": \"whatsapp\", \"phone\": \"+923001234567\"}} or {\"app\": \"discord\", \"id\": \"<user id>\"}. Messages open in the app and wait for you to press Enter.", 12.0);
-            p.note("Click a buddy to hear them, double-click for their move, drag to move them. With two on, only the primary buddy comments on the desktop and reminds you to take breaks. Quiet turns a buddy's comments and chat off.", 12.0);
+            p.note("Click a buddy to hear them speak, double-click to see their move, and drag to reposition them. When two buddies are enabled, only the primary buddy comments on the desktop and reminds you to take breaks. Turn on Quiet to mute a buddy's comments and chat.", 12.0);
+        });
+    }
+
+    /// The speech model dropdown (Automatic, Windows' own, each Parakeet with its size, any other model folder found), with its
+    /// description under it. Picking a Parakeet that isn't downloaded starts the download. When the chosen one is a Parakeet,
+    /// a row below shows the download's progress with Cancel, or offers Delete (or Download again after a failure).
+    fn speech_model(&mut self, p: &mut Pen) {
+        use crate::bridge::listen::{progress, MODELS};
+        let cur = self.gs(p.cx, "buddies.model");
+        let paths: Vec<String> = MODELS.iter().map(|m| m.path().to_string_lossy().into_owned()).collect();
+        let sel = MODELS.iter().zip(&paths).find(|(_, path)| **path == cur).map(|(m, _)| m);
+        let mut opts = vec![(json!(""), "Automatic".to_string()), (json!("windows"), "Windows (built in)".to_string())];
+        opts.extend(MODELS.iter().zip(&paths).map(|(m, path)| (json!(path), speech_option_label(m.name, m.mb, m.installed()))));
+        opts.extend(crate::assist::speech_models().into_iter().filter(|(d, _)| !paths.contains(d)).map(|(d, n)| (json!(d), n)));
+        let note = match (sel, cur.as_str()) {
+            (Some(m), _) => m.note,
+            (None, "windows") => "Needs no download. Less accurate than Parakeet",
+            (None, "") => "Uses the first Parakeet model you have, otherwise Windows' own",
+            _ => "A model folder you added",
+        };
+        self.pick(p, "buddies.model", opts, "Speech model", note, "model_training", 360.0);
+        let Some(m) = sel else { return };
+        let busy = self.busy == format!("speech-dl:{}", m.id);
+        let (frac, status) = progress();
+        let (sub, ic, label, act) = if busy { (status, "close", "Cancel", Act::Do("cancel-speech", String::new())) }
+            else if m.installed() { (format!("On disk, {} MB. Deleting it switches back to Automatic", m.mb), "delete", "Delete", Act::Do("delete-speech", m.id.to_string())) }
+            else { (format!("Not downloaded yet, {} MB", m.mb), "download", "Download", Act::Do("download-speech", m.id.to_string())) };
+        let w = chip_w(p.c, "Download", true) + 12.0;
+        if let Some(r) = p.row_sub(44.0, "storage", &sub, w) {
+            p.left(r, "storage", "Model files", &sub, w);
+            p.chip_right(r, Some(ic), label, act);
+        }
+        if busy {
+            if let Some(r) = p.row(8.0) {
+                p.c.rect(R::new(r.x, r.y + 2.0, r.w, 4.0), 2.0, p.col("secondaryContainer"));
+                p.c.rect(R::new(r.x, r.y + 2.0, r.w * frac, 4.0), 2.0, p.col("primary"));
+            }
+        }
+    }
+
+    fn voice(&mut self, p: &mut Pen) {
+        p.h2("mic", "Voice commands", "");
+        p.card(|p| {
+            self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say", "mic");
+            self.seg(p, "buddies.listenMode", &[("auto", "Auto"), ("toggle", "Toggle"), ("hold", "Hold")], "Dictation mode", "keyboard_voice");
+            p.note("Auto stops when you stop talking. Toggle records until you press the hotkey again. Hold records while you hold the hotkey.", 12.0);
+            self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
+            self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
+            self.sw(p, "buddies.allow.message", "Start messages", "\"message <name> saying ...\" opens the chat with the text ready. You press Enter to send", "chat");
+            self.sw(p, "buddies.allow.media", "Control the player", "The AI may pause, resume or skip the current song. \"play ...\" opens a music search and is covered by Open apps and games", "play_arrow");
+            self.sw(p, "buddies.allow.system", "Control the PC", "The AI may change volume, brightness and the wallpaper, switch Wi-Fi or Bluetooth, copy text to the clipboard, and lock the PC. Sleep, restart, shut down and sign out always ask first", "tune");
+            self.sw(p, "buddies.listenAi", "Ask the AI for other requests", "Sends what you said to the sidebar's AI model. Off: only the phrases above work", "auto_awesome");
+            self.sw(p, "buddies.screen", "Let the buddy see my screen", "\"where is ...\" or \"what's on my screen\" sends a picture of each monitor to the AI. Off: nothing is captured", "screenshot_monitor");
+            if self.gb(p.cx, "buddies.screen") {
+                // only models that can read images are offered; blank follows the sidebar's AI model
+                let current = self.gs(p.cx, "buddies.screenModel");
+                let vision = screen_model_choices(match &self.models { Load::Ready(m) => m.as_slice(), _ => &[] }, &current);
+                self.pick(p, "buddies.screenModel", vision, "Screen help model", "Models that can't read images are hidden", "model_training", 260.0);
+            }
+            self.sw(p, "buddies.drive", "Let the buddy take over", "\"take over and ...\" or \"click ...\": the AI moves the mouse and types for one task", "smart_toy");
+            if self.gb(p.cx, "buddies.drive") {
+                p.note("After you say yes, the AI uses the screen help model. Esc, your mouse or your voice stops it. Needs screen help.", 12.0);
+                self.num(p, "buddies.driveRounds", "Most steps per take-over", 1, 100, "format_list_numbered");
+                self.num(p, "buddies.driveSecs", "Most seconds per take-over", 10, 900, "timer");
+            }
+            self.sw(p, "buddies.browser", "Let the buddy use a browser", "For tasks on websites: the AI clicks and types in its own Edge window, and the pages' text goes to the AI. Needs Node.js", "language");
+            if self.gb(p.cx, "buddies.browser") {
+                p.note("It asks before the first step of each request, and before anything that sends, buys or deletes. It has its own logins: log in to a site once in its window. Passwords are yours to type.", 12.0);
+                self.sw(p, "buddies.bypass", "Bypass permissions", "No yes needed before the first step. It still asks before anything that sends, buys, deletes or presses Enter, and never types passwords", "lock_open");
+            }
+            self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
+            let mut mics = vec![(json!(""), "Windows default".to_string())];
+            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
+            self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
+            self.speech_model(p);
+            let w = chip_w(p.c, "Open folder", true);
+            let sub = "Put another model folder (the one with tokens.txt) here and it shows up in the list above";
+            if let Some(r) = p.row_sub(44.0, "folder_open", sub, w + 12.0) {
+                p.left(r, "folder_open", "Speech models folder", sub, w + 12.0);
+                p.chip_right(r, Some("folder_open"), "Open folder", Act::Do("open-speech", String::new()));
+            }
+            p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
+            p.note("Talk to the primary buddy with the hotkey (default Alt+B). Say \"search for ...\", \"open ...\" with an app or game name, or \"message ... saying ...\" with a contact name. Contact names come from buddies.contacts in config.json. The message opens in the app, and you press Enter to send it.", 12.0);
         });
     }
 
@@ -908,6 +1082,66 @@ impl Settings {
                 self.field_ui(p, &format!("key-{id}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), ph, 17.0, false);
             }
         });
+        // saved Claude Code logins; Idle means Claude Code isn't installed. No look setting here, so no preview.
+        if !matches!(self.claude, Load::Idle) {
+            let rows = match &self.claude { Load::Ready(v) => v["accounts"].as_array().cloned().unwrap_or_default(), _ => vec![] };
+            p.h2("manage_accounts", "Claude accounts", "");
+            p.card(|p| {
+                for a in &rows {
+                    let n = a["n"].as_u64().unwrap_or(0);
+                    let ns = n.to_string();
+                    let email = a["email"].as_str();
+                    let title = match email {
+                        Some(e) if a["default"] == true => format!("{e} (default)"),
+                        Some(e) => e.to_string(),
+                        None => "Default (not signed in)".to_string(),
+                    };
+                    let active = a["active"] == true;
+                    let (chip, act) = if active { ("Active", Act::Do("noop", String::new())) }
+                        else if a["dead"] == true || email.is_none() { ("Sign in", Act::Do("claude-relogin", ns.clone())) }
+                        else { ("Use", Act::Do("claude-switch", ns.clone())) };
+                    // the delete control: an icon that arms a "Remove?" chip (second click removes), none for the default
+                    let armed_now = n > 0 && super::armed(&self.claude_arm, &ns, crate::hub::now_ms());
+                    let del = if n == 0 { 0.0 } else if armed_now { chip_w(p.c, "Remove?", false) + 12.0 } else { 48.0 };
+                    let wchip = chip_w(p.c, chip, false);
+                    let sub = crate::bridge::claude_acct::summary(a);
+                    let Some(r) = p.row_sub(44.0, "person", &sub, wchip + del) else { continue };
+                    p.left(r, "person", &title, &sub, wchip + del);
+                    let mut end = r.x + r.w;
+                    if n > 0 && armed_now {
+                        let w = chip_w(p.c, "Remove?", false);
+                        let act = p.act(Act::Do("claude-remove", ns.clone()));
+                        ui::chip(p.c, p.cx, end - w, r.y + 8.0, act, None, "Remove?", false);
+                    } else if n > 0 {
+                        let act = p.act(Act::Do("claude-arm", ns.clone()));
+                        ui::icon_btn(p.c, p.cx, R::new(end - 36.0, r.y + 4.0, 36.0, 36.0), act, "delete", IconKind::Plain, 20.0, false);
+                    }
+                    end -= del;
+                    let act = p.act(act);
+                    ui::chip(p.c, p.cx, end - wchip, r.y + 8.0, act, None, chip, active);
+                }
+                self.sw(p, "claude.autoSwitch", "Switch automatically", "When the active login nears its limit, the next one with room takes over. A banner gives you 20 seconds to click it and cancel", "sync_alt");
+                if self.get(p.cx, "claude.autoSwitch") == true {
+                    self.slider(p, "claude.threshold", "Switch at", Sl { min: 50.0, max: 100.0, step: 5.0, fmt: Fmt::PctInt }, "speed");
+                }
+                self.sw(p, "claude.restartSessions", "Restart open sessions when switching", "Each idle Claude session is stopped and resumed in a new window with the new account. Busy ones follow when they finish. Sessions in Orca are left to Orca", "restart_alt");
+                let sub = "Resumes each open Claude session with the account in use now";
+                let wnow = chip_w(p.c, "Restart now", false);
+                if let Some(r) = p.row_sub(44.0, "restart_alt", sub, wnow + 12.0) {
+                    p.left(r, "restart_alt", "Restart open sessions", sub, wnow + 12.0);
+                    let act = p.act(Act::Do("claude-restart", String::new()));
+                    ui::chip(p.c, p.cx, r.x + r.w - wnow, r.y + 8.0, act, None, "Restart now", false);
+                }
+                let sub = "Opens a terminal to sign in. The account appears here once signed in";
+                let wadd = chip_w(p.c, "Add account", false);
+                if let Some(r) = p.row_sub(44.0, "person_add", sub, wadd + 12.0) {
+                    p.left(r, "person_add", "Add an account", sub, wadd + 12.0);
+                    let act = p.act(Act::Do("claude-add", String::new()));
+                    ui::chip(p.c, p.cx, r.x + r.w - wadd, r.y + 8.0, act, None, "Add account", false);
+                }
+                p.note("Switching applies to terminals opened afterwards. Open Claude sessions keep their account.", 12.0);
+            });
+        }
         p.h2("translate", "Translator", "");
         p.card(|p| self.pick(p, "translator.target", LANGS.iter().map(|(k, v)| (json!(k), v.to_string())).collect(), "Translate into", "", "language", 260.0));
         p.h2("screen_record", "Screen recording", "");
@@ -936,43 +1170,41 @@ impl Settings {
     }
 
     fn keys(&mut self, p: &mut Pen) {
-        let lwin = p.cx.cfg.str("modKey") == "lwin";
-        let m = if lwin { "Win" } else { "Alt" };
-        let f = |s: &str| s.replace("{m}", m);
-        let groups: Vec<(&str, &str, Vec<(String, &str)>)> = vec![
-            ("dashboard", "Shell", vec![(f("{m}+A"), "Left sidebar: home, AI, translator, anime, football"), (f("{m}+N"), "Right sidebar: toggles, notifications, calendar"),
-                (f("{m}+I"), "Settings"), (f("{m}+/"), "This keybinds list"), (if lwin { "Win+Tab".into() } else { "Alt+`".into() }, "Overview"), ("Alt+Space".into(), "Launcher"),
-                (f("{m}+Ctrl+T"), "Pick a wallpaper and regenerate colors"), (f("{m}+Ctrl+D"), "Dark / light"), (f("{m}+Ctrl+R"), "Restart the bar and reload GlazeWM"),
-                (f("{m}+Shift+G"), "Game mode: free RAM (press again to restore)"),
-                ("Ctrl+PgUp / PgDn".into(), "Switch tabs in a sidebar or here"), ("Esc".into(), "Close a sidebar or this window")]),
-            ("apps", "Apps", vec![(f("{m}+Enter / {m}+T"), "Terminal"), (f("{m}+E"), "File Explorer"), (f("{m}+W"), "Edge"), (f("{m}+C"), "VS Code"),
-                (f("{m}+Shift+S"), "Screen snip"), (f("{m}+K"), "On-screen keyboard")]),
-            ("view_quilt", "Windows", vec![(f("{m}+Arrows"), "Focus the window in that direction"), (f("{m}+Shift+Arrows"), "Move the window in that direction (also to another monitor)"),
-                (f("{m}+V"), "Next window opens beside / below"), (f("{m}+R"), "Resize mode: arrows to resize, Esc or Enter to finish"), (f("{m}+- / {m}+="), "Narrower / wider"),
-                (f("{m}+Q"), "Close"), (f("{m}+F"), "Fullscreen"), (f("{m}+Shift+Space"), "Float / tile"), (f("{m}+Shift+T"), "Tile a floating window"), (f("{m}+M"), "Minimize")]),
-            ("grid_view", "Workspaces", vec![(f("{m}+1…0"), "Go to workspace 1–10"), (f("{m}+Shift+1…0"), "Send the window to workspace 1–10"),
-                (f("{m}+Ctrl+← / →"), "Previous / next workspace"), (f("{m}+PgUp / PgDn"), "Previous / next workspace"), (f("{m}+Ctrl+Shift+← / →"), "Move the workspace to another monitor")]),
-            ("build", "GlazeWM", vec![(f("{m}+Shift+P"), "Pause tiling (press again to resume)"), (f("{m}+Shift+W"), "Redraw all windows"), (f("{m}+Shift+E"), "Quit GlazeWM")]),
-        ];
-        for (ic, title, list) in groups {
-            p.h2(ic, title, "");
+        let cfg = self.keys_cfg(p.cx);
+        let rec = self.rec.clone();
+        let m = keymap::mod_name(&cfg);
+        for (n, (ic, group)) in keymap::GROUPS.iter().enumerate() {
+            p.h2(ic, group, if n == 0 { "Click a key, then press the new combo. Esc cancels" } else { "" });
             p.card(|p| {
-                let kw = list.iter().map(|(k, _)| p.c.g.measure(k, txt(13.0, 400)).0.ceil()).fold(0.0, f32::max) + 16.0;
-                let rh = 13.0 * LH + 6.0;
-                let h = list.len() as f32 * rh + (list.len() as f32 - 1.0) * 6.0;
-                if let Some(r) = p.row(h) {
-                    for (i, (k, d)) in list.iter().enumerate() {
-                        let y = r.y + i as f32 * (rh + 6.0);
-                        let kr = R::new(r.x, y, p.c.g.measure(k, txt(13.0, 400)).0.ceil() + 16.0, rh);
-                        p.c.rect(kr, 6.0, p.col("surfaceContainer"));
-                        p.c.text(k, R::new(kr.x + 8.0, y, kr.w, rh), txt(13.0, 400), p.col("onSurface"), Align::Left);
-                        p.c.text(d, R::new(r.x + kw + 14.0, y, r.w - kw - 14.0, rh), txt(13.0, 400), p.col("onSurface"), Align::Left);
+                for b in keymap::BINDS.iter().filter(|b| b.group == *group) {
+                    let labels: Vec<String> = keymap::keys_of(&cfg, b).into_iter().enumerate()
+                        .map(|(i, k)| if rec.as_ref().is_some_and(|r| r.0 == b.id && r.1 == i) { "Press a key…".to_string() } else { k }).collect();
+                    let reset = keymap::changed(&cfg, b);
+                    let right: f32 = labels.iter().map(|l| chip_w(p.c, l, false) + 6.0).sum::<f32>() + if reset { chip_w(p.c, "", true) + 6.0 } else { 0.0 };
+                    if let Some(mut r) = p.row(40.0) {
+                        p.left(r, "", b.label, "", right);
+                        if reset { let w = p.chip_right(r, Some("restart_alt"), "", Act::Do("key-reset", b.id.to_string())); r.w -= w + 6.0; }
+                        for (i, l) in labels.iter().enumerate().rev() {
+                            let w = p.chip_right(r, None, l, Act::Do("key-rec", format!("{}:{i}", b.id)));
+                            r.w -= w + 6.0;
+                        }
+                    }
+                }
+                if *group == "Workspaces" {
+                    for (k, d) in [(format!("{m}+1…0"), "Go to workspace 1–10"), (format!("{m}+Shift+1…0"), "Send the window to workspace 1–10")] {
+                        if let Some(r) = p.row(40.0) {
+                            let w = p.c.g.measure(&k, txt(13.0, 400)).0.ceil() + 16.0;
+                            p.left(r, "", d, "", w);
+                            let kr = R::new(r.x + r.w - w, r.y + (r.h - 24.0) / 2.0, w, 24.0);
+                            p.c.rect(kr, 6.0, p.col("surfaceContainer"));
+                            p.c.text(&k, R::new(kr.x + 8.0, kr.y, kr.w, kr.h), txt(13.0, 400), p.col("onSurface"), Align::Left);
+                        }
                     }
                 }
             });
         }
         p.lead_gap(12.0);
-        let note = "Games are left alone by GlazeWM (window rule in %USERPROFILE%\\.glzr\\glazewm\\config.yaml).";
+        let note = "Fixed: Ctrl+PgUp / PgDn switch tabs in a sidebar or here, Esc closes a sidebar or this window. Games are left alone by GlazeWM (window rule in %USERPROFILE%\\.glzr\\glazewm\\config.yaml).";
         let h = p.c.g.measure_wrapped(note, txt(14.0, 400), p.w - 8.0).ceil();
         if p.show(h) { p.c.para(note, R::new(p.x + 4.0, p.y, p.w - 8.0, h), txt(14.0, 400), p.col("onSurfaceVariant"), Align::Left); }
         p.y += h + 12.0;
@@ -1022,9 +1254,10 @@ impl Settings {
     fn about(&mut self, p: &mut Pen) {
         p.h2("info", "About", "");
         p.card(|p| {
-            if let Some(r) = p.row(40.0) {
-                let w = chip_w(p.c, "zor-ui", true);
-                p.left(r, "", "Zor UI", "A native shell for GlazeWM on Windows: bar, Dynamic Island, sidebars, buddies, dock. Some parts are ported from end4-pC by pctrade (GPL-3.0)", w);
+            let w = chip_w(p.c, "zor-ui", true);
+            let sub = "A native shell for GlazeWM on Windows: bar, Dynamic Island, sidebars, buddies, dock. Some parts are ported from end4-pC by pctrade (GPL-3.0)";
+            if let Some(r) = p.row_sub(40.0, "", sub, w) {
+                p.left(r, "", "Zor UI", sub, w);
                 p.chip_right(r, Some("open_in_new"), "Credit: end4-pC", Act::Do("url", "https://github.com/pctrade/end4-pC".into()));
             }
             if let Some(r) = p.row(40.0) {
@@ -1054,21 +1287,25 @@ impl Settings {
         if !self.imgs.contains_key(&key) {
             if !path.exists() { return None; }
             if self.imgs.len() > 200 { self.imgs.clear(); }
-            self.imgs.insert(key.clone(), g.load_image(path, pw, ph));
+            // a failed decode is not remembered: one bad read must not blank the picture until restart
+            let img = g.load_image(path, pw, ph)?;
+            self.imgs.insert(key.clone(), Some(img));
         }
         self.imgs.get(&key)?.as_ref()
     }
 
-    /// `pic` drawn into `r` with rounded corners.
-    pub fn picture(&mut self, p: &mut Pen, path: &std::path::Path, r: R, radius: f32) {
+    /// `pic` drawn into `r` with rounded corners. False when the file is missing or does not decode (nothing was drawn).
+    pub fn picture(&mut self, p: &mut Pen, path: &std::path::Path, r: R, radius: f32) -> bool {
         let scale = p.c.scale;
         let g = p.c.g;
-        if let Some(img) = self.pic(g, scale, path, r.w, r.h) { p.c.clip_round(r, radius, |c| c.image(img, r, 1.0)); }
+        let Some(img) = self.pic(g, scale, path, r.w, r.h) else { return false };
+        p.c.clip_round(r, radius, |c| c.image(img, r, 1.0));
+        true
     }
 
     /// `.grid`: auto-fill columns of at least 190 px, 10 px apart.
     pub fn grid(&mut self, p: &mut Pen, tiles: Vec<Tile>) {
-        p.lead_gap(12.0);
+        p.lead_gap(ROW_GAP);
         let cols = (((p.w + 10.0) / 200.0).floor() as usize).max(1);
         let tw = (p.w - 10.0 * (cols as f32 - 1.0)) / cols as f32;
         let th = (tw * 9.0 / 16.0).round() + 52.0;
@@ -1191,6 +1428,20 @@ fn monitor_caption(name: &str, i: usize, w: i32, h: i32, custom: bool) -> (Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_picture_decode_is_retried_not_cached() {
+        use crate::gfx::Gfx;
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assetsonts"), &std::env::temp_dir()).unwrap();
+        let mut st = crate::settings::Settings::new((1100.0, 700.0));
+        let f = std::env::temp_dir().join("zor-retry-probe.png");
+        std::fs::write(&f, b"not a picture").unwrap();
+        assert!(st.pic(&g, 1.0, &f, 8.0, 8.0).is_none());
+        let ok = std::fs::read(crate::conf::pack_dir().join(r"images\greet-1793799724.webp"));
+        if let Ok(b) = ok { std::fs::write(&f, b).unwrap(); assert!(st.pic(&g, 1.0, &f, 8.0, 8.0).is_some(), "second try decodes"); }
+        let _ = std::fs::remove_file(&f);
+    }
+
     use super::*;
 
     fn model_list() -> Vec<(String, String)> {
@@ -1252,7 +1503,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "contacts", "services", "usage", "about"]);
+        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "contacts", "creator", "voice", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }
@@ -1264,9 +1515,92 @@ mod tests {
     }
 }
 
+/// Height of a box of three poses whose pictures are at most `max_h` tall: room for them above the feet, the title above
+/// that and the labels below.
+fn stances_h(max_h: f32) -> f32 { max_h + 50.0 }
+
+/// A box with a buddy standing, walking and sitting, drawn by the bar's own code (`buddy::draw_preview`); `what` is how he looks
+/// and where his pictures are kept, or None to show `empty` in the box instead.
+fn stances_box(p: &mut Pen, title: &str, what: Option<(&crate::buddy::Appearance, &mut crate::buddy::Sprites)>, empty: &str, max_h: f32) {
+    let h = stances_h(max_h);
+    let Some(r) = p.row(h + 12.0) else { return };
+    let b = R::new(r.x + 12.0, r.y + 6.0, r.w - 24.0, h);
+    p.c.rect(b, 12.0, p.col("surfaceContainer"));
+    p.c.text(title, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
+    let Some((ap, sprites)) = what else {
+        p.c.text(empty, R::new(b.x + 10.0, b.y + 24.0, b.w - 20.0, h - 30.0), txt(13.0, 400), p.col("onSurfaceVariant"), Align::Center);
+        return;
+    };
+    let feet = b.y + h - 30.0;
+    for (i, (stance, label)) in [("stand", "Standing"), ("walk", "Walking"), ("sit", "Sitting")].into_iter().enumerate() {
+        let x = b.x + b.w * (i as f32 * 2.0 + 1.0) / 6.0;
+        crate::buddy::draw_preview(p.c, ap, sprites, x, feet, stance, p.t, max_h);
+        p.c.text(label, R::new(x - 40.0, b.y + h - 17.0, 80.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Center);
+    }
+}
+
+/// What the buddy preview calls a buddy: the name typed for the slot, else the character's own.
+fn buddy_label<'a>(name: &'a str, character: &'a str) -> &'a str { let n = name.trim(); if n.is_empty() { character } else { n } }
+
 #[cfg(test)]
 mod page_header_tests {
     use super::*;
+
+    /// Height of the creator page laid out with this config.
+    fn creator_height(cfg: &str) -> f32 {
+        use crate::{app::Ctx, gfx::{Canvas, Gfx}};
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0u8; 800 * 800 * 4];
+        let mut c = Canvas::new(&g, &mut px, 800, 800, 1.0, 0).unwrap();
+        let mut cx = Ctx::new(false);
+        cx.cfg = conf::Config::parse(cfg);
+        let mut st = Settings::new((800.0, 800.0)).on_page("creator");
+        let mut p = Pen::new(&mut c, &cx, 0.0, 0.0, 600.0, 0.0, 0.0);
+        p.dry = true;
+        st.creator_page(&mut p);
+        p.y
+    }
+
+    #[test]
+    fn the_creator_page_lays_out_the_same_with_or_without_a_picture() {
+        let empty = creator_height("{}");
+        assert!(empty > 600.0, "preview and five sections: {empty}");
+        assert_eq!(creator_height(r#"{"buddies":{"make":{"image":"buddy-make-1.png"}}}"#), empty, "a picture changes what the preview shows, not how tall it is");
+        // the default height, 64, is already taller than a top bar allows, so it carries the note about that
+        assert_eq!(creator_height(r#"{"buddies":{"make":{"height":120}}}"#), empty, "a tall buddy has the top-bar note too");
+        assert!(creator_height(r#"{"buddies":{"make":{"height":54}}}"#) < empty, "one that fits a top bar needs no note");
+    }
+
+    #[test]
+    fn the_monitor_card_is_measured_with_its_brightness_sliders() {
+        use crate::{app::Ctx, gfx::{Canvas, Gfx}};
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0u8; 800 * 800 * 4];
+        let mut c = Canvas::new(&g, &mut px, 800, 800, 1.0, 0).unwrap();
+        let cx = Ctx::new(false);
+        let mut st = Settings::new((800.0, 800.0));
+        let mon = |i: u32, n: &str| json!({ "i": i, "w": 1920, "h": 1080, "name": n, "file": "" });
+        st.wmons = Load::Ready(vec![mon(0, "A"), mon(1, "B")]);
+        st.mons = Load::Ready(vec!["0|A".into(), "1|B".into()]);
+        let mut p = Pen::new(&mut c, &cx, 0.0, 0.0, 600.0, 0.0, 0.0);
+        p.dry = true; // nothing is on screen in the measuring pass, yet the sliders still take their room
+        assert!(st.monitor_wallpapers(&mut p));
+        assert!(p.measured[0] >= 2.0 * (PREVIEW_H + 24.0 + 40.0), "two pictures and two sliders: {}", p.measured[0]);
+    }
+
+    #[test]
+    fn the_boxes_leave_room_for_the_tallest_picture() {
+        assert!(stances_h(64.0) >= 64.0 + 30.0 + 14.0 + 6.0, "feet 30 above the bottom for the sitting legs and labels, title above the head");
+        assert!(stances_h(100.0) > stances_h(64.0));
+    }
+
+    #[test]
+    fn the_preview_names_the_buddy_by_its_own_name_else_the_characters() {
+        assert_eq!(buddy_label("  Kuro ", "Gojo"), "Kuro");
+        assert_eq!((buddy_label("   ", "Gojo"), buddy_label("", "Gojo")), ("Gojo", "Gojo"));
+    }
 
     fn buddies_height(saved: bool) -> f32 {
         use crate::{app::Ctx, gfx::{Canvas, Gfx}};
@@ -1316,6 +1650,12 @@ mod page_header_tests {
         let two = ["A=whatsapp:1", "B=discord:2"];
         assert!(contacts_height(&two, "", true) > contacts_height(&[], "", true), "a row per contact");
         assert!(contacts_height(&two, "A=whatsapp:1", true) > contacts_height(&two, "", true) + 30.0, "an 'Editing A' row with a Cancel button appears");
+    }
+
+    #[test]
+    fn the_speech_dropdown_line_shows_size_and_whether_a_download_is_needed() {
+        assert_eq!(speech_option_label("Parakeet TDT v3", 670, true), "Parakeet TDT v3 · 670 MB");
+        assert_eq!(speech_option_label("Parakeet TDT v2", 661, false), "Parakeet TDT v2 · 661 MB · download");
     }
 
     #[test]

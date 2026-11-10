@@ -14,7 +14,7 @@ use std::cell::Cell;
 use windows::Win32::{Foundation::{FILETIME, SYSTEMTIME}, System::Time::{FileTimeToSystemTime, SystemTimeToFileTime}};
 use std::sync::{Arc, Mutex};
 
-const W: f32 = 400.0; // the panel; the window adds 12 px each side for the shadow
+const W: f32 = crate::tokens::ISLAND_W; // the panel; the window adds 12 px each side for the shadow
 const PAD: f32 = 15.0; // 1 px border + 14 px padding
 const SEP: f32 = 25.0; // gap 12 + border 1 + padding 12 between sections
 const LYR_H: f32 = 70.0;
@@ -28,11 +28,16 @@ const TIMER_A: u32 = 6;
 const TIMER_B: u32 = 7;
 const CLEAR: u32 = 8;
 const LYRICS: u32 = 9;
-/// Lines the buddy's question gets.
-const ASK_LINES: f32 = 4.0;
+/// Most lines the buddy's question shows before it scrolls.
+const ASK_MAX_LINES: f32 = 8.0;
 const ALLOW: u32 = 10;
 const DENY: u32 = 11;
 const AGENT_CLEAR: u32 = 12;
+const ASK_Q: u32 = 13;
+const ASK_BOX: u32 = 14;
+const ASK_SEND: u32 = 15;
+const ASK_MIC: u32 = 16;
+const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
 
 enum Sec { Ask(String), Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
@@ -52,15 +57,27 @@ pub struct Island {
     tkind: (bool, bool),
     /// frame_ms: 50 while the wave moves, 100 while the recording dot pulses.
     frames: Cell<u32>,
+    /// The reply box under the buddy's question, whether it has the keyboard, and the question's scroll and full height.
+    reply: ui::TextBox,
+    reply_focus: bool,
+    ask_scroll: ui::Scroll,
+    ask_full: f32,
 }
 
 impl Island {
     /// `area`: unused, the panel sizes itself.
     pub fn new(_area: (f32, f32)) -> Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
-            seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0) }
+            seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
+            reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0 }
     }
 }
+
+/// Height the question gets: all of it, from one line up to `ASK_MAX_LINES` (it scrolls past that).
+fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
+
+/// Height of the whole ask section for a question that wraps to `full` px.
+fn ask_section_h(full: f32) -> f32 { 16.0 + 10.0 + ask_h(full) + 12.0 + ASK_BOX_H + 10.0 + 32.0 }
 
 /// island-panel.js `ago`: "now", "5m", "3h", "2d".
 pub fn ago(now: f64, t: f64) -> String {
@@ -126,10 +143,10 @@ fn add_secs(st: &SYSTEMTIME, secs: i64) -> SYSTEMTIME {
 fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { 14.0 + if icon { 24.0 } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + 14.0 }
 
 impl Island {
-    fn plan(&self, cx: &Ctx) -> Vec<(Sec, f32)> {
+    fn plan(&self, g: &Gfx, cx: &Ctx) -> Vec<(Sec, f32)> {
         let mut v = vec![];
-        // the buddy wants a yes or no before he drives (drive.rs): first, always
-        if let Some(q) = crate::drive::pending() { v.push((Sec::Ask(q), 16.0 + 10.0 + lh(13.0) * ASK_LINES + 12.0 + 32.0)); }
+        // the buddy wants an answer before he drives (drive.rs): first, always
+        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Ask(q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
@@ -207,12 +224,12 @@ impl Island {
         // controls
         let cy = y + 134.0;
         let cx0 = x + (w - 168.0) / 2.0;
-        ui::icon_btn(c, cx, R::new(cx0, cy + 8.0, 44.0, 44.0), PREV, "skip_previous", ui::IconKind::Plain, 26.0, true);
+        ui::icon_btn(c, cx, R::new(cx0, cy + 8.0, crate::tokens::TRANSPORT_BTN, crate::tokens::TRANSPORT_BTN), PREV, "skip_previous", ui::IconKind::Plain, 26.0, true);
         let big = R::new(cx0 + 54.0, cy, 60.0, 60.0);
-        c.rect(big, 20.0, t.c("primary"));
-        if c.hit(big, PLAY) { c.rect(big, 20.0, alpha(t.c("onPrimary"), 0.08)); }
+        c.rect(big, 20.0, ui::accent(cx));
+        if c.hit(big, PLAY) { c.rect(big, 20.0, alpha(t.c("onPrimary"), crate::tokens::HOVER_A)); }
         c.icon(if m.playing { "pause" } else { "play_arrow" }, big, ico(30.0, true), t.c("onPrimary"));
-        ui::icon_btn(c, cx, R::new(cx0 + 124.0, cy + 8.0, 44.0, 44.0), NEXT, "skip_next", ui::IconKind::Plain, 26.0, true);
+        ui::icon_btn(c, cx, R::new(cx0 + 124.0, cy + 8.0, crate::tokens::TRANSPORT_BTN, crate::tokens::TRANSPORT_BTN), NEXT, "skip_next", ui::IconKind::Plain, 26.0, true);
         if lyr > 0.0 { self.lyrics(c, cx, R::new(x, cy + 70.0, w, lyr), m, pos); }
     }
 
@@ -256,14 +273,27 @@ impl Island {
         }
     }
 
-    /// The buddy's question with Allow and Deny. Answering is the only way a take-over starts or a risky click goes through.
+    /// The buddy's question with Allow, Deny and a box to answer in words. Answering is the only way a take-over starts or a risky click goes through.
     fn ask(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, q: &str) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
         c.text("The buddy is asking", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         let y = y + 26.0;
-        c.para(q, R::new(x, y, w, lh(13.0) * ASK_LINES), txt(13.0, 400), t.c("onSurface"), Align::Left);
-        let y = y + lh(13.0) * ASK_LINES + 12.0;
+        let f = txt(13.0, 400);
+        self.ask_full = c.g.measure_wrapped(q, f, w);
+        let qr = R::new(x, y, w, ask_h(self.ask_full));
+        c.hit(qr, ASK_Q);
+        let full = self.ask_full;
+        self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
+        let y = y + qr.h + 12.0;
+        let br = R::new(x, y, w, ASK_BOX_H);
+        c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
+        c.hit(br, ASK_BOX);
+        self.reply.draw(c, cx, R::new(br.x + 14.0, br.y, br.w - 14.0 - 72.0, br.h), f, "Type an answer, or tap the mic", self.reply_focus);
+        let kind = if crate::pill::active() { ui::IconKind::Filled } else { ui::IconKind::Plain }; // filled while it listens
+        ui::icon_btn(c, cx, R::new(br.x + br.w - 70.0, br.y + 2.0, 32.0, 32.0), ASK_MIC, "mic", kind, 18.0, false);
+        ui::icon_btn(c, cx, R::new(br.x + br.w - 34.0, br.y + 2.0, 32.0, 32.0), ASK_SEND, "send", ui::IconKind::Plain, 18.0, false);
+        let y = y + ASK_BOX_H + 10.0;
         let (la, ld) = ("Allow", "Deny");
         let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
         ui::chip(c, cx, x + w - wa - 8.0 - wd, y, ALLOW, Some("check"), la, true);
@@ -413,8 +443,8 @@ impl Island {
 }
 
 impl View for Island {
-    fn size(&self, _: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
-        (W + 24.0, Self::content_h(&self.plan(cx)) + 2.0 * PAD + 24.0)
+    fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
+        (W + 24.0, Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 24.0)
     }
     fn key(&self, _: &Ctx) -> String { format!("{}", (hub::now_ms() / 1000.0) as u64) }
     fn frame_ms(&self) -> u32 {
@@ -423,12 +453,14 @@ impl View for Island {
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.fetch_notifs(cx);
-        let plan = self.plan(cx);
+        let plan = self.plan(c.g, cx);
         let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
         ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
         let lyr = Self::lyrics_h(cx);
         let mut y = 12.0 + PAD;
-        self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 } else { 0 });
+        if !plan.iter().any(|p| matches!(p.0, Sec::Ask(_))) && !self.reply.text.is_empty() { self.reply.set(""); self.reply_focus = false; } // answered by voice: the box starts empty next time
+        self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 }
+            else if (self.reply_focus || crate::pill::active()) && plan.iter().any(|p| matches!(p.0, Sec::Ask(_))) { 500 } else { 0 }); // the reply caret blinks, the mic fills while listening
         if plan.is_empty() {
             c.text("Nothing to show. Pick sections in Settings > Dynamic Island", R::new(x, y, W - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left);
         }
@@ -457,6 +489,9 @@ impl View for Island {
                     crate::drive::answer(i == ALLOW);
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
+                ASK_SEND => self.send_reply(cx),
+                // the same recording as the hotkey; while a question waits, what you say answers it (assist::listen)
+                ASK_MIC => cx.actions.push(Action::Command("buddy listen".into())),
                 PREV => media::control_of(&id, "previous"),
                 PLAY => media::control_of(&id, "togglePlayPause"),
                 NEXT => media::control_of(&id, "next"),
@@ -494,8 +529,26 @@ impl View for Island {
                 }
             }
             Input::Wheel(LYRICS, d) => self.scroll.wheel(d, self.plain_h, LYR_H),
+            Input::Wheel(ASK_Q, d) => self.ask_scroll.wheel(d, self.ask_full, lh(13.0) * ASK_MAX_LINES),
+            Input::Drag(ASK_BOX, x, y, Phase::Start) => { self.reply.press(x, y); self.reply_focus = true; }
+            Input::Focus(f) => self.reply_focus = f && self.reply_focus,
+            Input::Key { vk, ctrl, shift, alt } if self.reply_focus => {
+                if self.reply.key(vk, ctrl, shift, alt) == ui::Edit::Submit { self.send_reply(cx); }
+            }
+            Input::Char(ch) if self.reply_focus => { self.reply.ch(ch); }
             _ => {}
         }
+    }
+}
+
+impl Island {
+    /// Sends what you typed to the buddy as your answer, and closes the panel. An empty box sends nothing.
+    fn send_reply(&mut self, cx: &mut Ctx) {
+        if self.reply.text.trim().is_empty() { return; }
+        crate::drive::reply(&self.reply.text);
+        self.reply.set("");
+        self.reply_focus = false;
+        cx.actions.push(Action::Close("island-panel".into()));
     }
 }
 
@@ -511,6 +564,23 @@ mod tests {
         assert_eq!(Island::lyrics_h_for(&Lyr::Missing, &tab), 0.0); // browser tab: nothing at all
         assert_eq!(Island::lyrics_h_for(&Lyr::Searching, &player), LYR_H);
         assert_eq!(Island::lyrics_h_for(&Lyr::Found(std::sync::Arc::new(Lyrics::Plain(vec![]))), &player), LYR_H);
+    }
+
+    #[test]
+    fn the_question_gets_all_its_lines_up_to_the_cap() {
+        let one = lh(13.0);
+        assert_eq!(ask_h(0.0), one, "an empty question still keeps one line");
+        assert_eq!(ask_h(one * 3.0), one * 3.0, "a long question is not cut at four lines any more");
+        assert_eq!(ask_h(one * 30.0), one * ASK_MAX_LINES, "past the cap it scrolls");
+        assert_eq!(ask_section_h(one * 30.0) - ask_section_h(one * ASK_MAX_LINES), 0.0);
+        assert!(ask_section_h(one * 3.0) > ask_section_h(one), "the panel grows with the question");
+    }
+
+    #[test]
+    fn the_mic_button_starts_the_same_listening_as_the_hotkey() {
+        let mut cx = Ctx::new(false);
+        Island::new((0.0, 0.0)).input(Input::Click(ASK_MIC, Btn::Left), &mut cx);
+        assert!(matches!(cx.actions.as_slice(), [Action::Command(c)] if c == "buddy listen"), "{}", cx.actions.len());
     }
 
     #[test]

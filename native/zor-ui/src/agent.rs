@@ -852,12 +852,8 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     crate::browse::new_request();
     CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::log::line(&format!("buddy request: {}", assist::short(said, 200)));
-    let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
-    let browser = crate::browse::enabled(cfg);
-    let (steps, secs) = if browser { (crate::browse::MAX_STEPS, crate::browse::MAX_SECS) } else { (MAX_STEPS, MAX_SECS) };
     history::restore(&TURNS);
     let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
-    let confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
     let timing = state::Timing::start();
     // what the buddy asked last time, if anything: this request is its answer
     let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -887,17 +883,48 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     }
     if let Some(q) = pending { note = format!("(The buddy asked: \"{q}\". This request is the answer.) {note}"); }
     let framed = request_text_with(cfg, said, &note);
+    tasks::recover_once();
+    run_task(cfg, said, &framed, &history, &timing, Start::New)
+}
+
+/// How a run of `run_task` starts: a new task (its row is made there), or an interrupted task resumed on its own row.
+pub enum Start { New, Resume { id: i64, prior: Vec<plan::Entry>, plan: plan::Plan, next: usize } }
+
+/// Runs one request as a task: the plan, the tool loop over the model chain, and the verdict. `framed` is the text the model gets.
+fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &state::Timing, start: Start) -> Result<String, String> {
+    let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
+    let browser = crate::browse::enabled(cfg);
+    let (steps, secs) = if browser { (crate::browse::MAX_STEPS, crate::browse::MAX_SECS) } else { (MAX_STEPS, MAX_SECS) };
+    let confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
     // each tool's check from the verifier, in the order the tools ran
     let evidence: std::cell::RefCell<Vec<verifier::Check>> = std::cell::RefCell::new(vec![]);
     // acting calls that failed in this request; they are not run again
     let failed = std::cell::RefCell::new(std::collections::HashSet::<String>::new());
     // the task: saved in the database, and each state change is checked by the state machine
-    tasks::recover_once();
-    let task_id = tasks::begin(said);
+    let (task_id, resumed, plan0, next0, record0) = match start {
+        Start::New => { let id = tasks::begin(said); (id, false, None, 0, plan::Steps::new(id, &tasks::interrupted_steps())) }
+        Start::Resume { id, prior, plan, next } => (Some(id), true, Some(plan), next, plan::Steps::resumed(Some(id), prior, &tasks::interrupted_steps())),
+    };
     *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner()) = task_id;
     provider::reset();
     // each tool step is saved on the task; the steps of interrupted tasks decide what is not repeated
-    let record = std::cell::RefCell::new(plan::Steps::new(task_id, &tasks::interrupted_steps()));
+    let record = std::cell::RefCell::new(record0);
+    let progress = std::cell::RefCell::new(plan::Progress::new(plan0, next0, resumed));
+    // a model is usable when its provider needs no saved key or has one (provider.rs); routing never picks an unusable strong or fallback model
+    let usable = |id: &str| crate::bridge::web::provider_of(id).map_or(true, |p| provider::usable(&p, |k| !crate::bridge::web::secret_get(k).is_empty()));
+    // the model: the routed one, then the fallbacks, each tried only if the one before failed before any tool ran
+    let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model, &usable), &usable);
+    // a new multi-step request gets its plan before its first tool step; that planning reply is the only extra model call
+    if !resumed && plan::wanted(said) {
+        match timing.model(|| plan::plan_if_wanted(said, &chain[0], |c| assist::chat(cfg, c, 30))) {
+            Some(p) => { tasks::save_plan(task_id, &p.to_json()); *progress.borrow_mut() = plan::Progress::new(Some(p), 0, false); }
+            None => record.borrow_mut().note("plan", "no plan: the planning reply was empty or unreadable, so the task runs as before"),
+        }
+    }
+    let framed = match progress.borrow().plan() {
+        Some(p) => format!("{framed} Plan (follow it, one step at a time): {}", p.to_json()),
+        None => framed.to_string(),
+    };
     let task = std::cell::RefCell::new(state::Task::new());
     let step = |s: state::TaskStatus| {
         let calls = evidence.borrow().len() as i64;
@@ -910,6 +937,18 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         step(state::TaskStatus::Running);
         ok
     };
+    let halt = || progress.borrow().halt();
+    // the one re-plan: a planning call with the request, the plan so far, the steps done and the failure. Its text goes to the model.
+    let replan = |why: &str| -> String {
+        let (old, done) = { let p = progress.borrow(); (p.plan().cloned(), p.next()) };
+        let new = old.and_then(|o| plan::replan(&chain[0], said, &o, done, why, |c| timing.model(|| assist::chat(cfg, c, 30))));
+        let text = match &new {
+            Some(p) => { record.borrow_mut().note("replanned", &p.objective); tasks::save_plan(task_id, &p.to_json()); format!("New plan: {}", p.to_json()) }
+            None => { crate::log::line("buddy replan: no new plan came back, so the task ends"); String::new() }
+        };
+        progress.borrow_mut().set_plan(new);
+        text
+    };
     let run_tool = |c: &Call| {
         if matches!(c, Call::TakeOver(_)) && !take_over_asked(said) {
             crate::log::line("buddy take-over refused: the request did not ask for one");
@@ -920,6 +959,15 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
             crate::log::line("buddy repeat refused: an acting call that already failed");
             evidence.borrow_mut().push(verifier::Check::Failed);
             return Err("That already failed once in this request, so I didn't try it again. Try another way.".to_string());
+        }
+        // the call must fit the next planned step: a change against a read-only step is refused, and a resumed task never changes anything (plan.rs)
+        let gate = progress.borrow_mut().gate(c);
+        match gate {
+            plan::Check::Allow => {}
+            plan::Check::Refuse(why) => { crate::log::line("buddy plan refused: a change against a read-only step"); return Err(why); }
+            plan::Check::Wait => { crate::log::line("buddy plan: the next step changes something, waiting for the user"); return Err(plan::WAITING.to_string()); }
+            plan::Check::Replan => { let note = replan("the planned step was refused twice"); return Err(format!("The plan does not fit what you tried. {note}")); }
+            plan::Check::GiveUp => return Err(plan::GAVE_UP.to_string()),
         }
         // a changing step an interrupted task already tried is not run again (plan.rs)
         if let Some(why) = record.borrow_mut().begin(c) {
@@ -944,38 +992,43 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
             if let Some(h) = diagnose::hint(e) { crate::log::line(&format!("buddy failure hint: {h}")); res = Err(format!("{e} {h}")); }
         }
         evidence.borrow_mut().push(check);
+        // a failed tool step re-plans once; a second failure ends the task (plan.rs)
+        let failed_with = match &res { Err(e) if !declined.get() => Some(e.clone()), _ => None };
+        if let Some(e) = failed_with {
+            if progress.borrow_mut().failure() == plan::Check::Replan { let note = replan(&e); res = Err(format!("{e} {note}")); }
+        }
         res
     };
-    // a model is usable when its provider needs no saved key or has one (provider.rs); routing never picks an unusable strong or fallback model
-    let usable = |id: &str| crate::bridge::web::provider_of(id).map_or(true, |p| provider::usable(&p, |k| !crate::bridge::web::secret_get(k).is_empty()));
-    // the model: the routed one, then the fallbacks, each tried only if the one before failed before any tool ran
-    let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model, &usable), &usable);
     let mut r: Result<String, String> = Err(String::new());
     for (i, m) in chain.iter().enumerate() {
         let model: &str = m;
         r = if native_on(cfg, model) {
             let system = system_for(NATIVE_SYSTEM, cfg);
             let budget = budget_for(cfg, model, &system);
-            native::run_native_loop(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs), budget,
-                |convo| timing.model(|| if let Some(e) = stop_check() { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
+            native::run_native_loop(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
+                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
                 |c| run_tool(c))
         } else {
             let system = build_system_prompt(cfg);
             let budget = budget_for(cfg, model, &system);
-            run_loop_with(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs), budget,
-                |convo| timing.model(|| if let Some(e) = stop_check() { Err(e) } else { assist::chat(cfg, convo, 30) }),
+            run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
+                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::chat(cfg, convo, 30) }),
                 |c| run_tool(c))
         };
-        if i + 1 == chain.len() || !routing::should_fall_back(&r, !evidence.borrow().is_empty()) { break; }
+        if i + 1 == chain.len() || halt().is_some() || !routing::should_fall_back(&r, !evidence.borrow().is_empty()) { break; }
         crate::log::line(&format!("buddy fallback: {model} could not answer, trying the next model"));
     }
     // the verifier: a tool's success is not the request's success; say what could not be confirmed
     let checks: Vec<verifier::Check> = evidence.borrow().clone();
-    let (verdict, end) = outcome(&r, &checks);
+    let (verdict, mut end) = outcome(&r, &checks);
+    // a task that waits for the user stays Interrupted, with the reason as its verdict
+    let waiting = progress.borrow().waiting();
+    if waiting { end = state::TaskStatus::Interrupted; }
     crate::log::line(&format!("buddy verdict: {verdict:?} from {} tool result(s)", checks.len()));
-    // every request that ends on its own is verified first, then ends in its verdict; a cancel skips Verifying (it can't be cancelled)
-    if end != state::TaskStatus::Cancelled { step(state::TaskStatus::Verifying); }
-    if task.borrow_mut().to(end) { tasks::set(task_id, end, &format!("{verdict:?}"), checks.len() as i64); }
+    // every request that ends on its own is verified first, then ends in its verdict; a cancel skips Verifying (it can't be cancelled), and so does a wait
+    if end != state::TaskStatus::Cancelled && end != state::TaskStatus::Interrupted { step(state::TaskStatus::Verifying); }
+    let verdict_text = if waiting { plan::WAITING.to_string() } else { format!("{verdict:?}") };
+    if task.borrow_mut().to(end) { tasks::set(task_id, end, &verdict_text, checks.len() as i64); }
     // the tokens the whole request used, over all its model calls (provider.rs)
     tasks::save_usage(task_id, provider::request_total());
     let r = with_verdict_note(r, verdict, &checks);
@@ -988,6 +1041,32 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     if let (Ok(answer), Ok(mut t)) = (&r, TURNS.lock()) { remember(&mut t, said, answer, Instant::now()); }
     if let Ok(answer) = &r { history::save(said, answer); }
     r
+}
+
+/// On app start: resumes the newest interrupted task that has a plan, once, from its next unfinished step. A next step that changes
+/// something is not run: the task stays Interrupted and its verdict says why. Runs on its own thread so start is not held up.
+pub fn resume_on_start() {
+    std::thread::spawn(|| {
+        tasks::recover_once();
+        let Some(c) = tasks::resume_candidate() else { return };
+        let Some(p) = plan::parse(&c.plan) else { return };
+        let prior = plan::decode(&c.steps);
+        match plan::resume_action(&p, &prior) {
+            plan::Resume::Run(next) => {
+                if !tasks::resume_mark(c.id) { return; }
+                crate::log::line(&format!("buddy resume: task {} from planned step {}", c.id, next + 1));
+                let cfg = Config::load();
+                let note = format!("This request was interrupted. Continue it from planned step {}: {}. Earlier steps are done; do not repeat them.", next + 1, p.steps[next].does);
+                let framed = request_text_with(&cfg, &c.request, &note);
+                crate::browse::new_request();
+                CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+                let timing = state::Timing::start();
+                let _ = run_task(&cfg, &c.request, &framed, &[], &timing, Start::Resume { id: c.id, prior, plan: p, next });
+            }
+            plan::Resume::Wait => { crate::log::line(&format!("buddy resume: task {} waits for the user", c.id)); tasks::wait(c.id); }
+            plan::Resume::Skip => {}
+        }
+    });
 }
 
 #[cfg(test)]

@@ -2,9 +2,146 @@
 //! (a message sent, a key pressed, a power action) is refused when an interrupted task already tried it, so an app restart
 //! never repeats it. Reads may repeat. The AI picks the route after a failure; this file only records the steps and guards them.
 
-use super::{tasks, Call};
+use super::{routing, tasks, Call};
 use crate::assist;
 use serde_json::{json, Value};
+
+/// The most steps a plan may have; a longer reply is cut to this.
+pub const MAX_PLAN_STEPS: usize = 8;
+/// Note keys in the step record start with NOTE, so they are never counted as tool steps.
+const NOTE: &str = "note:";
+const REPLANNED: &str = "note:replanned";
+pub const WAITING: &str = "waiting: the next step changes something; ask the user";
+pub const GAVE_UP: &str = "I couldn't finish that as planned, so I stopped.";
+const PLAN_SYSTEM: &str = "You plan one request for a desktop buddy. Reply with only a JSON object: {\"objective\": string, \"done_when\": string, \"steps\": [{\"does\": string, \"expect\": string, \"side_effect\": bool}]}. At most 8 steps, in order. side_effect is true for a step that changes something outside the buddy (sends, opens, plays, sets, power); false for a lookup or a read.";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanStep { pub does: String, pub expect: String, pub side: bool }
+
+/// A plan declared before a multi-step request runs. Stored on the task row (`tasks.plan`) as `to_json`, the shape the model sends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan { pub objective: String, pub done_when: String, pub steps: Vec<PlanStep> }
+
+impl Plan {
+    pub fn to_json(&self) -> String {
+        json!({ "objective": self.objective, "done_when": self.done_when,
+            "steps": self.steps.iter().map(|s| json!({ "does": s.does, "expect": s.expect, "side_effect": s.side })).collect::<Vec<_>>() }).to_string()
+    }
+}
+
+/// Reads a plan from a model reply or a stored row. Text around the JSON (code fences included) is skipped. Unreadable text, no
+/// steps, or only blank steps give None, and the task runs without a plan. A step with no `side_effect` flag counts as a change.
+pub fn parse(text: &str) -> Option<Plan> {
+    let t = text.trim();
+    let (a, b) = (t.find('{')?, t.rfind('}')?);
+    let v: Value = serde_json::from_str(t.get(a..=b)?).ok()?;
+    let steps: Vec<PlanStep> = v["steps"].as_array()?.iter().filter_map(|s| {
+        let does = s["does"].as_str()?.trim();
+        (!does.is_empty()).then(|| PlanStep { does: does.to_string(), expect: s["expect"].as_str().unwrap_or("").trim().to_string(), side: s["side_effect"].as_bool().unwrap_or(true) })
+    }).take(MAX_PLAN_STEPS).collect();
+    if steps.is_empty() { return None; }
+    Some(Plan { objective: v["objective"].as_str().unwrap_or("").trim().to_string(), done_when: v["done_when"].as_str().unwrap_or("").trim().to_string(), steps })
+}
+
+/// Whether a request gets a plan first: the same multi-step check that picks the strong model. Any other request makes no call.
+pub fn wanted(said: &str) -> bool { routing::looks_multi_step(said) }
+
+fn convo(model: &str, prompt: &str) -> String {
+    json!({ "model": model, "system": PLAN_SYSTEM, "temperature": 0.2, "messages": [{ "role": "user", "content": prompt }] }).to_string()
+}
+
+/// One planning call: `ask` takes the conversation JSON `assist::chat` takes. A failed call or an unreadable reply is no plan.
+fn call(model: &str, prompt: &str, ask: impl FnOnce(&str) -> Result<String, String>) -> Option<Plan> {
+    parse(&ask(&convo(model, prompt)).ok()?)
+}
+
+/// The plan for a request that `wanted` flags. Any other request returns None without calling `ask`.
+pub fn plan_if_wanted(said: &str, model: &str, ask: impl FnOnce(&str) -> Result<String, String>) -> Option<Plan> {
+    if !wanted(said) { return None; }
+    call(model, &format!("Request: {said}"), ask)
+}
+
+/// The new plan after a failure: the request, the plan so far, the steps already done, and what failed.
+pub fn replan(model: &str, said: &str, old: &Plan, done: usize, failure: &str, ask: impl FnOnce(&str) -> Result<String, String>) -> Option<Plan> {
+    let completed: Vec<&str> = old.steps.iter().take(done).map(|s| s.does.as_str()).collect();
+    let completed = if completed.is_empty() { "none".to_string() } else { completed.join("; ") };
+    call(model, &format!("Request: {said}\nPlan so far: {}\nCompleted steps: {completed}\nFailure: {failure}\nMake a new plan for the steps still needed.", old.to_json()), ask)
+}
+
+/// What the plan says about one tool call, or about a failure.
+#[derive(Debug, PartialEq)]
+pub enum Check { Allow, Refuse(String), Replan, GiveUp, Wait }
+
+/// The plan of a running task: the next planned step, the refusals, and whether the task was re-planned. A task is re-planned at
+/// most once; a failure after that ends it. A resumed task never runs a change.
+pub struct Progress { plan: Option<Plan>, next: usize, refusals: u32, replanned: bool, resumed: bool, give_up: bool, waiting: bool }
+
+impl Progress {
+    pub fn new(plan: Option<Plan>, next: usize, resumed: bool) -> Progress {
+        Progress { plan, next, refusals: 0, replanned: false, resumed, give_up: false, waiting: false }
+    }
+    pub fn plan(&self) -> Option<&Plan> { self.plan.as_ref() }
+    pub fn next(&self) -> usize { self.next }
+    pub fn waiting(&self) -> bool { self.waiting }
+
+    /// Why the model's next turn must not run: the task is waiting for the user, or gave up. None while it can go on.
+    pub fn halt(&self) -> Option<String> {
+        if self.waiting { Some(WAITING.into()) } else if self.give_up { Some(GAVE_UP.into()) } else { None }
+    }
+
+    /// Checks one tool call against the next planned step, and counts it against that step when it is allowed.
+    pub fn gate(&mut self, call: &Call) -> Check {
+        let side = side_effect(call);
+        let Some(plan) = &self.plan else { return Check::Allow };
+        if self.resumed && side { self.waiting = true; return Check::Wait; }
+        let Some(step) = plan.steps.get(self.next) else { return Check::Allow };
+        if side && !step.side {
+            self.refusals += 1;
+            if self.refusals < 2 {
+                return Check::Refuse(format!("The plan says step {} only reads ({}), so this change is refused. Do the planned step, or answer without the change.", self.next + 1, step.does));
+            }
+            return self.failure();
+        }
+        self.next += 1;
+        Check::Allow
+    }
+
+    /// A failure: a failed tool step, or a planned step refused twice. The first re-plans (the caller asks for the new plan);
+    /// any later one ends the task.
+    pub fn failure(&mut self) -> Check {
+        if self.plan.is_none() { return Check::Allow; }
+        if self.replanned { self.give_up = true; return Check::GiveUp; }
+        self.replanned = true;
+        Check::Replan
+    }
+
+    /// Takes the new plan after a re-plan. None (the re-plan failed) ends the task.
+    pub fn set_plan(&mut self, plan: Option<Plan>) {
+        match plan {
+            Some(p) => { self.plan = Some(p); self.next = 0; self.refusals = 0; }
+            None => self.give_up = true,
+        }
+    }
+}
+
+/// What a restart does with an interrupted task that has a plan.
+#[derive(Debug, PartialEq)]
+pub enum Resume { Run(usize), Wait, Skip }
+
+/// The index of the next unfinished planned step: the tool steps recorded since the last re-plan.
+pub fn next_index(entries: &[Entry]) -> usize {
+    entries.iter().rev().take_while(|e| e.key != REPLANNED).filter(|e| !e.key.starts_with(NOTE)).count()
+}
+
+/// Resumes from the next step when it only reads. A next step that changes something waits for the user. A finished plan is skipped.
+pub fn resume_action(plan: &Plan, entries: &[Entry]) -> Resume {
+    let next = next_index(entries);
+    match plan.steps.get(next) {
+        None => Resume::Skip,
+        Some(s) if s.side => Resume::Wait,
+        Some(_) => Resume::Run(next),
+    }
+}
 
 /// How many recent interrupted tasks count when the buddy decides what not to repeat.
 pub const RECENT: i64 = 5;
@@ -63,6 +200,17 @@ impl Steps {
     /// `interrupted`: the step records of the earlier interrupted tasks (`tasks::interrupted_steps`).
     pub fn new(id: Option<i64>, interrupted: &[String]) -> Steps {
         Steps { id, entries: vec![], blocked: blocked_keys(interrupted) }
+    }
+
+    /// A resumed task: its record so far (`prior`) is kept and new steps are added to it.
+    pub fn resumed(id: Option<i64>, prior: Vec<Entry>, interrupted: &[String]) -> Steps {
+        Steps { id, entries: prior, blocked: blocked_keys(interrupted) }
+    }
+
+    /// Adds a note to the record (a plan that could not be made, a re-plan, a wait). Notes are not tool steps.
+    pub fn note(&mut self, key: &str, detail: &str) {
+        self.entries.push(Entry { key: format!("{NOTE}{key}"), side: false, status: Outcome::Done, detail: detail.to_string() });
+        self.save();
     }
 
     /// Records a step about to run. Returns why it must not run: a changing step an interrupted task already tried.
@@ -127,6 +275,102 @@ mod tests {
         assert!(!keys.contains(&key(&search)), "reads may repeat");
         assert!(!keys.contains(&key(&play)), "a failed step may be tried another way");
         assert!(!keys.contains(&key(&declined)), "a step the user said no to was never done");
+    }
+
+    fn planned(sides: &[bool]) -> Plan {
+        Plan { objective: "o".into(), done_when: "d".into(), steps: sides.iter().enumerate()
+            .map(|(i, &s)| PlanStep { does: format!("step {}", i + 1), expect: String::new(), side: s }).collect() }
+    }
+    fn done_entry(side: bool) -> Entry { Entry { key: "k".into(), side, status: Outcome::Done, detail: String::new() } }
+
+    #[test]
+    fn plan_parse_accepts_valid_json_and_reads_back_what_it_stored() {
+        let p = parse(r#"{"objective":"send hi","done_when":"sent","steps":[{"does":"search","expect":"results","side_effect":false},{"does":"send","expect":"sent","side_effect":true}]}"#).unwrap();
+        assert_eq!((p.objective.as_str(), p.done_when.as_str()), ("send hi", "sent"));
+        assert_eq!(p.steps.len(), 2);
+        assert!(!p.steps[0].side && p.steps[1].side);
+        assert_eq!(parse(&p.to_json()), Some(p.clone()), "the stored plan reads back as it was");
+        let many = format!(r#"{{"steps":[{}]}}"#, (0..10).map(|i| format!(r#"{{"does":"s{i}","side_effect":false}}"#)).collect::<Vec<_>>().join(","));
+        assert_eq!(parse(&many).unwrap().steps.len(), MAX_PLAN_STEPS, "a long plan is cut to 8 steps");
+    }
+
+    #[test]
+    fn plan_parse_strips_code_fences() {
+        let p = parse("Here is the plan:\n```json\n{\"objective\":\"x\",\"steps\":[{\"does\":\"look\",\"side_effect\":false}]}\n```").unwrap();
+        assert_eq!(p.steps[0].does, "look");
+        assert!(!p.steps[0].side);
+    }
+
+    #[test]
+    fn plan_parse_returns_none_on_garbage_or_an_empty_plan() {
+        assert_eq!(parse("sorry, I can't plan that"), None);
+        assert_eq!(parse(r#"{"objective":"x","steps":[]}"#), None);
+        assert_eq!(parse(r#"{"objective":"x","steps":[{"does":"  "}]}"#), None, "a blank step is not a step");
+        assert_eq!(parse("}{"), None);
+    }
+
+    #[test]
+    fn a_request_without_multi_step_wording_makes_no_planning_call() {
+        let mut calls = 0;
+        let fast = plan_if_wanted("turn the volume up", "m", |_| { calls += 1; Ok(String::new()) });
+        assert_eq!((fast, calls), (None, 0));
+        assert!(wanted("open spotify, then play lofi"));
+        let planned = plan_if_wanted("compare two laptops and then book one", "m", |_| Ok(r#"{"steps":[{"does":"look"}]}"#.into()));
+        assert_eq!(planned.unwrap().steps.len(), 1);
+    }
+
+    #[test]
+    fn a_side_effect_call_against_a_read_only_step_is_refused() {
+        let mut p = Progress::new(Some(planned(&[false, true])), 0, false);
+        let send = Call::Clip("hi".into());
+        assert!(matches!(p.gate(&send), Check::Refuse(ref why) if why.contains("step 1")));
+        assert_eq!(p.gate(&Call::WebSearch("news".into())), Check::Allow, "a read matches the read-only step");
+        assert_eq!(p.gate(&send), Check::Allow, "the change is the next step, which allows it");
+        assert_eq!(p.next(), 2);
+    }
+
+    #[test]
+    fn a_second_refusal_triggers_exactly_one_re_plan() {
+        let mut p = Progress::new(Some(planned(&[false])), 0, false);
+        let send = Call::Clip("hi".into());
+        assert!(matches!(p.gate(&send), Check::Refuse(_)), "the first refusal only tells the model");
+        assert_eq!(p.gate(&send), Check::Replan, "the second refusal triggers the one re-plan");
+        p.set_plan(Some(planned(&[true])));
+        assert_eq!(p.gate(&send), Check::Allow, "the new plan has a change step");
+        assert_eq!(p.failure(), Check::GiveUp, "a failure after the re-plan ends the task: no second re-plan");
+    }
+
+    #[test]
+    fn a_third_failure_ends_the_task_and_never_re_plans_again() {
+        let mut p = Progress::new(Some(planned(&[false, false])), 0, false);
+        assert_eq!(p.failure(), Check::Replan, "the first failure re-plans");
+        p.set_plan(Some(planned(&[false])));
+        assert_eq!(p.failure(), Check::GiveUp, "the second failure ends the task");
+        assert!(p.halt().is_some());
+        assert_eq!(p.failure(), Check::GiveUp, "a third failure ends it again, with no re-plan");
+        let mut none = Progress::new(None, 0, false);
+        assert_eq!(none.failure(), Check::Allow, "a task with no plan is never re-planned or held");
+        assert!(none.halt().is_none());
+    }
+
+    #[test]
+    fn an_interrupted_task_whose_next_step_reads_resumes_from_it() {
+        assert_eq!(resume_action(&planned(&[false, true]), &[]), Resume::Run(0));
+        assert_eq!(resume_action(&planned(&[false, false, true]), &[done_entry(false)]), Resume::Run(1));
+    }
+
+    #[test]
+    fn an_interrupted_task_whose_next_step_changes_something_waits_and_a_finished_plan_is_skipped() {
+        assert_eq!(resume_action(&planned(&[false, true]), &[done_entry(false)]), Resume::Wait);
+        assert_eq!(resume_action(&planned(&[false]), &[done_entry(false)]), Resume::Skip);
+    }
+
+    #[test]
+    fn the_next_step_counts_only_the_steps_since_the_last_re_plan() {
+        let replanned = Entry { key: REPLANNED.into(), side: false, status: Outcome::Done, detail: "new".into() };
+        let entries = [done_entry(true), replanned, done_entry(false)];
+        assert_eq!(next_index(&entries), 1, "the step before the re-plan is not counted against the new plan");
+        assert_eq!(next_index(&[done_entry(true), Entry { key: "note:plan".into(), side: false, status: Outcome::Done, detail: String::new() }]), 1, "a note is not a step");
     }
 
     #[test]

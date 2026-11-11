@@ -195,6 +195,8 @@ impl App {
         app.reload();
         desk::sync(&mut app);
         buddy::sync(&mut app);
+        // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
+        crate::agent::resume_on_start();
         dock::sync(&mut app);
         frame::sync(&mut app);
         guides::sync(&mut app);

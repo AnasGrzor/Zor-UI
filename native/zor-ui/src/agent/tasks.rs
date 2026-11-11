@@ -27,7 +27,10 @@ pub fn setup(conn: &Connection) -> rusqlite::Result<()> {
     // databases made before a column was added get it; existing rows keep their values
     add_missing(conn, "steps", "TEXT NOT NULL DEFAULT '[]'")?;
     add_missing(conn, "tokens_in", "INTEGER NOT NULL DEFAULT 0")?;
-    add_missing(conn, "tokens_out", "INTEGER NOT NULL DEFAULT 0")
+    add_missing(conn, "tokens_out", "INTEGER NOT NULL DEFAULT 0")?;
+    // the plan (plan.rs JSON) is nullable: a task with no plan is NULL and resumes as before
+    add_missing(conn, "plan", "TEXT")?;
+    add_missing(conn, "resumes", "INTEGER NOT NULL DEFAULT 0")
 }
 
 fn add_missing(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> {
@@ -70,6 +73,29 @@ pub fn save_steps(id: Option<i64>, steps: &str) {
 /// The step records of the newest interrupted tasks, for the side-effect guard. Empty when the database can't be read.
 pub fn interrupted_steps() -> Vec<String> {
     open_app().and_then(|c| interrupted_steps_on(&c, plan::RECENT).ok()).unwrap_or_default()
+}
+
+/// Saves a task's plan (the JSON `plan::Plan::to_json` writes), at the start and after each re-plan.
+pub fn plan_on(conn: &Connection, id: i64, plan: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE tasks SET plan = ?1 WHERE id = ?2", params![plan, id])?;
+    Ok(())
+}
+
+/// An interrupted task with a plan that was not resumed yet. Private requests are never resumed.
+pub struct Candidate { pub id: i64, pub request: String, pub steps: String, pub plan: String }
+
+/// The newest such task, if any.
+pub fn resume_candidate_on(conn: &Connection) -> rusqlite::Result<Option<Candidate>> {
+    let mut stmt = conn.prepare("SELECT id, request, steps, plan FROM tasks WHERE status = 'Interrupted' AND plan IS NOT NULL
+        AND resumes = 0 AND request <> '[private request]' ORDER BY id DESC LIMIT 1")?;
+    let mut rows = stmt.query_map([], |r| Ok(Candidate { id: r.get(0)?, request: r.get(1)?, steps: r.get(2)?, plan: r.get(3)? }))?;
+    rows.next().transpose()
+}
+
+/// Puts a task back to Running on its own row, and counts the resume so it happens once.
+pub fn resume_mark_on(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE tasks SET status = 'Running', resumes = resumes + 1, verdict = 'resumed', updated = ?1 WHERE id = ?2", params![now, id])?;
+    Ok(())
 }
 
 /// Saves a new task in its first state. Returns its id.
@@ -123,6 +149,31 @@ pub fn recover_once() {
             Err(e) => crate::log::line(&format!("buddy tasks: could not check for interrupted tasks: {e}")),
         }
     });
+}
+
+/// Saves a task's plan. A failure is logged and the request goes on.
+pub fn save_plan(id: Option<i64>, plan: &str) {
+    let (Some(id), Some(conn)) = (id, open_app()) else { return };
+    if let Err(e) = plan_on(&conn, id, plan) { crate::log::line(&format!("buddy tasks: could not save the plan: {e}")); }
+}
+
+/// The interrupted task to resume at start, if any. None when the database can't be read.
+pub fn resume_candidate() -> Option<Candidate> { open_app().and_then(|c| resume_candidate_on(&c).ok().flatten()) }
+
+/// Puts an interrupted task back to Running on its row. A failure is logged and the resume is not done.
+pub fn resume_mark(id: i64) -> bool {
+    let Some(conn) = open_app() else { return false };
+    let r = resume_mark_on(&conn, id, now());
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Err(e) = &r { crate::log::line(&format!("buddy tasks: could not resume: {e}")); }
+    r.is_ok()
+}
+
+/// Records why an interrupted task waits for the user (its verdict). The status stays Interrupted.
+pub fn wait(id: i64) {
+    let Some(conn) = open_app() else { return };
+    if let Err(e) = conn.execute("UPDATE tasks SET verdict = ?1 WHERE id = ?2", params![plan::WAITING, id]) { crate::log::line(&format!("buddy tasks: could not save the wait: {e}")); }
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Saves a new task for `request`. None when the database can't be used; the request still runs.
@@ -261,5 +312,23 @@ mod tests {
         let id = begin_on(&c, "new", 2).unwrap();
         steps_on(&c, id, "[]").unwrap();
         assert_eq!(recent_on(&c, 5).unwrap().len(), 2, "the old row is kept");
+    }
+
+    #[test]
+    fn an_interrupted_task_with_a_plan_resumes_once_on_its_own_row() {
+        let c = mem();
+        let no_plan = begin_on(&c, "what time is it", 1).unwrap();
+        let secret = begin_on(&c, "my bank password is hunter2", 2).unwrap();
+        let planned = begin_on(&c, "compare two laptops and then book one", 3).unwrap();
+        plan_on(&c, planned, "{\"steps\":[]}").unwrap();
+        for id in [no_plan, secret, planned] { set_on(&c, id, TaskStatus::Interrupted, "", 0, 4).unwrap(); }
+        let got = resume_candidate_on(&c).unwrap().expect("the planned task is the candidate");
+        assert_eq!(got.id, planned, "no plan and a private request are never resumed");
+        resume_mark_on(&c, planned, 5).unwrap();
+        assert_eq!(recent_on(&c, 9).unwrap().len(), 3, "the resume reuses the row, no duplicate");
+        assert_eq!(recent_on(&c, 9).unwrap().iter().find(|r| r.id == planned).unwrap().status, "Running");
+        assert!(resume_candidate_on(&c).unwrap().is_none(), "nothing left to resume while it runs");
+        set_on(&c, planned, TaskStatus::Interrupted, "", 0, 6).unwrap();
+        assert!(resume_candidate_on(&c).unwrap().is_none(), "a second interruption is not resumed again");
     }
 }

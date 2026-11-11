@@ -7,7 +7,8 @@ use crate::conf::Config;
 /// Words that mark a request as several steps or a comparison.
 const MULTI_STEP: [&str; 9] = ["then", "after", "compare", "research", "plan", "steps", "step", "first", "comparison"];
 
-fn looks_multi_step(said: &str) -> bool {
+/// Whether a request is several steps or a comparison. A planning call is made only for these (plan.rs).
+pub fn looks_multi_step(said: &str) -> bool {
     let words: Vec<String> = said.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
     let text = format!(" {} ", words.join(" "));
     MULTI_STEP.iter().any(|w| text.contains(&format!(" {w} ")))

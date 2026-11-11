@@ -8,7 +8,12 @@ use serde_json::Value;
 use std::{collections::BTreeSet, path::{Path, PathBuf}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Memory { pub id: i64, pub text: String, pub created: i64, pub updated: i64 }
+pub struct Memory { pub id: i64, pub text: String, pub created: i64, pub updated: i64, pub kind: Option<String>, pub project: Option<String> }
+
+/// What a fact is for, stored in `kind` when it is saved. A row with no kind (saved before the column existed) is read by its text.
+pub const KIND_PREFERENCE: &str = "preference";
+pub const KIND_PROJECT: &str = "project";
+pub const KIND_SEMANTIC: &str = "semantic";
 
 /// What `add` did with a fact.
 #[derive(Debug, PartialEq)]
@@ -69,18 +74,32 @@ fn setup(conn: &Connection) -> Result<(), String> {
              updated INTEGER NOT NULL
          );
          CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text);",
-    ).map_err(|e| format!("could not set up memory: {e}"))
+    ).map_err(|e| format!("could not set up memory: {e}"))?;
+    // nullable and additive: rows saved before these columns keep NULL and are classified by their text
+    add_column(conn, "kind", "TEXT").and_then(|_| add_column(conn, "project", "TEXT")).map_err(|e| format!("could not set up memory: {e}"))
+}
+
+/// Adds `col` to `memories` when the table lacks it. Existing rows are left as they are.
+fn add_column(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> {
+    let has = conn.prepare("PRAGMA table_info(memories)")?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == col));
+    if !has { conn.execute_batch(&format!("ALTER TABLE memories ADD COLUMN {col} {decl};"))?; }
+    Ok(())
+}
+
+fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
+    Ok(Memory { id: r.get(0)?, text: r.get(1)?, created: r.get(2)?, updated: r.get(3)?, kind: r.get(4)?, project: r.get(5)? })
 }
 
 /// Every stored fact, oldest first.
 pub fn all(conn: &Connection) -> rusqlite::Result<Vec<Memory>> {
-    let mut stmt = conn.prepare("SELECT id, text, created, updated FROM memories ORDER BY id")?;
-    let rows = stmt.query_map([], |r| Ok(Memory { id: r.get(0)?, text: r.get(1)?, created: r.get(2)?, updated: r.get(3)? }))?;
+    let mut stmt = conn.prepare("SELECT id, text, created, updated, kind, project FROM memories ORDER BY id")?;
+    let rows = stmt.query_map([], from_row)?;
     rows.collect()
 }
 
-/// Keeps a fact. Empty and sensitive text is refused; a fact that matches a stored one updates it.
-pub fn add(conn: &Connection, text: &str, now: i64) -> Result<Outcome, String> {
+/// Keeps a fact with its kind and project (both optional). Empty and sensitive text is refused; a fact that matches a stored one
+/// updates it, and a kind or project given now replaces the stored one.
+pub fn add_as(conn: &Connection, text: &str, kind: Option<&str>, project: Option<&str>, now: i64) -> Result<Outcome, String> {
     let text = text.trim();
     if text.is_empty() { return Err("Nothing to remember.".into()); }
     if is_sensitive(text) { return Err("I won't keep passwords, keys or account numbers.".into()); }
@@ -90,12 +109,13 @@ pub fn add(conn: &Connection, text: &str, now: i64) -> Result<Outcome, String> {
     let tx = conn.unchecked_transaction().map_err(db)?;
     let outcome = match same {
         Some(m) => {
-            tx.execute("UPDATE memories SET text = ?1, updated = ?2 WHERE id = ?3", params![text, now, m.id]).map_err(db)?;
+            tx.execute("UPDATE memories SET text = ?1, updated = ?2, kind = COALESCE(?3, kind), project = COALESCE(?4, project) WHERE id = ?5",
+                params![text, now, kind, project, m.id]).map_err(db)?;
             tx.execute("UPDATE memory_fts SET text = ?1 WHERE rowid = ?2", params![text, m.id]).map_err(db)?;
             Outcome::Updated(m.id)
         }
         None => {
-            tx.execute("INSERT INTO memories (text, created, updated) VALUES (?1, ?2, ?2)", params![text, now]).map_err(db)?;
+            tx.execute("INSERT INTO memories (text, created, updated, kind, project) VALUES (?1, ?2, ?2, ?3, ?4)", params![text, now, kind, project]).map_err(db)?;
             let id = tx.last_insert_rowid();
             tx.execute("INSERT INTO memory_fts (rowid, text) VALUES (?1, ?2)", params![id, text]).map_err(db)?;
             Outcome::Added(id)
@@ -104,6 +124,10 @@ pub fn add(conn: &Connection, text: &str, now: i64) -> Result<Outcome, String> {
     tx.commit().map_err(db)?;
     Ok(outcome)
 }
+
+/// A fact saved with no kind and no project, as the tests and the earlier code saved them.
+#[cfg(test)]
+pub fn add(conn: &Connection, text: &str, now: i64) -> Result<Outcome, String> { add_as(conn, text, None, None, now) }
 
 /// Deletes one fact from the memory and its search index. True when it existed.
 pub fn forget(conn: &Connection, id: i64) -> Result<bool, String> {
@@ -122,11 +146,11 @@ pub fn search(conn: &Connection, query: &str, k: usize) -> rusqlite::Result<Vec<
     // each word is letters and digits only, so quoting it can't break the search syntax
     let expr = terms.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(" OR ");
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.text, m.created, m.updated FROM memory_fts
+        "SELECT m.id, m.text, m.created, m.updated, m.kind, m.project FROM memory_fts
          JOIN memories m ON m.id = memory_fts.rowid
          WHERE memory_fts MATCH ?1
          ORDER BY bm25(memory_fts), m.updated DESC LIMIT ?2")?;
-    let rows = stmt.query_map(params![expr, k as i64], |r| Ok(Memory { id: r.get(0)?, text: r.get(1)?, created: r.get(2)?, updated: r.get(3)? }))?;
+    let rows = stmt.query_map(params![expr, k as i64], from_row)?;
     rows.collect()
 }
 
@@ -152,6 +176,17 @@ pub fn import_json(conn: &Connection, json_path: &Path) -> Result<usize, String>
 }
 
 fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
+
+/// Keeps a fact in the app's memory, with the kind it is known to have (`fact_kind`) and the active project it names, if any.
+/// The answer is what the buddy says back.
+pub fn remember(text: &str, project: Option<&str>) -> Result<String, String> {
+    let outcome = with_app(|c| add_as(c, text, Some(fact_kind(text, project)), project, now()))??;
+    changed();
+    Ok(match outcome {
+        Outcome::Added(_) => format!("Remembered: {}", text.trim()),
+        Outcome::Updated(_) => format!("Updated what I remember: {}", text.trim()),
+    })
+}
 
 /// The memory database for this PC.
 #[cfg(not(test))]
@@ -221,16 +256,6 @@ pub fn forget_matching(query: &str) -> Result<String, String> {
     Ok(match found { Some(m) => format!("Forgot: {}", m.text), None => "I don't remember anything like that.".into() })
 }
 
-/// Keeps a fact in the app's memory. The answer is what the buddy says back.
-pub fn remember(text: &str) -> Result<String, String> {
-    let outcome = with_app(|c| add(c, text, now()))??;
-    changed();
-    Ok(match outcome {
-        Outcome::Added(_) => format!("Remembered: {}", text.trim()),
-        Outcome::Updated(_) => format!("Updated what I remember: {}", text.trim()),
-    })
-}
-
 /// How facts are found for a request. Keyword search (FTS5) is the only ranker today. A semantic ranker can implement this
 /// trait later, with its own storage, and `recall` will use it without any other change.
 pub trait Recall {
@@ -245,16 +270,17 @@ impl Recall for Keyword {
 }
 
 /// Up to `k` facts that match `query`, for the system prompt. A memory that can't be read recalls nothing, and the request goes on.
+/// A sensitive-looking fact is never recalled, even one stored before the save check existed.
 pub fn recall(query: &str, k: usize) -> Vec<String> {
-    with_app(|c| Keyword.find(c, query, k).unwrap_or_default().into_iter().map(|m| m.text).collect()).unwrap_or_default()
+    with_app(|c| Keyword.find(c, query, k).unwrap_or_default().into_iter().filter(|m| !is_sensitive(&m.text)).map(|m| m.text).collect()).unwrap_or_default()
 }
 
 /// Most memory items the context carries, preferences and project memories together, and most characters they take.
 pub const CONTEXT_ITEMS: usize = 6;
 pub const CONTEXT_MEMORY_CHARS: usize = 600;
 
-/// Words that say how the user wants things done. No kind is stored with a fact (the table has none), so a preference is read
-/// from its text.
+/// Words that say how the user wants things done. A fact saved with no kind is read by its text: a preference is a fact with one of
+/// these words.
 const PREFERENCE_WORDS: &[&str] = &["prefer", "prefers", "preferred", "always", "never", "avoid", "instead", "rather", "style", "don't", "dont"];
 
 /// The words of a text as they are compared with a project's folder name: letters, digits, apostrophes and dashes, lowercased.
@@ -268,16 +294,32 @@ pub fn is_preference(text: &str) -> bool { tokens(text).iter().any(|t| PREFERENC
 /// True when the fact names the project: one of its words is the project's folder name (lowercase).
 pub fn names_project(text: &str, project: &str) -> bool { tokens(text).iter().any(|t| t == project) }
 
-/// The memory for a request: preferences whose words share something with the request, and facts that name the active project.
+/// The kind a fact gets when it is saved: a preference if its text says how to do things, else a project fact when it names the
+/// active project, else a plain fact.
+pub fn fact_kind(text: &str, project: Option<&str>) -> &'static str {
+    if is_preference(text) { KIND_PREFERENCE } else if project.is_some() { KIND_PROJECT } else { KIND_SEMANTIC }
+}
+
+/// The memory for a request: preferences whose words share something with the request, and project facts for the active project.
+/// A row with a kind is judged by it. A row with no kind (saved before the column) is judged by its text: it is a project fact when
+/// its text names the active project, a preference when its words are a preference and share something with the request.
 /// Best match first (shared words, then newest), at most `CONTEXT_ITEMS` items and `CONTEXT_MEMORY_CHARS` characters. Anything
-/// else in the table stays out.
+/// else in the table stays out, and so does anything sensitive.
 pub fn for_context(conn: &Connection, request: &str, project: Option<&str>) -> rusqlite::Result<Vec<String>> {
     let terms: BTreeSet<String> = words(request).into_iter().filter(|w| !STOP.contains(&w.as_str())).collect();
     let project = project.map(str::to_lowercase).filter(|p| !p.is_empty());
     let mut picked: Vec<(usize, i64, String)> = all(conn)?.into_iter().filter_map(|m| {
+        if is_sensitive(&m.text) { return None; }
         let shared = words(&m.text).intersection(&terms).count();
-        let of_project = project.as_deref().map_or(false, |p| names_project(&m.text, p));
-        (of_project || (shared > 0 && is_preference(&m.text))).then_some((shared, m.updated, m.text))
+        let for_here = project.is_some() && m.project.as_deref().map_or(false, |p| Some(p.to_lowercase()) == project);
+        let wanted = match m.kind.as_deref() {
+            None => project.as_deref().map_or(false, |p| names_project(&m.text, p)) || (shared > 0 && is_preference(&m.text)),
+            // a preference with a project is for that project only; one without is for every request it matches
+            Some(KIND_PREFERENCE) => shared > 0 && (m.project.is_none() || for_here),
+            Some(KIND_PROJECT) => for_here,
+            Some(_) => false,
+        };
+        wanted.then_some((shared, m.updated, m.text))
     }).collect();
     picked.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
     let mut out = vec![];
@@ -392,7 +434,7 @@ mod tests {
 
     #[test]
     fn a_write_clears_the_list_the_settings_page_reads() {
-        *CACHE.lock().unwrap() = Some(vec![Memory { id: 1, text: "old".into(), created: 0, updated: 0 }]);
+        *CACHE.lock().unwrap() = Some(vec![Memory { id: 1, text: "old".into(), created: 0, updated: 0, kind: None, project: None }]);
         changed();
         assert!(CACHE.lock().unwrap().is_none(), "the next listing reads the database again");
     }
@@ -445,6 +487,120 @@ mod tests {
         let total: usize = got.iter().map(|s| s.chars().count()).sum();
         assert!(total <= CONTEXT_MEMORY_CHARS, "{total} characters");
         assert_eq!(got.len(), 2, "two 200-character facts fit in 600, the rest are left out");
+    }
+
+    /// Saves a fact with a kind and project, as `remember` does: the kind comes from `fact_kind`.
+    fn save(c: &Connection, text: &str, project: Option<&str>, now: i64) {
+        add_as(c, text, Some(fact_kind(text, project)), project, now).unwrap();
+    }
+
+    /// A row written straight into the table, the way a sensitive fact from an older build could be stored.
+    fn insert_raw(c: &Connection, text: &str, kind: Option<&str>) {
+        c.execute("INSERT INTO memories (text, created, updated, kind) VALUES (?1, 1, 1, ?2)", params![text, kind]).unwrap();
+        c.execute("INSERT INTO memory_fts (rowid, text) VALUES (last_insert_rowid(), ?1)", params![text]).unwrap();
+    }
+
+    #[test]
+    fn a_preference_row_is_retrieved_for_a_matching_request() {
+        let c = mem();
+        add_as(&c, "I prefer short answers in English", Some(KIND_PREFERENCE), None, 1).unwrap();
+        add_as(&c, "my sister is called Lina", Some(KIND_SEMANTIC), None, 2).unwrap();
+        assert_eq!(for_context(&c, "a short answer please", None).unwrap(), vec!["I prefer short answers in English".to_string()]);
+        assert!(for_context(&c, "open spotify", None).unwrap().is_empty(), "no shared word, not retrieved");
+        assert!(for_context(&c, "what is my sister called", None).unwrap().is_empty(), "a semantic row is never context");
+    }
+
+    #[test]
+    fn a_project_row_is_retrieved_only_for_its_project() {
+        let c = mem();
+        add_as(&c, "Zor-UI uses Rust and tiny-skia for drawing", Some(KIND_PROJECT), Some("zor-ui"), 1).unwrap();
+        assert_eq!(for_context(&c, "what is the build status", Some("zor-ui")).unwrap(), vec!["Zor-UI uses Rust and tiny-skia for drawing".to_string()]);
+        assert!(for_context(&c, "what is the build status", Some("notes")).unwrap().is_empty(), "another project does not get it");
+        assert!(for_context(&c, "what is the build status", None).unwrap().is_empty(), "no active project, no project row");
+        insert_raw(&c, "Orca notes are in Markdown", Some(KIND_PROJECT));
+        assert!(for_context(&c, "orca notes markdown", Some("orca")).unwrap().is_empty(), "a project row with no project column is for no project");
+    }
+
+    #[test]
+    fn a_row_with_no_kind_is_classified_by_its_text() {
+        let c = mem();
+        insert_raw(&c, "I prefer short answers in English", None);
+        insert_raw(&c, "zor-ui uses tiny-skia for drawing", None);
+        insert_raw(&c, "my sister is called Lina", None);
+        assert_eq!(for_context(&c, "short answers please", None).unwrap(), vec!["I prefer short answers in English".to_string()], "a preference by its words");
+        assert_eq!(for_context(&c, "the build", Some("zor-ui")).unwrap(), vec!["zor-ui uses tiny-skia for drawing".to_string()], "a project fact by its folder name");
+        assert!(for_context(&c, "what is my sister called", None).unwrap().is_empty(), "a plain fact by its text is not context");
+    }
+
+    #[test]
+    fn a_saved_fact_gets_the_kind_it_is_known_to_have() {
+        assert_eq!(fact_kind("Never use emojis in replies", None), KIND_PREFERENCE);
+        assert_eq!(fact_kind("Zor-UI uses Rust", Some("zor-ui")), KIND_PROJECT);
+        assert_eq!(fact_kind("My sister is called Lina", None), KIND_SEMANTIC);
+    }
+
+    #[test]
+    fn the_migration_adds_the_columns_to_an_old_database_and_keeps_its_rows() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY, text TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+             CREATE VIRTUAL TABLE memory_fts USING fts5(text);
+             INSERT INTO memories (text, created, updated) VALUES ('I prefer short answers', 3, 4);
+             INSERT INTO memory_fts (rowid, text) VALUES (1, 'I prefer short answers');",
+        ).unwrap();
+        setup(&c).unwrap();
+        setup(&c).unwrap();
+        let cols: Vec<String> = c.prepare("PRAGMA table_info(memories)").unwrap().query_map([], |r| r.get::<_, String>(1)).unwrap().map(Result::unwrap).collect();
+        assert!(cols.contains(&"kind".to_string()) && cols.contains(&"project".to_string()), "{cols:?}");
+        let rows = all(&c).unwrap();
+        assert_eq!(rows, vec![Memory { id: 1, text: "I prefer short answers".into(), created: 3, updated: 4, kind: None, project: None }]);
+        assert_eq!(search(&c, "short", 5).unwrap().len(), 1, "the search index still finds it");
+    }
+
+    /// Realistic saved facts, saved through the save path (`fact_kind`). The project is the one the window named when it was saved.
+    const FIXTURE: &[(&str, Option<&str>)] = &[
+        ("I prefer short answers in English", None),
+        ("Always answer with code first, then the explanation", None),
+        ("Never use emojis in replies", None),
+        ("Avoid long lists, use short paragraphs instead", None),
+        ("Zor-UI uses Rust and tiny-skia for drawing", Some("zor-ui")),
+        ("Zor-UI runs on Windows 11 with Win32 windows", Some("zor-ui")),
+        ("Zor-UI tests run with cargo test", Some("zor-ui")),
+        ("Orca-notes keeps meeting notes in Markdown", Some("orca-notes")),
+        ("My sister is called Lina", None),
+        ("I like green tea in the morning", None),
+        ("My flat number is 12", None),
+        ("My birthday is in March", None),
+        ("My laptop is a ThinkPad with 16 GB of RAM", None),
+    ];
+
+    #[test]
+    fn the_saved_facts_fixture_gives_the_expected_context_for_each_request() {
+        let c = mem();
+        for (i, (text, project)) in FIXTURE.iter().enumerate() { save(&c, text, *project, i as i64); }
+        // a sensitive preference stored the old way, bypassing the save check: it shares words with a request and must not come back
+        insert_raw(&c, "I prefer short answers, my PIN code is 4821", Some(KIND_PREFERENCE));
+        assert_eq!(all(&c).unwrap().len(), FIXTURE.len() + 1, "no fixture fact merged into another");
+        let set = |v: Vec<String>| { let mut v = v; v.sort(); v };
+        let s = |t: &[&str]| set(t.iter().map(|x| x.to_string()).collect());
+        // a short request in English: the preference that names both words, and the two that share one
+        assert_eq!(set(for_context(&c, "give me a short answer in English", None).unwrap()),
+            s(&["I prefer short answers in English", "Always answer with code first, then the explanation", "Avoid long lists, use short paragraphs instead"]));
+        assert_eq!(set(for_context(&c, "any short tips for replies", None).unwrap()),
+            s(&["I prefer short answers in English", "Never use emojis in replies", "Avoid long lists, use short paragraphs instead"]));
+        // the active project's facts, and no preference shares a word with the request
+        assert_eq!(set(for_context(&c, "what is the status of the zor-ui build", Some("zor-ui")).unwrap()),
+            s(&["Zor-UI uses Rust and tiny-skia for drawing", "Zor-UI runs on Windows 11 with Win32 windows", "Zor-UI tests run with cargo test"]));
+        assert_eq!(set(for_context(&c, "meeting notes format in orca-notes", Some("orca-notes")).unwrap()),
+            s(&["Orca-notes keeps meeting notes in Markdown"]));
+        // no active project: no project facts; a plain question matches no preference
+        assert!(for_context(&c, "what is the zor-ui build status", None).unwrap().is_empty());
+        assert!(for_context(&c, "what is my sister called", None).unwrap().is_empty());
+        // the sensitive preference shares "short" and "answers" with this request, and is still left out
+        assert_eq!(set(for_context(&c, "short answers please", None).unwrap()),
+            s(&["I prefer short answers in English", "Avoid long lists, use short paragraphs instead"]));
+        let pin = for_context(&c, "my pin code", None).unwrap();
+        assert!(pin.iter().all(|t| !t.contains("PIN")), "a sensitive fact is never retrieved: {pin:?}");
     }
 
     #[test]

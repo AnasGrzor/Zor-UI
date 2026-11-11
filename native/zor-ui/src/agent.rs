@@ -606,7 +606,12 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::OpenFile(p) => open_file(cfg, p, &user_dirs()),
         Call::SeeScreen(q) => assist::see_screen(cfg, q),
         Call::Remember(_) if !memory_on(cfg) => Err("Remembering is turned off in Settings.".into()),
-        Call::Remember(t) => memory::remember(t),
+        // a fact that names the window's project is saved against it (the same lookup the request context uses)
+        Call::Remember(t) => {
+            let project = project::lookup(t, &crate::drive::front_title(), &project::roots(cfg), &project::list_dirs)
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+            memory::remember(t, project.as_deref())
+        }
         Call::Forget(_) if !memory_on(cfg) => Err("Remembering is turned off in Settings.".into()),
         Call::Forget(q) => memory::forget_matching(q),
         Call::ListTree(p) => developer::workspace(cfg).and_then(|ws| developer::list_tree(&ws, p)),

@@ -377,6 +377,9 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
             "id": id, "label": agent_label(&id),
             "state": if !waiting.is_empty() { "waiting" } else if !working.is_empty() { "working" } else { "idle" },
             "message": waiting.first().map_or(json!(""), |s| or_empty(&s["message"])),
+            // the newest prompt that asks for permission: the island offers Allow and Deny for it (permit.rs)
+            // only agents whose hook waits for the answer (permit.rs PERMIT_AGENTS) get Allow and Deny
+            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]) })),
             "cwd": first.map_or(json!(""), |s| or_empty(&s["cwd"])),
             "waiting": waiting.len(), "working": working.len(),
             "usage": windows, "model": or_empty(&u["model"]), "usageAt": u["at"].clone(),
@@ -518,7 +521,7 @@ mod tests {
         w("usage.json", json!({ "model": "m", "at": 5, "windows": { "5h": { "resets_at": now + 5.0 }, "old": { "resets_at": now - 5.0 }, "none": {} } }));
         let r = agents_summary(&d, now);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0], json!({ "id": "claude", "label": "Claude", "state": "waiting", "message": "ok?", "cwd": "C:/x", "waiting": 1, "working": 1,
+        assert_eq!(r[0], json!({ "id": "claude", "label": "Claude", "state": "waiting", "message": "ok?", "permit": null, "cwd": "C:/x", "waiting": 1, "working": 1,
             "usage": { "5h": { "resets_at": now + 5.0 }, "none": {} }, "model": "m", "usageAt": 5 }));
         assert!(!a.join("4.json").exists());
         assert_eq!(agent_label("my-agent"), "My-Agent");
@@ -541,6 +544,26 @@ mod tests {
         assert_eq!(agents_dismiss(&d, None, now), 1);
         assert_eq!(agents_dismiss(&d, None, now), 0);
         assert!(agents_summary(&d, now).iter().all(|a| a["state"] != "waiting"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn agents_that_wait_for_the_answer_offer_allow_and_deny() {
+        let d = tmp("agents-permit");
+        let now = 1_000_000.0;
+        for id in ["claude", "codex"] {
+            std::fs::create_dir_all(d.join(id)).unwrap();
+            std::fs::write(d.join(id).join("s.json"), json!({ "state": "waiting", "at": now - 1.0, "ask": "permission", "id": "s", "message": "Allow?" }).to_string()).unwrap();
+        }
+        let r = agents_summary(&d, now);
+        assert_eq!(r[0]["permit"]["session"], "s", "claude gets Allow and Deny");
+        assert_eq!(r[1]["permit"]["session"], "s", "codex gets Allow and Deny");
+        assert_eq!(r[1]["state"], "waiting");
+        let g = d.join("gemini");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("s.json"), json!({ "state": "waiting", "at": now - 1.0, "ask": "permission", "id": "s" }).to_string()).unwrap();
+        let gem = agents_summary(&d, now).into_iter().find(|a| a["id"] == "gemini").unwrap();
+        assert!(gem["permit"].is_null(), "gemini has no permission hook, so no buttons it cannot answer");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -135,12 +135,47 @@ impl<'p, 'a> Pen<'p, 'a> {
 
     /// The page title and a one-line description, above the first section.
     pub fn title(&mut self, title: &str, desc: &str) {
-        if self.show(56.0) {
+        self.title_cat(title, desc, "");
+    }
+
+    /// The page title with category eyebrow and description.
+    pub fn title_cat(&mut self, title: &str, desc: &str, cat: &str) {
+        if self.show(76.0) {
             let (x, y, w) = (self.x, self.y, self.w);
-            self.c.text(title, R::new(x + 4.0, y, w, 34.0), txt(26.0, 500), self.col("onSurface"), Align::Left);
-            self.c.text(desc, R::new(x + 4.0, y + 36.0, w, 18.0), txt(13.0, 400), self.col("onSurfaceVariant"), Align::Left);
+            if !cat.is_empty() {
+                self.c.text(&cat.to_uppercase(), R::new(x + 4.0, y, w, 14.0), txt(11.0, 600), self.col("primary"), Align::Left);
+            }
+            self.c.text(title, R::new(x + 4.0, y + 16.0, w, 34.0), txt(26.0, 500), self.col("onSurface"), Align::Left);
+            self.c.text(desc, R::new(x + 4.0, y + 52.0, w, 18.0), txt(13.0, 400), self.col("onSurfaceVariant"), Align::Left);
         }
-        self.y += 66.0;
+        self.y += 82.0;
+    }
+
+    /// An interactive studio container row of height `h` with Material You styling, header and optional badge.
+    pub fn studio_box(&mut self, h: f32, title: &str, badge: &str) -> Option<R> {
+        self.lead();
+        let r = self.show(h).then(|| R::new(self.x, self.y, self.w, h));
+        if let Some(r) = r {
+            use crate::tokens::STUDIO_R;
+            self.c.rect(r, STUDIO_R, self.col("surfaceContainerHigh"));
+            self.c.rect(R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), STUDIO_R - 1.0, alpha(self.col("outlineVariant"), 0.35));
+            let mut top = r.y + 10.0;
+            if !title.is_empty() || !badge.is_empty() {
+                if !title.is_empty() {
+                    self.c.text(title, R::new(r.x + 16.0, top, r.w - 140.0, 20.0), txt(13.5, 500), self.col("onSurface"), Align::Left);
+                }
+                if !badge.is_empty() {
+                    let bw = self.c.g.measure(badge, txt(11.0, 500)).0.ceil() + 16.0;
+                    let br = R::new(r.x + r.w - bw - 16.0, top, bw, 20.0);
+                    self.c.rect(br, 10.0, self.col("primaryContainer"));
+                    self.c.text(badge, br, txt(11.0, 500), self.col("onPrimaryContainer"), Align::Center);
+                }
+                top += 26.0;
+                self.c.rect(R::new(r.x + 12.0, top, r.w - 24.0, 1.0), 0.0, alpha(self.col("outlineVariant"), 0.25));
+            }
+        }
+        self.y += h;
+        r
     }
 
     /// A group of rows with no box around it: a hairline between rows, a little air above the first and below the last.
@@ -380,7 +415,7 @@ impl Settings {
     pub fn viz_color(&self, cx: &crate::app::Ctx, own: &str) -> crate::gfx::Color {
         let hex = |p: &str| crate::conf::parse_hex(&self.gs(cx, p));
         if let (Some(pk), true) = (&self.picker, self.pick_path.as_deref() == Some(own)) { return pk.color(); } // being picked: live
-        hex(own).or_else(|| hex("visualizer.color")).unwrap_or_else(|| cx.theme.c("primary"))
+        hex(own).or_else(|| self.wallpaper_override_color(own)).or_else(|| hex("visualizer.color")).unwrap_or_else(|| cx.theme.c("primary"))
     }
 
     /// `color`: a swatch that opens the picker for config `path` (a "#RRGGBB" string; "" means unset), and Reset when set.
@@ -396,7 +431,10 @@ impl Settings {
             ui::chip(p.c, p.cx, ax, r.y + 4.0, id, None, "Reset", false);
         }
         let sw = R::new(ax - 8.0 - 48.0, r.y + 2.0, 48.0, 36.0);
-        p.c.rect(sw, 6.0, self.viz_color(p.cx, path));
+        if path.starts_with("$theme.") {
+            p.c.rect(sw, 6.0, p.col("outlineVariant"));
+            p.c.rect(R::new(sw.x + 1.0, sw.y + 1.0, sw.w - 2.0, sw.h - 2.0), 5.0, self.viz_color(p.cx, path));
+        } else { p.c.rect(sw, 6.0, self.viz_color(p.cx, path)); }
         let id = p.act(Act::Do("pickcolor", path.into()));
         if p.c.hit(sw, id) { p.c.rect(sw, 6.0, alpha(p.col("onSurface"), 0.12)); }
     }

@@ -33,6 +33,14 @@ const ASK_MAX_LINES: f32 = 8.0;
 const ALLOW: u32 = 10;
 const DENY: u32 = 11;
 const AGENT_CLEAR: u32 = 12;
+/// Allow and Deny for a Claude Code permission prompt (permit.rs); the same block as the buddy's question.
+const PERMIT_ALLOW: u32 = 17;
+const PERMIT_DENY: u32 = 18;
+/// The open notification's buttons and its body (the list rows are NOTIF + index).
+const NOTIF_BACK: u32 = 130;
+const NOTIF_OPEN: u32 = 131;
+const NOTIF_DISMISS: u32 = 132;
+const NOTIF_BODY: u32 = 133;
 const ASK_Q: u32 = 13;
 const ASK_BOX: u32 = 14;
 const ASK_SEND: u32 = 15;
@@ -40,7 +48,8 @@ const ASK_MIC: u32 = 16;
 const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
 
-enum Sec { Ask(String), Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>) }
+/// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
+enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -62,6 +71,10 @@ pub struct Island {
     reply_focus: bool,
     ask_scroll: ui::Scroll,
     ask_full: f32,
+    /// The notification opened in the panel (its id), and its body's scroll and full height.
+    notif_open: Option<Value>,
+    body_scroll: ui::Scroll,
+    body_full: f32,
 }
 
 impl Island {
@@ -69,7 +82,8 @@ impl Island {
     pub fn new(_area: (f32, f32)) -> Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
             seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
-            reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0 }
+            reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0 }
     }
 }
 
@@ -147,6 +161,7 @@ impl Island {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
         if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Ask(q), h)); }
+        if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
@@ -164,13 +179,20 @@ impl Island {
             }
         }
         if dp(cx, "notifications") {
-            let n = self.notifs.lock().map(|n| n.clone()).unwrap_or_default();
-            let count = cx.cfg.get("island.panel.notifCount").as_u64().unwrap_or(3) as usize;
-            let n: Vec<Value> = n.into_iter().take(count).collect();
-            let h = if n.is_empty() { 16.0 + 10.0 + lh(12.5) } else {
-                22.0 + n.iter().map(|x| 10.0 + 16.0 + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum::<f32>()
-            };
-            v.push((Sec::Notifs(n), h));
+            // a clicked notification opens in place of the list
+            if let Some(n) = self.notif_open.clone() {
+                let (title_h, body_full) = Self::notif_text_h(g, &n);
+                let body = if s(&n, "body").is_empty() { 0.0 } else { ask_h(body_full) + 12.0 };
+                v.push((Sec::NotifDetail(n), 26.0 + title_h + 8.0 + body + 32.0));
+            } else {
+                let n = self.notifs.lock().map(|n| n.clone()).unwrap_or_default();
+                let count = cx.cfg.get("island.panel.notifCount").as_u64().unwrap_or(3) as usize;
+                let n: Vec<Value> = n.into_iter().take(count).collect();
+                let h = if n.is_empty() { 16.0 + 10.0 + lh(12.5) } else {
+                    22.0 + n.iter().map(|x| 10.0 + 16.0 + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum::<f32>()
+                };
+                v.push((Sec::Notifs(n), h));
+            }
         }
         v
     }
@@ -273,11 +295,13 @@ impl Island {
         }
     }
 
-    /// The buddy's question with Allow, Deny and a box to answer in words. Answering is the only way a take-over starts or a risky click goes through.
-    fn ask(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, q: &str) {
+    /// The buddy's question, or a Claude Code permission (`permit`), with Allow, Deny and a box to answer in words.
+    /// Answering is the only way a take-over starts or a risky click goes through.
+    fn ask(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, q: &str, permit: Option<&str>) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
-        c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
-        c.text("The buddy is asking", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        let (icon, head) = match permit { Some(h) => ("terminal", h), None => ("smart_toy", "The buddy is asking") };
+        c.icon(icon, R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
+        c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         let y = y + 26.0;
         let f = txt(13.0, 400);
         self.ask_full = c.g.measure_wrapped(q, f, w);
@@ -296,8 +320,9 @@ impl Island {
         let y = y + ASK_BOX_H + 10.0;
         let (la, ld) = ("Allow", "Deny");
         let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
-        ui::chip(c, cx, x + w - wa - 8.0 - wd, y, ALLOW, Some("check"), la, true);
-        ui::chip(c, cx, x + w - wd, y, DENY, Some("close"), ld, false);
+        let (allow, deny) = if permit.is_some() { (PERMIT_ALLOW, PERMIT_DENY) } else { (ALLOW, DENY) };
+        ui::chip(c, cx, x + w - wa - 8.0 - wd, y, allow, Some("check"), la, true);
+        ui::chip(c, cx, x + w - wd, y, deny, Some("close"), ld, false);
     }
 
     fn rec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
@@ -430,6 +455,56 @@ impl Island {
         }
     }
 
+    /// An opened notification: its app and age, the title, the body (scrolls past a few lines), then Back, Open and Dismiss.
+    fn notif_detail(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, n: &Value) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let (title, body) = (s(n, "title"), s(n, "body"));
+        let (title_h, body_full) = Self::notif_text_h(c.g, n);
+        self.body_full = body_full;
+        let now = hub::now_ms() / 1000.0;
+        let app = s(n, "app");
+        let ago = ago(now, n["time"].as_f64().unwrap_or(now));
+        let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
+        c.icon("notifications", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
+        c.text(&app, R::new(x + 22.0, y, w - 22.0 - aw - 8.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        c.text(&ago, R::new(x + w - aw, y, aw, 16.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+        let y = y + 26.0;
+        c.para(&title, R::new(x, y, w, title_h), txt(13.0, 500), t.c("onSurface"), Align::Left);
+        let mut y = y + title_h + 8.0;
+        if !body.is_empty() {
+            let br = R::new(x, y, w, ask_h(body_full));
+            c.hit(br, NOTIF_BODY);
+            let f = txt(13.0, 400);
+            self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - 8.0, body_full), f, t.c("onSurface"), Align::Left));
+            y += br.h + 12.0;
+        }
+        // Back on the left; Open (the app that sent it, if it names one) and Dismiss on the right
+        let (ld, lo) = ("Dismiss", "Open");
+        let wd = chip_w(c, ld, false);
+        ui::chip(c, cx, x, y, NOTIF_BACK, Some("arrow_back"), "Back", false);
+        ui::chip(c, cx, x + w - wd, y, NOTIF_DISMISS, None, ld, false);
+        if !s(n, "open").is_empty() {
+            let wo = chip_w(c, lo, true);
+            ui::chip(c, cx, x + w - wd - 8.0 - wo, y, NOTIF_OPEN, Some("open_in_new"), lo, true);
+        }
+    }
+
+    /// Height of a notification's title and body when they wrap to the panel width.
+    fn notif_text_h(g: &Gfx, n: &Value) -> (f32, f32) {
+        let w = W - 2.0 * PAD;
+        (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - 8.0))
+    }
+
+    /// The app target of the open notification (what Open launches), "" if none.
+    fn open_target(&self) -> String { self.notif_open.as_ref().map(|n| s(n, "open")).unwrap_or_default() }
+
+    /// A banner click leaves the newest notification in "zor-ui.notifOpen" (see bar.rs); it opens here, so you see what it said.
+    fn take_banner_notif(&mut self) {
+        let Some(t) = hub::get("zor-ui.notifOpen") else { return };
+        hub::set("zor-ui.notifOpen", None);
+        if let Ok(n) = serde_json::from_str::<Value>(&t) { self.notif_open = Some(n); self.body_scroll = Default::default(); }
+    }
+
     fn fetch_notifs(&mut self, cx: &Ctx) {
         if self.asked || !dp(cx, "notifications") { return; }
         self.asked = true;
@@ -452,15 +527,17 @@ impl View for Island {
     }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
+        self.take_banner_notif();
         self.fetch_notifs(cx);
         let plan = self.plan(c.g, cx);
         let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
         ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
         let lyr = Self::lyrics_h(cx);
         let mut y = 12.0 + PAD;
-        if !plan.iter().any(|p| matches!(p.0, Sec::Ask(_))) && !self.reply.text.is_empty() { self.reply.set(""); self.reply_focus = false; } // answered by voice: the box starts empty next time
+        let asking = |p: &(Sec, f32)| matches!(p.0, Sec::Ask(_) | Sec::Permit(..));
+        if !plan.iter().any(asking) && !self.reply.text.is_empty() { self.reply.set(""); self.reply_focus = false; } // answered by voice: the box starts empty next time
         self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 }
-            else if (self.reply_focus || crate::pill::active()) && plan.iter().any(|p| matches!(p.0, Sec::Ask(_))) { 500 } else { 0 }); // the reply caret blinks, the mic fills while listening
+            else if (self.reply_focus || crate::pill::active()) && plan.iter().any(asking) { 500 } else { 0 }); // the reply caret blinks, the mic fills while listening
         if plan.is_empty() {
             c.text("Nothing to show. Pick sections in Settings > Dynamic Island", R::new(x, y, W - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left);
         }
@@ -469,13 +546,15 @@ impl View for Island {
                 c.rect(R::new(x, y - 12.5, W - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
             }
             match sec {
-                Sec::Ask(q) => self.ask(c, cx, x, y, q),
+                Sec::Ask(q) => self.ask(c, cx, x, y, q, None),
+                Sec::Permit(head, q) => self.ask(c, cx, x, y, q, Some(head.as_str())),
                 Sec::Media => self.now_playing(c, cx, x, y, lyr),
                 Sec::Rec => self.rec(c, cx, x, y),
                 Sec::Timer => self.timer(c, cx, x, y),
                 Sec::Idle => self.idle(c, cx, x, y),
                 Sec::Agents(l) => self.agents(c, cx, x, y, l),
                 Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
+                Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
             }
             y += sh + SEP;
         }
@@ -487,6 +566,10 @@ impl View for Island {
             Input::Click(i, Btn::Left) => match i {
                 ALLOW | DENY => {
                     crate::drive::answer(i == ALLOW);
+                    cx.actions.push(Action::Close("island-panel".into()));
+                }
+                PERMIT_ALLOW | PERMIT_DENY => {
+                    if let Some((_, session, _)) = crate::bridge::permit::pending() { crate::bridge::permit::decide(&session, i == PERMIT_ALLOW, ""); }
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
                 ASK_SEND => self.send_reply(cx),
@@ -512,12 +595,23 @@ impl View for Island {
                     let cfg = Config(cx.cfg.0.clone());
                     std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); crate::proc::bridge(&cfg, "notifications-dismiss", &a); });
                 }
-                i if i >= NOTIF => {
-                    hub::set("zor-ui.rightTab", Some("notif".into()));
-                    // the sidebar scrolls to this notification (see sidebar_right/pages.rs FOCUS)
-                    hub::set("zor-ui.notifFocus", self.notifs.lock().ok().and_then(|n| n.get((i - NOTIF) as usize).and_then(|n| n["id"].as_str().map(|id| format!("{}:{id}", hub::now_ms() as u64)))));
-                    cx.actions.push(Action::open("sidebar-right"));
+                NOTIF_BACK => self.notif_open = None,
+                NOTIF_OPEN => {
+                    let open = self.open_target();
+                    if !open.is_empty() { crate::bridge::sys::open_and_point(&open); }
                     cx.actions.push(Action::Close("island-panel".into()));
+                }
+                NOTIF_DISMISS => {
+                    if let Some(n) = self.notif_open.take() {
+                        let id = s(&n, "id");
+                        if let Ok(mut l) = self.notifs.lock() { l.retain(|x| x["id"].as_str() != Some(id.as_str())); }
+                        let cfg = Config(cx.cfg.0.clone());
+                        std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &[id.as_str()]); });
+                    }
+                }
+                i if i >= NOTIF => {
+                    self.notif_open = self.notifs.lock().ok().and_then(|n| n.get((i - NOTIF) as usize).cloned());
+                    self.body_scroll = Default::default();
                 }
                 _ => {}
             },
@@ -530,6 +624,7 @@ impl View for Island {
             }
             Input::Wheel(LYRICS, d) => self.scroll.wheel(d, self.plain_h, LYR_H),
             Input::Wheel(ASK_Q, d) => self.ask_scroll.wheel(d, self.ask_full, lh(13.0) * ASK_MAX_LINES),
+            Input::Wheel(NOTIF_BODY, d) => self.body_scroll.wheel(d, self.body_full, lh(13.0) * ASK_MAX_LINES),
             Input::Drag(ASK_BOX, x, y, Phase::Start) => { self.reply.press(x, y); self.reply_focus = true; }
             Input::Focus(f) => self.reply_focus = f && self.reply_focus,
             Input::Key { vk, ctrl, shift, alt } if self.reply_focus => {
@@ -545,7 +640,8 @@ impl Island {
     /// Sends what you typed to the buddy as your answer, and closes the panel. An empty box sends nothing.
     fn send_reply(&mut self, cx: &mut Ctx) {
         if self.reply.text.trim().is_empty() { return; }
-        crate::drive::reply(&self.reply.text);
+        // the buddy's question first (it shows first); otherwise the words answer the Claude Code permission
+        if crate::drive::waiting() || !crate::bridge::permit::answer_with(&self.reply.text) { crate::drive::reply(&self.reply.text); }
         self.reply.set("");
         self.reply_focus = false;
         cx.actions.push(Action::Close("island-panel".into()));

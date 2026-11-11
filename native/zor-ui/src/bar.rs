@@ -83,8 +83,16 @@ pub fn tray_split(total: usize, visible: usize) -> (usize, usize) {
 
 /// The tray icons that have a picture, split into the ones the bar shows and the ones the flyout holds.
 pub fn tray_icons(cx: &Ctx) -> (Vec<crate::tray::Icon>, Vec<crate::tray::Icon>) {
-    let mut all: Vec<_> = cx.tray.iter().filter(|i| i.rgba.is_some()).cloned().collect();
-    let (shown, _) = tray_split(all.len(), cx.cfg.get("bar.trayVisible").as_u64().unwrap_or(3) as usize);
+    let all: Vec<_> = cx.tray.iter().filter(|i| i.rgba.is_some()).cloned().collect();
+    let visible = cx.cfg.get("bar.trayVisible").as_u64().unwrap_or(3) as usize;
+    split_icons(all, cx.cfg.get("bar.trayMatchWindows").as_bool().unwrap_or(true), visible)
+}
+
+/// Splits icons into (bar, flyout). "Match Windows" puts the icons Windows shows on the taskbar on the bar; otherwise the first `visible`.
+pub fn split_icons(all: Vec<crate::tray::Icon>, match_windows: bool, visible: usize) -> (Vec<crate::tray::Icon>, Vec<crate::tray::Icon>) {
+    if match_windows { return all.into_iter().partition(|i| i.promoted); }
+    let mut all = all;
+    let (shown, _) = tray_split(all.len(), visible);
     let hidden = all.split_off(shown);
     (all, hidden)
 }
@@ -102,10 +110,18 @@ pub fn tray_sample_colors() -> [Color; TRAY_SAMPLE] {
     [0xFF5865F2, 0xFF1DB954, 0xFFF59E0B, 0xFFEF4444, 0xFF06B6D4, 0xFFA855F7, 0xFFEC4899, 0xFF84CC16]
 }
 
-/// The tray group with `visible` of the sample icons and the chevron, drawn with the bar's own element
+/// How many sample icons "Match Windows" puts on the bar: the first two, as if Windows shows them on the taskbar.
+pub const TRAY_SAMPLE_PROMOTED: usize = 2;
+
+/// (shown, hidden) for the sample icons, with the same rule as `tray_icons`.
+pub fn tray_sample_split(match_windows: bool, visible: usize) -> (usize, usize) {
+    if match_windows { (TRAY_SAMPLE_PROMOTED, TRAY_SAMPLE - TRAY_SAMPLE_PROMOTED) } else { tray_split(TRAY_SAMPLE, visible) }
+}
+
+/// The tray group with `split` = (shown, hidden) sample icons and the chevron when some are hidden, drawn with the bar's own element
 /// code (`draw_el`). Returns its width. Ids are 0 so the Settings page gets no clicks from it.
-pub fn draw_tray_sample(c: &mut Canvas, cx: &Ctx, x: f32, cy: f32, visible: usize, edge: Edge) -> f32 {
-    let (shown, hidden) = tray_split(TRAY_SAMPLE, visible);
+pub fn draw_tray_sample(c: &mut Canvas, cx: &Ctx, x: f32, cy: f32, split: (usize, usize), edge: Edge) -> f32 {
+    let (shown, hidden) = split;
     let mut els: Vec<El> = tray_sample_colors().iter().take(shown)
         .map(|&col| El::Btn { id: 0, w: 24.0, h: 24.0, label: Box::new(El::Dot(14.0, col)), bg: None, round: 6.0 }).collect();
     if hidden > 0 { els.push(tray_more(edge, 0, cx.theme.c("onSurface"))); }
@@ -541,7 +557,7 @@ impl Bar {
         let mut l = vec![];
         if cx.notif.as_ref().is_some_and(|n| n.until > now) { l.push(("notification", true)); }
         if cx.osd.as_ref().is_some_and(|o| o.until > now) { l.push(("osd", true)); }
-        if asks { l.push(("agent", false)); }
+        if asks { l.push(("agent", true)); } // a waiting prompt wins outright, so a badge focus can't hide it
         if di("recording") && Self::rec_started() > 0.0 { l.push(("recording", false)); }
         if di("timer") && Self::timer_chip(cx).is_some() { l.push(("timer", false)); }
         if di("media") && cx.media.is_some() { l.push(("media", false)); }
@@ -927,7 +943,7 @@ fn group_look(cx: &Ctx, p: &Pill) -> (Option<Color>, Option<Color>, bool) { grou
 /// `group_look` for a given style and group setting (the Settings preview passes the values being edited).
 fn group_look_for(cx: &Ctx, p: &Pill, style: &str, groups: &str) -> (Option<Color>, Option<Color>, bool) {
     let t = &cx.theme;
-    let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
+    let layer0 = crate::ui::layer0(cx);
     let border = alpha(t.c("outlineVariant"), tk::GLASS_EDGE_A);
     if style == "clear" { return (None, None, false); } // a preset's "transparent" bar: only the contents show
     if style == "islands" { return (Some(islands_fill(p, layer0)), Some(border), true); }
@@ -960,7 +976,7 @@ impl View for Bar {
         self.viz_loud = false; // viz_pill() turns it back on
         let t = &cx.theme;
         let style = cx.cfg.str("bar.style");
-        let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
+        let layer0 = crate::ui::layer0(cx);
         let flat = style == "flat";
         let (v, edge) = (self.edge.vertical(), self.edge);
         let (bx, by, bw, bh) = match (flat, v) {
@@ -1148,15 +1164,14 @@ impl Bar {
             (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
                 match crate::app::Notif::target(&cx.notif, hub::now_ms()) {
                     Some(crate::bridge::claude_acct::CANCEL) => crate::bridge::claude_acct::cancel(), // the auto-switch banner
-                    Some(t) => crate::bridge::sys::open_and_point(t),
+                    // a notification: show what it said in the island (its Open button launches the app)
+                    Some(_) => if let Some(last) = hub::get("zor-ui.notifLast") {
+                        hub::set("zor-ui.notifOpen", Some(last));
+                        cx.actions.push(crate::app::Action::open("island-panel"));
+                    },
                     None => {}
                 }
                 cx.notif = None;
-            }
-            // a click on a stuck "needs you" prompt clears it
-            (ISLAND, Btn::Left) if self.di_state == "agent" && hub::get_json("zor-ui.agents").as_array().is_some_and(|a| a.iter().any(|a| a["state"] == "waiting")) => {
-                let cfg = crate::conf::Config(cx.cfg.0.clone());
-                std::thread::spawn(move || { proc::bridge(&cfg, "agents-dismiss", &[]); });
             }
             (ISLAND, Btn::Left) => { let a = cx.cfg.str("island.click").to_string(); act(self, if a.is_empty() { "panel" } else { &a }, cx) }
             (ISLAND, Btn::Right) => { let a = cx.cfg.str("island.rightClick").to_string(); act(self, if a.is_empty() { "sidebar-left" } else { &a }, cx) }
@@ -1283,7 +1298,7 @@ impl View for Popup {
     fn key(&self, _cx: &Ctx) -> String { util::now().wSecond.to_string() } // live numbers while open
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         let t = &cx.theme;
-        let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
+        let layer0 = crate::ui::layer0(cx);
         let card = R::new(6.0, 6.0, c.w - 12.0, c.h - 12.0);
         c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(card, 23.0, col) });
         c.rect(card, 23.0, alpha(t.c("outlineVariant"), 0.45));
@@ -1475,6 +1490,29 @@ mod tests {
         assert_eq!(tray_sample_colors().len(), TRAY_SAMPLE);
         assert!(tray_split(TRAY_SAMPLE, 3).1 > 0);
         assert_eq!(tray_split(TRAY_SAMPLE, 5).0, 5);
+    }
+
+    #[test]
+    fn match_windows_leaves_some_sample_icons_on_the_bar_and_some_in_the_flyout() {
+        let (shown, hidden) = tray_sample_split(true, 0);
+        assert_eq!(shown, TRAY_SAMPLE_PROMOTED);
+        assert!(shown > 0 && hidden > 0);
+        assert_eq!(tray_sample_split(false, 5), tray_split(TRAY_SAMPLE, 5), "switch off: the count");
+    }
+
+    #[test]
+    fn split_follows_windows_or_the_count() {
+        let icon = |id: &str, promoted: bool| crate::tray::Icon { id: id.into(), tooltip: String::new(), rgba: None, promoted };
+        let all = || vec![icon("a", false), icon("b", true), icon("c", false), icon("d", true)];
+        let (bar, flyout) = split_icons(all(), true, 1);
+        assert_eq!(bar.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["b", "d"]);
+        assert_eq!(flyout.len(), 2);
+        let (bar, flyout) = split_icons(all(), true, 0);
+        assert_eq!(bar.len(), 2, "the count is ignored when matching Windows");
+        assert!(flyout.iter().all(|i| !i.promoted));
+        let (bar, flyout) = split_icons(all(), false, 1);
+        assert_eq!((bar.len(), flyout.len()), (1, 3), "count mode keeps the first N");
+        assert!(split_icons(vec![], true, 0).0.is_empty());
     }
 
     #[test]

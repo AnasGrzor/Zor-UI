@@ -33,6 +33,7 @@ pub fn run(args: &[String]) {
     let pack = conf::pack_dir();
     let Ok(g) = Gfx::new(&pack.join(r"assets\fonts"), &conf::data_dir()) else { return };
     let mut cx = Ctx::new(true);
+    cx.agents = crate::hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default();
     cx.cfg = Config::parse(&std::fs::read_to_string(pack.join("config.json")).unwrap_or_default());
     cx.theme = Theme::parse(&std::fs::read_to_string(pack.join("theme.json")).unwrap_or_default());
     g.set_font(cx.cfg.str("font.family"), cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32, cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);

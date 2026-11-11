@@ -550,8 +550,7 @@ impl Bar {
     /// diProviders() in bar.js: what the island could show, most important first; .2 = wins outright.
     fn island_list(cx: &Ctx) -> Vec<(&'static str, bool)> {
         let di = |k: &str| cx.cfg.get(&format!("island.{k}")).as_bool() != Some(false);
-        let agents = hub::get_json("zor-ui.agents");
-        let agents = agents.as_array().cloned().unwrap_or_default();
+        let agents = &cx.agents;
         let asks = di("agents") && agents.iter().any(|a| a["state"] == "waiting");
         let now = hub::now_ms();
         let mut l = vec![];
@@ -592,8 +591,7 @@ impl Bar {
                 els.push(El::Txt(format!("{} · {}", n.app, n.text), txt(13.0, 400), fg, wide_w));
             }
             "agent" => {
-                let agents = hub::get_json("zor-ui.agents");
-                let agents = agents.as_array().cloned().unwrap_or_default();
+                let agents = &cx.agents;
                 let waiting: Vec<&Value> = agents.iter().filter(|a| a["state"] == "waiting").collect();
                 let a = waiting.first().copied().or_else(|| agents.iter().find(|a| a["state"] == "working"))?;
                 let s = |v: &Value| v.as_str().unwrap_or("").to_string();
@@ -1383,6 +1381,16 @@ mod tests {
             let p = bar.island(&mut c, &cx, &|_| true).expect("island with media");
             assert_eq!(p.els.iter().any(|e| matches!(e, El::Eq(..))), playing, "playing {playing}");
         }
+    }
+
+    /// The island shows a waiting agent over playing media when cx.agents has one, and the media when cx.agents is empty.
+    #[test]
+    fn island_shows_agent_from_ctx() {
+        let mut cx = Ctx::new(false);
+        cx.media = Some(crate::media::Media { playing: true, title: "t".into(), current: true, ..Default::default() });
+        assert_eq!(Bar::island_list(&cx).first().map(|p| p.0), Some("media"));
+        cx.agents = vec![serde_json::json!({ "label": "a", "state": "waiting" })];
+        assert_eq!(Bar::island_list(&cx).first().map(|p| p.0), Some("agent"));
     }
 
     /// The pill shows only while media plays, in both the island and the media slot; paused or no session gives none.

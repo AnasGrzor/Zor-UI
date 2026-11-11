@@ -51,6 +51,8 @@ pub struct Ctx {
     pub tray: Vec<tray::Icon>,
     pub notif: Option<Notif>,
     pub osd: Option<Osd>,
+    /// The agents (`zor-ui.agents`), read by the island and bar drawing. Passed in, so tests don't read the real data file.
+    pub agents: Vec<serde_json::Value>,
     /// The apps holding the microphone and camera (polled every tick while the island shows it).
     pub privacy: crate::privacy::Privacy,
     /// Bumps whenever any of the above changes; windows repaint on a new version.
@@ -89,7 +91,7 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, privacy: Default::default(), ver: 0, all, actions: vec![],
+            notif: None, osd: None, agents: vec![], privacy: Default::default(), ver: 0, all, actions: vec![],
         }
     }
 
@@ -183,7 +185,7 @@ impl App {
         MSG_HWND.store(msg.0 as isize, Ordering::Relaxed);
         let mut app = App {
             g,
-            cx: Ctx::new(all),
+            cx: Ctx { agents: hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default(), ..Ctx::new(all) },
             wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
             ws_main: None,
@@ -235,7 +237,11 @@ impl App {
         if self.cx.island_shown() {
             self._streams.extend(proc::stream(cfg, "agents-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
-                if let Some(a) = v.get("agents") { hub::set("zor-ui.agents", Some(a.to_string())); post(Box::new(|_| {})); }
+                if let Some(a) = v.get("agents") {
+                    hub::set("zor-ui.agents", Some(a.to_string()));
+                    let list = a.as_array().cloned().unwrap_or_default();
+                    post(Box::new(move |cx| cx.agents = list));
+                }
             }));
             self._streams.extend(proc::stream(cfg, "notifications-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };

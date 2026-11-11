@@ -1054,4 +1054,16 @@ release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings.
 - Remaining limitations (M2): the browser's per-step gate still lives in `browse::gate` (it is per action, not per request);
   the take-over's question text is built in `drive::question`, which `policy` calls.
 
+**M3 (progressive context), done on branch `buddy-intel-m1b`.**
+- Two sources added to `AgentContext`: the previous saved request and how it ended (when the words point back), and the
+  names of the five newest Recent-folder shortcuts (when the words ask about files).
+- Intent rules in Rust, no extra model call: a request that points back with nothing earlier gets one instruction to ask one
+  short question.
+- The whole context is cut to 700 characters.
+- Tests: reference words, the newest-shortcut order in a temp folder, the previous-request and question rules, and the budget.
+- Tests after M3: `zorui` 959 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings 59 (unchanged).
+- Live: "what files did I open recently" listed real Recent files; "continue where we left off" answered from the last request.
+- Remaining limitations (M3): no active-project source; "it" is not a reference word; the memory lookup still opens the
+  database on every request; intent rules are keyword-based, so an unusual phrasing gets no earlier request.
+
 **Start with Milestone 1. Inspect the repository, establish the baseline build, and implement the smallest complete, tested intelligence foundation before moving to persistent memory. Do not attempt the entire upgrade in one unverified change.**

@@ -435,6 +435,8 @@ pub trait Host {
     /// Shows where the next click goes.
     fn point(&mut self, at: (i32, i32), label: &str);
     fn confirm(&mut self, question: &str) -> bool;
+    /// What the take-over says when a step it asked about was not allowed. The reason is the island's, not a guess.
+    fn refusal(&self) -> &'static str { "You said no, so I stopped." }
     /// Like `confirm`, but you may answer with words instead of yes or no.
     fn ask(&mut self, question: &str) -> Answer { if self.confirm(question) { Answer::Yes } else { Answer::No } }
     fn password_focused(&self) -> bool;
@@ -533,7 +535,7 @@ fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
 fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action, approved: &mut bool, replied: &mut bool) -> Result<String, Stop> {
     if let Act::Ask(q) = &a.act {
         let ans = g.h.ask(q);
-        if ans == Answer::No { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+        if ans == Answer::No { return Err(Stop::Refused(g.h.refusal().into())); }
         g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
         if let Answer::Said(t) = ans {
             // words are instructions, not a yes: the model plans again from a fresh picture, and a risky click asks again
@@ -551,7 +553,7 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
         let arg = if *tool == Tool::Open { open_target(arg).map_err(Stop::Error)? } else { arg.clone() };
         if tool.asks() {
             let q = if *tool == Tool::Open { format!("The buddy wants to open {}. Allow it?", assist::short(&arg, 200)) } else { format!("The buddy wants to start the app \"{}\". Allow it?", assist::short(&arg, 80)) };
-            if !g.h.confirm(&q) { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+            if !g.h.confirm(&q) { return Err(Stop::Refused(g.h.refusal().into())); }
             g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
         }
         let out = g.h.tool(*tool, &arg).map_err(Stop::Error)?;
@@ -562,7 +564,7 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
     // a drag lets go on the same screen the picture names
     let to = match a.act { Act::Drag(x, y) => resolve(caps, &Action { act: Act::Move, pos: Some((x, y)), el: None, ..a.clone() }).map_err(Stop::Error)?, _ => None };
     if matches!(a.act, Act::Click(..) | Act::Drag(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
-        return Err(Stop::Refused("You said no, so I stopped.".into()));
+        return Err(Stop::Refused(g.h.refusal().into()));
     }
     if matches!(a.act, Act::Type(_) | Act::Hold(..)) && g.h.password_focused() {
         return Err(Stop::Refused("That's a password field, so type that one yourself.".into()));
@@ -672,6 +674,18 @@ fn give(ans: Answer, how: &'static str) {
 /// How the waiting question was answered: the island button, a typed reply or a spoken one.
 static ANSWERED_BY: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
 
+/// Why the last island question did not get a yes: 0 you said no, 1 no answer in time, 2 you stopped it (Esc or voice).
+static LAST_NO: AtomicU32 = AtomicU32::new(0);
+
+/// What a take-over says when a step it asked about was not allowed, by the reason `LAST_NO` holds.
+pub fn refusal_text(code: u32) -> &'static str {
+    match code {
+        1 => "I got no answer in time, so I stopped.",
+        2 => "You stopped me, so I stopped.",
+        _ => "You said no, so I stopped.",
+    }
+}
+
 fn island_open() -> bool {
     unsafe { FindWindowW(None, w!("Zor UI / island-panel")).is_ok_and(|h| IsWindowVisible(h).as_bool()) }
 }
@@ -693,6 +707,8 @@ pub fn ask_island(q: &str) -> Answer {
     };
     crate::log::line(&format!("island question \"{}\": {} ({how}) after {:.1} s",
         assist::short(q, 60), if yes == Answer::Yes { "allowed" } else { "refused" }, start.elapsed().as_secs_f32()));
+    let code = if yes == Answer::Yes { 0 } else if how.contains("timed out") { 1 } else if how.starts_with("no answer") { 2 } else { 0 };
+    LAST_NO.store(code, Ordering::Relaxed);
     if let Ok(mut a) = ASK.lock() { *a = None; }
     if yes != Answer::Yes { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::Close("island-panel".into())))); }
     yes
@@ -982,6 +998,7 @@ The screens now are attached. Answer with the JSON."), caps);
     fn say(&mut self, line: &str) { assist::say_later(line, 6.0); }
     fn point(&mut self, at: (i32, i32), label: &str) { if crate::buddy::on() { assist::point_later(at.0, at.1, label); } }
     fn confirm(&mut self, q: &str) -> bool { ask_island(q) == Answer::Yes } // words are not a yes
+    fn refusal(&self) -> &'static str { refusal_text(LAST_NO.load(Ordering::Relaxed)) }
     fn ask(&mut self, q: &str) -> Answer { ask_island(q) }
     fn password_focused(&self) -> bool { focused_is_password() }
     fn tool(&mut self, tool: Tool, arg: &str) -> Result<String, String> {
@@ -1229,6 +1246,13 @@ mod tests {
         assert!(!w.took((500, 500), 0));
         w.expect((500, 500));
         assert!(!w.took((500, 500), 1000), "the drive put it there itself");
+    }
+
+    #[test]
+    fn a_refused_step_says_whether_you_said_no_or_nobody_answered() {
+        assert_eq!(refusal_text(0), "You said no, so I stopped.", "a button or a typed no");
+        assert_eq!(refusal_text(1), "I got no answer in time, so I stopped.", "the 90 s timeout");
+        assert_eq!(refusal_text(2), "You stopped me, so I stopped.", "Esc or voice");
     }
 
     #[test]

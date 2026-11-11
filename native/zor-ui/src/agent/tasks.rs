@@ -99,6 +99,18 @@ pub fn summary_line(rows: &[Row]) -> String {
         n("Completed"), n("Unverified"), n("Partial"), n("Failed"), n("Declined"), n("Cancelled"))
 }
 
+/// Records how a take-over that a request started ended. Only the state and verdict change: the request's tool count stays.
+pub fn take_over_ended(id: i64, status: TaskStatus) {
+    let Some(conn) = open_app() else { return };
+    let r = conn.execute("UPDATE tasks SET status = ?1, verdict = ?2, updated = ?3 WHERE id = ?4",
+        params![format!("{status:?}"), format!("take-over {status:?}"), now(), id]);
+    if let Err(e) = r { crate::log::line(&format!("buddy tasks: could not save the take-over's end: {e}")); }
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The newest saved request and how it ended. None when there is none, or the database can't be read.
+pub fn latest() -> Option<Row> { open_app().and_then(|c| recent_on(&c, 1).ok()).and_then(|v| v.into_iter().next()) }
+
 /// The newest tasks, as the Settings page lists them. Cached, so a repaint never opens the database.
 static CACHE: std::sync::Mutex<Option<Vec<Row>>> = std::sync::Mutex::new(None);
 

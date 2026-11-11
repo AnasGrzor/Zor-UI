@@ -107,8 +107,16 @@ page lists the 10 newest requests with their state, verdict and tool calls.
 
 ## Context and skills
 
-`AgentContext` (in `agent.rs`) holds what a request needs: the clock, the window in front, the player, and matching facts.
-Each part is filled only when the request asks for it. `skills.rs` has three skills with their tools and short guidance:
+`AgentContext` (in `agent.rs`) holds what a request needs: the clock, the window in front, the player, matching facts, the
+previous request, and the names of recently opened files. Each part is filled only when the request asks for it.
+
+- **Previous request.** When the words point back ("this", "continue", "again", "last", "before"), the newest saved request
+  and how it ended go in. "it" is not a reference word yet, because it shows up in too many plain questions.
+- **Recent files.** When the words ask about files ("recent", "file", "document"), the names of the five newest shortcuts in
+  the Windows Recent folder go in, labelled as names only and never instructions. Only names are sent, and only on request.
+- **Vague requests.** A request that points back, with no earlier request and no earlier turn, gets one instruction: ask one
+  short question about what it means.
+- **Budget.** The whole context is cut to 700 characters. `skills.rs` has three skills with their tools and short guidance:
 research (search, read pages), desktop (apps, volume, brightness, media, screen, take-over) and personal (remember, forget,
 files, messages, music). A skill's guidance goes into the request only when its words appear, so most requests carry none.
 
@@ -173,7 +181,7 @@ protocol. Native tool calling needs an API key, because the tool definitions go 
 - **Semantic memory.** The `Recall` trait is in place, but an embedding model would have to be downloaded, and the privacy
   rule keeps facts off providers, so it needs your decision on a local model first.
 - **Browser tools and other providers in native mode.** Native mode is Claude-only with the browser off.
-- **Active project in the context.** The program in front is read; no project is detected.
+- **Active project in the context.** The program in front is read; no project is detected. (M3 did not add a project source.)
 - **Metrics beyond the logs and the tasks table.** The eval scripts are the benchmarks; no dashboard.
 - **Manage tasks by voice.** The Settings list shows them and can cancel one. A cancel stops the request between model calls;
   a tool that is already running finishes first.

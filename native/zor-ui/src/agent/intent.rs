@@ -1,6 +1,9 @@
 //! Intent: what a request is for, and how sure the buddy is, from the words and what the context holds. No model call. A clear
 //! request goes ahead. One that is clear only with an assumption goes ahead with the assumption stated. One that is unclear and
-//! has nothing to point at gets one question instead, and the next request is read as the answer.
+//! has nothing to point at gets one question instead, and the next request is read as the answer. The rules are measured by the
+//! table in `intent_table.rs`.
+
+use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -12,8 +15,10 @@ pub enum Kind {
     Act,
     /// Change a setting.
     Setting,
-    /// A request whose object is not clear ("fix this", "make it better").
+    /// A request whose object is not clear ("fix this", "make it better", "clean up my project").
     Unclear,
+    /// A follow-up whose object is the previous turn ("do that again", "continue where we left off").
+    Followup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +41,7 @@ pub struct Context {
     pub previous_request: bool,
     /// The conversation has turns in memory.
     pub conversation: bool,
-    /// The window in front is a project folder.
+    /// The window in front is a project folder (agent/project.rs).
     pub project: bool,
     /// The title of the window in front, read without acting. Empty when there is none. Something the user can see is
     /// the likeliest object of "this", so an unclear request with a window in front is assumed, not asked about.
@@ -56,9 +61,13 @@ pub enum Decision {
 }
 
 /// Words that say "do the thing" without saying which thing.
-const VAGUE: [&str; 7] = ["fix", "improve", "better", "clean", "ready", "sort", "tidy"];
-/// Words that point at something already on the table.
-const REFERENCE: [&str; 5] = ["this", "that", "it", "them", "those"];
+const VAGUE: [&str; 9] = ["fix", "improve", "better", "clean", "ready", "sort", "tidy", "polish", "finish"];
+/// Words that stand for an object the request does not name ("something like that", "stuff").
+const GENERIC: [&str; 5] = ["something", "stuff", "things", "everything", "anything"];
+/// Words for the project as a whole: "clean up my project" is vague about which project, so it needs one in front.
+const PROJECT_WORDS: [&str; 4] = ["project", "repo", "repository", "workspace"];
+/// Words that point at something already on the table: "this", "that", "them", "those". "It" is decided by `points_at`.
+const REFERENCE: [&str; 4] = ["this", "that", "them", "those"];
 const LOOKUP: [&str; 9] = ["search", "look", "news", "weather", "price", "prices", "score", "scores", "research"];
 const ACT: [&str; 14] = ["open", "play", "volume", "brightness", "click", "message", "remember", "forget", "wallpaper", "lock", "copy", "pause", "skip", "take"];
 const SETTING: [&str; 4] = ["turn", "enable", "disable", "switch"];
@@ -67,14 +76,41 @@ fn words(said: &str) -> Vec<String> {
     said.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
 }
 
+/// Whether the word at `i` points back at something. "It" does, except when it is the subject of a question or a statement
+/// about now: "what time is it", "is it raining", "it's cold" (the "s" is the contraction's), "it is cold". "fix it" and
+/// "turn it off" point back. A fixed list of words, no grammar.
+fn points_at(w: &[String], i: usize) -> bool {
+    match w[i].as_str() {
+        "it" => {
+            let before = i.checked_sub(1).map(|j| w[j].as_str());
+            let after = w.get(i + 1).map(String::as_str);
+            !matches!(before, Some("is" | "was" | "be" | "been")) && !matches!(after, Some("s" | "is" | "was"))
+        }
+        word => REFERENCE.contains(&word),
+    }
+}
+
 /// What the request is and how sure the buddy is of it.
 pub fn classify(said: &str, ctx: &Context) -> Assessment {
     if ctx.answering { return Assessment { kind: Kind::Answer, confidence: Confidence::High }; }
     let w = words(said);
     let has = |list: &[&str]| w.iter().any(|x| list.contains(&x.as_str()));
-    if has(&VAGUE) && has(&REFERENCE) {
-        // the object is unclear: a project or window in front, or something said or done before, gives it one
-        let confidence = if ctx.project || !ctx.window.is_empty() || ctx.previous_request || ctx.conversation { Confidence::Medium } else { Confidence::Low };
+    let lower = said.to_lowercase();
+    let pointing = (0..w.len()).any(|i| points_at(&w, i));
+    let prior = ctx.previous_request || ctx.conversation;
+    // a follow-up: its object is the previous turn, so it needs one (a window in front does not make "continue" clear)
+    let followup = lower.contains("left off") || has(&["continue"]) || (has(&["again"]) && pointing) || lower.contains("same thing") || lower.contains("same one");
+    if followup {
+        return Assessment { kind: Kind::Followup, confidence: if prior { Confidence::Medium } else { Confidence::Low } };
+    }
+    // vague: a vague word with an object that is missing ("this", "it", "something", "my project"), or a generic object with a reference
+    let project_object = has(&PROJECT_WORDS);
+    let vague = (has(&VAGUE) && (pointing || has(&GENERIC) || project_object)) || (pointing && has(&GENERIC));
+    if vague {
+        // "my project" needs the project in front: a window that is not the project does not say which one
+        let confidence = if project_object && !ctx.project { Confidence::Low }
+            else if ctx.project || !ctx.window.is_empty() || prior { Confidence::Medium }
+            else { Confidence::Low };
         return Assessment { kind: Kind::Unclear, confidence };
     }
     let kind = if has(&LOOKUP) { Kind::Lookup } else if has(&ACT) { Kind::Act } else if has(&SETTING) { Kind::Setting } else { Kind::Answer };
@@ -87,25 +123,49 @@ pub fn decide(a: Assessment, ctx: &Context) -> Decision {
     match a.confidence {
         Confidence::High => Decision::Proceed,
         Confidence::Medium => {
-            let what = if ctx.project { "the active project".to_string() }
+            let what = if a.kind == Kind::Followup { "the last thing we talked about".to_string() }
+                else if ctx.project { "the active project".to_string() }
                 else if !ctx.window.is_empty() { format!("the window in front, \"{}\"", ctx.window) }
                 else { "the last thing we talked about".to_string() };
-            Decision::Assume(format!("Taking \"this\" to mean {what}."))
+            Decision::Assume(format!("Taking this request to mean {what}."))
         }
         Confidence::Low => Decision::Ask("Which one do you mean? Tell me what should change, and I'll take it from there.".into()),
     }
 }
 
-/// Words that point back at the subject of the previous request. "It" is one of them: "fix it" after "open Spotify" means Spotify.
-const POINT_BACK: [&str; 5] = ["it", "this", "that", "them", "those"];
+thread_local! {
+    /// The request now running has an assumed object (not one the user named). Read by `agent::approve`.
+    static ASSUMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the request on this thread as assumed for as long as the guard lives. Dropping it clears the mark on every path.
+pub struct Assumed;
+
+impl Assumed {
+    pub fn request(on: bool) -> Assumed {
+        ASSUMED.with(|a| a.set(on));
+        Assumed
+    }
+}
+
+impl Drop for Assumed {
+    fn drop(&mut self) { ASSUMED.with(|a| a.set(false)); }
+}
+
+/// Whether the request on this thread has an assumed object. Then a consequential or destructive step is refused, not asked.
+pub fn is_assumed() -> bool { ASSUMED.with(|a| a.get()) }
+
+/// The answer when an assumed request asks for a consequential or destructive step.
+pub const ASSUMED_REFUSAL: &str = "Your request didn't say what to do, so I didn't take that step. Tell me exactly what you want and I'll do it.";
 
 /// The note that resolves a reference word against the previous turn: the words the user said then, and the answer. The request
 /// itself is not changed. None when the request has no reference word, or there is no previous turn to point at.
 pub fn resolve_reference(said: &str, previous: Option<(&str, &str)>) -> Option<String> {
     let (said_then, answer) = previous?;
     let lower = said.to_lowercase();
-    let word = words(said).into_iter().find(|w| POINT_BACK.contains(&w.as_str()))
-        .or_else(|| lower.contains("the last one").then(|| "the last one".to_string()))?;
+    let w = words(said);
+    let word = (0..w.len()).find(|&i| points_at(&w, i)).map(|i| w[i].clone())
+        .or_else(|| ["the last one", "same thing", "other one"].iter().find(|p| lower.contains(*p)).map(|p| p.to_string()))?;
     Some(format!("\"{word}\" in this request refers to the previous request, \"{}\" (the buddy answered: \"{}\"). If it means something else, go by the words.",
         crate::assist::short(said_then, 120), crate::assist::short(answer, 120)))
 }

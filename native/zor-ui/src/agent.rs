@@ -16,6 +16,8 @@ pub mod policy;
 pub mod provider;
 pub mod readback;
 pub mod intent;
+#[cfg(test)]
+pub mod intent_table;
 pub mod project;
 pub mod routing;
 pub mod skills;
@@ -421,6 +423,10 @@ pub fn power(what: &str, act: &mut dyn FnMut(&str) -> Result<(), String>) -> Res
 /// The one place a risky call asks the user first (`policy::approval_for`). A "no" comes back as an error, which the verifier
 /// records as Declined. The browser asks once per request, and not at all when Settings skips the question.
 fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
+    // a request whose object was assumed never gets a consequential or destructive step: refused, not asked (intent.rs)
+    if intent::is_assumed() && matches!(policy::risk_of(call), policy::Risk::Consequential | policy::Risk::Destructive) {
+        return Err(intent::ASSUMED_REFUSAL.into());
+    }
     // every browser step asks once per request, whatever its level, so this comes before the level check; an unknown name is refused
     if let Call::Browser { tool, .. } = call {
         if policy::browser_risk(tool).is_none() { return Err(policy::no_such_browser_tool(tool)); }
@@ -887,14 +893,18 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     let ctx = intent::Context {
         previous_request: tasks::latest().is_some(),
         conversation: TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false),
-        project: project::wants_project(said) && project::from_title(&front, &project::roots(cfg)).is_some(),
+        // the project in front is an object for "fix this" and "clean up my project", so it is looked for on every request
+        project: project::from_title(&front, &project::roots(cfg)).is_some(),
         window: assist::short(front.trim(), 80),
         answering: pending.is_some(),
     };
     let a = intent::classify(said, &ctx);
     crate::log::line(&format!("buddy intent: {:?} {:?}", a.kind, a.confidence));
     let mut note = note.to_string();
-    match intent::decide(a, &ctx) {
+    let d = intent::decide(a, &ctx);
+    // an object that was assumed, not named: approve refuses its consequential and destructive steps for this request
+    let _assumed = intent::Assumed::request(matches!(d, intent::Decision::Assume(_)));
+    match d {
         // unclear with nothing to point at: the buddy asks one question, and no model is called
         intent::Decision::Ask(q) => {
             // every question is logged with its request, so the count of questions per request can be read from the log

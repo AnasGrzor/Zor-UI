@@ -10,7 +10,7 @@ fn defaults() -> Value {
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
         "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "runOnStartup": true, "customAgents": [],
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
-        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true },
+        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true, "nativeTools": false, "memory": true },
         "claude": { "autoSwitch": false, "threshold": 95 },
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },
@@ -19,10 +19,11 @@ fn defaults() -> Value {
         "nightLight": { "kelvin": 4500 },
         "record": { "audio": "both", "mic": "" },
         "wallpaperEngine": { "follow": true, "path": "" },
+        "wallpaperTheme": { "perMonitor": false, "adaptiveGlass": true, "reducedMotion": false },
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
         "frame": { "enabled": false, "thickness": 5, "radius": 20 },
         "dock": { "enabled": false, "side": "bottom", "style": "hug", "iconSize": 30, "radius": 30, "pinned": [] },
-        "bar": { "style": "float", "groups": "filled", "spacing": "cozy", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3 },
+        "bar": { "style": "float", "groups": "filled", "spacing": "cozy", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3, "trayMatchWindows": true },
         "font": { "family": "", "size": 1, "weight": 0 },
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
@@ -38,6 +39,7 @@ fn defaults() -> Value {
             "listen": true, "listenAi": true, "screen": false, "screenModel": "", "drive": false, "browser": false, "driveRounds": 25, "driveSecs": 180, "allow": { "search": true, "open": true, "message": true, "media": true, "system": true },
             "a": { "character": "gojo", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true },
             "b": { "on": false, "character": "geto", "name": "", "hair": "", "shirt": "", "pants": "", "eyes": "", "bun": "", "chatty": "normal", "walk": true } },
+        "voice": { "provider": "windows" },
         "native": { "bar": true, "desktop": true, "dock": true, "island-panel": true, "overview": true, "settings": true, "sidebar-left": true, "sidebar-right": true, "theme": true, "tray-flyout": true, "visualizer": true }
     }"#).expect("defaults are valid JSON")
 }
@@ -87,7 +89,14 @@ const FALLBACK: &[(&str, Color)] = &[
     ("error", 0xFFFFB4AB), ("onError", 0xFF690005), ("inverseSurface", 0xFFEAE0E7), ("inverseOnSurface", 0xFF342F34),
 ];
 
-pub struct Theme { colors: HashMap<String, Color>, pub dark: bool }
+mod theme_effects;
+pub use theme_effects::{surface_scope, hide_preview};
+pub struct Theme {
+    colors: HashMap<String, Color>, pub dark: bool,
+    regions: Vec<(f64, f64)>,
+    monitors: Vec<theme_effects::MonitorTheme>,
+    transition: Option<theme_effects::Transition>,
+}
 
 impl Theme {
     pub fn parse(text: &str) -> Theme {
@@ -98,11 +107,14 @@ impl Theme {
                 if let Some(c) = v.as_str().and_then(parse_hex) { colors.insert(k.clone(), c); }
             }
         }
-        Theme { colors, dark: raw.get("mode").and_then(Value::as_str) != Some("light") }
+        Theme { colors, dark: raw.get("mode").and_then(Value::as_str) != Some("light"),
+            regions: theme_effects::regions(&raw["analysis"]), monitors: theme_effects::monitors(&raw), transition: None }
     }
     /// A Material colour by its theme.json name ("onSurface"); magenta if a name is mistyped.
     pub fn c(&self, name: &str) -> Color {
-        PREVIEW.with(|p| p.borrow().as_ref().and_then(|m| m.get(name).copied())).or_else(|| self.colors.get(name).copied()).unwrap_or(0xFFFF_00FF)
+        PREVIEW.with(|p| p.borrow().as_ref().and_then(|m| m.get(name).copied()))
+            .or_else(|| self.monitor().and_then(|m| m.colors.get(name).copied()))
+            .or_else(|| self.colors.get(name).copied()).unwrap_or(0xFFFF_00FF)
     }
 }
 
@@ -181,7 +193,7 @@ mod tests {
 
     use super::*;
     #[test]
-    fn the_settings_folder_is_not_inside_zebar() {
+    fn the_settings_folder_is_the_zor_ui_folder() {
         let p = pack_dir().to_string_lossy().to_lowercase();
         assert!(p.ends_with(r".glzr\zor-ui") && !p.contains("zebar"));
     }

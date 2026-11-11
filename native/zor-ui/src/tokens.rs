@@ -66,8 +66,14 @@ pub const NAV_X: f32 = 22.0;
 pub const NAV_W: f32 = 200.0;
 pub const DIVIDER_X: f32 = 238.0;
 pub const PAGE_X: f32 = 274.0;
+/// Collapsed rail dimensions for compact mode / icon-only navigation.
+pub const NAV_COLLAPSED_W: f32 = 48.0;
+pub const DIVIDER_COLLAPSED_X: f32 = NAV_X + NAV_COLLAPSED_W + 16.0;
+pub const PAGE_COLLAPSED_X: f32 = DIVIDER_COLLAPSED_X + 35.0;
 /// Top edge of the page area. The title starts here, so this is the air above it (the rail starts at 22).
 pub const PAGE_Y: f32 = 44.0;
+/// Corner radius for interactive preview studios and cards.
+pub const STUDIO_R: f32 = 16.0;
 
 // ---- island panel ----
 /// Width of the Dynamic Island panel (the window adds a margin each side for the shadow), and the transport buttons in it.
@@ -130,6 +136,8 @@ mod tests {
     fn rail_divider_and_page_have_room_between_them() {
         assert!(DIVIDER_X - (NAV_X + NAV_W) >= 16.0, "rail to divider");
         assert!(PAGE_X - (DIVIDER_X + 1.0) >= 32.0, "divider to page");
+        assert!(DIVIDER_COLLAPSED_X - (NAV_X + NAV_COLLAPSED_W) >= 16.0, "collapsed rail to divider");
+        assert!(PAGE_COLLAPSED_X - (DIVIDER_COLLAPSED_X + 1.0) >= 32.0, "collapsed divider to page");
     }
 
     #[test]

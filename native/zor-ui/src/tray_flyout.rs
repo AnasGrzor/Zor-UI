@@ -42,7 +42,7 @@ impl View for TrayFlyout {
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         let t = &cx.theme;
-        let layer0 = alpha(t.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32);
+        let layer0 = crate::ui::layer0(cx);
         let card = R::new(MARGIN, MARGIN, c.w - 2.0 * MARGIN, c.h - 2.0 * MARGIN);
         c.shadow(6.0, 24.0, 0.35, |c, col| if let Some(col) = col { c.rect(card, 18.0, col) });
         c.rect(card, 18.0, alpha(t.c("outlineVariant"), 0.45));

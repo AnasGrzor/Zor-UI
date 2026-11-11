@@ -12,7 +12,11 @@ use crate::{
 pub const LH: f32 = 1.252;
 
 /// `--layer0`: the background colour with the configured transparency.
-pub fn layer0(cx: &Ctx) -> Color { alpha(cx.theme.c("background"), 1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32) }
+pub fn layer0(cx: &Ctx) -> Color {
+    let manual = (1.0 - cx.cfg.get("transparency").as_f64().unwrap_or(0.0) as f32).clamp(0.0, 1.0);
+    let opacity = if cx.cfg.get("wallpaperTheme.adaptiveGlass") == &serde_json::json!(false) { manual } else { cx.theme.surface_opacity(manual) };
+    alpha(cx.theme.c("background"), opacity)
+}
 
 /// The popup background (bar hover popups, sidebars): shadow, 1px border, `--layer0` fill. `r` is the
 /// card; leave ~12 px around it in the window for the shadow.
@@ -269,12 +273,17 @@ pub struct TextBox {
     /// Byte index of the caret.
     pub caret: usize,
     pub all_selected: bool,
+    /// The fixed end of a range selection (mouse or Shift+arrows); the caret is the moving end.
+    pub anchor: Option<usize>,
     pub multiline: bool,
     /// Multiline: Enter submits and Shift+Enter adds a line (a chat box); else Enter adds a line.
     pub enter_submits: bool,
     /// Single line: how far the text is scrolled left (set by `draw`).
     off: std::cell::Cell<f32>,
+    /// A press not yet placed: it sets the caret and the anchor at the next `draw`, which knows the layout.
     pending: Option<(f32, f32)>,
+    /// The latest pointer position of a drag, placed at the next `draw`.
+    dragged: Option<(f32, f32)>,
 }
 
 const BACK: u32 = 0x08;
@@ -288,9 +297,46 @@ const DOWN: u32 = 0x28;
 const DELETE: u32 = 0x2E;
 
 impl TextBox {
-    pub fn new(multiline: bool) -> TextBox { TextBox { text: String::new(), caret: 0, all_selected: false, multiline, enter_submits: false, off: Default::default(), pending: None } }
+    pub fn new(multiline: bool) -> TextBox { TextBox { text: String::new(), caret: 0, all_selected: false, anchor: None, multiline, enter_submits: false, off: Default::default(), pending: None, dragged: None } }
 
-    pub fn set(&mut self, s: &str) { self.text = s.to_string(); self.caret = s.len(); self.all_selected = false; }
+    pub fn set(&mut self, s: &str) { self.text = s.to_string(); self.caret = s.len(); self.all_selected = false; self.anchor = None; }
+
+    /// The selected byte range (start, end), if any.
+    pub fn range(&self) -> Option<(usize, usize)> {
+        if self.all_selected { return (!self.text.is_empty()).then_some((0, self.text.len())); }
+        let a = self.anchor?;
+        (a != self.caret).then(|| (a.min(self.caret), a.max(self.caret)))
+    }
+
+    /// The selected text ("" when nothing is selected).
+    pub fn selected(&self) -> &str { self.range().map_or("", |(s, e)| &self.text[s..e]) }
+
+    /// Deletes the selection, leaving the caret where it was. True if something was deleted.
+    fn take(&mut self) -> bool {
+        let Some((s, e)) = self.range() else { return false };
+        self.text.replace_range(s..e, "");
+        self.caret = s;
+        self.anchor = None;
+        self.all_selected = false;
+        true
+    }
+
+    /// Ctrl+C: the selection to the clipboard.
+    pub fn copy(&self) { if self.range().is_some() { util::clipboard_set(self.selected()); } }
+
+    /// Ctrl+X: copy, then delete the selection.
+    pub fn cut(&mut self) -> Edit { if self.range().is_none() { return Edit::None; } self.copy(); self.take(); Edit::Changed }
+
+    /// Ctrl+V: the clipboard text replaces the selection.
+    pub fn paste(&mut self) -> Edit {
+        let Some(p) = util::clipboard_get() else { return Edit::None };
+        let p = p.replace("\r\n", "\n").replace('\r', "\n");
+        self.insert(&if self.multiline { p } else { p.replace('\n', " ") });
+        Edit::Changed
+    }
+
+    /// Ctrl+A: everything selected; typing then replaces it.
+    pub fn select_all(&mut self) { self.all_selected = !self.text.is_empty(); self.anchor = Some(0); self.caret = self.text.len(); }
 
     fn prev(&self) -> usize { self.text[..self.caret].char_indices().next_back().map_or(0, |c| c.0) }
     fn next(&self) -> usize { self.text[self.caret..].chars().next().map_or(self.caret, |c| self.caret + c.len_utf8()) }
@@ -301,7 +347,7 @@ impl TextBox {
     }
 
     fn insert(&mut self, s: &str) {
-        if self.all_selected { self.text.clear(); self.caret = 0; self.all_selected = false; }
+        self.take();
         self.text.insert_str(self.caret, s);
         self.caret += s.len();
     }
@@ -316,32 +362,37 @@ impl TextBox {
     pub fn key(&mut self, vk: u32, ctrl: bool, shift: bool, _alt: bool) -> Edit {
         if ctrl {
             match vk {
-                0x41 => { self.all_selected = !self.text.is_empty(); self.caret = self.text.len(); }
-                0x43 => if self.all_selected { util::clipboard_set(&self.text); },
-                0x58 => if self.all_selected { util::clipboard_set(&self.text); self.set(""); return Edit::Changed; },
-                0x56 => {
-                    let Some(p) = util::clipboard_get() else { return Edit::None };
-                    let p = p.replace("\r\n", "\n").replace('\r', "\n");
-                    self.insert(&if self.multiline { p } else { p.replace('\n', " ") });
-                    return Edit::Changed;
-                }
+                0x41 => self.select_all(),
+                0x43 => self.copy(),
+                0x58 => return self.cut(),
+                0x56 => return self.paste(),
                 _ => {}
             }
             return Edit::None;
         }
+        if matches!(vk, LEFT | RIGHT | HOME | END | UP | DOWN) {
+            // Shift keeps the anchor and grows the selection; a plain move drops it. Left/Right with a
+            // selection and no Shift collapse to the near edge, as in a text editor.
+            let range = self.range();
+            if shift { if self.anchor.is_none() { self.anchor = Some(self.caret); } } else { self.anchor = None; }
+            self.all_selected = false;
+            if let (false, Some((s, e)), LEFT | RIGHT) = (shift, range, vk) {
+                self.caret = if vk == LEFT { s } else { e };
+                return Edit::None;
+            }
+        }
         match vk {
             ENTER if !self.multiline || (self.enter_submits && !shift) => return Edit::Submit,
             ENTER => self.insert("\n"),
-            BACK if self.all_selected => self.set(""),
+            BACK if self.take() => {}
             BACK if self.caret > 0 => { let p = self.prev(); self.text.replace_range(p..self.caret, ""); self.caret = p; }
-            DELETE if self.all_selected => self.set(""),
+            DELETE if self.take() => {}
             DELETE if self.caret < self.text.len() => { let n = self.next(); self.text.replace_range(self.caret..n, ""); }
-            LEFT => { self.caret = if self.all_selected { 0 } else { self.prev() }; self.all_selected = false; return Edit::None; }
-            RIGHT => { self.caret = if self.all_selected { self.text.len() } else { self.next() }; self.all_selected = false; return Edit::None; }
-            HOME => { self.caret = if self.multiline { self.line().0 } else { 0 }; self.all_selected = false; return Edit::None; }
-            END => { self.caret = if self.multiline { self.line().1 } else { self.text.len() }; self.all_selected = false; return Edit::None; }
+            LEFT => { self.caret = self.prev(); return Edit::None; }
+            RIGHT => { self.caret = self.next(); return Edit::None; }
+            HOME => { self.caret = if self.multiline { self.line().0 } else { 0 }; return Edit::None; }
+            END => { self.caret = if self.multiline { self.line().1 } else { self.text.len() }; return Edit::None; }
             UP | DOWN if self.multiline => {
-                self.all_selected = false;
                 let (s, e) = self.line();
                 let col = self.text[s..self.caret].chars().count();
                 let target = if vk == UP { if s == 0 { return Edit::None } else { self.text[..s - 1].rfind('\n').map_or(0, |i| i + 1) } } else if e >= self.text.len() { return Edit::None } else { e + 1 };
@@ -355,7 +406,16 @@ impl TextBox {
     }
 
     /// A press at (x, y) (window CSS px, from `Drag Start`) moves the caret there at the next `draw`, which knows the rect and font.
-    pub fn press(&mut self, x: f32, y: f32) { self.all_selected = false; self.pending = Some((x, y)); }
+    pub fn press(&mut self, x: f32, y: f32) { self.all_selected = false; self.pending = Some((x, y)); self.dragged = None; }
+
+    /// The pointer moved while held after `press`: the caret follows it, the anchor stays at the press.
+    pub fn drag(&mut self, x: f32, y: f32) { self.dragged = Some((x, y)); }
+
+    /// Byte index under window point (x, y) for text laid out in `r`.
+    fn at(&self, c: &Canvas, f: Font, r: R, wrap: bool, x: f32, y: f32) -> usize {
+        if wrap { c.g.hit_index(&self.text, f, r.w, true, x - r.x, y - r.y) }
+        else { c.g.hit_index(&self.text, f, r.w, false, x - r.x + self.off.get(), 0.0) }
+    }
 
     /// Text (or the muted `placeholder`), the "everything selected" tint and a blinking caret while `focus`.
     /// `r` is the text area; a single line is centred vertically and scrolls sideways to keep the caret in view.
@@ -364,7 +424,11 @@ impl TextBox {
         let (fg, muted) = (t.c("onSurface"), alpha(t.c("onSurfaceVariant"), 0.8));
         let wrap = self.multiline;
         if let Some((x, y)) = self.pending.take() {
-            self.caret = if wrap { c.g.hit_index(&self.text, f, r.w, true, x - r.x, y - r.y) } else { c.g.hit_index(&self.text, f, r.w, false, x - r.x + self.off.get(), 0.0) };
+            self.caret = self.at(c, f, r, wrap, x, y);
+            self.anchor = Some(self.caret);
+        }
+        if let Some((x, y)) = self.dragged.take() {
+            self.caret = self.at(c, f, r, wrap, x, y);
         }
         let (cxp, cyp, ch) = c.g.caret(&self.text, f, r.w, wrap, self.caret);
         if !wrap { self.off.set((cxp - (r.w - 2.0)).max(0.0)); }
@@ -373,9 +437,22 @@ impl TextBox {
             if self.text.is_empty() {
                 if wrap { c.para(placeholder, r, f, muted, Align::Left) } else { c.text(placeholder, r, f, muted, Align::Left) }
             } else {
-                if self.all_selected {
-                    let (w, h) = if wrap { (r.w, c.g.measure_wrapped(&self.text, f, r.w)) } else { c.g.measure(&self.text, f) };
-                    c.rect(R::new(r.x - off, if wrap { r.y } else { r.y + (r.h - h) / 2.0 }, w, h), 3.0, alpha(t.c("primary"), 0.3));
+                if let Some((s, e)) = self.range() {
+                    // one box per line the selection crosses: the first and last lines stop at the ends
+                    let (x1, y1, h1) = c.g.caret(&self.text, f, r.w, wrap, s);
+                    let (x2, y2, _) = c.g.caret(&self.text, f, r.w, wrap, e);
+                    let col = alpha(t.c("primary"), 0.3);
+                    if wrap {
+                        let mut y = y1;
+                        while y < y2 + h1 * 0.5 {
+                            let xa = if y == y1 { x1 } else { 0.0 };
+                            let xb = if y == y2 { x2 } else { r.w };
+                            c.rect(R::new(r.x + xa, r.y + y, (xb - xa).max(0.0), h1), 3.0, col);
+                            y += h1;
+                        }
+                    } else {
+                        c.rect(R::new(r.x + x1 - off, r.y + (r.h - h1) / 2.0, (x2 - x1).max(0.0), h1), 3.0, col);
+                    }
                 }
                 if wrap { c.para(&self.text, r, f, fg, Align::Left) }
                 else { c.text(&self.text, R::new(r.x - off, r.y, c.g.measure(&self.text, f).0.ceil() + 8.0, r.h), f, fg, Align::Left) }
@@ -462,6 +539,44 @@ mod tests {
         tb.key(0x41, true, false, false);
         tb.key(BACK, false, false, false);
         assert_eq!(tb.text, "");
+    }
+
+    #[test]
+    fn shift_arrows_select_and_typing_replaces() {
+        let mut tb = TextBox::new(true);
+        typed(&mut tb, "abcdef");
+        tb.key(LEFT, false, true, false);
+        tb.key(LEFT, false, true, false);
+        assert_eq!((tb.range(), tb.selected()), (Some((4, 6)), "ef"));
+        assert_eq!(tb.ch('X'), Edit::Changed);
+        assert_eq!((tb.text.as_str(), tb.caret, tb.range()), ("abcdX", 5, None));
+    }
+
+    #[test]
+    fn backspace_deletes_selection_and_plain_arrow_collapses_it() {
+        let mut tb = TextBox::new(true);
+        typed(&mut tb, "hello world");
+        tb.key(HOME, false, false, false);
+        for _ in 0..5 { tb.key(RIGHT, false, true, false); }
+        assert_eq!(tb.selected(), "hello");
+        assert_eq!(tb.key(BACK, false, false, false), Edit::Changed);
+        assert_eq!((tb.text.as_str(), tb.caret), (" world", 0));
+        tb.key(0x41, true, false, false); // Ctrl+A
+        tb.key(RIGHT, false, false, false); // a plain move drops the selection, end of text
+        assert_eq!((tb.range(), tb.caret), (None, 6));
+    }
+
+    #[test]
+    fn selection_across_lines_and_cut() {
+        let mut tb = TextBox::new(true);
+        typed(&mut tb, "ab");
+        tb.key(ENTER, false, false, false); // a newline comes from Enter, not a typed char
+        typed(&mut tb, "cd");
+        tb.key(HOME, false, false, false); // start of "cd"
+        tb.key(UP, false, true, false); // shift+up: back into "ab"
+        assert_eq!(tb.selected(), "ab\n");
+        tb.key(BACK, false, false, false); // deletes the selected lines without touching the clipboard
+        assert_eq!((tb.text.as_str(), tb.caret), ("cd", 0));
     }
 
     #[test]

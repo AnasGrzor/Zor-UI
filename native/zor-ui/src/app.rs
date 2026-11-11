@@ -241,6 +241,7 @@ impl App {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
                 let n = &v["new"];
                 if n.is_null() { return; }
+                hub::set("zor-ui.notifLast", Some(n.to_string())); // the full notification: a banner click opens it in the island
                 let s = |k: &str| n[k].as_str().unwrap_or("").to_string();
                 let (app, text, open) = (s("app"), if s("title").is_empty() { s("body") } else { s("title") }, s("open"));
                 post(Box::new(move |cx| {
@@ -300,7 +301,13 @@ impl App {
             if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
             changed = true;
         }
-        if let Some(t) = self.theme_file.changed() { self.cx.theme = Theme::parse(&t); changed = true; }
+        if let Some(t) = self.theme_file.changed() {
+            let mut theme = Theme::parse(&t);
+            let mut animate = BOOL(0);
+            let system_motion = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&mut animate as *mut BOOL).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() } && animate.as_bool();
+            theme.transition_from(&self.cx.theme, self.cx.ver > 0 && system_motion && !self.cx.cfg.bool("wallpaperTheme.reducedMotion"));
+            self.cx.theme = theme; changed = true;
+        }
         if changed { self.cx.ver += 1; }
         changed
     }
@@ -330,7 +337,7 @@ impl App {
     /// Keeps a fast timer running while any view animates.
     fn frames(&mut self) {
         if self.game.is_some() { return; }
-        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).filter(|&m| m > 0).min().unwrap_or(0);
+        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
         let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding);
         if glide != self.hires {
             unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
@@ -677,6 +684,7 @@ impl App {
                 (WM_TIMER, TICK) => self.tick(),
                 (WM_TIMER, GUARD) => if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); },
                 (WM_TIMER, FRAME) => {
+                    if self.cx.theme.advance() { self.cx.ver += 1; }
                     // each view paints at its own rate: a tile that wants 33 ms frames must not drag the
                     // bar, the desk cards and the island down to 30 fps with it
                     let now = std::time::Instant::now();

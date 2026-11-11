@@ -298,7 +298,15 @@ impl Win {
 
     /// Repaints if the view's picture could have changed (data version, time key, hover, DPI).
     pub fn update(&mut self, g: &Gfx, cx: &Ctx, force: bool) {
-        let key = self.view.key(cx);
+        let _preview = (self.part != "settings").then(crate::conf::hide_preview);
+        let rect = self.rect();
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        unsafe { let _ = GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut info); }
+        let mon = info.rcMonitor;
+        let _surface = crate::conf::surface_scope([rect.left, rect.top, rect.right, rect.bottom], [mon.left, mon.top, mon.right, mon.bottom]);
+        let grid_x = |x: i32| (x - mon.left) * 8 / (mon.right - mon.left).max(1);
+        let grid_y = |y: i32| (y - mon.top) * 8 / (mon.bottom - mon.top).max(1);
+        let key = format!("{}@{},{}:{},{},{},{}", self.view.key(cx), mon.left, mon.top, grid_x(rect.left), grid_y(rect.top), grid_x(rect.right), grid_y(rect.bottom));
         let s = self.scale();
         let (w, h) = self.view.size(g, cx, s);
         let px = ((w * s).ceil() as i32, (h * s).ceil() as i32);

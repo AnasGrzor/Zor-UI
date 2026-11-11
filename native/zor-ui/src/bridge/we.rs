@@ -70,7 +70,7 @@ fn vdf_paths(text: &str) -> Vec<String> {
 /// A path with Windows separators (Steam's registry values use `/`).
 fn norm(p: &str) -> PathBuf { PathBuf::from(p.replace('/', "\\")) }
 
-fn reg_str(hive: HKEY, key: &str, name: &str) -> Option<String> {
+pub(crate) fn reg_str(hive: HKEY, key: &str, name: &str) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     let mut bytes = (buf.len() * 2) as u32;
     unsafe {

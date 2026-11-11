@@ -1491,6 +1491,8 @@ mod tests {
 
     #[test]
     fn a_tall_bubble_gets_a_window_that_holds_it() {
+        // DirectWrite needs COM on this thread; the test threads do not get it from anywhere else
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
         let base = FY + (H - FY);
         assert_eq!(window_h(base, None), base, "no bubble: the usual window");
         assert_eq!(window_h(base, Some(30.0)), base, "a short bubble fits already");

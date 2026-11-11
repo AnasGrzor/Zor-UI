@@ -171,7 +171,8 @@ pub struct Card {
     img: Option<(PathBuf, SystemTime, u32, Pixmap)>,
     np: np::Np,
     notes: Option<small::Notes>,
-    /// This card's window (notes takes keyboard focus through it).
+    todo: small::Todo,
+    /// This card's window (notes and the to-do add field take keyboard focus through it).
     hwnd: Arc<AtomicIsize>,
 }
 
@@ -209,7 +210,7 @@ fn greet_conf(cx: &Ctx) -> (String, String, bool, String, String) {
 
 impl Card {
     pub fn new(id: &str) -> Card {
-        Card { id: id.into(), glass: None, img: None, np: np::Np::new(), notes: (id == "notes").then(small::Notes::new), hwnd: Default::default() }
+        Card { id: id.into(), glass: None, img: None, np: np::Np::new(), notes: (id == "notes").then(small::Notes::new), todo: small::Todo::new(), hwnd: Default::default() }
     }
 
     fn key_time(&self, cx: &Ctx) -> String {
@@ -238,8 +239,8 @@ impl Card {
     /// The glass fill for `rects` (logical px, the visible shapes in this window), or None when glass is off or
     /// there is no wallpaper picture to look through. Re-made only when something it depends on changed.
     fn glass_back(&mut self, c: &Canvas, cx: &Ctx, rects: &[R]) -> Option<Pixmap> {
-        let glass = crate::glass::Glass::from_cfg(&cx.cfg)?;
-        let img = PathBuf::from(cx.state.v["image"].as_str().filter(|s| !s.is_empty())?);
+        let glass = crate::glass::Glass::from_cfg(&cx.cfg)?.adapt(&cx.cfg, &cx.theme);
+        let img = PathBuf::from(cx.theme.monitor_wallpaper().or_else(|| cx.state.v["image"].as_str()).filter(|s| !s.is_empty())?);
         let r = self.screen_rect()?;
         let (w, h) = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
         let (mons, _) = util::monitors();
@@ -288,7 +289,7 @@ impl View for Card {
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         match self.id.as_str() {
             "media" | "lyrics" | "cover" => self.np.input(ev, cx),
-            "todo" => small::todo_input(ev),
+            "todo" => self.todo.input(ev, &self.hwnd),
             "timer" => small::timer_input(ev, cx),
             "notes" => if let Some(n) = &mut self.notes { n.input(ev, &self.hwnd) },
             _ => {}
@@ -296,7 +297,7 @@ impl View for Card {
     }
 
     fn context(&mut self, _id: u32, cx: &Ctx) -> Vec<Item> {
-        let mut items = vec![];
+        let mut items = if self.id == "notes" { small::notes_menu() } else { vec![] };
         let copy = match self.id.as_str() {
             "clock" => Some(util::clock(util::now().wHour, util::now().wMinute, cx.cfg.get("use24h").as_bool() != Some(false))),
             "text" => Some(cx.cfg.str("desktop.text").to_string()),
@@ -320,6 +321,7 @@ impl View for Card {
         match self.id.as_str() {
             "media" | "lyrics" | "cover" => self.np.anim,
             "notes" if self.notes.as_ref().is_some_and(|n| n.focused) => 500,
+            "todo" if self.todo.focused => 500,
             _ => 0,
         }
     }
@@ -338,7 +340,7 @@ impl View for Card {
         }
         match self.id.as_str() {
             "media" | "lyrics" | "cover" => self.np.size(cx, &self.id),
-            "todo" => (W, small::todo_size(g) + pad - 8.0),
+            "todo" => (W, self.todo.size(g) + pad - 8.0),
             "notes" => (W, self.notes.as_ref().map_or(pad, |n| n.size(g) + pad - 8.0)),
             "timer" => (W, small::timer_size() + pad - 8.0),
             "clock" => (W, if clock_vertical(cx) { 190.0 } else if matches!(clock_style(cx), "digital" | "pixel") { 150.0 } else { 250.0 } + pad),
@@ -392,7 +394,7 @@ impl View for Card {
         }
 
         match self.id.as_str() {
-            "todo" => { bg(c); small::todo_paint(c, cx); }
+            "todo" => { bg(c); self.todo.paint(c, cx); }
             "notes" => { bg(c); if let Some(n) = &mut self.notes { n.paint(c, cx); } }
             "timer" => { bg(c); small::timer_paint(c, cx); }
             "clock" => clock(c, cx, &st, h24),

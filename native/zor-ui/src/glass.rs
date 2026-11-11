@@ -18,6 +18,19 @@ pub fn default_of(key: &str) -> f64 {
 pub struct Glass { pub frost: f32, pub haze: f32, pub pull: f32, pub rim: f32, pub sheen: f32, pub split: f32, pub tint: (f32, f32, f32), pub tint_strength: f32, pub vivid: f32 }
 
 impl Glass {
+    /// Apply cached wallpaper adaptation only when enabled, retaining existing manual tints.
+    pub fn adapt(mut self, cfg: &Config, theme: &crate::conf::Theme) -> Glass {
+        let manual = !cfg.str("desktop.glass.tint").is_empty();
+        if cfg.get("wallpaperTheme.adaptiveGlass") == &serde_json::json!(false)
+            || manual && !cfg.bool("desktop.glass.adaptive") { return self; }
+        let color = theme.target_color("background");
+        self.tint = (((color >> 16) & 255) as f32 / 255.0, ((color >> 8) & 255) as f32 / 255.0, (color & 255) as f32 / 255.0);
+        self.tint_strength = self.tint_strength.max(theme.surface_opacity(0.0));
+        // A large white highlight would undo the dark tint's contrast protection.
+        self.frost = self.frost.min(0.01);
+        self.sheen = self.sheen.min(0.08);
+        self
+    }
     /// `desktop.glass` from config.json; None unless it is switched on.
     pub fn from_cfg(cfg: &Config) -> Option<Glass> {
         cfg.bool("desktop.glass.enable").then(|| {

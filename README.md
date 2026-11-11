@@ -290,7 +290,7 @@ In the sidebars, `Ctrl+PageUp/PageDown` switches tabs, the pin button keeps a si
 **AI chat.** Add a key once, either in Settings > Services or by typing `/key gemini YOUR_KEY` in the chat
 (also `anthropic`, `openai`, `mistral` or `openrouter`). Keys are encrypted with Windows DPAPI for your
 account. If [Ollama](https://ollama.com) is running, its models show up automatically. To use a subscription
-instead of a key, install the CLI (`npm i -g @google/gemini-cli` for **Gemini subscription**, `npm i -g @openai/codex`
+instead of a key, install the CLI (Antigravity, which provides `agy`, for **Antigravity subscription**, since the Gemini CLI was discontinued; `npm i -g @openai/codex`
 for **ChatGPT subscription**) and sign in once in a terminal. Both then appear in the model list, each using the
 model its account allows. Picking one without its CLI installed shows the install command. Other commands:
 `/model`, `/prompt`, `/temp`, `/clear`, `/help`.

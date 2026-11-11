@@ -93,25 +93,29 @@ pub fn chat(provider: &str, msgs: &[Value], system: &str, out: &Sink) {
             buf.clear();
         }
     });
-    let mut got = false;
+    let (mut got, mut errored) = (false, false);
     loop {
         if out.stopped() { let _ = child.kill(); let _ = child.wait(); return; }
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(l) => for e in codex_events(&l) { got = got || e["delta"].is_string(); out.emit(&e); },
+            Ok(l) => for e in codex_events(&l) { got = got || e["delta"].is_string(); errored = errored || e["error"].is_string(); out.emit(&e); },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
     if got || ok { out.emit(&json!({ "done": true })); }
-    else { out.emit(&json!({ "error": format!("{cmd} stopped without an answer. Run `{cmd}` once in a terminal to sign in.") })); }
+    else if !errored { out.emit(&json!({ "error": format!("{cmd} stopped without an answer. Run `{cmd}` once in a terminal to sign in.") })); }
 }
 
-/// What one line of `codex exec --json` means, as the events the chat sends: the agent's message text when it completes, and the
-/// turn's token counts from `turn.completed` (`input_tokens` already includes cached tokens). Other events are not shown.
+/// What one line of `codex exec --json` means, as the events the chat sends: the agent's message text when it completes, the turn's
+/// token counts from `turn.completed` (`input_tokens` already includes cached tokens), and Codex's own error message from `error`
+/// or `turn.failed`. Other events are not shown.
 pub fn codex_events(line: &str) -> Vec<Value> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
+    let error = |m: &Value| m.as_str().filter(|m| !m.is_empty()).map(|m| vec![json!({ "error": m })]).unwrap_or_default();
     match v["type"].as_str() {
+        Some("error") => error(&v["message"]),
+        Some("turn.failed") => error(&v["error"]["message"]),
         Some("item.completed") if v["item"]["type"] == "agent_message" => {
             v["item"]["text"].as_str().filter(|t| !t.is_empty()).map(|t| vec![json!({ "delta": t })]).unwrap_or_default()
         }
@@ -126,7 +130,7 @@ pub fn codex_events(line: &str) -> Vec<Value> {
 /// Antigravity's print mode: the prompt is the -p value, and the answer is one JSON object printed when the turn ends. `--mode plan`
 /// keeps it read-only. `--disable-slash-commands` is not passed, because with it `--mode plan` does nothing.
 fn chat_agy(exe: PathBuf, msgs: &[Value], system: &str, out: &Sink) {
-    let p = prompt(msgs, system);
+    let p = agy_prompt(msgs, system);
     let spawned = hidden(exe).args(["-p", p.as_str(), "--output-format", "json", "--mode", "plan"])
         .current_dir(std::env::temp_dir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let mut child = match spawned {
@@ -188,8 +192,8 @@ mod tests {
         assert!(e.starts_with("Antigravity: Individual quota reached"), "{e}");
     }
 
-    /// A success reply. The field names come from the quota reply above; the status value and the text are not yet captured
-    /// from a real answer, so this shape is assumed until the account has quota again.
+    /// A success reply. UNVERIFIED: the live `agy -p "Reply with the word ok"` call on 2026-11-12 was quota-blocked (QUOTA_REPLY above),
+    /// so the status value and the text here are assumed until a real answer is captured.
     #[test]
     fn a_reply_gives_its_text_and_its_counts() {
         let ok = r#"{"conversation_id":"x","status":"OK","response":" ok ","error":"","usage":{"input_tokens":12,"output_tokens":1,"total_tokens":13}}"#;
@@ -204,13 +208,26 @@ mod tests {
         assert!(parse_agy(r#"{"status":"OK","response":"","error":""}"#).unwrap_err().contains("no answer"));
     }
 
-    /// Lines from a real `codex exec --json` run (one word answer), as Codex printed them.
     #[test]
     fn a_saved_gemini_cli_id_maps_to_antigravity_and_other_ids_are_kept() {
         assert_eq!(current_id("gemini-cli:default"), "antigravity-cli:default");
         assert_eq!(current_id("antigravity-cli:default"), "antigravity-cli:default");
         assert_eq!(current_id("gpt-4o-mini"), "gpt-4o-mini");
         assert_eq!(current_id(""), "");
+    }
+
+    /// Lines from a real `codex exec --skip-git-repo-check -s read-only --json -m no-such-model -` run with `hi` on stdin (captured
+    /// 2026-11-12, signed-in ChatGPT account). Codex printed these before exiting with code 1.
+    #[test]
+    fn codex_error_lines_from_a_real_run_are_shown_as_errors() {
+        let model_error = "The 'no-such-model' model is not supported when using Codex with a ChatGPT account.";
+        assert_eq!(codex_events(r#"{"type":"error","message":"The 'no-such-model' model is not supported when using Codex with a ChatGPT account."}"#),
+            vec![json!({ "error": model_error })]);
+        assert_eq!(codex_events(r#"{"type":"turn.failed","error":{"message":"The 'no-such-model' model is not supported when using Codex with a ChatGPT account."}}"#),
+            vec![json!({ "error": model_error })]);
+        assert!(codex_events(r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `no-such-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}"#).is_empty(),
+            "a warning item is not an answer or a failure");
+        assert!(codex_events(r#"{"type":"turn.started"}"#).is_empty());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The buddy's tools in native form: one JSON schema per tool, for providers that call tools themselves. A native call goes
 //! back through `parse_step`, the same validator the JSON protocol uses, so both paths accept and refuse the same things.
-//! The loop does not use this yet; it is built and tested on its own.
+//! `run_native_loop` runs it for a Claude model when native tools are on (`agent::native_on`).
 
-use super::{parse_step, Call, Step, MAX_SAY};
+use super::{fit_to_budget, parse_step, Call, Step, MAX_RESULT_CHARS, MAX_SAY};
 use crate::assist::Turn;
 use crate::bridge::native_tools;
 use serde_json::{json, Value};
@@ -56,12 +56,14 @@ pub fn step_from_tool(name: &str, input: &Value) -> Step {
 /// is plain text, which ends the request. Calls that can't be read are answered with an error so the model can try again.
 /// `ask` sends one conversation (`convo` carries the tool list) and returns the reply; `run` runs one tool.
 #[allow(clippy::too_many_arguments)]
-pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, mut ask: impl FnMut(&Value) -> Result<Turn, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
+pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&Value) -> Result<Turn, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
     let start = Instant::now();
     let mut msgs = history.to_vec();
     msgs.push(json!({ "role": "user", "content": said }));
+    let keep = history.len();
     for _ in 0..max_steps {
         if start.elapsed() > limit { return Err("That took too long, so I stopped.".into()); }
+        fit_to_budget(&mut msgs, keep, budget);
         let convo = json!({ "model": model, "system": system, "temperature": temp, "messages": msgs, "tools": tool_schemas() });
         let turn = ask(&convo).map_err(|e| crate::assist::short(&e, 110))?;
         crate::log::line(&format!("buddy native turn: {} calls, {} bad, text {:?}", turn.calls.len(), turn.bad.len(), crate::assist::short(&turn.text, 120)));
@@ -79,7 +81,7 @@ pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], 
         let mut results = vec![];
         for c in &turn.calls {
             let (text, is_error) = match step_from_tool(c["name"].as_str().unwrap_or(""), &c["input"]) {
-                Step::Call { call, .. } => match run(&call) { Ok(r) => (r, false), Err(e) => (format!("Failed: {e}"), true) },
+                Step::Call { call, .. } => match run(&call) { Ok(r) => (crate::assist::short(&r, MAX_RESULT_CHARS), false), Err(e) => (format!("Failed: {e}"), true) },
                 Step::Bad(why) => (why, true),
                 Step::Say(_) => ("Use a tool, or answer in plain text.".into(), true),
             };
@@ -109,7 +111,7 @@ mod tests {
     fn a_tool_result_goes_back_to_the_model_with_its_id() {
         let turns = RefCell::new(vec![text("Opened Spotify."), calls(&[("toolu_1", "open", json!({ "arg": "Spotify" }))])]);
         let seen = RefCell::new(Vec::<Value>::new());
-        let r = run_native_loop("claude-sonnet-5-5", "SYS", 0.4, &[], "open spotify", 4, Duration::from_secs(5),
+        let r = run_native_loop("claude-sonnet-5-5", "SYS", 0.4, &[], "open spotify", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
             |c| { assert!(matches!(c, Call::Open(a) if a == "Spotify")); Ok("Opened Spotify.".into()) });
         assert_eq!(r, Ok("Opened Spotify.".into()));
@@ -129,7 +131,7 @@ mod tests {
     fn a_failed_tool_is_sent_back_as_an_error_and_the_model_goes_on() {
         let turns = RefCell::new(vec![text("Sorry, it failed."), calls(&[("toolu_2", "open", json!({ "arg": "Nope" }))])]);
         let seen = RefCell::new(Vec::<Value>::new());
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5),
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
             |_| Err("No app called Nope.".into()));
         assert_eq!(r, Ok("Sorry, it failed.".into()));
@@ -144,7 +146,7 @@ mod tests {
         let turns = RefCell::new(vec![text("Done."), bad]);
         let seen = RefCell::new(Vec::<Value>::new());
         let ran = RefCell::new(0);
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5),
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
             |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
         assert_eq!(r, Ok("Done.".into()));
@@ -160,7 +162,7 @@ mod tests {
     fn an_unknown_tool_name_is_refused_as_an_error() {
         let turns = RefCell::new(vec![text("Okay."), calls(&[("toolu_4", "delete_everything", json!({ "arg": "x" }))])]);
         let seen = RefCell::new(Vec::<Value>::new());
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5),
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
             |_| panic!("an unknown tool must not run"));
         assert_eq!(r, Ok("Okay.".into()));
@@ -169,22 +171,22 @@ mod tests {
 
     #[test]
     fn a_plain_text_reply_ends_the_request_and_empty_text_is_an_error() {
-        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), |_| Ok(text("Hi there.")), |_| Ok(String::new()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("Hi there.")), |_| Ok(String::new()));
         assert_eq!(r, Ok("Hi there.".into()));
-        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), |_| Ok(text("  ")), |_| Ok(String::new()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("  ")), |_| Ok(String::new()));
         assert_eq!(r, Err("I got no answer from the AI.".into()));
     }
 
     #[test]
     fn the_loop_stops_after_the_step_budget() {
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 2, Duration::from_secs(5), |_| Ok(calls(&[("t", "media", json!({ "arg": "next" }))])), |_| Ok("Skipped.".into()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 2, Duration::from_secs(5), usize::MAX, |_| Ok(calls(&[("t", "media", json!({ "arg": "next" }))])), |_| Ok("Skipped.".into()));
         assert_eq!(r, Err("I couldn't finish that in a few steps.".into()));
     }
 
     #[test]
     fn a_stop_from_the_user_ends_the_native_loop_before_any_tool_runs() {
         let ran = RefCell::new(0);
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5),
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |_| Err(crate::browse::STOPPED.into()),
             |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
         assert_eq!(r, Err(crate::browse::STOPPED.into()));

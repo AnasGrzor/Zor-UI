@@ -2,6 +2,7 @@
 //! download, the AI chat/models and the preset gallery. HTTP goes through curl.exe (no TLS stack here).
 
 mod adapters;
+pub(crate) use adapters::MAX_REPLY_TOKENS;
 
 use super::common::*;
 use super::*;
@@ -134,6 +135,13 @@ fn curl_get(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Result<Vec<u
 
 fn get_json_e(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Result<Value, String> {
     serde_json::from_slice(&curl_get(url, headers, timeout_s)?).map_err(|e| e.to_string())
+}
+
+/// Ollama's /api/show for one model (its `model_info` holds the context length). None when Ollama is not running or does not know the name.
+pub(crate) fn ollama_show(model: &str) -> Option<Value> {
+    let body = json!({ "model": model }).to_string();
+    let o = hidden("curl.exe").args(["-sSf", "--max-time", "2", "-H", "Content-Type: application/json", "-d", &body, "http://localhost:11434/api/show"]).output().ok()?;
+    o.status.success().then(|| serde_json::from_slice(&o.stdout).ok()).flatten()
 }
 
 // ------------------------------------------------------------------ secrets (Windows DPAPI)

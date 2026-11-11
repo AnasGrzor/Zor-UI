@@ -6,6 +6,9 @@ use super::{blocks_of, gemini_parts, openai_like, UA};
 use crate::bridge::native_tools::{self, ToolParser};
 use serde_json::{json, Value};
 
+/// The most tokens a reply may use (the Anthropic request's `max_tokens`). The agent keeps this much of the window free (agent.rs).
+pub(crate) const MAX_REPLY_TOKENS: u32 = 4096;
+
 /// One provider's wire format.
 pub trait Adapter {
     /// The provider's name, as the model list gives it.
@@ -74,7 +77,7 @@ impl Adapter for Anthropic {
         headers.push(header("anthropic-version", "2023-06-01"));
         let messages: Vec<Value> = msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, false) })).collect();
         ("https://api.anthropic.com/v1/messages".into(), headers,
-         json!({ "model": id, "max_tokens": 4096, "system": system, "temperature": temp, "stream": true, "messages": messages }))
+         json!({ "model": id, "max_tokens": MAX_REPLY_TOKENS, "system": system, "temperature": temp, "stream": true, "messages": messages }))
     }
 
     fn events(&self, ev: &Value) -> Vec<Value> {

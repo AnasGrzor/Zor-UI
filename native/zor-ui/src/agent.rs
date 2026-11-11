@@ -601,22 +601,80 @@ pub fn shrink_page(msgs: &mut [Value], i: usize) {
     msgs[i]["content"] = json!(short);
 }
 
+/// Characters of one tool result the AI gets back, so one large result cannot fill the window.
+pub const MAX_RESULT_CHARS: usize = 4000;
+
+/// Characters of an old tool result kept once it is cut for the budget (`fit_to_budget`).
+const CUT_RESULT_CHARS: usize = 300;
+
+/// Estimated tokens of one message: its JSON text over four.
+// shortcut: characters / 4 is not a tokenizer count; it is only used to keep a request inside its window.
+fn est_tokens(m: &Value) -> usize { m.to_string().chars().count() / 4 }
+
+/// A message that is plain user text (not a tool result), which a tool use can be paired with.
+fn is_plain_user(m: &Value) -> bool { m["role"] == "user" && m["content"].is_string() }
+
+/// Cuts the text of one old tool result (a string, or the `tool_result` blocks of a native turn) to `CUT_RESULT_CHARS`.
+fn cut_result(m: &mut Value) {
+    let cut = |v: &mut Value| {
+        if let Some(t) = v.as_str().filter(|t| t.chars().count() > CUT_RESULT_CHARS) {
+            *v = json!(format!("{} (older result removed)", assist::short(t, CUT_RESULT_CHARS)));
+        }
+    };
+    if m["content"].is_string() { cut(&mut m["content"]); }
+    if let Some(blocks) = m["content"].as_array_mut() {
+        for b in blocks.iter_mut().filter(|b| b["type"] == "tool_result") { cut(&mut b["content"]); }
+    }
+}
+
+/// Keeps `msgs` inside `budget_tokens`. Messages from `keep` on are this request (its own message at `keep` and the newest
+/// message are never cut or dropped). Over budget, it first cuts the tool results of this request, then drops the oldest
+/// earlier turns, a whole turn at a time, so no tool result is left without its tool use. The system text is not in `msgs`:
+/// the caller takes its size out of the budget.
+pub fn fit_to_budget(msgs: &mut Vec<Value>, keep: usize, budget_tokens: usize) {
+    let total = |m: &[Value]| m.iter().map(est_tokens).sum::<usize>();
+    if total(msgs) <= budget_tokens { return; }
+    let last = msgs.len().saturating_sub(1);
+    for i in (keep + 1)..last {
+        cut_result(&mut msgs[i]);
+        if total(msgs) <= budget_tokens { return; }
+    }
+    let mut keep = keep;
+    while total(msgs) > budget_tokens && keep > 0 {
+        msgs.remove(0);
+        keep -= 1;
+        while keep > 0 && !is_plain_user(&msgs[0]) {
+            msgs.remove(0);
+            keep -= 1;
+        }
+    }
+}
+
+/// The tokens a request to `model` may use: its window (`provider::context_tokens`, else the floor) less the reply reserve and
+/// the system text.
+pub fn budget_for(cfg: &Config, model: &str, system: &str) -> usize {
+    let window = provider::context_tokens(model, cfg).unwrap_or(provider::UNKNOWN_CONTEXT_TOKENS) as usize;
+    window.saturating_sub(crate::bridge::web::MAX_REPLY_TOKENS as usize).saturating_sub(system.chars().count() / 4)
+}
+
 /// Answers `said`: asks the AI, runs the tool it picks, feeds the result back, and repeats until it says it is done. `ask` runs one
 /// AI conversation (the JSON `assist::chat` takes) and `run` one tool, so a test can script both.
 pub fn run_loop(model: &str, said: &str, max_steps: usize, limit: Duration, ask: impl FnMut(&str) -> Result<String, String>, run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
-    run_loop_with(model, SYSTEM, 0.3, &[], said, max_steps, limit, ask, run)
+    run_loop_with(model, SYSTEM, 0.3, &[], said, max_steps, limit, usize::MAX, ask, run)
 }
 
 /// `run_loop` under a given system prompt and temperature, with earlier turns (`recent`) placed before `said`.
 #[allow(clippy::too_many_arguments)]
-pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, mut ask: impl FnMut(&str) -> Result<String, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
+pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&str) -> Result<String, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
     let start = Instant::now();
     let mut msgs = history.to_vec();
     msgs.push(json!({ "role": "user", "content": said }));
+    let keep = history.len();
     // index of the newest browser page in `msgs`; older pages are shrunk when a newer one arrives
     let mut last_page: Option<usize> = None;
     for _ in 0..max_steps {
         if start.elapsed() > limit { return Err("That took too long, so I stopped.".into()); }
+        fit_to_budget(&mut msgs, keep, budget);
         let convo = json!({ "model": model, "messages": msgs, "system": system, "temperature": temp }).to_string();
         let reply = ask(&convo).map_err(|e| assist::short(&e, 110))?;
         crate::log::line(&format!("buddy AI reply: {}", assist::short(&reply, 300)));
@@ -631,7 +689,7 @@ pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], sa
                 crate::log::line(&format!("buddy tool {call:?} more={more}: {}", match &res { Ok(r) => format!("ok: {}", assist::short(r, 200)), Err(e) => format!("failed: {}", assist::short(e, 200)) }));
                 match res {
                     Ok(r) if !more && !matches!(call, Call::FindApp(_) | Call::FindFile(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Browser { .. }) => return Ok(r),
-                    Ok(r) => format!("Result: {r}"),
+                    Ok(r) => format!("Result: {}", assist::short(&r, MAX_RESULT_CHARS)),
                     Err(e) => format!("Failed: {e}"),
                 }
             }
@@ -702,8 +760,14 @@ pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String {
 
 /// Native tool calling runs only when Settings turns it on, the model is Claude, and the browser is off (its tools are not in the native list).
 pub fn native_on(cfg: &Config, model: &str) -> bool {
+    native_allowed(cfg, crate::bridge::web::provider_of(model).as_deref())
+}
+
+/// `native_on` for a model whose provider is known: Settings must allow native tools, the browser must be off, and the provider's
+/// capabilities must include native tool calls.
+pub fn native_allowed(cfg: &Config, provider_name: Option<&str>) -> bool {
     cfg.get("ai.nativeTools").as_bool() == Some(true) && !crate::browse::enabled(cfg)
-        && crate::bridge::web::provider_of(model).is_some_and(|p| provider::capabilities(&p, false).native_tools)
+        && provider_name.is_some_and(|p| provider::capabilities(p, false).native_tools)
 }
 
 /// Set when the user cancels the running request from the Settings list. Checked between model calls; a tool already running
@@ -861,12 +925,14 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         let model: &str = m;
         r = if native_on(cfg, model) {
             let system = system_for(NATIVE_SYSTEM, cfg);
-            native::run_native_loop(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs),
+            let budget = budget_for(cfg, model, &system);
+            native::run_native_loop(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check() { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
                 |c| run_tool(c))
         } else {
             let system = build_system_prompt(cfg);
-            run_loop_with(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs),
+            let budget = budget_for(cfg, model, &system);
+            run_loop_with(model, &system, temperature(cfg), &history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check() { Err(e) } else { assist::chat(cfg, convo, 30) }),
                 |c| run_tool(c))
         };
@@ -944,7 +1010,7 @@ mod tests {
     fn earlier_turns_and_the_system_text_reach_the_ai() {
         let history = [json!({ "role": "user", "content": "play lofi" }), json!({ "role": "assistant", "content": "{\"say\":\"Playing.\"}" })];
         let mut seen = String::new();
-        let r = run_loop_with("m", "SYS", 0.3, &history, "louder", 3, Duration::from_secs(5), |c| { seen = c.to_string(); Ok("{\"say\":\"Done.\"}".into()) }, |_| Ok(String::new()));
+        let r = run_loop_with("m", "SYS", 0.3, &history, "louder", 3, Duration::from_secs(5), usize::MAX, |c| { seen = c.to_string(); Ok("{\"say\":\"Done.\"}".into()) }, |_| Ok(String::new()));
         assert_eq!(r, Ok("Done.".into()));
         let v: Value = serde_json::from_str(&seen).unwrap();
         assert_eq!(v["system"], "SYS");
@@ -1283,7 +1349,7 @@ mod tests {
         let seen = RefCell::new(Vec::<String>::new());
         let replies = ["{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"say\":\"Done.\"}"];
         let mut page = 0;
-        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies.get(n).copied().unwrap_or("{\"say\":\"Done.\"}").to_string()) }, |_| {
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX, |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies.get(n).copied().unwrap_or("{\"say\":\"Done.\"}").to_string()) }, |_| {
             page += 1;
             Ok(char::from(b'A' + page - 1).to_string().repeat(2000))
         });
@@ -1309,7 +1375,7 @@ mod tests {
     #[test]
     fn the_configured_temperature_reaches_the_request() {
         let seen = RefCell::new(String::new());
-        let r = run_loop_with("m", SYSTEM, 0.9, &[], "x", 3, Duration::from_secs(5), |c| { *seen.borrow_mut() = c.to_string(); Ok("{\"say\":\"ok\"}".into()) }, |_| Ok(String::new()));
+        let r = run_loop_with("m", SYSTEM, 0.9, &[], "x", 3, Duration::from_secs(5), usize::MAX, |c| { *seen.borrow_mut() = c.to_string(); Ok("{\"say\":\"ok\"}".into()) }, |_| Ok(String::new()));
         assert_eq!(r, Ok("ok".into()));
         let v: Value = serde_json::from_str(&seen.borrow()).unwrap();
         assert_eq!(v["temperature"], 0.9);
@@ -1375,7 +1441,7 @@ mod tests {
     #[test]
     fn a_stop_from_the_user_ends_the_loop_at_once() {
         let ran = RefCell::new(0);
-        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), |_| Err(crate::browse::STOPPED.into()), |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX, |_| Err(crate::browse::STOPPED.into()), |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
         assert_eq!(r, Err(crate::browse::STOPPED.into()));
         assert_eq!(*ran.borrow(), 0, "no tool runs after the stop");
     }
@@ -1433,5 +1499,81 @@ mod tests {
         assert_eq!(slow, Err("That took too long, so I stopped.".into()), "the time cap");
         assert_eq!(run_loop("m", "x", 3, Duration::from_secs(5), |_| Ok("  ".into()), |_| Ok(String::new())), Err("I got no answer from the AI.".into()));
         assert_eq!(run_loop("m", "x", 3, Duration::from_secs(5), |_| Err("offline".into()), |_| Ok(String::new())), Err("offline".into()));
+    }
+
+    #[test]
+    fn fit_to_budget_drops_the_oldest_turn_first_and_keeps_the_newest_question() {
+        let turn = |n: usize| vec![json!({ "role": "user", "content": format!("old {n} {}", "x".repeat(400)) }), json!({ "role": "assistant", "content": "ok" })];
+        let newest = json!({ "role": "user", "content": "the new question" });
+        let mut msgs: Vec<Value> = [turn(1), turn(2)].concat();
+        let keep = msgs.len();
+        msgs.push(newest.clone());
+        // exactly the room for the second old turn and the newest question: the first old turn must go
+        let budget: usize = [turn(2), vec![newest.clone()]].concat().iter().map(est_tokens).sum();
+        fit_to_budget(&mut msgs, keep, budget);
+        assert_eq!(msgs.last().unwrap(), &newest, "the newest question stays");
+        assert_eq!(msgs[0]["content"].as_str().unwrap().split(' ').nth(1), Some("2"), "old turn 2 is the oldest kept: {msgs:?}");
+        assert!(msgs.iter().map(est_tokens).sum::<usize>() <= budget);
+    }
+
+    #[test]
+    fn fit_to_budget_cuts_old_tool_results_before_it_drops_any_turn() {
+        let said = json!({ "role": "user", "content": "find it" });
+        let mut msgs = vec![json!({ "role": "user", "content": "earlier question" }), json!({ "role": "assistant", "content": "ok" }),
+            said.clone(), json!({ "role": "assistant", "content": "{\"do\":\"web_search\"}" }),
+            json!({ "role": "user", "content": format!("Result: {}", "y".repeat(10_000)) }),
+            json!({ "role": "assistant", "content": "{\"do\":\"read_url\"}" }), json!({ "role": "user", "content": "Result: short" })];
+        let mut cut = msgs.clone();
+        cut_result(&mut cut[4]);
+        let budget: usize = cut.iter().map(est_tokens).sum();
+        let before = msgs.len();
+        fit_to_budget(&mut msgs, 2, budget);
+        assert_eq!(msgs.len(), before, "no turn dropped");
+        assert_eq!(msgs[0]["content"], "earlier question");
+        assert!(msgs[4]["content"].as_str().unwrap().ends_with("(older result removed)"), "the old result was cut");
+        assert_eq!(msgs[2], said, "the request's own message is never cut");
+    }
+
+    #[test]
+    fn a_long_tool_result_is_cut_before_the_ai_sees_it() {
+        let seen = RefCell::new(vec![]);
+        let replies = ["{\"do\":\"web_search\",\"arg\":\"a\"}", "{\"say\":\"Done.\"}"];
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX,
+            |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies[n].to_string()) },
+            |_| Ok("z".repeat(10_000)));
+        assert_eq!(r, Ok("Done.".into()));
+        let second: Value = serde_json::from_str(&seen.borrow()[1]).unwrap();
+        let fed = second["messages"][2]["content"].as_str().unwrap();
+        assert!(fed.starts_with("Result: ") && fed.chars().count() <= MAX_RESULT_CHARS + 16, "{} chars", fed.chars().count());
+    }
+
+    #[test]
+    fn the_budget_is_the_window_less_the_reply_reserve_and_the_system_text() {
+        let cfg = Config::parse(r#"{"ai":{"customModels":[{"id":"small-m","contextTokens":10000}]}}"#);
+        assert_eq!(budget_for(&cfg, "small-m", ""), 10_000 - 4096, "window less the reply reserve");
+        assert_eq!(budget_for(&cfg, "small-m", &"s".repeat(4000)), 10_000 - 4096 - 1000, "the system text is counted at chars / 4");
+        assert_eq!(budget_for(&cfg, "no-such-model-xyz", ""), (provider::UNKNOWN_CONTEXT_TOKENS - 4096) as usize, "unknown window: the floor");
+    }
+
+    #[test]
+    fn native_tools_run_for_a_claude_model_only_when_settings_allow_them() {
+        let on = Config::parse(r#"{"ai":{"nativeTools":true}}"#);
+        let off = Config::parse(r#"{"ai":{"nativeTools":false}}"#);
+        assert!(native_allowed(&on, Some("anthropic")), "a Claude model with native tools on");
+        assert!(!native_allowed(&off, Some("anthropic")), "Settings off");
+        assert!(!native_allowed(&on, Some("openai")), "a non-Anthropic model keeps the JSON loop");
+        assert!(!native_allowed(&on, None), "an unknown provider is not native");
+    }
+
+    #[test]
+    fn a_multi_step_request_reaches_a_strong_claude_model_with_native_tools_and_a_plain_one_stays_on_the_primary() {
+        let cfg = Config::parse(r#"{"ai":{"nativeTools":true,"strongModel":"claude-sonnet-5-5"}}"#);
+        let all = |_: &str| true;
+        let strong = routing::route_model(&cfg, "compare two laptops and then book one", "gpt-4o-mini", &all);
+        assert_eq!(strong, "claude-sonnet-5-5");
+        assert!(native_allowed(&cfg, Some("anthropic")), "the strong Claude model gets the native loop");
+        let plain = routing::route_model(&cfg, "turn the volume up", "gpt-4o-mini", &all);
+        assert_eq!(plain, "gpt-4o-mini", "a plain request never leaves the primary");
+        assert!(!native_allowed(&cfg, Some("openai")), "a non-Anthropic primary keeps the JSON loop");
     }
 }

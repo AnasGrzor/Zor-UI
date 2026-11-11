@@ -2,7 +2,10 @@
 //! reply used. The adapters in `bridge/web.rs` turn each provider's stream into the same events; this file reads the facts out of
 //! them, so the agent loop never looks at a provider's wire format.
 
+use crate::conf::Config;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 /// What a model can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +70,51 @@ pub fn usage_event(provider: &str, ev: &Value) -> Option<Value> {
     (input.is_some() || output.is_some()).then(|| json!({ "usage": { "input": input, "output": output } }))
 }
 
+/// The window used when no window is known. A conservative floor, not a model fact: each default model has more, so a
+/// smaller guess only drops older turns sooner.
+pub const UNKNOWN_CONTEXT_TOKENS: u32 = 32_000;
+
+/// Context windows (input tokens) of the default models in `bridge/web.rs` `default_models()`, as each provider publishes them.
+/// Models with no confirmed published number are left out; a number is never guessed.
+const PUBLISHED: [(&str, u32); 5] = [
+    // https://platform.claude.com/docs/en/models/overview ("Context window: 1M tokens"), checked 2026-11-12
+    ("claude-sonnet-5-5", 1_000_000),
+    // https://platform.claude.com/docs/en/models/overview ("Context window: 1M tokens"), checked 2026-11-12
+    ("claude-haiku-5-5", 1_000_000),
+    // https://aistudio.google.com/docs/models/gemini-2.5-flash ("Input token limit 1,048,576"), checked 2026-11-12; Google marks it deprecated
+    ("gemini-2.5-flash", 1_048_576),
+    // https://aistudio.google.com/docs/models/gemini-3-flash-preview ("Input token limit 1,048,576"), checked 2026-11-12
+    ("gemini-3-flash-preview", 1_048_576),
+    // https://developers.openai.com/api/docs/models/gpt-4o-mini ("128,000 context window"), checked 2026-11-12; OpenAI marks it deprecated
+    ("gpt-4o-mini", 128_000),
+];
+
+/// Ollama's context length per model name, read once per session (None when Ollama does not report one).
+static OLLAMA: Mutex<BTreeMap<String, Option<u32>>> = Mutex::new(BTreeMap::new());
+
+/// The context window of `model_id`, in tokens: the user's `contextTokens` on its `ai.customModels` entry, else the published
+/// number above, else what Ollama reports for it. None when none of those knows it (the caller then uses `UNKNOWN_CONTEXT_TOKENS`).
+pub fn context_tokens(model_id: &str, cfg: &Config) -> Option<u32> {
+    let custom = cfg.get("ai.customModels").as_array().into_iter().flatten()
+        .find(|m| m["id"].as_str() == Some(model_id)).and_then(|m| m["contextTokens"].as_u64()).and_then(|n| u32::try_from(n).ok());
+    custom.or_else(|| PUBLISHED.iter().find(|(id, _)| *id == model_id).map(|(_, n)| *n))
+        .or_else(|| ollama_context(model_id))
+}
+
+/// Ollama's reported context length for a model, asked once and then remembered for the session.
+fn ollama_context(model_id: &str) -> Option<u32> {
+    if let Some(n) = OLLAMA.lock().unwrap_or_else(|e| e.into_inner()).get(model_id) { return *n; }
+    let n = crate::bridge::web::ollama_show(model_id).and_then(|v| context_from_show(&v));
+    OLLAMA.lock().unwrap_or_else(|e| e.into_inner()).insert(model_id.to_string(), n);
+    n
+}
+
+/// The context length in an Ollama /api/show reply: the `model_info` key that ends in `.context_length` (for example `llama.context_length`).
+pub fn context_from_show(v: &Value) -> Option<u32> {
+    v["model_info"].as_object()?.iter().find(|(k, _)| k.ends_with(".context_length"))
+        .and_then(|(_, n)| n.as_u64()).and_then(|n| u32::try_from(n).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,7 +154,7 @@ mod tests {
     fn switching_the_model_changes_only_the_model_field_of_the_request() {
         let run = |model: &str| {
             let sent = std::cell::RefCell::new(vec![]);
-            let r = crate::agent::run_loop_with(model, "system", 0.3, &[], "what time is it", 3, std::time::Duration::from_secs(5),
+            let r = crate::agent::run_loop_with(model, "system", 0.3, &[], "what time is it", 3, std::time::Duration::from_secs(5), usize::MAX,
                 |convo| { sent.borrow_mut().push(convo.to_string()); Ok("{\"say\":\"It is noon.\"}".to_string()) },
                 |_| Ok(String::new()));
             (r, sent.into_inner())
@@ -145,5 +193,24 @@ mod tests {
     fn an_event_without_counts_is_not_usage() {
         assert_eq!(usage_event("anthropic", &json!({ "type": "content_block_delta", "delta": { "text": "hi" } })), None);
         assert_eq!(usage_event("openai", &json!({ "choices": [{ "delta": { "content": "hi" } }] })), None);
+    }
+
+    #[test]
+    fn the_user_override_beats_the_published_window_and_unknown_is_none() {
+        let cfg = Config::parse(r#"{"ai":{"customModels":[{"id":"claude-haiku-5-5","contextTokens":64000}]}}"#);
+        assert_eq!(context_tokens("claude-haiku-5-5", &cfg), Some(64_000), "the override wins");
+        let plain = Config::parse("{}");
+        assert_eq!(context_tokens("claude-haiku-5-5", &plain), Some(1_000_000), "then the published table");
+        assert_eq!(context_tokens("gpt-4o-mini", &plain), Some(128_000));
+        assert_eq!(context_tokens("gemini-2.5-flash", &plain), Some(1_048_576));
+        assert_eq!(context_tokens("mistral-medium-latest", &plain), None, "no confirmed number: left out, not guessed");
+    }
+
+    #[test]
+    fn ollama_reports_its_context_length_under_the_architecture_key() {
+        let show = json!({ "model_info": { "general.architecture": "llama", "llama.context_length": 8192, "llama.embedding_length": 4096 } });
+        assert_eq!(context_from_show(&show), Some(8192));
+        assert_eq!(context_from_show(&json!({ "model_info": { "llama.block_count": 32 } })), None, "no context key: unknown");
+        assert_eq!(context_from_show(&json!({})), None);
     }
 }

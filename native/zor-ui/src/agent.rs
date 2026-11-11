@@ -10,6 +10,7 @@ pub mod history;
 pub mod memory;
 pub mod native;
 pub mod policy;
+pub mod intent;
 pub mod project;
 pub mod routing;
 pub mod skills;
@@ -687,6 +688,9 @@ pub fn native_on(cfg: &Config, model: &str) -> bool {
 /// finishes first.
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The question the buddy asked instead of acting on an unclear request. The next request is read as its answer.
+static PENDING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// The task of the request being answered, so a take-over it starts can record how it ended.
 static CURRENT_TASK: std::sync::Mutex<Option<i64>> = std::sync::Mutex::new(None);
 
@@ -739,7 +743,31 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
     let confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
     let timing = state::Timing::start();
-    let framed = request_text_with(cfg, said, note);
+    // what the buddy asked last time, if anything: this request is its answer
+    let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let ctx = intent::Context {
+        previous_request: tasks::latest().is_some(),
+        conversation: TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false),
+        project: project::wants_project(said) && project::from_title(&crate::drive::front_title(), &project::roots(cfg)).is_some(),
+        answering: pending.is_some(),
+    };
+    let a = intent::classify(said, &ctx);
+    crate::log::line(&format!("buddy intent: {:?} {:?}", a.kind, a.confidence));
+    let mut note = note.to_string();
+    match intent::decide(a, &ctx) {
+        // unclear with nothing to point at: the buddy asks one question, and no model is called
+        intent::Decision::Ask(q) => {
+            crate::log::line("buddy asks one question: the request is unclear");
+            if let Ok(mut t) = TURNS.lock() { remember(&mut t, said, &q, Instant::now()); }
+            history::save(said, &q);
+            *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(q.clone());
+            return Ok(q);
+        }
+        intent::Decision::Assume(s) => note = format!("{s} {note}"),
+        intent::Decision::Proceed => {}
+    }
+    if let Some(q) = pending { note = format!("(The buddy asked: \"{q}\". This request is the answer.) {note}"); }
+    let framed = request_text_with(cfg, said, &note);
     // each tool's check from the verifier, in the order the tools ran
     let evidence: std::cell::RefCell<Vec<verifier::Check>> = std::cell::RefCell::new(vec![]);
     // acting calls that failed in this request; they are not run again

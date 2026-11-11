@@ -244,16 +244,43 @@ pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.listen").as_bool().unwra
 /// One action's switch in Settings; on unless turned off.
 /// Starts the installed app or game that best matches `name` (Start Menu shortcuts, Steam games).
 pub fn launch_app(cfg: &Config, name: &str) -> Result<String, String> {
-    let items = launchables(cfg);
-    match best_match(name, &items) {
-        Some((n, target)) if crate::bridge::sys::shell_open(target) => Ok(format!("Opening {}.", short(n, 40))),
-        Some((n, _)) => Err(format!("Windows couldn't open {}.", short(n, 40))),
-        None => match web_version(name) {
-            Some((label, url)) if crate::bridge::sys::shell_open(url) => Ok(format!("{label} isn't installed, so I opened it in your browser.")),
-            Some(_) => Err("Windows couldn't open the browser.".into()),
-            None => Err(format!("I can't find {} on this PC.", short(name, 40))),
-        },
+    if let Some(r) = open_installed(cfg, name) { return r; }
+    // "discord and valorant": each app opens here, and the ones not installed are said, without a round trip to the AI
+    let parts = split_apps(name);
+    if parts.len() > 1 {
+        let (mut opened, mut missing) = (vec![], vec![]);
+        for p in &parts { match open_installed(cfg, p) { Some(Ok(_)) => opened.push(p.as_str()), _ => missing.push(p.as_str()) } }
+        return match (opened.is_empty(), missing.is_empty()) {
+            (true, _) => Err(format!("I can't find {} on this PC.", short(name, 40))),
+            (false, true) => Ok(format!("Opened {}.", opened.join(" and "))),
+            (false, false) => Ok(format!("Opened {}. I can't find {} on this PC.", opened.join(" and "), missing.join(" and "))),
+        };
     }
+    match web_version(name) {
+        Some((label, url)) if crate::bridge::sys::shell_open(url) => Ok(format!("{label} isn't installed, so I opened it in your browser.")),
+        Some(_) => Err("Windows couldn't open the browser.".into()),
+        None => Err(format!("I can't find {} on this PC.", short(name, 40))),
+    }
+}
+
+/// The app names in "discord and valorant" or "a, b and c", one each.
+pub fn split_apps(name: &str) -> Vec<String> {
+    name.split(" and ").flat_map(|p| p.split(',')).map(|p| app_name_of(p.trim()).to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+/// Opens the installed app or game `name` names: the best match by its start, else the one installed name that holds every word
+/// of it. None when there is no such app.
+fn open_installed(cfg: &Config, name: &str) -> Option<Result<String, String>> {
+    let items = launchables(cfg);
+    let (n, target) = match best_match(name, &items) {
+        Some((n, t)) => (n.to_string(), t.to_string()),
+        None => {
+            let names = app_names(cfg, name);
+            let [only] = names.as_slice() else { return None };
+            items.iter().find(|(n, _)| n == only).map(|(n, t)| (n.clone(), t.clone()))?
+        }
+    };
+    Some(if crate::bridge::sys::shell_open(&target) { Ok(format!("Opening {}.", short(&n, 40))) } else { Err(format!("Windows couldn't open {}.", short(&n, 40))) })
 }
 
 /// Apps that have a website, for when the app isn't installed: (name you say, label, address).
@@ -732,6 +759,13 @@ mod tests {
         assert_eq!(parse("search"), Intent::Chat("search".into()));
         assert_eq!(parse("okay okay please open notepad"), Intent::Open("notepad".into()));
         assert_eq!(parse("tell me a joke"), Intent::Chat("tell me a joke".into()));
+    }
+
+    #[test]
+    fn a_list_of_apps_is_split_into_one_name_each() {
+        assert_eq!(split_apps("discord and valorant"), ["discord", "valorant"]);
+        assert_eq!(split_apps("the chrome, spotify and steam app"), ["chrome", "spotify", "steam"]);
+        assert_eq!(split_apps("notepad"), ["notepad"], "one name stays one name");
     }
 
     #[test]

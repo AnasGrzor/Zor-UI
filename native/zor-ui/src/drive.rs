@@ -7,6 +7,7 @@
 //! the tests drive it with a fake model and fake hands. `Live` is the real `Host`.
 
 use crate::{assist, conf::Config, screen};
+use crate::agent::state::TaskStatus;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::{
@@ -1026,16 +1027,25 @@ pub fn check_ready(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts a take-over for `goal` on a worker thread after asking you in the island. Returns what the buddy says right now.
-pub fn start(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None, false) }
+/// Called once with how a take-over ended, to record it as a task.
+pub type OnDone = Box<dyn FnOnce(TaskStatus) + Send>;
 
-/// Starts a take-over the caller already got your yes for (`agent::approve`), so the island isn't asked a second time.
-pub fn start_approved(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None, true) }
+/// The task state a finished take-over gets. The user stopping it (Esc, voice, taking the mouse) is a cancel. A stop for a
+/// failure (out of steps or time, stuck, refused, an error) is a failure. Finishing on its own is Unverified: nothing checks
+/// the screen afterwards.
+pub fn end_status(stop: &Stop) -> TaskStatus {
+    if matches!(stop, Stop::Esc | Stop::Voice | Stop::UserMouse) { TaskStatus::Cancelled }
+    else if stop.failed() { TaskStatus::Failed }
+    else { TaskStatus::Unverified }
+}
 
-/// `start`, with the words the island card shows instead of the goal, and a step that runs once you said yes (opening the app the
-/// task needs, say) before the take-over begins. `approved`: the yes was already asked, so the island isn't asked again. `Err`
-/// when it can't start.
-pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool) -> Result<String, String> {
+/// Starts a take-over the caller already got your yes for (`agent::take_over` or `agent::approve`), so the island isn't asked again.
+pub fn start_approved(cfg: &Config, goal: &str, on_done: Option<OnDone>) -> Result<String, String> { start_with(cfg, goal, None, None, true, on_done) }
+
+/// `start_approved` for a take-over that still has to ask: the island asks on its worker thread, and a no ends the task as
+/// Declined. `shown` is the words the island card shows instead of the goal; `prep` is a step that runs once you said yes (opening
+/// the app the task needs, say) before the take-over begins. `Err` when it can't start.
+pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>) -> Result<String, String> {
     check_ready(cfg)?;
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
@@ -1047,7 +1057,8 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
         VOICE.store(false, Ordering::Relaxed);
         let q = question(shown.as_deref().unwrap_or(&goal));
         let mut failed = false;
-        let line = if !approved && !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
+        let mut status = TaskStatus::Failed;
+        let line = if !approved && !live.confirm(&q) { status = TaskStatus::Declined; "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
             if let Some(p) = prep { p(); std::thread::sleep(std::time::Duration::from_secs(3)); } // the app needs a moment to appear
             live.t0 = std::time::Instant::now();
             pass_through(true);
@@ -1058,10 +1069,12 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
             exclude_own_windows(false);
             drop(hook);
             crate::log::line(&format!("drive ended: {stop:?}"));
+            status = end_status(&stop);
             failed = stop.failed();
             stop.message()
         } else { failed = true; "I can't watch the Esc key, so I won't drive.".to_string() };
         ACTIVE.store(false, Ordering::Relaxed);
+        if let Some(done) = on_done { done(status); }
         if failed { assist::fail_later(&line) } else { assist::say_later(&line, 8.0) }
     });
     Ok(if approved { "Taking over now.".into() } else { "Checking with you first.".into() })
@@ -1216,6 +1229,17 @@ mod tests {
         assert!(!w.took((500, 500), 0));
         w.expect((500, 500));
         assert!(!w.took((500, 500), 1000), "the drive put it there itself");
+    }
+
+    #[test]
+    fn a_finished_take_over_ends_with_the_state_that_fits_how_it_stopped() {
+        assert_eq!(end_status(&Stop::Done), TaskStatus::Unverified, "it finished; nothing checked the screen");
+        assert_eq!(end_status(&Stop::Esc), TaskStatus::Cancelled);
+        assert_eq!(end_status(&Stop::Voice), TaskStatus::Cancelled);
+        assert_eq!(end_status(&Stop::UserMouse), TaskStatus::Cancelled, "the user took the mouse");
+        for s in [Stop::Rounds, Stop::Time, Stop::Stuck, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
+            assert_eq!(end_status(&s), TaskStatus::Failed, "{s:?}");
+        }
     }
 
     #[test]

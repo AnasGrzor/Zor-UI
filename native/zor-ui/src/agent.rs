@@ -345,6 +345,24 @@ fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> 
 /// What a refused risky call says back to the AI and the user.
 const DECLINED: &str = "You didn't allow it, so I did nothing.";
 
+/// A take-over started from a fixed phrase, not from the AI. It is checked and asked like the AI's take-over, and saved as a
+/// task like any request: Declined on a no, Running once you say yes, and its end state when the take-over finishes.
+pub fn take_over(cfg: &Config, goal: &str) -> Result<String, String> {
+    assist::drive_switches(cfg)?;
+    crate::drive::check_ready(cfg)?;
+    let task = tasks::begin(goal);
+    let mut confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
+    if approve(&Call::TakeOver(goal.to_string()), cfg, &mut confirm).is_err() {
+        tasks::set(task, state::TaskStatus::Declined, "Declined", 0);
+        return Ok("Okay, I won't.".into());
+    }
+    tasks::set(task, state::TaskStatus::Running, "", 0);
+    let done: crate::drive::OnDone = Box::new(move |status| tasks::set(task, status, &format!("{status:?}"), 0));
+    let r = crate::drive::start_approved(cfg, goal, Some(done));
+    if r.is_err() { tasks::set(task, state::TaskStatus::Failed, "Failed", 0); }
+    r
+}
+
 /// Folders a voice request may search and open files from.
 pub fn user_dirs() -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
@@ -481,7 +499,8 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             assist::drive_switches(cfg)?;
             crate::drive::check_ready(cfg)?;
             approve(call, cfg, confirm)?;
-            crate::drive::start_approved(cfg, g)
+            // the take-over is recorded as this request's task; it doesn't wait for the take-over to end
+            crate::drive::start_approved(cfg, g, None)
         }
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
         Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },

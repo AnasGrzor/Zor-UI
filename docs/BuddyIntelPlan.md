@@ -519,7 +519,7 @@ This brief (v2) is the source of truth. Milestone numbers are the ones in sectio
 | Milestone | Status | Where | Limits |
 | --------- | ------ | ----- | ------ |
 | M0 Fresh audit and baseline | Done | main | Baseline: `zorui` 938 passed, 10 ignored; `zorui-svc` 13 passed; release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings. |
-| M1 Verification and task state | Partial | buddy-intel-m1b | Volume and opening apps have no read-back. The repeat block covers only the same call with the same arguments. |
+| M1 Verification and task state | Done | buddy-intel-m7-finish | Volume changes are read back from the default output device (`media::output_now`, `IAudioEndpointVolume`): verified within 2 points or by mute state, Failed with the real level otherwise, Unverified when no read API answers. App opens wait up to 5 s for a process with the app's image name (`agent::readback`); not found is Unverified, and a web-page fallback is Unverified. An app that is already running counts as found; game launcher images match by name only. The repeat block is unchanged. |
 | M2 Centralized permissions | Done | buddy-intel-m7-finish | The browser's per-action gate lives in `policy::browser_gate`; `policy::check_browser` returns a `Permit` that is the only input to the browser executor. Each browser tool has a risk level (`policy::BROWSER_RISK`); unknown names are refused. Fail-closed and confirm tests in `agent::policy`. |
 | M3 Progressive context | Partial | buddy-intel-m1b | "It" is not a reference word. Memory lookup opens the database on every request. Intent rules are keyword-based. No preferences or project memories in context. |
 | M4 Intent inference | Partial | buddy-intel-m1b | Keyword-based. Not yet measured against real requests. |

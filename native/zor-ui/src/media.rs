@@ -16,7 +16,7 @@ use windows::{
     Storage::Streams::DataReader,
     Win32::{
         Media::Audio::{Endpoints::*, *},
-        System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED},
+        System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED},
     },
 };
 
@@ -300,6 +300,23 @@ pub fn set_volume(pct: f32) { asend(AMsg::Volume(pct)); }
 pub fn set_mute(on: bool) { asend(AMsg::Mute(on)); }
 pub fn set_mic_mute(on: bool) { asend(AMsg::MicMute(on)); }
 pub fn set_mic_volume(pct: f32) { asend(AMsg::MicVolume(pct)); }
+
+/// The default output device's level (0-100) and mute as Windows reports them now: the read-back for a volume change
+/// (`agent::readback`). None when no output device answers. Runs on the calling thread, which sets up COM for the call.
+pub fn output_now() -> Option<(f32, bool)> {
+    unsafe {
+        // S_FALSE (already set up the same way) is fine too; only a set-up that succeeded is undone
+        let init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let r = (|| {
+            let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let d = en.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+            let v: IAudioEndpointVolume = d.Activate(CLSCTX_ALL, None).ok()?;
+            Some((v.GetMasterVolumeLevelScalar().ok()? * 100.0, v.GetMute().ok()?.as_bool()))
+        })();
+        if init { CoUninitialize(); }
+        r
+    }
+}
 
 /// Device id (GetId allocates it; freed here, it runs every 3 s).
 unsafe fn dev_id(d: &IMMDevice) -> Option<String> {

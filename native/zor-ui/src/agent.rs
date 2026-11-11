@@ -14,6 +14,7 @@ pub mod native;
 pub mod plan;
 pub mod policy;
 pub mod provider;
+pub mod readback;
 pub mod intent;
 pub mod project;
 pub mod routing;
@@ -527,7 +528,8 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::WebSearch(_) | Call::ReadUrl(_) if !assist::allowed(cfg, "search") => Err("Web search is turned off in Settings.".into()),
         Call::WebSearch(q) => crate::webread::search(q),
         Call::ReadUrl(u) => crate::webread::read(u),
-        Call::Open(n) => assist::run(assist::Intent::Open(n.clone()), cfg),
+        // the launch's own reply, then the app is looked for in the running processes for up to 5 s (readback.rs)
+        Call::Open(n) => readback::open_reply(assist::run(assist::Intent::Open(n.clone()), cfg), n, &readback::running_images, &|t| std::thread::sleep(t), &|| stop_check().is_some()),
         Call::Message { to, text, via } => assist::run(assist::Intent::Message { to: to.clone(), text: text.clone(), via: via.clone() }, cfg),
         Call::Url(u) => open_url(cfg, u),
         Call::Play { query, service } => play(cfg, query, service),
@@ -536,10 +538,15 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             Ok(if names.is_empty() { format!("No installed app or game matches \"{q}\".") } else { format!("Installed: {}.", names.join(", ")) })
         }
         Call::Volume(_) | Call::Brightness(_) | Call::Radio { .. } | Call::Power(_) | Call::Clip(_) | Call::Wallpaper(_) if !assist::allowed(cfg, "system") => Err("PC control is turned off in Settings.".into()),
+        // each change is read back from the output device (readback.rs); the setter's own return is not proof
         Call::Volume(a) => match volume_cmd(a) {
-            Some(Vol::Step(d)) => { crate::media::step_volume(d); Ok("Done.".into()) }
-            Some(Vol::Mute(m)) => { crate::media::set_mute(m); Ok("Done.".into()) }
-            Some(Vol::Set(v)) => { crate::media::set_volume(v); Ok(format!("Volume {}%.", v.round())) }
+            Some(Vol::Step(d)) => {
+                let before = crate::media::output_now().map(|o| o.0);
+                crate::media::step_volume(d);
+                readback::step_reply(d, before, &crate::media::output_now, &|t| std::thread::sleep(t))
+            }
+            Some(Vol::Mute(m)) => { crate::media::set_mute(m); readback::volume_reply(readback::Want::Mute(m), &crate::media::output_now, &|t| std::thread::sleep(t)) }
+            Some(Vol::Set(v)) => { crate::media::set_volume(v); readback::volume_reply(readback::Want::Level(v), &crate::media::output_now, &|t| std::thread::sleep(t)) }
             None => Err(format!("Volume takes up, down, mute, unmute or 0 to 100, not \"{a}\".")),
         },
         Call::Brightness(a) => {
@@ -828,7 +835,7 @@ pub fn outcome(r: &Result<String, String>, checks: &[verifier::Check]) -> (verif
     if verdict == verifier::Verdict::Completed && !checks.is_empty() && !checks.contains(&verifier::Check::Passed) && r.as_ref().is_ok_and(|a| verifier::claims_code_result(a)) {
         verdict = verifier::Verdict::Unverified;
     }
-    let any_effect = checks.iter().any(|c| matches!(c, verifier::Check::Verified | verifier::Check::Unverified | verifier::Check::Passed));
+    let any_effect = checks.iter().any(|c| matches!(c, verifier::Check::Verified | verifier::Check::Unverified | verifier::Check::NotConfirmed | verifier::Check::Passed));
     (verdict, state::status_of(r, verdict, any_effect))
 }
 

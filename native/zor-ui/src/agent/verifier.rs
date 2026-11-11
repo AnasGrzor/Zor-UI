@@ -21,6 +21,10 @@ pub enum Kind {
     Action,
     /// A project check (`run_check`): its exit code is the evidence.
     Check,
+    /// The output level or mute is read back from the device after a volume change (`agent::readback`).
+    Volume,
+    /// An app launch is checked against the running processes for a while (`agent::readback`).
+    AppOpen,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +41,9 @@ pub enum Check {
     Passed,
     /// A project check ran and did not pass (exit code, or time limit). It stays failed for the whole request.
     CheckFailed,
+    /// The tool ran, and its read-back could not confirm the effect (no read API, or the app never showed up). Judged as Unverified;
+    /// the answer then says it could not be confirmed (`unverified_claim_note`).
+    NotConfirmed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +68,8 @@ pub fn kind_of(call: &Call) -> Kind {
         WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
         Radio { .. } | Brightness(_) => Kind::ReadBack,
+        Volume(_) => Kind::Volume,
+        Open(_) => Kind::AppOpen,
         RunCheck(_) => Kind::Check,
         // a page that loads or is read is evidence; a click or typing is an action that nothing reports back on
         Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
@@ -86,6 +95,8 @@ pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
         // an Ok from these tools is only returned after the state was read back (radio: `exec`; brightness: `brightness_reply`)
         Kind::ReadBack => Check::Verified,
         Kind::Action => Check::Unverified,
+        // the read-back texts say "not confirmed" when the device or the process list could not confirm the change
+        Kind::Volume | Kind::AppOpen => if t.to_lowercase().contains("not confirmed") { Check::NotConfirmed } else { Check::Verified },
     }
 }
 
@@ -133,8 +144,11 @@ pub fn note(verdict: Verdict) -> Option<&'static str> {
 
 /// The sentence for a task that claims a code result with no passing check: its verdict is Unverified (`agent::outcome`).
 pub fn unverified_claim_note(verdict: Verdict, answer: &Result<String, String>, checks: &[Check]) -> Option<&'static str> {
+    if verdict != Verdict::Unverified { return None; }
+    // a volume change or an app open that the read-back could not confirm
+    if checks.contains(&Check::NotConfirmed) { return Some("I couldn't confirm that on this PC."); }
     let claimed = answer.as_ref().is_ok_and(|a| claims_code_result(a));
-    (verdict == Verdict::Unverified && claimed && !checks.contains(&Check::Passed)).then_some("I did not run a check, so this is unverified.")
+    (claimed && !checks.contains(&Check::Passed)).then_some("I did not run a check, so this is unverified.")
 }
 
 #[cfg(test)]
@@ -218,7 +232,8 @@ mod tests {
         assert_eq!(kind_of(&Call::FindFile("x".into())), Kind::FileSearch);
         assert_eq!(kind_of(&Call::Radio { which: "wifi".into(), state: "on".into() }), Kind::ReadBack);
         assert_eq!(kind_of(&Call::Brightness("50".into())), Kind::ReadBack);
-        assert_eq!(kind_of(&Call::Volume("up".into())), Kind::Action);
+        assert_eq!(kind_of(&Call::Volume("up".into())), Kind::Volume);
+        assert_eq!(kind_of(&Call::Open("notepad".into())), Kind::AppOpen);
         let browser = |tool: &str| Call::Browser { tool: tool.into(), args: serde_json::json!({}) };
         assert_eq!(kind_of(&browser("browser_navigate")), Kind::Lookup, "a page that loads is evidence");
         assert_eq!(kind_of(&browser("browser_snapshot")), Kind::Lookup);

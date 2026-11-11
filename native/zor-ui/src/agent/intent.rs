@@ -41,7 +41,7 @@ pub struct Context {
     pub previous_request: bool,
     /// The conversation has turns in memory.
     pub conversation: bool,
-    /// The window in front is a project folder (agent/project.rs).
+    /// The request names a project and the window in front is its folder (agent/project.rs `lookup`). Not set for a vague request.
     pub project: bool,
     /// The title of the window in front, read without acting. Empty when there is none. Something the user can see is
     /// the likeliest object of "this", so an unclear request with a window in front is assumed, not asked about.
@@ -65,7 +65,7 @@ const VAGUE: [&str; 9] = ["fix", "improve", "better", "clean", "ready", "sort", 
 /// Words that stand for an object the request does not name ("something like that", "stuff").
 const GENERIC: [&str; 5] = ["something", "stuff", "things", "everything", "anything"];
 /// Words for the project as a whole: "clean up my project" is vague about which project, so it needs one in front.
-const PROJECT_WORDS: [&str; 4] = ["project", "repo", "repository", "workspace"];
+pub const PROJECT_WORDS: [&str; 4] = ["project", "repo", "repository", "workspace"];
 /// Words that point at something already on the table: "this", "that", "them", "those". "It" is decided by `points_at`.
 const REFERENCE: [&str; 4] = ["this", "that", "them", "those"];
 const LOOKUP: [&str; 9] = ["search", "look", "news", "weather", "price", "prices", "score", "scores", "research"];

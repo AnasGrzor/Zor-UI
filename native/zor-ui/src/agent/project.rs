@@ -1,7 +1,7 @@
 //! The active project: the folder of the project the window in front is working on. The title names it ("main.rs - zor-ui - Visual
 //! Studio Code" names zor-ui). A project is a folder directly under one of the project roots that has a project marker (.git,
 //! Cargo.toml, package.json, pyproject.toml, go.mod). The roots are Documents and Desktop, or `buddies.projectRoots` in the config.
-//! Only the title is read to find it. Its top-level names are read only when a request asks about the project.
+//! Only the title is read to find it. The roots' folder names are listed only when the request names a project (`lookup`).
 
 use crate::conf::Config;
 use std::path::{Path, PathBuf};
@@ -31,20 +31,45 @@ pub fn roots(cfg: &Config) -> Vec<PathBuf> {
 
 fn is_project(dir: &Path) -> bool { MARKERS.iter().any(|m| dir.join(m).exists()) }
 
-/// The project a window title names: a part of the title ("main.rs", "zor-ui", "Visual Studio Code") equal to the name of a
-/// project folder under one of `roots`. The first match wins.
-pub fn from_title(title: &str, roots: &[PathBuf]) -> Option<PathBuf> {
+/// The top-level entries of a project root. The only place a root's folder names are read.
+pub fn list_dirs(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root).map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect()).unwrap_or_default()
+}
+
+/// The title's parts, lowercased: "main.rs - zor-ui - Visual Studio Code" gives "main.rs", "zor-ui", "visual studio code".
+fn title_parts(title: &str) -> Vec<String> {
     let title = title.replace(" — ", " - ").replace(" | ", " - ");
-    let parts: Vec<String> = title.split(" - ").map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    title.split(" - ").map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Whether the request names a project, so a folder listing is worth doing. True when it has an explicit project word the intent
+/// code recognises, or a word that is a title part (or a word of one) the window in front already shows.
+/// shortcut: a folder name the title does not show and the request does not say by project word is not found; no listing is done for it.
+pub fn names_project(said: &str, title: &str) -> bool {
+    let tokens: Vec<String> = said.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect();
+    if tokens.iter().any(|t| crate::agent::intent::PROJECT_WORDS.contains(&t.as_str())) { return true; }
+    let parts = title_parts(title);
+    tokens.iter().any(|t| parts.iter().any(|p| p == t || p.split_whitespace().any(|w| w == t)))
+}
+
+/// The project a window title names: a part of the title ("main.rs", "zor-ui", "Visual Studio Code") equal to the name of a
+/// project folder under one of `roots`, read with `list`. The first match wins.
+fn from_title_with(title: &str, roots: &[PathBuf], list: &dyn Fn(&Path) -> Vec<PathBuf>) -> Option<PathBuf> {
+    let parts = title_parts(title);
     for root in roots {
-        let Ok(rd) = std::fs::read_dir(root) else { continue };
-        for e in rd.filter_map(Result::ok) {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_lowercase();
+        for p in list(root) {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
             if p.is_dir() && parts.contains(&name) && is_project(&p) { return Some(p); }
         }
     }
     None
+}
+
+/// The active project for a request. Lists the roots only when the request names a project (`names_project`); otherwise
+/// `list` is never called and no folder is read.
+pub fn lookup(said: &str, title: &str, roots: &[PathBuf], list: &dyn Fn(&Path) -> Vec<PathBuf>) -> Option<PathBuf> {
+    if !names_project(said, title) { return None; }
+    from_title_with(title, roots, list)
 }
 
 /// The project as the AI reads it: its name and folder, whether it is a git repository, and its top-level names (at most 12).
@@ -78,14 +103,41 @@ mod tests {
         dir
     }
 
+    fn no_list(_: &Path) -> Vec<PathBuf> { panic!("no folder should be listed") }
+
     #[test]
     fn the_title_names_the_project_and_a_folder_without_a_marker_is_not_one() {
         let root = temp("title");
         let roots = [root.clone()];
-        assert_eq!(from_title("main.rs - zor-ui - Visual Studio Code", &roots), Some(root.join("zor-ui")));
-        assert_eq!(from_title("ZOR-UI — Orca", &roots), Some(root.join("zor-ui")), "case and dash do not matter");
-        assert_eq!(from_title("notes - Visual Studio Code", &roots), None, "no project marker, no project");
-        assert_eq!(from_title("Inbox - Chrome", &[]), None, "no roots, no project");
+        let find = |said: &str, title: &str| lookup(said, title, &roots, &list_dirs);
+        assert_eq!(find("fix the project", "main.rs - zor-ui - Visual Studio Code"), Some(root.join("zor-ui")));
+        assert_eq!(find("fix the project", "ZOR-UI — Orca"), Some(root.join("zor-ui")), "case and dash do not matter");
+        assert_eq!(find("fix the project", "notes - Visual Studio Code"), None, "no project marker, no project");
+        assert_eq!(lookup("fix the project", "Inbox - Chrome", &[], &list_dirs), None, "no roots, no project");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_request_that_names_a_known_project_resolves_to_it() {
+        let root = temp("names");
+        let roots = [root.clone()];
+        assert_eq!(lookup("open zor-ui in the editor", "Chrome", &roots, &list_dirs), None, "no project word and the window does not show the name: not looked up (shortcut)");
+        assert_eq!(lookup("open zor-ui in the editor", "main.rs - zor-ui", &roots, &list_dirs), Some(root.join("zor-ui")), "the window shows the name the request says");
+        assert_eq!(lookup("how many errors does my project have", "main.rs - zor-ui", &roots, &list_dirs), Some(root.join("zor-ui")), "a project word names it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_request_that_names_no_project_reads_no_folder() {
+        let root = temp("vague");
+        let roots = [root.clone()];
+        let calls = std::cell::Cell::new(0usize);
+        let counting = |r: &Path| { calls.set(calls.get() + 1); list_dirs(r) };
+        for said in ["fix this", "what time is it", "make it better"] {
+            assert_eq!(lookup(said, "main.rs - zor-ui", &roots, &counting), None, "{said}");
+        }
+        assert_eq!(calls.get(), 0, "no request named a project, so no folder was listed");
+        assert_eq!(lookup("fix this", "main.rs - zor-ui", &roots, &no_list), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

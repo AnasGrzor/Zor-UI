@@ -172,7 +172,7 @@ impl AgentContext {
             all.iter().find(|m| m.current).or(all.first()).filter(|m| !m.title.is_empty()).map(|m| (m.title.clone(), m.artist.clone(), m.playing))
         } else { None };
         // the active project: its folder name is what project memories are matched against
-        let active = if memory_on(cfg) || project::wants_project(said) { project::from_title(&crate::drive::front_title(), &project::roots(cfg)) } else { None };
+        let active = project::lookup(said, &crate::drive::front_title(), &project::roots(cfg), &project::list_dirs);
         let project_name = active.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned());
         let memory_context = if memory_on(cfg) { memory::context_for(said, project_name.as_deref()) } else { vec![] };
         let mut relevant_memories = if memory_on(cfg) { memory::recall(said, 5) } else { vec![] };
@@ -893,8 +893,8 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     let ctx = intent::Context {
         previous_request: tasks::latest().is_some(),
         conversation: TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false),
-        // the project in front is an object for "fix this" and "clean up my project", so it is looked for on every request
-        project: project::from_title(&front, &project::roots(cfg)).is_some(),
+        // the project in front is an object for "clean up my project", so it is looked for only when the request names a project
+        project: project::lookup(said, &front, &project::roots(cfg), &project::list_dirs).is_some(),
         window: assist::short(front.trim(), 80),
         answering: pending.is_some(),
     };

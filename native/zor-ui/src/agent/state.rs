@@ -1,6 +1,8 @@
-//! The state of one buddy request. The loop decides how a request ended from its result, not from anything the AI says
-//! about being finished. A task moves through these states in order, and a move that skips one is refused and logged.
+//! The state of one buddy request. The loop decides how a request ended from its result and the verifier's verdict, not from
+//! anything the AI says about being finished. A task moves through these states in order, and a move that skips one is
+//! refused and logged.
 
+use crate::agent::verifier::Verdict;
 use crate::browse;
 use std::{cell::Cell, time::{Duration, Instant}};
 
@@ -10,8 +12,15 @@ pub enum TaskStatus {
     Running,
     WaitingApproval,
     Verifying,
+    /// Finished and every step was confirmed by the tools' reports.
     Completed,
+    /// Finished, but some of the evidence could not be checked (volume, opening an app).
+    Unverified,
+    /// Some steps worked and the request as a whole did not.
+    Partial,
     Failed,
+    /// The user said no to what the request needed. Nothing was done by choice.
+    Declined,
     Cancelled,
     /// The app closed while the task was still running. Found and marked on the next start.
     Interrupted,
@@ -19,7 +28,8 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_final(self) -> bool {
-        matches!(self, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Interrupted)
+        use TaskStatus::*;
+        matches!(self, Completed | Unverified | Partial | Failed | Declined | Cancelled | Interrupted)
     }
 
     /// Whether a task may move from this state to `next`.
@@ -30,19 +40,29 @@ impl TaskStatus {
             (Planning, Running)
             | (Running, WaitingApproval) | (WaitingApproval, Running)
             | (Running, Verifying)
-            | (Verifying, Completed) | (Verifying, Failed)
-            // a request can end without a verify step: no tool ran, it was stopped, or it failed
-            | (Running, Completed)
+            | (Verifying, Completed | Unverified | Partial | Failed | Declined)
+            // a request can end without a verify step: no tool ran, or the user said no
+            | (Running, Completed | Declined)
             | (Planning | Running | WaitingApproval, Failed | Cancelled | Interrupted))
     }
 }
 
-/// How a request ended, read from the loop's result. The user stopping the browser is a cancel, not a failure.
-pub fn status_of(result: &Result<String, String>) -> TaskStatus {
+/// How a request ended. An answer is only as good as the verifier's verdict on its tools: an answer whose tools failed is
+/// Failed, not Completed. A failure after a tool already acted is Partial, because the action happened. The user stopping
+/// the browser or the request is a cancel, not a failure.
+pub fn status_of(result: &Result<String, String>, verdict: Verdict, any_effect: bool) -> TaskStatus {
     match result {
-        Ok(_) => TaskStatus::Completed,
         Err(e) if e == browse::STOPPED || e == crate::agent::CANCELLED => TaskStatus::Cancelled,
+        Err(_) if verdict == Verdict::Declined => TaskStatus::Declined,
+        Err(_) if any_effect => TaskStatus::Partial,
         Err(_) => TaskStatus::Failed,
+        Ok(_) => match verdict {
+            Verdict::Completed => TaskStatus::Completed,
+            Verdict::Unverified => TaskStatus::Unverified,
+            Verdict::Partial => TaskStatus::Partial,
+            Verdict::Failed => TaskStatus::Failed,
+            Verdict::Declined => TaskStatus::Declined,
+        },
     }
 }
 
@@ -77,6 +97,16 @@ mod task_tests {
     }
 
     #[test]
+    fn a_verified_task_ends_in_the_verdict_it_got() {
+        for end in [TaskStatus::Unverified, TaskStatus::Partial, TaskStatus::Failed, TaskStatus::Declined] {
+            let mut t = Task::new();
+            t.to(TaskStatus::Running);
+            assert!(t.to(TaskStatus::Verifying) && t.to(end), "{end:?}");
+            assert_eq!(t.status, end);
+        }
+    }
+
+    #[test]
     fn a_skipped_or_backwards_step_is_refused_and_the_state_stays() {
         let mut t = Task::new();
         assert!(!t.to(TaskStatus::Verifying), "planning can't jump to verifying");
@@ -88,18 +118,26 @@ mod task_tests {
     }
 
     #[test]
+    fn a_task_being_verified_cannot_be_cancelled() {
+        let mut t = Task::new();
+        t.to(TaskStatus::Running);
+        t.to(TaskStatus::Verifying);
+        assert!(!t.to(TaskStatus::Cancelled), "the request ends with its verdict, not as a cancel");
+    }
+
+    #[test]
     fn a_final_state_stays_final() {
         let mut t = Task::new();
         t.to(TaskStatus::Running);
         assert!(t.to(TaskStatus::Cancelled));
         assert!(!t.to(TaskStatus::Running) && !t.to(TaskStatus::Failed));
-        assert!(TaskStatus::Interrupted.is_final() && !TaskStatus::WaitingApproval.is_final());
+        assert!(TaskStatus::Interrupted.is_final() && TaskStatus::Partial.is_final() && !TaskStatus::WaitingApproval.is_final());
     }
 
     #[test]
     fn a_cancel_is_a_cancelled_task_not_a_failed_one() {
-        assert_eq!(status_of(&Err(crate::agent::CANCELLED.into())), TaskStatus::Cancelled);
-        assert_eq!(status_of(&Err("claude returned 503".into())), TaskStatus::Failed);
+        assert_eq!(status_of(&Err(crate::agent::CANCELLED.into()), Verdict::Failed, false), TaskStatus::Cancelled);
+        assert_eq!(status_of(&Err("claude returned 503".into()), Verdict::Completed, false), TaskStatus::Failed);
     }
 
     #[test]
@@ -164,10 +202,25 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_completes_a_stop_cancels_and_anything_else_fails() {
-        assert_eq!(status_of(&Ok("Done.".into())), TaskStatus::Completed);
-        assert_eq!(status_of(&Err(browse::STOPPED.into())), TaskStatus::Cancelled);
-        assert_eq!(status_of(&Err("I couldn't finish that in a few steps.".into())), TaskStatus::Failed);
-        assert_eq!(status_of(&Err("That took too long, so I stopped.".into())), TaskStatus::Failed);
+    fn an_answer_takes_its_verdict_a_stop_cancels_and_a_failure_fails() {
+        assert_eq!(status_of(&Ok("Done.".into()), Verdict::Completed, true), TaskStatus::Completed);
+        assert_eq!(status_of(&Err(browse::STOPPED.into()), Verdict::Completed, false), TaskStatus::Cancelled);
+        assert_eq!(status_of(&Err("I couldn't finish that in a few steps.".into()), Verdict::Completed, false), TaskStatus::Failed);
+        assert_eq!(status_of(&Err("That took too long, so I stopped.".into()), Verdict::Completed, false), TaskStatus::Failed);
+    }
+
+    #[test]
+    fn a_fine_sounding_answer_is_not_a_completed_task_when_its_tools_failed() {
+        assert_eq!(status_of(&Ok("Done.".into()), Verdict::Failed, false), TaskStatus::Failed, "the model said done; the tools said no");
+        assert_eq!(status_of(&Ok("Done.".into()), Verdict::Unverified, true), TaskStatus::Unverified);
+        assert_eq!(status_of(&Ok("Done.".into()), Verdict::Partial, true), TaskStatus::Partial);
+        assert_eq!(status_of(&Ok("Okay.".into()), Verdict::Declined, false), TaskStatus::Declined);
+    }
+
+    #[test]
+    fn a_failure_after_an_action_is_partial_and_a_declined_one_is_declined() {
+        assert_eq!(status_of(&Err("That took too long, so I stopped.".into()), Verdict::Partial, true), TaskStatus::Partial, "the action already happened");
+        assert_eq!(status_of(&Err("That took too long, so I stopped.".into()), Verdict::Failed, false), TaskStatus::Failed);
+        assert_eq!(status_of(&Err("You didn't allow it, so I did nothing.".into()), Verdict::Declined, false), TaskStatus::Declined);
     }
 }

@@ -421,7 +421,7 @@ fn find_and_message(cfg: &Config, to: &str, text: &str, via: &str) -> Result<Str
     let on = if via.is_empty() { String::new() } else { format!(" on {via}") };
     let shown = format!("find {to}{on} and message them: \"{text}\"");
     let (cfg2, via2) = (Config(cfg.0.clone()), via.to_string());
-    crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))))
+    crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))), false)
 }
 
 /// The link that opens a chat with `text` ready, and what to tell you to do next.
@@ -488,9 +488,7 @@ pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
         Intent::Screen(_) if !screen_on(cfg) => Err(SCREEN_OFF.into()),
         Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Screen(t) => screen_help(cfg, &t),
-        Intent::Drive(_) if !crate::drive::enabled(cfg) => Err(DRIVE_OFF.into()),
-        Intent::Drive(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
-        Intent::Drive(g) => crate::drive::start(cfg, &g),
+        Intent::Drive(g) => drive_switches(cfg).and_then(|_| crate::drive::start(cfg, &g)),
         Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Chat(t) => crate::agent::ask(cfg, &t),
     }
@@ -498,6 +496,13 @@ pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
 
 const AI_OFF: &str = "I only know search, open, play and message. The AI is off in Settings.";
 const DRIVE_OFF: &str = "Take-over is off. Turn on \"Let the buddy take over\" in Settings, Voice.";
+
+/// The Settings switches a take-over needs, checked before anyone is asked: take-over is on and the AI is on.
+pub fn drive_switches(cfg: &Config) -> Result<(), String> {
+    if !crate::drive::enabled(cfg) { return Err(DRIVE_OFF.into()); }
+    if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) { return Err(AI_OFF.into()); }
+    Ok(())
+}
 const SCREEN_OFF: &str = "Screen help is off. Turn on \"Let the buddy see my screen\" in Settings, Voice.";
 
 /// Settings, Voice, "Let the buddy see my screen". Off unless turned on: the pictures leave this PC.
@@ -608,7 +613,7 @@ pub fn ask(cfg: &Config, said: &str) {
         // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
         let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
         let r = match run(parse(&said), &cfg) {
-            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask(&cfg, &retry_text(&said, &e)),
+            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask_with_note(&cfg, said.trim(), &fallback_note(&e)),
             r => r,
         };
         report(r);
@@ -621,9 +626,10 @@ pub fn falls_back(intent: &Intent, err: &str, ai_on: bool) -> bool {
     ai_on && matches!(intent, Intent::Open(_) | Intent::Play { .. } | Intent::Search(_)) && !err.contains("turned off")
 }
 
-/// The sentence the AI gets after a fixed command failed: what was said, and why the fixed command could not do it.
-pub fn retry_text(said: &str, err: &str) -> String {
-    format!("{}\n(I first tried it as a fixed command and it failed: {err} Find another way.)", said.trim())
+/// The note the AI gets with the request after a fixed command failed: why the fixed command could not do it. It goes to the AI
+/// only; the request itself is saved as the user said it.
+pub fn fallback_note(err: &str) -> String {
+    format!("(I first tried it as a fixed command and it failed: {err} Find another way.)")
 }
 
 /// Bridge arguments for the speech model folder and microphone name; empty ones are left out.
@@ -921,9 +927,8 @@ mod tests {
         assert!(!falls_back(&Intent::Chat("hi".into()), err, true));
         assert!(!falls_back(&Intent::Drive("click save".into()), err, true));
         assert!(!falls_back(&Intent::Screen("what's on my screen".into()), err, true));
-        let text = retry_text("  start a timer ", err);
-        assert!(text.starts_with("start a timer\n"), "{text}");
-        assert!(text.contains(err), "{text}");
+        let note = fallback_note(err);
+        assert!(note.starts_with("(I first tried") && note.contains(err), "{note}");
         assert_eq!(parse("start a timer"), Intent::Open("a timer".into()), "the misfire the fallback catches");
     }
 

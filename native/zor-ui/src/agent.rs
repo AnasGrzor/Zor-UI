@@ -296,6 +296,11 @@ pub fn brightness_target(arg: &str, current: Option<i64>) -> Option<i64> {
     }.map(|v| v.clamp(1, 100))
 }
 
+/// The brightness answer once the level is read back: it must be the level that was asked for.
+pub fn brightness_reply(pct: i64, status: &Value) -> Result<String, String> {
+    if status["brightness"].as_i64() == Some(pct) { Ok(format!("Brightness {pct}%.")) } else { Err("Windows didn't confirm the brightness change.".into()) }
+}
+
 /// A toggles bridge answer as a result: its "error" text, or no answer at all, is a failure.
 fn toggled(v: &Value) -> Result<(), String> {
     match (v["error"].as_str(), v.is_null()) {
@@ -305,21 +310,40 @@ fn toggled(v: &Value) -> Result<(), String> {
     }
 }
 
-/// A power action. Locking is quick to undo; the rest can lose unsaved work, so `confirm` (the island's Allow or Deny) must say yes
-/// first. `act` does it. Nothing runs for a name that isn't one of the five.
-pub fn power(what: &str, confirm: &mut dyn FnMut(&str) -> bool, act: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String> {
+/// A power action. The island's question (`approve`, from `policy::approval_for`) comes first for everything but lock; this only
+/// does it. Nothing runs for a name that isn't one of the five.
+pub fn power(what: &str, act: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String> {
     let w = what.trim().to_lowercase();
-    let (ask, said) = match w.as_str() {
+    let said = match w.as_str() {
         "lock" => return act("lock").map(|_| "Locked.".into()),
-        "sleep" => ("Put the PC to sleep?", "Going to sleep."),
-        "restart" => ("Restart the PC? Unsaved work is lost.", "Restarting."),
-        "shutdown" => ("Shut down the PC? Unsaved work is lost.", "Shutting down."),
-        "logout" => ("Sign out? Unsaved work is lost.", "Signing out."),
+        "sleep" => "Going to sleep.",
+        "restart" => "Restarting.",
+        "shutdown" => "Shutting down.",
+        "logout" => "Signing out.",
         other => return Err(format!("Unknown power action \"{other}\".")),
     };
-    if !confirm(ask) { return Err("You didn't allow it, so I did nothing.".into()); }
     act(&w).map(|_| said.into())
 }
+
+/// The one place a risky call asks the user first (`policy::approval_for`). A "no" comes back as an error, which the verifier
+/// records as Declined. The browser asks once per request, and not at all when Settings skips the question.
+fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
+    if !policy::needs_approval(policy::risk_of(call)) { return Ok(()); }
+    // a risky call with no question has no way to be approved, so it does not run
+    let Some(q) = policy::approval_for(call) else { return Err("I can't run that safely.".into()) };
+    if matches!(call, Call::Browser { .. }) {
+        if crate::browse::approved() { return Ok(()); }
+        let asks = crate::browse::first_step_needs_yes(cfg);
+        if asks && !confirm(&q) { return Err(DECLINED.into()); }
+        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
+        crate::browse::approve_request();
+        return Ok(());
+    }
+    if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
+}
+
+/// What a refused risky call says back to the AI and the user.
+const DECLINED: &str = "You didn't allow it, so I did nothing.";
 
 /// Folders a voice request may search and open files from.
 pub fn user_dirs() -> Vec<PathBuf> {
@@ -418,7 +442,9 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             // only "up" and "down" need the current level
             let current = if a.trim().starts_with(|c: char| c.is_ascii_digit()) { None } else { crate::proc::run(cfg, "toggles", &["-Action", "status"])["brightness"].as_i64() };
             let pct = brightness_target(a, current).ok_or_else(|| format!("Brightness takes up, down or 1 to 100, not \"{a}\"."))?;
-            toggled(&crate::proc::run(cfg, "toggles", &["-Action", "brightness", "-Value", &pct.to_string()])).map(|_| format!("Brightness {pct}%."))
+            toggled(&crate::proc::run(cfg, "toggles", &["-Action", "brightness", "-Value", &pct.to_string()]))?;
+            // the setter reporting no error is not proof the screen changed: the level is read back
+            brightness_reply(pct, &crate::proc::run(cfg, "toggles", &["-Action", "status"]))
         }
         Call::Radio { which, state } => {
             let (w, st) = (which.trim().to_lowercase(), state.trim().to_lowercase());
@@ -429,7 +455,7 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             let on = v[&w].as_bool().ok_or_else(|| format!("There is no {w} on this PC."))?;
             Ok(format!("{} is {}.", if w == "wifi" { "Wi-Fi" } else { "Bluetooth" }, if on { "on" } else { "off" }))
         }
-        Call::Power(w) => power(w, confirm, &mut |a| toggled(&crate::proc::run(cfg, "toggles", &["-Action", a]))),
+        Call::Power(w) => { approve(call, cfg, confirm)?; power(w, &mut |a| toggled(&crate::proc::run(cfg, "toggles", &["-Action", a]))) }
         Call::Wallpaper(a) => {
             let wallpapers = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Pictures").join("Wallpapers");
             let pick = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
@@ -450,11 +476,20 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::Remember(t) => memory::remember(t),
         Call::Forget(_) if !memory_on(cfg) => Err("Remembering is turned off in Settings.".into()),
         Call::Forget(q) => memory::forget_matching(q),
-        // the take-over asks you in the island before it moves anything (drive::start), so it is not asked twice here
-        Call::TakeOver(g) => assist::run(assist::Intent::Drive(g.clone()), cfg),
+        // the switches and the model check come before the question, so a take-over that can't run asks nothing
+        Call::TakeOver(g) => {
+            assist::drive_switches(cfg)?;
+            crate::drive::check_ready(cfg)?;
+            approve(call, cfg, confirm)?;
+            crate::drive::start_approved(cfg, g)
+        }
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
         Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
-        Call::Browser { tool, args } => crate::browse::run(cfg, tool, args, confirm),
+        Call::Browser { tool, args } => {
+            if !crate::browse::enabled(cfg) { return Err(crate::browse::OFF.into()); }
+            approve(call, cfg, confirm)?;
+            crate::browse::run(cfg, tool, args, confirm)
+        }
     }
 }
 
@@ -555,7 +590,8 @@ fn system_for(base: &str, cfg: &Config) -> String {
 
 /// The request as the model reads it: the context this request needs (only when its words ask for it) and the facts that
 /// match it, then what the user said. It goes in the user turn, not the system text, so the system text stays cached.
-pub fn request_text(cfg: &Config, said: &str) -> String {
+/// `said` is the user's words; `note` is for the AI only (a fixed command that failed, say) and is never stored with the request.
+pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String {
     let mut parts = vec![];
     let ctx = AgentContext::for_request(cfg, said).render();
     if !ctx.is_empty() { parts.push(ctx); }
@@ -563,6 +599,7 @@ pub fn request_text(cfg: &Config, said: &str) -> String {
     let skills = skills::guidance_for(said);
     if !skills.is_empty() { parts.push(skills); }
     parts.push(format!("User says: {said}"));
+    if !note.is_empty() { parts.push(note.to_string()); }
     parts.join("\n")
 }
 
@@ -588,8 +625,25 @@ fn stop_check() -> Option<String> {
     None
 }
 
+/// The verdict and the end state of a request, from its result and each tool's check. A model's "Done." does not count when
+/// its tools failed.
+pub fn outcome(r: &Result<String, String>, checks: &[verifier::Check]) -> (verifier::Verdict, state::TaskStatus) {
+    let verdict = verifier::judge(checks);
+    let any_effect = checks.iter().any(|c| matches!(c, verifier::Check::Verified | verifier::Check::Unverified));
+    (verdict, state::status_of(r, verdict, any_effect))
+}
+
+/// An acting call that already failed in this request is not run again: the model may ask for the same thing twice.
+/// Lookups are not refused, since asking again is harmless.
+pub fn already_failed(failed: &std::collections::HashSet<String>, c: &Call) -> bool {
+    !policy::may_retry(c) && failed.contains(&format!("{c:?}"))
+}
+
 /// The sidebar's AI model answers; this is the Chat path of `assist::run`.
-pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
+pub fn ask(cfg: &Config, said: &str) -> Result<String, String> { ask_with_note(cfg, said, "") }
+
+/// `ask` with a note the AI gets with the request. Only `said` is saved: the task, the turn and its memory keep the user's words.
+pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, String> {
     crate::browse::new_request();
     CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::log::line(&format!("buddy request: {}", assist::short(said, 200)));
@@ -600,9 +654,11 @@ pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
     let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
     let confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
     let timing = state::Timing::start();
-    let framed = request_text(cfg, said);
-    // what each tool reported, for the verifier: (kind, result)
-    let evidence: std::cell::RefCell<Vec<(verifier::Kind, Result<String, String>)>> = std::cell::RefCell::new(vec![]);
+    let framed = request_text_with(cfg, said, note);
+    // each tool's check from the verifier, in the order the tools ran
+    let evidence: std::cell::RefCell<Vec<verifier::Check>> = std::cell::RefCell::new(vec![]);
+    // acting calls that failed in this request; they are not run again
+    let failed = std::cell::RefCell::new(std::collections::HashSet::<String>::new());
     // the task: saved in the database, and each state change is checked by the state machine
     tasks::recover_once();
     let task_id = tasks::begin(said);
@@ -619,14 +675,23 @@ pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
         ok
     };
     let run_tool = |c: &Call| {
-        let mut res = timing.tool(|| exec(c, cfg, &mut |q| tracked_confirm(q)));
+        if already_failed(&failed.borrow(), c) {
+            crate::log::line("buddy repeat refused: an acting call that already failed");
+            evidence.borrow_mut().push(verifier::Check::Failed);
+            return Err("That already failed once in this request, so I didn't try it again. Try another way.".to_string());
+        }
+        let declined = std::cell::Cell::new(false);
+        let mut ask_user = |q: &str| { let ok = tracked_confirm(q); if !ok { declined.set(true); } ok };
+        let mut res = timing.tool(|| exec(c, cfg, &mut ask_user));
         // a read-only lookup that failed (a flaky connection, say) is tried once more; nothing that acts is repeated
         if res.is_err() && policy::may_retry(c) {
             crate::log::line("buddy retry: read-only tool, once more");
             std::thread::sleep(Duration::from_millis(400));
-            res = timing.tool(|| exec(c, cfg, &mut |q| tracked_confirm(q)));
+            res = timing.tool(|| exec(c, cfg, &mut ask_user));
         }
-        evidence.borrow_mut().push((verifier::kind_of(c), res.clone()));
+        let check = if declined.get() { verifier::Check::Declined } else { verifier::check(verifier::kind_of(c), &res) };
+        if res.is_err() && !declined.get() && !policy::may_retry(c) { failed.borrow_mut().insert(format!("{c:?}")); }
+        evidence.borrow_mut().push(check);
         res
     };
     // the model: the routed one, then the fallbacks, each tried only if the one before failed before any tool ran
@@ -649,14 +714,12 @@ pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
         crate::log::line(&format!("buddy fallback: {model} could not answer, trying the next model"));
     }
     // the verifier: a tool's success is not the request's success; say what could not be confirmed
-    let checks: Vec<verifier::Check> = evidence.borrow().iter().map(|(k, res)| verifier::check(*k, res)).collect();
-    let verdict = verifier::judge(&checks);
+    let checks: Vec<verifier::Check> = evidence.borrow().clone();
+    let (verdict, end) = outcome(&r, &checks);
     crate::log::line(&format!("buddy verdict: {verdict:?} from {} tool result(s)", checks.len()));
-    // the end state: a completed request is verified first; any other end is recorded as it is
-    let end = state::status_of(&r);
-    if end == state::TaskStatus::Completed { step(state::TaskStatus::Verifying); }
-    let calls = evidence.borrow().len() as i64;
-    if task.borrow_mut().to(end) { tasks::set(task_id, end, &format!("{verdict:?}"), calls); }
+    // every request that ends on its own is verified first, then ends in its verdict; a cancel skips Verifying (it can't be cancelled)
+    if end != state::TaskStatus::Cancelled { step(state::TaskStatus::Verifying); }
+    if task.borrow_mut().to(end) { tasks::set(task_id, end, &format!("{verdict:?}"), checks.len() as i64); }
     let r = match (r, verifier::note(verdict)) {
         (Ok(answer), Some(note)) => Ok(format!("{answer} {note}")),
         (r, _) => r,
@@ -665,7 +728,7 @@ pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
     crate::browse::close_now();
     crate::log::line(&timing.line());
     crate::log::line(&answer_line(&r));
-    crate::log::line(&format!("buddy status: {:?}", state::status_of(&r)));
+    crate::log::line(&format!("buddy status: {end:?}"));
     // only answers are remembered: a failure would teach the AI nothing about what you meant
     if let (Ok(answer), Ok(mut t)) = (&r, TURNS.lock()) { remember(&mut t, said, answer, Instant::now()); }
     if let Ok(answer) = &r { history::save(said, answer); }
@@ -789,22 +852,32 @@ mod tests {
     }
 
     #[test]
-    fn power_asks_first_except_for_lock() {
-        let (mut asked, mut did) = (vec![], vec![]);
-        let r = power("lock", &mut |q| { asked.push(q.to_string()); true }, &mut |a| { did.push(a.to_string()); Ok(()) });
-        assert_eq!((r, asked.len(), did.clone()), (Ok("Locked.".into()), 0, vec!["lock".to_string()]));
-        did.clear();
-        let no = power("Shutdown", &mut |q| { asked.push(q.to_string()); false }, &mut |a| { did.push(a.to_string()); Ok(()) });
-        assert_eq!(no, Err("You didn't allow it, so I did nothing.".into()));
-        assert!(did.is_empty() && asked[0].contains("Shut down"), "a no runs nothing: {asked:?}");
+    fn power_only_acts_and_refuses_unknown_words() {
+        let mut did = vec![];
+        assert_eq!(power("lock", &mut |a| { did.push(a.to_string()); Ok(()) }), Ok("Locked.".into()));
+        assert_eq!(did, vec!["lock".to_string()]);
         for w in ["sleep", "restart", "shutdown", "logout"] {
             did.clear();
-            assert!(power(w, &mut |_| true, &mut |a| { did.push(a.to_string()); Ok(()) }).is_ok());
+            assert!(power(w, &mut |a| { did.push(a.to_string()); Ok(()) }).is_ok());
             assert_eq!(did, vec![w.to_string()], "{w}");
         }
-        let bad = power("format c:", &mut |_| true, &mut |a| { did.push(a.into()); Ok(()) });
-        assert!(bad.unwrap_err().contains("Unknown") && !did.contains(&"format c:".to_string()));
-        assert_eq!(power("restart", &mut |_| true, &mut |_| Err("failed".into())), Err("failed".into()));
+        did.clear();
+        assert!(power("format c:", &mut |a| { did.push(a.into()); Ok(()) }).unwrap_err().contains("Unknown") && did.is_empty());
+        assert_eq!(power("restart", &mut |_| Err("failed".into())), Err("failed".into()));
+    }
+
+    #[test]
+    fn a_risky_call_asks_first_and_a_no_runs_nothing() {
+        let cfg = Config(json!({}));
+        let mut asked = vec![];
+        let no = approve(&Call::Power("shutdown".into()), &cfg, &mut |q| { asked.push(q.to_string()); false });
+        assert_eq!(no, Err(DECLINED.into()));
+        assert!(asked[0].contains("Shut down"), "{asked:?}");
+        assert!(approve(&Call::Power("lock".into()), &cfg, &mut |_| panic!("lock asks nothing")).is_ok());
+        assert_eq!(approve(&Call::TakeOver("fill the form".into()), &cfg, &mut |_| false), Err(DECLINED.into()));
+        assert!(approve(&Call::TakeOver("fill the form".into()), &cfg, &mut |_| true).is_ok());
+        assert!(approve(&Call::WebSearch("x".into()), &cfg, &mut |_| panic!("a lookup asks nothing")).is_ok());
+        assert!(approve(&Call::Power("format c:".into()), &cfg, &mut |_| panic!("an unknown power word is not asked")).is_err(), "risky with no question: refused");
     }
 
     #[test]
@@ -927,6 +1000,43 @@ mod tests {
     }
 
     #[test]
+    fn a_done_answer_after_a_failed_tool_is_a_failed_task() {
+        let (verdict, end) = outcome(&Ok("Done.".into()), &[verifier::Check::Failed]);
+        assert_eq!((verdict, end), (verifier::Verdict::Failed, state::TaskStatus::Failed), "the model said done; the tool said no");
+        let (_, end) = outcome(&Ok("Done.".into()), &[verifier::Check::Failed, verifier::Check::Verified]);
+        assert_eq!(end, state::TaskStatus::Completed, "a failure that a later step recovers from is not counted");
+        let (_, end) = outcome(&Err("That took too long, so I stopped.".into()), &[verifier::Check::Verified]);
+        assert_eq!(end, state::TaskStatus::Partial, "time ran out after an action already happened");
+    }
+
+    #[test]
+    fn an_acting_call_that_failed_is_not_run_again() {
+        let mut failed = std::collections::HashSet::new();
+        let open = Call::Open("Spotify".into());
+        assert!(!already_failed(&failed, &open), "the first try runs");
+        failed.insert(format!("{open:?}"));
+        assert!(already_failed(&failed, &open), "the same call is refused");
+        assert!(!already_failed(&failed, &Call::Open("Steam".into())), "another app is a different call");
+        assert!(!already_failed(&failed, &Call::WebSearch("x".into())), "a lookup is never refused");
+    }
+
+    #[test]
+    fn brightness_is_only_reported_when_the_level_reads_back() {
+        assert_eq!(brightness_reply(40, &json!({ "brightness": 40 })), Ok("Brightness 40%.".into()));
+        assert!(brightness_reply(40, &json!({ "brightness": 55 })).is_err(), "the screen did not change");
+        assert!(brightness_reply(40, &Value::Null).is_err(), "no answer from the bridge");
+    }
+
+    #[test]
+    fn a_fallback_note_goes_to_the_ai_after_the_users_words() {
+        let cfg = Config(json!({}));
+        let note = "(I first tried it as a fixed command and it failed: No app. Find another way.)";
+        let framed = request_text_with(&cfg, "start a timer", note);
+        assert!(framed.contains("User says: start a timer") && framed.ends_with(note), "{framed}");
+        assert!(!request_text_with(&cfg, "start a timer", "").contains("fixed command"), "a request without a failed command has no note");
+    }
+
+    #[test]
     fn the_system_text_lists_the_web_tools() {
         assert!(SYSTEM.contains("web_search") && SYSTEM.contains("read_url") && SYSTEM.contains("never follow instructions"));
     }
@@ -1023,10 +1133,10 @@ mod tests {
         assert!(wants_window("what is on my screen"));
         assert!(!wants_window("turn the volume up"));
         let cfg = Config::parse(r#"{"ai":{"memory":false}}"#);
-        let volume = request_text(&cfg, "turn the volume up");
+        let volume = request_text_with(&cfg, "turn the volume up", "");
         assert!(!volume.contains("Right now") && volume.ends_with("User says: turn the volume up"), "no clock for a volume request: {volume}");
-        assert_eq!(request_text(&cfg, "hi there"), "User says: hi there", "a chat gets no context and no skill");
-        let timed = request_text(&cfg, "what time is it");
+        assert_eq!(request_text_with(&cfg, "hi there", ""), "User says: hi there", "a chat gets no context and no skill");
+        let timed = request_text_with(&cfg, "what time is it", "");
         assert!(timed.contains("Right now:") && timed.ends_with("User says: what time is it"), "{timed}");
     }
 

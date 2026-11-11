@@ -28,7 +28,7 @@ pub const PAGE_CHARS: usize = 6000;
 const CALL_SECS: u64 = 60;
 const START_SECS: u64 = 180;
 
-const OFF: &str = "The browser is off. Turn on \"Let the buddy use a browser\" in Settings, Voice.";
+pub const OFF: &str = "The browser is off. Turn on \"Let the buddy use a browser\" in Settings, Voice.";
 const NO_NODE: &str = "The browser needs Node.js. Install it from nodejs.org, then ask again.";
 
 /// The browser tools the AI may use, each with how it is told to call it. The server has more (run a script, upload a
@@ -79,6 +79,13 @@ pub fn new_request() { APPROVED.store(false, Ordering::Relaxed); STOP.store(fals
 
 /// The request is over: Esc is no longer watched.
 pub fn end_request() { APPROVED.store(false, Ordering::Relaxed); }
+
+/// The browser may act for this request: the user said yes (`agent::approve`), or Settings skips the question. Esc is watched
+/// from then on.
+pub fn approve_request() { if !APPROVED.swap(true, Ordering::Relaxed) { watch_esc(); } }
+
+/// Whether the browser may act for this request yet.
+pub fn approved() -> bool { APPROVED.load(Ordering::Relaxed) }
 
 /// Has this request been stopped? `agent::ask` ends its loop on it.
 pub fn stopped() -> bool { STOP.load(Ordering::Relaxed) }
@@ -253,16 +260,8 @@ pub fn run(cfg: &Config, tool: &str, args: &Value, confirm: &mut dyn FnMut(&str)
     if stopped() { return Err(STOPPED.into()); } // Esc while the AI was thinking: the step it then picked is not run
     let page = PAGE.lock().map(|p| p.clone()).unwrap_or_default();
     let ask = match gate(tool, args, &page) { Gate::Refuse(why) => return Err(why), Gate::Ask(q) => Some(q), Gate::Run => None };
-    if !APPROVED.load(Ordering::Relaxed) {
-        if first_step_needs_yes(cfg) {
-            if !confirm("The buddy wants to use its browser for this. Allow it?") { crate::log::line("browser approval: refused for this request"); return Err("You didn't allow the browser, so I left it alone.".into()); }
-            crate::log::line("browser approval: allowed for this request");
-        } else {
-            crate::log::line("browser approval: skipped, bypass permissions is on");
-        }
-        APPROVED.store(true, Ordering::Relaxed);
-        watch_esc();
-    }
+    // the request's yes is asked before this call (`agent::approve`); a step that gets here without it does not run
+    if !approved() { return Err("The browser isn't allowed for this request.".into()); }
     if let Some(q) = ask {
         crate::log::line(&format!("browser confirm asked: {q}"));
         if !confirm(&q) { crate::log::line(&format!("browser confirm refused: {tool}")); return Err("You said no, so I didn't do that.".into()); }
@@ -374,9 +373,10 @@ mod tests {
         assert!(r.unwrap_err().contains("no browser tool"));
         assert_eq!(asked, 0, "a refused step asks nothing");
         new_request();
+        // the request's yes is asked by `agent::approve` before a step gets here; a step without it does not run and asks nothing
         let r = run(&on, "browser_navigate", &json!({ "url": "https://example.com" }), &mut |_| { asked += 1; false });
-        assert!(r.unwrap_err().contains("didn't allow"));
-        assert_eq!(asked, 1);
+        assert!(r.unwrap_err().contains("isn't allowed"));
+        assert_eq!(asked, 0, "run asks nothing itself");
         // a stop only counts while a request has the browser, ends that request at its next step, and is gone for the next one
         request_stop();
         assert!(!stopped(), "nothing is using the browser, so there is nothing to stop");
@@ -384,7 +384,7 @@ mod tests {
         request_stop();
         assert!(stopped());
         assert_eq!(run(&on, "browser_snapshot", &json!({}), &mut |_| { asked += 1; true }), Err(STOPPED.to_string()));
-        assert_eq!(asked, 1, "a stopped request asks nothing more");
+        assert_eq!(asked, 0, "a stopped request asks nothing more");
         end_request();
         assert!(stopped(), "the loop still has to see the stop after the request's last step");
         new_request();

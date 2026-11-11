@@ -25,12 +25,22 @@ Both loops run the same tools through `exec`, so the same confirmations and swit
 
 Risk levels (`agent/policy.rs`, one `match` over every tool): read-only (search, find, see the screen), reversible (open,
 volume, play, remember, forget, message), consequential (take over, browser), destructive (sleep, restart, shut down, sign
-out). Only consequential and destructive calls need approval. The island confirmations still do the asking today; the log
-records each call's level, not its arguments.
+out). Only consequential and destructive calls need approval. The log records each call's level, not its arguments.
+
+Approval (M2): every risky call is asked in one place, `agent::approve`, which reads the question from
+`policy::approval_for`. Nothing else asks. The steps:
+- A call is risky when its level needs approval. A risky call with no question is refused, so it fails closed.
+- `power` (sleep, restart, shut down, sign out) asks in the island. Lock doesn't ask.
+- `take_over` checks its Settings switches and that the model can see images first, then asks. The island is asked on
+  the request's own thread, so the answer comes back to the verifier. No second question is asked.
+- The browser asks once per request, before its first step. Settings' "Bypass permissions" skips that question. Each
+  risky click or typing step inside the browser still asks on its own (`browse::gate`).
+- A "no" comes back as "You didn't allow it, so I did nothing." and the request is recorded as Declined.
+- Every island question logs one line when it ends: `island question "<question>": allowed|refused (<how>) after N s`.
+  `<how>` is `island button` (Allow or Deny was pressed), `typed reply`, `spoken reply`, `no answer: Esc pressed`,
+  `no answer: voice started`, or `no answer: timed out after 90 s`.
 
 Safety:
-- `power` asks in the island before anything except lock. A refusal does nothing.
-- `take_over` asks in the island before it moves the mouse or keyboard.
 - `message` opens a chat with the text ready. The user presses Enter to send.
 - `message` text is the user's own words. The prompt says so, and the live eval checks it.
 - `remember` and `forget` do nothing while `ai.memory` is off.
@@ -60,20 +70,30 @@ Facts the user asks Buddy to keep, in `%LOCALAPPDATA%\zor-ui\buddy.db` (SQLite, 
 
 A tool's "ok" is not proof that the request worked. `agent/verifier.rs` checks each tool result against what the tool
 reports:
-- **Verified:** a play that `playsong` confirmed ("Playing ..."), a saved or forgotten fact, a search with results, a file found.
+- **Verified:** a play that `playsong` confirmed ("Playing ..."), a saved or forgotten fact, a search with results, a file
+  found, an app found, a screen answer, a radio or brightness level read back after the change.
 - **Unverified:** the device or app did something, but nothing reports what it did (volume, opening an app, take-over).
-- **Failed:** the tool errored, or found nothing.
+- **Failed:** the tool errored, found nothing, or a brightness change did not read back as the level asked for.
+- **Declined:** the user said no in the island. Not a failure of the tool.
 
-The checks give one verdict for the request: completed, unverified, partial, or failed. The verdict is logged as
+A tool that failed and a later step that worked do not make the request partial: only the last outcome decides, so
+"open Spotify failed, then the browser play worked" is unverified, not partial. A request where something was declined and
+something else ran is partial.
+
+The checks give one verdict for the request: completed, unverified, partial, failed, or declined. The verdict is logged as
 `buddy verdict`. A partial or failed request also gets a short note added to the answer ("Only part of that was confirmed.").
 Unverified actions are not called out, so a volume change doesn't come with a complaint.
+
+The verdict decides the saved state. A model's "Done." after its tools failed is saved as Failed. An acting call that
+failed in this request is not run again (the model is told so). Lookups may still be retried.
 
 ## Tasks and states
 
 Each request is a task, saved in the `tasks` table with its request text, state, verdict and tool-call count. A request
 that looks like a secret is saved as "[private request]". The task moves through the states in `agent/state.rs`: Planning,
-Running, WaitingApproval (while the island asks), Verifying, then Completed, Failed or Cancelled. A move that skips a state
-is refused and logged. A task still open when the app closed is marked Interrupted on the next start. The Settings > AI
+Running, WaitingApproval (while the island asks), Verifying, then one of the final states: Completed, Unverified, Partial,
+Failed, Declined or Cancelled. A request that ends on its own goes through Verifying and ends in its verdict. A cancel skips
+Verifying. A move that skips a state is refused and logged. A task still open when the app closed is marked Interrupted on the next start. The Settings > AI
 page lists the 10 newest requests with their state, verdict and tool calls.
 
 ## Retries and fallbacks
@@ -126,7 +146,7 @@ in the system text, nothing was read.
 ## Logs
 
 Each request logs `buddy request`, `buddy native turn` or `buddy AI reply`, each tool call, `buddy timing: ... total, ... in the
-model, ... in N tool call(s)`, `buddy answer` or `buddy failed`, and `buddy status` (Completed, Failed or Cancelled). The log
+model, ... in N tool call(s)`, `buddy answer` or `buddy failed`, and `buddy status` (the final state: Completed, Unverified, Partial, Failed, Declined or Cancelled). The log
 is `%LOCALAPPDATA%\zor-ui\zorui.log`.
 
 ## Evals

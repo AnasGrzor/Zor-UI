@@ -132,7 +132,7 @@ mod tests {
                     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
                     (format!("{}\n{}", crate::agent::SYSTEM, crate::agent::context_text("today", &ms.to_string(), "", None)), request.clone())
                 } else {
-                    (crate::agent::system_for(crate::agent::SYSTEM, &cfg), crate::agent::request_text(&cfg, request))
+                    (crate::agent::system_for(crate::agent::SYSTEM, &cfg), crate::agent::request_text_with(&cfg, request, ""))
                 };
                 let r = ask_subscription(&model, &system, &user).unwrap_or_default();
                 read += r.cache_read;
@@ -156,7 +156,7 @@ mod tests {
         let (mut passed, mut total_ms) = (0usize, 0u128);
         for c in &cases {
             let t = std::time::Instant::now();
-            let reply = ask_subscription(&model, &system, &crate::agent::request_text(&cfg, &c.request));
+            let reply = ask_subscription(&model, &system, &crate::agent::request_text_with(&cfg, &c.request, ""));
             let ms = t.elapsed().as_millis();
             total_ms += ms;
             let (ok, shown) = match &reply {

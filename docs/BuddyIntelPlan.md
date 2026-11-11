@@ -1021,4 +1021,37 @@ The upgrade is complete when Buddy can:
 
 The final result should feel like a capable desktop assistant, not a chatbot with a collection of disconnected commands.
 
+## Status: M0 and M1
+
+**M0 (audit and baseline), done.** The modules this brief names live on `origin/main` (commit `9a41524`, merged to main
+through `8c8d46d`). Findings and their file references are in the M1 plan. Main of this checkout was fast-forwarded to
+`origin/main` for the audit. Baseline on main before any M1 edit: `zorui` 938 passed, 10 ignored; `zorui-svc` 13 passed;
+release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings.
+
+**M1 (verification and task-state reliability), done on branch `buddy-intel-m1b`.**
+- Verdict decides the saved state: Completed, Unverified, Partial, Failed, Declined or Cancelled. A model's "Done." after
+  failed tools is saved as Failed (`agent::outcome`, `state::status_of`).
+- A declined tool is `Check::Declined`, not a failure.
+- A failure that a later step recovers from is not counted (`verifier::judge`).
+- Radio and brightness are verified by reading the real state back; brightness is refused unless the level matches.
+- `open`-style acting calls that failed in a request are not run again (`agent::already_failed`).
+- Tests added in `agent/verifier.rs`, `agent/state.rs`, `agent/tasks.rs` and `agent.rs`.
+- Tests after M1: `zorui` 948 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings unchanged at 59.
+- Remaining limitations (M1): volume and opening apps still have no read-back; the repeat block covers only the same call
+  with the same arguments.
+
+**M2 (centralized permission enforcement), done on branch `buddy-intel-m1b`.**
+- Every risky call is asked in one place: `agent::approve`, with the question from `policy::approval_for`. Power (not lock),
+  take-over and the browser are the three cases. The old asks in `power()`, `browse::run` and `drive::start` (for the agent
+  path) are gone.
+- A risky call whose level needs approval but has no question is refused (fails closed).
+- Take-over asks on the request's own thread before it starts, so a "no" is a Declined task, not a silent "Checking with you
+  first." The switches and the model check run before the question, so a take-over that can't run asks nothing.
+- The browser's yes is per request (`browse::approve_request`); `browse::run` refuses a step that arrives without it.
+- Tests: `policy.rs` (level and question agree for every risky call), `agent.rs` (`approve`: a no runs nothing, lock and
+  lookups ask nothing, an unknown risky call is refused), `browse.rs` (a step without approval asks nothing).
+- Tests after M2: `zorui` 951 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings 59 (unchanged).
+- Remaining limitations (M2): the browser's per-step gate still lives in `browse::gate` (it is per action, not per request);
+  the take-over's question text is built in `drive::question`, which `policy` calls.
+
 **Start with Milestone 1. Inspect the repository, establish the baseline build, and implement the smallest complete, tested intelligence foundation before moving to persistent memory. Do not attempt the entire upgrade in one unverified change.**

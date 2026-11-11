@@ -95,7 +95,8 @@ pub fn set(id: Option<i64>, status: TaskStatus, verdict: &str, tool_calls: i64) 
 /// One line of counts for the Settings list: how the recent requests ended.
 pub fn summary_line(rows: &[Row]) -> String {
     let n = |s: &str| rows.iter().filter(|r| r.status == s).count();
-    format!("Recent requests: {} completed, {} failed, {} cancelled.", n("Completed"), n("Failed"), n("Cancelled"))
+    format!("Recent requests: {} completed, {} unverified, {} partial, {} failed, {} declined, {} cancelled.",
+        n("Completed"), n("Unverified"), n("Partial"), n("Failed"), n("Declined"), n("Cancelled"))
 }
 
 /// The newest tasks, as the Settings page lists them. Cached, so a repaint never opens the database.
@@ -148,9 +149,9 @@ mod tests {
     #[test]
     fn the_summary_counts_how_the_recent_requests_ended() {
         let row = |s: &str| Row { id: 1, request: String::new(), status: s.into(), verdict: String::new(), tool_calls: 0 };
-        let rows = vec![row("Completed"), row("Completed"), row("Failed"), row("Cancelled"), row("Running")];
-        assert_eq!(summary_line(&rows), "Recent requests: 2 completed, 1 failed, 1 cancelled.");
-        assert_eq!(summary_line(&[]), "Recent requests: 0 completed, 0 failed, 0 cancelled.");
+        let rows = vec![row("Completed"), row("Completed"), row("Unverified"), row("Partial"), row("Failed"), row("Declined"), row("Cancelled"), row("Running")];
+        assert_eq!(summary_line(&rows), "Recent requests: 2 completed, 1 unverified, 1 partial, 1 failed, 1 declined, 1 cancelled.");
+        assert_eq!(summary_line(&[]), "Recent requests: 0 completed, 0 unverified, 0 partial, 0 failed, 0 declined, 0 cancelled.");
     }
 
     #[test]

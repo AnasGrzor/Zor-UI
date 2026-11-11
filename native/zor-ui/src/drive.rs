@@ -637,11 +637,11 @@ pub fn request_stop() { if active() { VOICE.store(true, Ordering::Relaxed); } }
 /// The question waiting for your answer, for the island to show.
 pub fn pending() -> Option<String> { ASK.lock().ok().and_then(|a| a.as_ref().filter(|a| a.1.is_none()).map(|a| a.0.clone())) }
 /// Your answer from the island's Allow or Deny.
-pub fn answer(yes: bool) { give(if yes { Answer::Yes } else { Answer::No }) }
+pub fn answer(yes: bool) { give(if yes { Answer::Yes } else { Answer::No }, "island button") }
 /// Your typed reply from the island. Blank text is no answer at all.
 pub fn reply(text: &str) {
     let t: String = text.trim().chars().take(MAX_SAID).collect();
-    if !t.is_empty() { give(Answer::Said(t)); }
+    if !t.is_empty() { give(Answer::Said(t), "typed reply"); }
 }
 /// A question is waiting for you (the voice hotkey then answers it instead of stopping the take-over).
 pub fn waiting() -> bool { pending().is_some() }
@@ -659,10 +659,17 @@ pub fn spoken_answer(said: &str) -> Option<Answer> {
 
 /// Answers the waiting question with what you said out loud. False when nothing is waiting or nothing was heard.
 pub fn reply_spoken(said: &str) -> bool {
-    match (waiting(), spoken_answer(said)) { (true, Some(a)) => { give(a); true } _ => false }
+    match (waiting(), spoken_answer(said)) { (true, Some(a)) => { give(a, "spoken reply"); true } _ => false }
 }
 
-fn give(ans: Answer) { if let Ok(mut a) = ASK.lock() { if let Some(a) = a.as_mut() { a.1 = Some(ans); } } }
+/// Stores the answer and how it came (the island button, a typed or spoken reply), for `ask_island`'s log line.
+fn give(ans: Answer, how: &'static str) {
+    if let Ok(mut a) = ASK.lock() { if let Some(a) = a.as_mut() { a.1 = Some(ans); } }
+    if let Ok(mut b) = ANSWERED_BY.lock() { *b = how; }
+}
+
+/// How the waiting question was answered: the island button, a typed reply or a spoken one.
+static ANSWERED_BY: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
 
 fn island_open() -> bool {
     unsafe { FindWindowW(None, w!("Zor UI / island-panel")).is_ok_and(|h| IsWindowVisible(h).as_bool()) }
@@ -674,12 +681,17 @@ pub fn ask_island(q: &str) -> Answer {
     // opening a panel that is already open would close it
     if !island_open() { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::open("island-panel")))); }
     let start = std::time::Instant::now();
-    let yes = loop {
+    // how it ended is logged: an answer (which kind), or the reason no answer came
+    let (yes, how) = loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let a = ASK.lock().ok().and_then(|a| a.as_ref().and_then(|a| a.1.clone()));
-        if let Some(y) = a { break y; }
-        if ESC.load(Ordering::Relaxed) || VOICE.load(Ordering::Relaxed) || start.elapsed().as_secs() >= 90 { break Answer::No; }
+        if let Some(y) = a { break (y, ANSWERED_BY.lock().map(|b| *b).unwrap_or("")); }
+        if ESC.load(Ordering::Relaxed) { break (Answer::No, "no answer: Esc pressed"); }
+        if VOICE.load(Ordering::Relaxed) { break (Answer::No, "no answer: voice started"); }
+        if start.elapsed().as_secs() >= 90 { break (Answer::No, "no answer: timed out after 90 s"); }
     };
+    crate::log::line(&format!("island question \"{}\": {} ({how}) after {:.1} s",
+        assist::short(q, 60), if yes == Answer::Yes { "allowed" } else { "refused" }, start.elapsed().as_secs_f32()));
     if let Ok(mut a) = ASK.lock() { *a = None; }
     if yes != Answer::Yes { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::Close("island-panel".into())))); }
     yes
@@ -1002,24 +1014,40 @@ The screens now are attached. Answer with the JSON."), caps);
     }
 }
 
-/// Starts a take-over for `goal` on a worker thread after asking you. Returns what the buddy says right now.
-pub fn start(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None) }
+/// The island's question before a take-over of `goal`.
+pub fn question(goal: &str) -> String {
+    format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(goal, 140))
+}
+
+/// What can refuse a take-over before anyone is asked: the model can't see images, or a take-over is already running.
+pub fn check_ready(cfg: &Config) -> Result<(), String> {
+    if !crate::bridge::model_can_see(&assist::screen_model(cfg)) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
+    if ACTIVE.load(Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
+    Ok(())
+}
+
+/// Starts a take-over for `goal` on a worker thread after asking you in the island. Returns what the buddy says right now.
+pub fn start(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None, false) }
+
+/// Starts a take-over the caller already got your yes for (`agent::approve`), so the island isn't asked a second time.
+pub fn start_approved(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None, true) }
 
 /// `start`, with the words the island card shows instead of the goal, and a step that runs once you said yes (opening the app the
-/// task needs, say) before the take-over begins. `Err` when it can't start.
-pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>) -> Result<String, String> {
-    let model = assist::screen_model(cfg);
-    if !crate::bridge::model_can_see(&model) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
+/// task needs, say) before the take-over begins. `approved`: the yes was already asked, so the island isn't asked again. `Err`
+/// when it can't start.
+pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool) -> Result<String, String> {
+    check_ready(cfg)?;
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
         let lim = limits(&cfg);
+        let model = assist::screen_model(&cfg);
         let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms };
         ESC.store(false, Ordering::Relaxed);
         VOICE.store(false, Ordering::Relaxed);
-        let q = format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(shown.as_deref().unwrap_or(&goal), 140));
+        let q = question(shown.as_deref().unwrap_or(&goal));
         let mut failed = false;
-        let line = if !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
+        let line = if !approved && !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
             if let Some(p) = prep { p(); std::thread::sleep(std::time::Duration::from_secs(3)); } // the app needs a moment to appear
             live.t0 = std::time::Instant::now();
             pass_through(true);
@@ -1036,7 +1064,7 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
         ACTIVE.store(false, Ordering::Relaxed);
         if failed { assist::fail_later(&line) } else { assist::say_later(&line, 8.0) }
     });
-    Ok("Checking with you first.".into())
+    Ok(if approved { "Taking over now.".into() } else { "Checking with you first.".into() })
 }
 
 #[cfg(test)]
@@ -1188,6 +1216,18 @@ mod tests {
         assert!(!w.took((500, 500), 0));
         w.expect((500, 500));
         assert!(!w.took((500, 500), 1000), "the drive put it there itself");
+    }
+
+    #[test]
+    fn an_answer_remembers_how_it_came() {
+        let _one = ASK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        *ASK.lock().unwrap() = Some(("Send it?".into(), None));
+        answer(false);
+        assert_eq!(*ANSWERED_BY.lock().unwrap(), "island button");
+        *ASK.lock().unwrap() = Some(("Which Jimmy?".into(), None));
+        reply("the second one");
+        assert_eq!(*ANSWERED_BY.lock().unwrap(), "typed reply");
+        *ASK.lock().unwrap() = None;
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! The risk level of each tool, from the plan's permission table. The table is a `match` on `Call`, so a new tool doesn't
-//! compile until it has a level. The existing confirmations (island prompts for power and take-over) still do the asking;
-//! this module says which calls need one, so the rule lives in one place.
+//! The risk level of each tool, and the question the user must answer before a risky call runs. The table is a `match` on
+//! `Call`, so a new tool doesn't compile until it has a level and a question. `agent::approve` asks every question here, in
+//! one place, and a "no" is recorded by the verifier as Declined. A call that is not in the table can't be built, so
+//! unknown tools fail closed (`agent::parse_step` refuses them before a `Call` exists).
 
 use super::Call;
 
@@ -32,10 +33,26 @@ pub fn risk_of(call: &Call) -> Risk {
 /// power) could do it twice.
 pub fn may_retry(call: &Call) -> bool { risk_of(call) == Risk::ReadOnly }
 
-/// Whether a call of this level must be confirmed by the user first. The confirmations still live in `exec` for now;
-/// this is what they will be checked against once they move here.
-#[allow(dead_code)]
+/// Whether a call of this level must be confirmed by the user first.
 pub fn needs_approval(risk: Risk) -> bool { matches!(risk, Risk::Consequential | Risk::Destructive) }
+
+/// The question the user answers in the island before this call runs, or None when it runs without asking. Power asks for
+/// everything but lock, and an unknown power word asks nothing here because `power` refuses it before it does anything.
+/// The browser asks once per request, and only when Settings doesn't skip the question (`agent::approve` does that part).
+pub fn approval_for(call: &Call) -> Option<String> {
+    match call {
+        Call::Power(w) => match w.trim().to_lowercase().as_str() {
+            "sleep" => Some("Put the PC to sleep?".into()),
+            "restart" => Some("Restart the PC? Unsaved work is lost.".into()),
+            "shutdown" => Some("Shut down the PC? Unsaved work is lost.".into()),
+            "logout" => Some("Sign out? Unsaved work is lost.".into()),
+            _ => None,
+        },
+        Call::TakeOver(goal) => Some(crate::drive::question(goal)),
+        Call::Browser { .. } => Some("The buddy wants to use its browser for this. Allow it?".into()),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -83,5 +100,24 @@ mod tests {
         assert!(needs_approval(Risk::Destructive));
         assert!(needs_approval(risk_of(&Call::Power("shutdown".into()))));
         assert!(!needs_approval(risk_of(&Call::Power("lock".into()))));
+    }
+
+    #[test]
+    fn every_risky_call_has_a_question_and_no_safe_call_does() {
+        let calls = [
+            Call::Power("sleep".into()), Call::Power("restart".into()), Call::Power("shutdown".into()), Call::Power("logout".into()),
+            Call::Power("lock".into()), Call::TakeOver("fill the form".into()), Call::Browser { tool: "browser_click".into(), args: json!({}) },
+            Call::Open("Spotify".into()), Call::Volume("up".into()), Call::WebSearch("x".into()), Call::FindFile("cv".into()),
+        ];
+        for c in &calls {
+            assert_eq!(approval_for(c).is_some(), needs_approval(risk_of(c)), "{c:?}: the question and the level must agree");
+        }
+    }
+
+    #[test]
+    fn the_power_questions_name_what_is_lost() {
+        assert!(approval_for(&Call::Power("shutdown".into())).unwrap().contains("Unsaved work is lost"));
+        assert!(approval_for(&Call::Power("sleep".into())).is_some());
+        assert_eq!(approval_for(&Call::Power("format c:".into())), None, "an unknown word asks nothing; `power` refuses it");
     }
 }

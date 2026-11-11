@@ -520,34 +520,58 @@ pub fn short(s: &str, n: usize) -> String { match s.char_indices().nth(n) { Some
 /// Runs one `ai-chat` conversation (the JSON the bridge command reads) and returns the whole reply. Gives up when
 /// nothing arrives for `wait_secs`.
 pub fn chat(cfg: &Config, convo: &str, wait_secs: u64) -> Result<String, String> {
-    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    stream_turn(cfg, convo, wait_secs).map(|t| t.text)
+}
+
+/// One model reply that may ask for tools: its text, the tool calls it made, and calls whose input could not be read.
+/// A call is `{"id", "name", "input"}`; a bad one is `{"id", "name", "message"}`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Turn {
+    pub text: String,
+    pub calls: Vec<Value>,
+    pub bad: Vec<Value>,
+}
+
+/// Puts the streamed events of one reply together: text deltas join in order, tool calls and their failures are kept.
+pub fn fold_turn(events: &[Value]) -> Turn {
+    let mut t = Turn::default();
+    for e in events {
+        if let Some(d) = e["delta"].as_str() { t.text.push_str(d); }
+        if e["tool_use"].is_object() { t.calls.push(e["tool_use"].clone()); }
+        if e["tool_error"].is_object() { t.bad.push(e["tool_error"].clone()); }
+    }
+    t
+}
+
+/// Runs one `ai-chat` conversation and returns its reply with any tool calls. A stream error fails the whole reply.
+/// Gives up when nothing arrives for `wait_secs`.
+pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
+    let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
         let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
-        if let Some(d) = v["delta"].as_str() { let _ = tx2.send(Ok(d.to_string())); }
-        if let Some(e) = v["error"].as_str() { let _ = tx2.send(Err(e.to_string())); }
-    }, move || { let _ = tx3.send(Ok(String::new())); drop(tx3); });
+        if v.is_object() { let _ = tx2.send(Some(v)); }
+    }, move || { let _ = tx3.send(None); });
     if stream.is_none() { return Err("I can't reach my brain.".into()); }
-    let mut reply = String::new();
-    // the exit marker is an empty Ok; stop on it, on an error, or when nothing comes for `wait_secs`
-    while let Ok(m) = rx.recv_timeout(std::time::Duration::from_secs(wait_secs)) {
-        match m {
-            Ok(d) if d.is_empty() => break,
-            Ok(d) => reply.push_str(&d),
-            Err(e) => return Err(e),
-        }
+    let mut events = vec![];
+    // None is the end of the stream; stop on it, on an error, or when nothing comes for `wait_secs`
+    while let Ok(Some(v)) = rx.recv_timeout(std::time::Duration::from_secs(wait_secs)) {
+        if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
+        events.push(v);
     }
-    Ok(reply)
+    Ok(fold_turn(&events))
 }
 
 /// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.
-fn screen_convo(model: &str, said: &str, caps: &[screen::Cap]) -> String { convo_with(model, screen::SYSTEM, said, caps) }
+fn screen_convo(cfg: &Config, model: &str, said: &str, caps: &[screen::Cap]) -> String { convo_at(model, screen::SYSTEM, said, caps, crate::agent::temperature(cfg)) }
 
-/// One question with a labeled picture per monitor, under the given system prompt.
-pub fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String {
+/// One question with a labeled picture per monitor, under the given system prompt. Take-over uses this at 0.2, so its clicks stay precise.
+pub fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String { convo_at(model, system, said, caps, 0.2) }
+
+fn convo_at(model: &str, system: &str, said: &str, caps: &[screen::Cap], temp: f64) -> String {
     let images: Vec<Value> = caps.iter().enumerate()
         .map(|(i, c)| json!({ "mime": "image/jpeg", "data": crate::bridge::base64(&c.jpeg), "label": c.label(i, caps.len(), caps.first()) })).collect();
-    json!({ "model": model, "messages": [{ "role": "user", "content": said, "images": images }], "system": system, "temperature": 0.2 }).to_string()
+    json!({ "model": model, "messages": [{ "role": "user", "content": said, "images": images }], "system": system, "temperature": temp }).to_string()
 }
 
 /// Where the buddy should fly for a point the model gave: screen pixels, or None when the model named a screen that isn't there.
@@ -561,7 +585,7 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     // checked first, so nothing is captured or sent for a model that can't use it
     if !crate::bridge::model_can_see(&model) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
     let caps = screen::capture_all().map_err(|e| short(&e, 110))?;
-    let reply = chat(cfg, &screen_convo(&model, said, &caps), 60).map_err(|e| short(&e, 110))?;
+    let reply = chat(cfg, &screen_convo(cfg, &model, said, &caps), 60).map_err(|e| short(&e, 110))?;
     if reply.trim().is_empty() { return Err("I got no answer from the AI.".into()); }
     let (spoken, point) = screen::parse_point(&reply);
     let mut said = if spoken.is_empty() { "Here.".to_string() } else { short(&spoken, 160) }; // the bubble is small
@@ -611,7 +635,7 @@ fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
 /// Starts recording: the bridge prints states and then the text, which goes to `ask`.
 pub fn listen(cfg: &Config) {
     // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
-    let answering = crate::drive::waiting();
+    let answering = crate::drive::waiting() || crate::bridge::permit::waiting();
     if !answering { crate::drive::request_stop(); crate::browse::request_stop(); }
     let cfg2 = Config(cfg.0.clone());
     let model = cfg.str("buddies.model").to_string();
@@ -632,7 +656,7 @@ pub fn listen(cfg: &Config) {
         if let Some(t) = v["text"].as_str() {
             crate::pill::set(0);
             if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); }
-            else if answering && crate::drive::reply_spoken(t) {} // the take-over heard you
+            else if answering && (crate::drive::reply_spoken(t) || crate::bridge::permit::answer_with(t)) {} // the take-over or a Claude Code permission heard you
             else { ask(&cfg2, t); }
         }
     });
@@ -968,11 +992,30 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_keeps_its_text_its_tool_calls_and_its_bad_calls() {
+        let events = vec![
+            json!({ "delta": "Let me " }),
+            json!({ "tool_use": { "id": "toolu_1", "name": "open", "input": { "arg": "Spotify" } } }),
+            json!({ "delta": "check." }),
+            json!({ "tool_error": { "id": "toolu_2", "name": "play", "message": "tool input is not JSON" } }),
+            json!({ "done": true }),
+        ];
+        let t = fold_turn(&events);
+        assert_eq!(t.text, "Let me check.");
+        assert_eq!(t.calls, vec![json!({ "id": "toolu_1", "name": "open", "input": { "arg": "Spotify" } })]);
+        assert_eq!(t.bad, vec![json!({ "id": "toolu_2", "name": "play", "message": "tool input is not JSON" })]);
+        assert_eq!(fold_turn(&[]), Turn::default());
+    }
+
+    #[test]
     fn the_question_goes_out_with_one_labeled_picture_per_monitor() {
         let cap = |x, cursor| screen::Cap { jpeg: vec![0xFF, 0xD8, 0xFF], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
-        let v: Value = serde_json::from_str(&screen_convo("m", "where is save?", &[cap(0, true), cap(1920, false)])).unwrap();
+        let v: Value = serde_json::from_str(&screen_convo(&cfg(json!({ "ai": { "temperature": 0.8 } })), "m", "where is save?", &[cap(0, true), cap(1920, false)])).unwrap();
         assert_eq!(v["model"], "m");
         assert_eq!(v["system"], screen::SYSTEM);
+        assert_eq!(v["temperature"], 0.8, "a screen question uses the Settings temperature");
+        let take_over: Value = serde_json::from_str(&convo_with("m", "sys", "click save", &[cap(0, true)])).unwrap();
+        assert_eq!(take_over["temperature"], 0.2, "take-over keeps its low temperature");
         let imgs = v["messages"][0]["images"].as_array().unwrap();
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0]["data"], "/9j/", "base64 of the JPEG bytes");

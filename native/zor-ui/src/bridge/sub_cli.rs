@@ -14,9 +14,9 @@ use std::{
 };
 
 /// (provider id, command name, label, arguments). Codex reads the prompt from stdin with "-" and
-/// runs read-only; Gemini appends stdin to the -p text and can't run tools without approval in -p mode.
+/// runs read-only. Antigravity (`agy`) ignores stdin in -p mode, so its prompt goes in as the last argument.
 const CLIS: [(&str, &str, &str, &[&str]); 2] = [
-    ("gemini-cli", "gemini", "Gemini subscription", &["-p", "Answer the conversation below."]),
+    ("gemini-cli", "agy", "Gemini subscription", &["-p"]),
     ("codex-cli", "codex", "ChatGPT subscription", &["exec", "--skip-git-repo-check", "-s", "read-only", "-"]),
 ];
 
@@ -47,17 +47,25 @@ fn prompt(msgs: &[Value], system: &str) -> String {
     format!("{system}\n\n{}\n\nAssistant:", turns.join("\n\n"))
 }
 
+/// Antigravity's prompt: the last 12 turns (keeps it under the Windows command-line limit), no tools.
+fn agy_prompt(msgs: &[Value], system: &str) -> String {
+    let recent = &msgs[msgs.len().saturating_sub(12)..];
+    format!("Reply as the assistant to this conversation. Do not use tools.\n\n{}", prompt(recent, system))
+}
+
 /// Streams the reply as {"delta"} lines, then {"done"}.
 pub fn chat(provider: &str, msgs: &[Value], system: &str, out: &Sink) {
     let Some(&(_, cmd, label, args)) = spec(provider) else { out.emit(&json!({ "error": format!("unknown provider {provider}") })); return };
     let Some(exe) = find(cmd) else {
-        let pkg = if cmd == "gemini" { "@google/gemini-cli" } else { "@openai/codex" };
-        out.emit(&json!({ "error": format!("{cmd} isn't installed, so the {label} can't be used. Install it with `npm i -g {pkg}`, run `{cmd}` once in a terminal to sign in, then use it here.") }));
+        let (pkg, how) = if cmd == "agy" { ("Antigravity CLI", "https://antigravity.google/docs/getting-started?tab=cli") } else { ("Codex CLI", "npm i -g @openai/codex") };
+        out.emit(&json!({ "error": format!("{cmd} isn't installed, so the {label} can't be used. Install the {pkg} ({how}), run `{cmd}` once in a terminal to sign in, then use it here.") }));
         return;
     };
-    let spawned = hidden(exe).args(args).current_dir(std::env::temp_dir())
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
-    let mut child = match spawned {
+    let agy = cmd == "agy";
+    let mut command = hidden(exe);
+    command.args(args).current_dir(std::env::temp_dir()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if agy { command.arg(agy_prompt(msgs, system)).stdin(Stdio::null()); } else { command.stdin(Stdio::piped()); }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => { out.emit(&json!({ "error": format!("{cmd}: {e}") })); return; }
     };
@@ -97,8 +105,16 @@ mod tests {
     }
 
     #[test]
+    fn agy_gets_the_last_twelve_turns() {
+        let msgs: Vec<Value> = (0..20).map(|i| json!({ "role": "user", "content": format!("m{i}") })).collect();
+        let p = agy_prompt(&msgs, "sys");
+        assert!(p.starts_with("Reply as the assistant"));
+        assert!(!p.contains("m7\n") && p.contains("User: m8") && p.contains("User: m19"));
+    }
+
+    #[test]
     fn knows_both_providers() {
-        assert_eq!(spec("gemini-cli").unwrap().1, "gemini");
+        assert_eq!(spec("gemini-cli").unwrap().1, "agy");
         assert_eq!(spec("codex-cli").unwrap().1, "codex");
         assert!(spec("claude-cli").is_none());
         assert!(find("no-such-command-xyz").is_none());

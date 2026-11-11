@@ -123,6 +123,9 @@ mod tests {
     /// A sleep that only counts, so no test waits for real.
     fn counting(n: &Cell<u32>) -> impl Fn(Duration) + '_ { move |_| n.set(n.get() + 1) }
 
+    /// A lag longer than the reads one check makes (the first read and `VOLUME_RETRIES` after it): the change never shows.
+    const NEVER: u32 = 99;
+
     #[test]
     fn a_volume_read_within_two_points_is_verified() {
         let n = Cell::new(0);
@@ -253,5 +256,73 @@ mod tests {
     fn a_mixed_launch_waits_only_for_the_apps_it_opened() {
         let r = open_reply(Ok("Opened discord. I can't find valorant on this PC.".into()), "discord and valorant", &|| vec!["Discord.exe".into()], &|_| {}, &|| false);
         assert_eq!(verifier::check(Kind::AppOpen, &r), Check::Verified, "valorant was never opened, so it is not waited for");
+    }
+
+    /// A fake output device. `change` sets a level or mute at once, but the next `lag` reads still give the state from before
+    /// the change, the way a level lands a moment late.
+    struct Device { now: Cell<(f32, bool)>, before: Cell<(f32, bool)>, lag: Cell<u32> }
+
+    impl Device {
+        fn new(level: f32) -> Self { Device { now: Cell::new((level, false)), before: Cell::new((level, false)), lag: Cell::new(0) } }
+        fn change(&self, to: (f32, bool), lag: u32) {
+            self.before.set(self.now.get());
+            self.now.set(to);
+            self.lag.set(lag);
+        }
+        fn read(&self) -> Option<(f32, bool)> {
+            if self.lag.get() == 0 { return Some(self.now.get()); }
+            self.lag.set(self.lag.get() - 1);
+            Some(self.before.get())
+        }
+    }
+
+    /// One volume change through the fake device's setter, then the read-back the agent does.
+    fn change_and_read(dev: &Device, want: Want, lag: u32, sleep: &dyn Fn(Duration)) -> Result<String, String> {
+        match want {
+            Want::Level(v) => dev.change((v, dev.now.get().1), lag),
+            Want::Mute(m) => dev.change((dev.now.get().0, m), lag),
+        }
+        volume_reply(want, &|| dev.read(), sleep)
+    }
+
+    #[test]
+    fn a_sequence_of_changes_is_verified_at_each_step() {
+        let dev = Device::new(50.0);
+        let steps = [Want::Level(30.0), Want::Level(80.0), Want::Level(10.0), Want::Mute(true), Want::Mute(false)];
+        let texts = ["Volume 30%.", "Volume 80%.", "Volume 10%.", "Muted.", "Unmuted."];
+        for (want, text) in steps.into_iter().zip(texts) {
+            let r = change_and_read(&dev, want, 0, &|_| {});
+            assert_eq!(r, Ok(text.into()), "{want:?}");
+            assert_eq!(verifier::check(Kind::Volume, &r), Check::Verified, "{want:?}");
+        }
+    }
+
+    #[test]
+    fn a_change_that_lands_one_read_late_is_still_verified_within_the_poll() {
+        let dev = Device::new(50.0);
+        let steps = [Want::Level(30.0), Want::Level(80.0), Want::Level(10.0), Want::Mute(true), Want::Mute(false)];
+        for want in steps {
+            let n = Cell::new(0);
+            let r = change_and_read(&dev, want, 1, &counting(&n));
+            assert_eq!(verifier::check(Kind::Volume, &r), Check::Verified, "{want:?}: {r:?}");
+            assert_eq!(n.get(), 1, "{want:?}: one 250 ms wait, then the level has landed");
+        }
+    }
+
+    #[test]
+    fn a_level_that_never_settles_is_failed_with_the_actual_level_not_verified() {
+        let dev = Device::new(55.0);
+        let r = change_and_read(&dev, Want::Level(30.0), NEVER, &|_| {});
+        assert_eq!(r, Err("Volume is 55%, not 30%.".into()), "the record names the actual level");
+        assert_eq!(verifier::check(Kind::Volume, &r), Check::Failed);
+        assert_ne!(outcome(&r, &[Check::Failed]).0, Verdict::Completed);
+    }
+
+    #[test]
+    fn a_mute_that_never_settles_is_failed_not_verified() {
+        let dev = Device::new(40.0);
+        let r = change_and_read(&dev, Want::Mute(true), NEVER, &|_| {});
+        assert_eq!(r, Err("The output is still not muted.".into()));
+        assert_eq!(verifier::check(Kind::Volume, &r), Check::Failed);
     }
 }

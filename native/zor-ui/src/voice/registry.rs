@@ -15,6 +15,18 @@ pub enum SwitchError {
     Preview(ProviderError),
 }
 
+impl std::fmt::Display for SwitchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwitchError::UnknownProvider(id) => write!(f, "there is no provider '{id}'"),
+            SwitchError::MissingCapability(what) => write!(f, "this provider does not support {what}"),
+            SwitchError::NoVoice(v) => write!(f, "the provider has no voice '{v}'"),
+            SwitchError::Health(e) => write!(f, "{e}"),
+            SwitchError::Preview(e) => write!(f, "the test voice failed: {e}"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Registry {
     providers: Vec<SharedProvider>,
@@ -32,6 +44,9 @@ impl Registry {
         self.providers.push(p);
         Ok(())
     }
+
+    /// Every registered provider, in registration order.
+    pub fn all(&self) -> Vec<SharedProvider> { self.providers.clone() }
 
     /// Ids of every registered provider, in registration order.
     pub fn ids(&self) -> Vec<&'static str> { self.providers.iter().map(|p| p.id()).collect() }
@@ -53,20 +68,31 @@ impl Registry {
     /// preview. Only then does it become active.
     pub fn switch(&mut self, id: &str, voice: &str, need: &ProviderCapabilities) -> Result<(), SwitchError> {
         let next = self.get(id).ok_or_else(|| SwitchError::UnknownProvider(id.into()))?;
-        if let Some(missing) = next.capabilities().missing(need) {
-            return Err(SwitchError::MissingCapability(missing));
-        }
-        let voices = next.voices().map_err(SwitchError::Health)?;
-        if !voices.iter().any(|v| v.id == voice) {
-            return Err(SwitchError::NoVoice(voice.into()));
-        }
-        next.health().map_err(SwitchError::Health)?;
-        next.preview(voice, &Default::default(), &Cancel::new()).map_err(SwitchError::Preview)?;
-        if let Some(old) = self.active.replace(next) {
+        check(&next, voice, need)?;
+        if let Some(old) = self.activate(next.clone()) {
             if old.id() != id { old.shutdown(); }
         }
         Ok(())
     }
+
+    /// Makes `p` the active provider and returns the one it replaced. The caller shuts the old one down
+    /// after releasing the registry lock, since a shutdown can be slow.
+    pub fn activate(&mut self, p: SharedProvider) -> Option<SharedProvider> { self.active.replace(p) }
+}
+
+/// The slow part of a switch: the provider's voices, health and a test preview. Takes no lock, so callers
+/// holding a registry lock should look the provider up, drop the lock, then call this.
+pub fn check(next: &SharedProvider, voice: &str, need: &ProviderCapabilities) -> Result<(), SwitchError> {
+    if let Some(missing) = next.capabilities().missing(need) {
+        return Err(SwitchError::MissingCapability(missing));
+    }
+    let voices = next.voices().map_err(SwitchError::Health)?;
+    if !voices.iter().any(|v| v.id == voice) {
+        return Err(SwitchError::NoVoice(voice.into()));
+    }
+    next.health().map_err(SwitchError::Health)?;
+    next.preview(voice, &Default::default(), &Cancel::new()).map_err(SwitchError::Preview)?;
+    Ok(())
 }
 
 #[cfg(test)]

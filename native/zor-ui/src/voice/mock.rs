@@ -7,6 +7,7 @@ use std::time::Duration;
 pub struct MockTts {
     id: &'static str,
     fail_health: bool,
+    health_delay: Duration,
     fail_preview: bool,
     cloning: bool,
     delay: Duration,
@@ -16,9 +17,11 @@ pub struct MockTts {
 
 impl MockTts {
     pub fn new(id: &'static str) -> MockTts {
-        MockTts { id, fail_health: false, fail_preview: false, cloning: false, delay: Duration::ZERO, spoken: Arc::new(Mutex::new(vec![])) }
+        MockTts { id, fail_health: false, health_delay: Duration::ZERO, fail_preview: false, cloning: false, delay: Duration::ZERO, spoken: Arc::new(Mutex::new(vec![])) }
     }
     pub fn failing_health(mut self) -> Self { self.fail_health = true; self }
+    /// Makes `health` take this long, like a provider that checks a server before answering.
+    pub fn with_health_delay(mut self, d: Duration) -> Self { self.health_delay = d; self }
     pub fn failing_preview(mut self) -> Self { self.fail_preview = true; self }
     pub fn with_cloning(mut self) -> Self { self.cloning = true; self }
     pub fn with_delay(mut self, d: Duration) -> Self { self.delay = d; self }
@@ -35,6 +38,7 @@ impl TtsProvider for MockTts {
         Ok(vec![VoiceInfo { id: "v1".into(), name: "Voice one".into(), language: "en".into() }])
     }
     fn health(&self) -> Result<(), ProviderError> {
+        std::thread::sleep(self.health_delay);
         if self.fail_health { Err(ProviderError::ModelLoad("mock model missing".into())) } else { Ok(()) }
     }
     fn synthesize(&self, req: &SynthesisRequest, cancel: &Cancel) -> Result<SynthesisResult, ProviderError> {

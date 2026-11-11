@@ -98,12 +98,17 @@ fn settings_json(s: &SpeechSettings) -> Value {
     json!({ "speed": s.speed, "pitch": s.pitch, "expressiveness": s.expressiveness, "emotion": s.emotion })
 }
 
-/// The characters the app ships with, and the Windows voice each one uses. Every one maps to the same
-/// Windows voice, as before this platform existed, so Buddy sounds the same.
+/// The characters the app ships with. Each has a binding per provider: the Windows voice (as before this
+/// platform existed, so Buddy sounds the same), Piper's Lessac voice and OpenAI's alloy.
 pub const BUILTIN_CHARACTERS: [&str; 4] = ["neutral", "gojo", "geto", "yuji"];
 
 /// Profile id of a built-in character voice, e.g. `builtin:gojo`.
 pub fn builtin_id(character: &str) -> String { format!("builtin:{character}") }
+
+/// The built-in voice for a Buddy's character; a character the app does not know gets the neutral one.
+pub fn default_voice(character: &str) -> String {
+    builtin_id(if BUILTIN_CHARACTERS.contains(&character) { character } else { "neutral" })
+}
 
 /// The built-in profiles: one per character, bound to the Windows voice.
 pub fn builtin_profiles() -> Vec<VoiceProfile> {
@@ -114,12 +119,11 @@ pub fn builtin_profiles() -> Vec<VoiceProfile> {
         tags: vec!["built-in".into()],
         settings: SpeechSettings::default(),
         reference: None,
-        bindings: vec![ProviderBinding {
-            provider: "windows".into(),
-            voice: "male".into(),
-            model: None,
-            ext: json!({ "v": EXT_VERSION }),
-        }],
+        bindings: vec![
+            ProviderBinding { provider: "windows".into(), voice: "male".into(), model: None, ext: json!({ "v": EXT_VERSION }) },
+            ProviderBinding { provider: "piper".into(), voice: "en_US-lessac-medium".into(), model: None, ext: json!({ "v": EXT_VERSION }) },
+            ProviderBinding { provider: "openai".into(), voice: "alloy".into(), model: Some("tts-1".into()), ext: json!({ "v": EXT_VERSION }) },
+        ],
     }).collect()
 }
 

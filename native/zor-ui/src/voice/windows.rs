@@ -4,7 +4,6 @@
 use super::contract::*;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 pub const ID: &str = "windows";
 /// The one voice this adapter offers: the male voice the Buddies always used.
@@ -48,19 +47,8 @@ impl TtsProvider for WindowsTts {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| ProviderError::Other(format!("could not start Windows speech: {e}")))?;
-        loop {
-            if cancel.is_cancelled() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ProviderError::Cancelled);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(SynthesisResult { audio: AudioOutput::Played }),
-                Ok(Some(status)) => return Err(ProviderError::Other(format!("Windows speech exited with {status}"))),
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                Err(e) => return Err(ProviderError::Other(format!("lost the Windows speech process: {e}"))),
-            }
-        }
+        super::process::wait_cancellable(&mut child, cancel, "Windows speech")?;
+        Ok(SynthesisResult { audio: AudioOutput::Played })
     }
 }
 

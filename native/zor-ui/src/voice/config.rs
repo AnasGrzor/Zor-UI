@@ -1,7 +1,8 @@
 //! The "voice" section of config.json and its versioned migrations. Old installs have no section: their
 //! Buddies keep the built-in voices they had, and the on/off switch stays `native.gojoVoice`.
 
-use super::profile::{builtin_id, builtin_profiles, VoiceProfile, BUILTIN_CHARACTERS};
+use super::endpoint::EndpointCfg;
+use super::profile::{builtin_profiles, default_voice, VoiceProfile};
 use serde_json::Value;
 
 /// Schema of the "voice" section. Bump it with a new arm in `migrate` when the layout changes.
@@ -15,6 +16,8 @@ pub struct VoiceConfig {
     pub buddies: [String; 2],
     /// Built-in profiles first, then the user's.
     pub profiles: Vec<VoiceProfile>,
+    /// The custom OpenAI-compatible endpoint, when the user has set one up.
+    pub endpoint: Option<EndpointCfg>,
 }
 
 impl VoiceConfig {
@@ -27,13 +30,30 @@ impl VoiceConfig {
             if !profiles.iter().any(|b| b.id == p.id) { profiles.push(p); }
         }
         let slot = |key: &str| migrated["buddies"][key].as_str().filter(|s| !s.is_empty()).map(String::from);
-        let fallback = |c: &str| if BUILTIN_CHARACTERS.contains(&c) { builtin_id(c) } else { builtin_id("neutral") };
         VoiceConfig {
             provider: migrated["provider"].as_str().filter(|s| !s.is_empty()).unwrap_or("windows").to_string(),
-            buddies: [slot("a").unwrap_or_else(|| fallback(a_char)), slot("b").unwrap_or_else(|| fallback(b_char))],
+            buddies: [slot("a").unwrap_or_else(|| default_voice(a_char)), slot("b").unwrap_or_else(|| default_voice(b_char))],
             profiles,
+            endpoint: endpoint_of(&migrated["endpoint"]),
         }
     }
+}
+
+/// The endpoint from its config entry: {url, model, voices: [...]}. A missing address means no endpoint.
+pub fn endpoint_of(e: &Value) -> Option<EndpointCfg> {
+    let url = e.get("url")?.as_str()?.trim();
+    if url.is_empty() { return None; }
+    // a list (what the field saves once it has one) or the comma-separated text it starts as
+    let voices: Vec<String> = match e.get("voices") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        _ => vec![],
+    };
+    Some(EndpointCfg {
+        url: url.to_string(),
+        model: e.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()).unwrap_or("tts-1").to_string(),
+        voices,
+    })
 }
 
 /// Brings a "voice" section to `SCHEMA`. A section from a newer app is returned as it is, since a rewrite
@@ -47,8 +67,8 @@ pub fn migrate(section: &Value, a_char: &str, b_char: &str) -> Value {
     out.entry("provider").or_insert_with(|| Value::from("windows"));
     out.entry("profiles").or_insert_with(|| Value::Array(vec![]));
     let mut buddies = out.get("buddies").and_then(Value::as_object).cloned().unwrap_or_default();
-    buddies.entry("a").or_insert_with(|| Value::from(builtin_id(a_char)));
-    buddies.entry("b").or_insert_with(|| Value::from(builtin_id(b_char)));
+    buddies.entry("a").or_insert_with(|| Value::from(default_voice(a_char)));
+    buddies.entry("b").or_insert_with(|| Value::from(default_voice(b_char)));
     out.insert("buddies".into(), Value::Object(buddies));
     Value::Object(out)
 }
@@ -56,6 +76,7 @@ pub fn migrate(section: &Value, a_char: &str, b_char: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::profile;
     use serde_json::json;
 
     #[test]
@@ -63,7 +84,7 @@ mod tests {
         let c = VoiceConfig::load(&Value::Null, "gojo", "geto");
         assert_eq!(c.provider, "windows");
         assert_eq!(c.buddies, ["builtin:gojo".to_string(), "builtin:geto".to_string()]);
-        assert_eq!(c.profiles.len(), BUILTIN_CHARACTERS.len(), "only the built-ins exist yet");
+        assert_eq!(c.profiles.len(), profile::BUILTIN_CHARACTERS.len(), "only the built-ins exist yet");
     }
 
     #[test]
@@ -82,6 +103,16 @@ mod tests {
     }
 
     #[test]
+    fn an_endpoint_needs_an_address_and_takes_its_voices() {
+        assert!(endpoint_of(&json!({})).is_none());
+        let e = endpoint_of(&json!({ "url": "http://localhost:8880/v1", "voices": ["af_sky", " "] })).unwrap();
+        assert_eq!(e.voices, vec!["af_sky".to_string()]);
+        assert_eq!(e.model, "tts-1", "model defaults to tts-1");
+        let typed = endpoint_of(&json!({ "url": "https://x.test", "voices": "a, b ,," })).unwrap();
+        assert_eq!(typed.voices, vec!["a".to_string(), "b".to_string()], "comma-separated text works too");
+    }
+
+    #[test]
     fn an_unknown_character_falls_back_to_the_neutral_voice() {
         let c = VoiceConfig::load(&Value::Null, "custom-pack", "gojo");
         assert_eq!(c.buddies[0], "builtin:neutral");
@@ -95,7 +126,7 @@ mod tests {
             { "id": "builtin:gojo", "name": "shadow" }
         ]});
         let c = VoiceConfig::load(&section, "gojo", "geto");
-        assert_eq!(c.profiles.len(), BUILTIN_CHARACTERS.len() + 1);
+        assert_eq!(c.profiles.len(), profile::BUILTIN_CHARACTERS.len() + 1);
         assert!(c.profiles.iter().any(|p| p.id == "user-1"));
         assert!(c.profiles.iter().any(|p| p.id == "builtin:gojo" && p.name == "gojo"), "a user entry cannot replace a built-in");
     }

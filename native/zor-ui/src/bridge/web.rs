@@ -518,7 +518,7 @@ fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system
 /// The lines to emit for one parsed SSE event of `provider`.
 fn sse_events(provider: &str, ev: &Value) -> Vec<Value> {
     let delta = |t: &Value| t.as_str().filter(|t| !t.is_empty()).map(|t| json!({ "delta": t }));
-    match provider {
+    let mut out: Vec<Value> = match provider {
         "gemini" => ev["candidates"][0]["content"]["parts"].as_array().map(|p| p.iter().filter_map(|x| delta(&x["text"])).collect()).unwrap_or_default(),
         "anthropic" => match ev["type"].as_str() {
             Some("content_block_delta") => delta(&ev["delta"]["text"]).into_iter().collect(),
@@ -526,7 +526,10 @@ fn sse_events(provider: &str, ev: &Value) -> Vec<Value> {
             _ => vec![],
         },
         _ => delta(&ev["choices"][0]["delta"]["content"]).into_iter().collect(),
-    }
+    };
+    // token counts, when this event carries them (agent::provider)
+    out.extend(crate::agent::provider::usage_event(provider, ev));
+    out
 }
 
 /// A value as a curl --config quoted string.

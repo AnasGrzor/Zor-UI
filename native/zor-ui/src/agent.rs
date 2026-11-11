@@ -12,6 +12,7 @@ pub mod memory;
 pub mod native;
 pub mod plan;
 pub mod policy;
+pub mod provider;
 pub mod intent;
 pub mod project;
 pub mod routing;
@@ -781,6 +782,7 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     tasks::recover_once();
     let task_id = tasks::begin(said);
     *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner()) = task_id;
+    provider::reset();
     // each tool step is saved on the task; the steps of interrupted tasks decide what is not repeated
     let record = std::cell::RefCell::new(plan::Steps::new(task_id, &tasks::interrupted_steps()));
     let task = std::cell::RefCell::new(state::Task::new());
@@ -831,8 +833,10 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         evidence.borrow_mut().push(check);
         res
     };
+    // a model is usable when its provider needs no saved key or has one (provider.rs); routing never picks an unusable strong or fallback model
+    let usable = |id: &str| crate::bridge::web::provider_of(id).map_or(true, |p| provider::usable(&p, |k| !crate::bridge::web::secret_get(k).is_empty()));
     // the model: the routed one, then the fallbacks, each tried only if the one before failed before any tool ran
-    let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model));
+    let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model, &usable), &usable);
     let mut r: Result<String, String> = Err(String::new());
     for (i, m) in chain.iter().enumerate() {
         let model: &str = m;
@@ -857,6 +861,8 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     // every request that ends on its own is verified first, then ends in its verdict; a cancel skips Verifying (it can't be cancelled)
     if end != state::TaskStatus::Cancelled { step(state::TaskStatus::Verifying); }
     if task.borrow_mut().to(end) { tasks::set(task_id, end, &format!("{verdict:?}"), checks.len() as i64); }
+    // the tokens the whole request used, over all its model calls (provider.rs)
+    tasks::save_usage(task_id, provider::request_total());
     let r = match (r, verifier::note(verdict)) {
         (Ok(answer), Some(note)) => Ok(format!("{answer} {note}")),
         (r, _) => r,

@@ -5,7 +5,7 @@
 //! AI model from the sidebar, which picks tools and retries when one fails (agent.rs). Nothing is ever sent for you:
 //! messages open in the app and wait for you to press Enter.
 
-use crate::{conf::Config, proc, screen, util};
+use crate::{agent::provider, conf::Config, proc, screen, util};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -567,15 +567,23 @@ pub struct Turn {
     pub text: String,
     pub calls: Vec<Value>,
     pub bad: Vec<Value>,
+    /// The tokens the provider reported for this reply, when it reported any (`provider::usage_event`).
+    pub usage: Option<provider::Usage>,
 }
 
-/// Puts the streamed events of one reply together: text deltas join in order, tool calls and their failures are kept.
+/// Puts the streamed events of one reply together: text deltas join in order, tool calls and their failures are kept, and the
+/// provider's running token counts are taken from the last event that gave each one.
 pub fn fold_turn(events: &[Value]) -> Turn {
     let mut t = Turn::default();
     for e in events {
         if let Some(d) = e["delta"].as_str() { t.text.push_str(d); }
         if e["tool_use"].is_object() { t.calls.push(e["tool_use"].clone()); }
         if e["tool_error"].is_object() { t.bad.push(e["tool_error"].clone()); }
+        if e["usage"].is_object() {
+            let u = t.usage.get_or_insert_with(provider::Usage::default);
+            if let Some(i) = e["usage"]["input"].as_u64() { u.input = i; }
+            if let Some(o) = e["usage"]["output"].as_u64() { u.output = o; }
+        }
     }
     t
 }
@@ -596,7 +604,12 @@ pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, St
         if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
         events.push(v);
     }
-    Ok(fold_turn(&events))
+    let turn = fold_turn(&events);
+    if let Some(u) = turn.usage {
+        crate::log::line(&format!("buddy usage: {} in, {} out", u.input, u.output));
+        provider::add(u);
+    }
+    Ok(turn)
 }
 
 /// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.
@@ -1049,6 +1062,18 @@ mod tests {
         assert_eq!(t.calls, vec![json!({ "id": "toolu_1", "name": "open", "input": { "arg": "Spotify" } })]);
         assert_eq!(t.bad, vec![json!({ "id": "toolu_2", "name": "play", "message": "tool input is not JSON" })]);
         assert_eq!(fold_turn(&[]), Turn::default());
+    }
+
+    #[test]
+    fn the_last_token_counts_win_and_a_reply_without_them_has_none() {
+        let events = vec![
+            json!({ "usage": { "input": 12, "output": null } }),
+            json!({ "delta": "hi" }),
+            json!({ "usage": { "input": null, "output": 40 } }),
+        ];
+        let t = fold_turn(&events);
+        assert_eq!(t.usage, Some(crate::agent::provider::Usage { input: 12, output: 40 }));
+        assert_eq!(fold_turn(&[json!({ "delta": "hi" })]).usage, None, "the provider said nothing");
     }
 
     #[test]

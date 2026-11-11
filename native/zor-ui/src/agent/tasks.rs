@@ -2,7 +2,7 @@
 //! A task still running when the app closes is marked Interrupted on the next start. A request whose text looks like a
 //! secret is saved as "[private request]".
 
-use super::{memory, plan};
+use super::{memory, plan, provider};
 use super::state::TaskStatus;
 use rusqlite::{params, Connection};
 use std::sync::Once;
@@ -20,12 +20,32 @@ pub fn setup(conn: &Connection) -> rusqlite::Result<()> {
              tool_calls INTEGER NOT NULL DEFAULT 0,
              started INTEGER NOT NULL,
              updated INTEGER NOT NULL,
-             steps TEXT NOT NULL DEFAULT '[]'
+             steps TEXT NOT NULL DEFAULT '[]',
+             tokens_in INTEGER NOT NULL DEFAULT 0,
+             tokens_out INTEGER NOT NULL DEFAULT 0
          );")?;
-    // a database made before M5 has no steps column
-    let has_steps = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == "steps"));
-    if !has_steps { conn.execute_batch("ALTER TABLE tasks ADD COLUMN steps TEXT NOT NULL DEFAULT '[]';")?; }
+    // databases made before a column was added get it; existing rows keep their values
+    add_missing(conn, "steps", "TEXT NOT NULL DEFAULT '[]'")?;
+    add_missing(conn, "tokens_in", "INTEGER NOT NULL DEFAULT 0")?;
+    add_missing(conn, "tokens_out", "INTEGER NOT NULL DEFAULT 0")
+}
+
+fn add_missing(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> {
+    let has = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == col));
+    if !has { conn.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {col} {decl};"))?; }
     Ok(())
+}
+
+/// Saves the tokens a task used in total (the provider's counts, summed over its model calls).
+pub fn usage_on(conn: &Connection, id: i64, u: provider::Usage) -> rusqlite::Result<()> {
+    conn.execute("UPDATE tasks SET tokens_in = ?1, tokens_out = ?2 WHERE id = ?3", params![u.input as i64, u.output as i64, id])?;
+    Ok(())
+}
+
+/// Saves a task's token total. A failure is logged and the request is done anyway.
+pub fn save_usage(id: Option<i64>, u: provider::Usage) {
+    let (Some(id), Some(conn)) = (id, open_app()) else { return };
+    if let Err(e) = usage_on(&conn, id, u) { crate::log::line(&format!("buddy tasks: could not save tokens: {e}")); }
 }
 
 /// Saves a task's step record (the JSON text `plan` writes) as it runs.
@@ -212,6 +232,22 @@ mod tests {
         set_on(&c, id, TaskStatus::Running, "", 1, 2).unwrap();
         recover_on(&c, 3).unwrap();
         assert_eq!(interrupted_steps_on(&c, 5).unwrap(), vec!["[{\"key\":\"k\"}]".to_string()]);
+    }
+
+    #[test]
+    fn a_task_keeps_the_tokens_it_used_and_an_old_database_gets_the_columns() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE tasks (id INTEGER PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL,
+            verdict TEXT NOT NULL DEFAULT '', tool_calls INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL, updated INTEGER NOT NULL,
+            steps TEXT NOT NULL DEFAULT '[]');
+            INSERT INTO tasks (request, status, started, updated) VALUES ('old', 'Completed', 1, 1);").unwrap();
+        setup(&c).unwrap();
+        let id = begin_on(&c, "new", 2).unwrap();
+        usage_on(&c, id, provider::Usage { input: 1200, output: 340 }).unwrap();
+        let (i, o): (i64, i64) = c.query_row("SELECT tokens_in, tokens_out FROM tasks WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((i, o), (1200, 340));
+        let old: (i64, i64) = c.query_row("SELECT tokens_in, tokens_out FROM tasks WHERE request = 'old'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(old, (0, 0), "an old task has no count");
     }
 
     #[test]

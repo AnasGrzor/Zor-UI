@@ -116,6 +116,11 @@ declined is never treated as done. The `steps` column is added to databases from
 
 ## Retries and fallbacks
 
+- **Usable models (M7).** A model whose provider needs a key (Gemini, OpenAI, Anthropic, Mistral, OpenRouter) is skipped as a
+  strong or fallback model when that key is not saved. The model the user chose is always tried. Ollama and the subscription
+  command lines need no saved key. Each reply's token counts are logged as `buddy usage: N in, M out` when the provider reports
+  them (`agent/provider.rs`). Each task's total over all its model calls is saved on its row as `tokens_in` and `tokens_out`
+  (0 when the provider reported none). Databases from before this change get the columns; rows are kept.
 - **Retries.** A read-only tool that fails (a search, a page read) is tried once more after 400 ms. Anything that acts is
   never repeated (`policy::may_retry`).
 - **Replanning.** A failed tool's error goes back to the model, which picks another route. The loop itself does not plan.

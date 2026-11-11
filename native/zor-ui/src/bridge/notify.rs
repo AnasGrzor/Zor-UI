@@ -343,6 +343,20 @@ fn num(v: &Value) -> f64 {
 /// `v` unless it is null, else "" (Python's `.get(key, "")` on our JSON).
 fn or_empty(v: &Value) -> Value { if v.is_null() { json!("") } else { v.clone() } }
 
+/// Sort order of a session in the island: waiting, then working, then the rest.
+fn rank(s: &Value) -> u8 { match s["state"].as_str() { Some("waiting") => 0, Some("working") => 1, _ => 2 } }
+
+/// One session as the island draws it: what it is doing now, its subagents and its spend.
+fn session_json(s: &Value) -> Value {
+    let subs: Vec<Value> = s["subs"].as_object().into_iter().flatten()
+        .map(|(k, v)| json!({ "id": k, "type": or_empty(&v["type"]), "tool": or_empty(&v["tool"]), "since": num(&v["since"]) })).collect();
+    json!({
+        "id": or_empty(&s["id"]), "state": or_empty(&s["state"]), "message": or_empty(&s["message"]), "cwd": or_empty(&s["cwd"]),
+        "model": or_empty(&s["model"]), "prompt": or_empty(&s["prompt"]), "tool": or_empty(&s["tool"]), "since": num(&s["since"]),
+        "at": num(&s["at"]), "subs": subs, "spend": s["spend"].clone(),
+    })
+}
+
 /// One entry per agent: the session that needs you (if any), what's running, and usage windows.
 /// Deletes session files whose agent quit without a SessionEnd (12 h old).
 pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
@@ -361,7 +375,11 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
             if !s.is_object() { s = json!({}); }
             let age = now - num(&s["at"]);
             if age > 12.0 * 3600.0 { let _ = std::fs::remove_file(&f); continue; }
-            if s["state"] == "working" && age > 15.0 * 60.0 { s["state"] = json!("done"); } // crashed mid-turn
+            if s["state"] == "working" && age > 15.0 * 60.0 { // crashed mid-turn: nothing is running any more
+                s["state"] = json!("done");
+                s["tool"] = json!("");
+                s["subs"] = json!({});
+            }
             sessions.push(s);
         }
         let u = load_json(&d.join("usage.json"), json!({}));
@@ -373,15 +391,19 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
         waiting.sort_by(|a, b| num(&b["at"]).total_cmp(&num(&a["at"])));
         let working: Vec<&Value> = sessions.iter().filter(|s| s["state"] == "working").collect();
         let first = waiting.first().or(working.first());
+        // every session, the ones that need you first, then running, then idle; newest first within each
+        let mut ranked: Vec<&Value> = sessions.iter().collect();
+        ranked.sort_by(|a, b| rank(a).cmp(&rank(b)).then(num(&b["at"]).total_cmp(&num(&a["at"]))));
         res.push(json!({
             "id": id, "label": agent_label(&id),
             "state": if !waiting.is_empty() { "waiting" } else if !working.is_empty() { "working" } else { "idle" },
             "message": waiting.first().map_or(json!(""), |s| or_empty(&s["message"])),
             // the newest prompt that asks for permission: the island offers Allow and Deny for it (permit.rs)
             // only agents whose hook waits for the answer (permit.rs PERMIT_AGENTS) get Allow and Deny
-            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]) })),
+            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]), "at": num(&s["at"]) })),
             "cwd": first.map_or(json!(""), |s| or_empty(&s["cwd"])),
             "waiting": waiting.len(), "working": working.len(),
+            "sessions": ranked.into_iter().map(session_json).collect::<Vec<_>>(),
             "usage": windows, "model": or_empty(&u["model"]), "usageAt": u["at"].clone(),
         }));
     }
@@ -521,8 +543,13 @@ mod tests {
         w("usage.json", json!({ "model": "m", "at": 5, "windows": { "5h": { "resets_at": now + 5.0 }, "old": { "resets_at": now - 5.0 }, "none": {} } }));
         let r = agents_summary(&d, now);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0], json!({ "id": "claude", "label": "Claude", "state": "waiting", "message": "ok?", "permit": null, "cwd": "C:/x", "waiting": 1, "working": 1,
+        let mut agent = r[0].clone();
+        let sessions = agent.as_object_mut().unwrap().remove("sessions").unwrap();
+        assert_eq!(agent, json!({ "id": "claude", "label": "Claude", "state": "waiting", "message": "ok?", "permit": null, "cwd": "C:/x", "waiting": 1, "working": 1,
             "usage": { "5h": { "resets_at": now + 5.0 }, "none": {} }, "model": "m", "usageAt": 5 }));
+        // every session, the one that needs you first; the crashed one (working for 16 min) is done now
+        let states: Vec<&str> = sessions.as_array().unwrap().iter().map(|s| s["state"].as_str().unwrap()).collect();
+        assert_eq!(states, ["waiting", "working", "done"]);
         assert!(!a.join("4.json").exists());
         assert_eq!(agent_label("my-agent"), "My-Agent");
         let _ = std::fs::remove_dir_all(&d);

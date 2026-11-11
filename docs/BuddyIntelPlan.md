@@ -531,7 +531,8 @@ This brief (v2) is the source of truth. Milestone numbers are the ones in sectio
 | M10 Skills, delegation, evaluation | Partial | — | Research, Desktop and Personal skills exist. Missing: Developer, Project management, Browser research, Workflow skills; versioning and evaluation criteria. |
 | M11 Performance | Not started | — | Only the M0 numbers. No optimization and no before-and-after measurements. |
 
-Tests on `buddy-intel-m5` after M5: `zorui` 978 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed.
+Tests on `main` at `741abef` (M9a): `zorui` 1011 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings: the existing unused `run_loop` in `agent.rs`, and no others from the M-series files.
+The work of every milestone listed above is on `main`. `buddy-intel-m1b`, `buddy-intel-m5` and `buddy-intel-m6` are ancestors of it. `buddy-intel-m7` and `buddy-intel-m9` hold the same changes under different commit hashes, from a parallel history. The branch names stay as a record of where each milestone was built.
 M5 migration was run on a copy of a real `buddy.db` (21 tasks): all rows kept, the column added, a new row written.
 Corrections: the active-project source (`agent/project.rs`) is part of the M3 commit `8c4a892`. An earlier note said there was none.
 

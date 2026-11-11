@@ -2,7 +2,7 @@
 //! A task still running when the app closes is marked Interrupted on the next start. A request whose text looks like a
 //! secret is saved as "[private request]".
 
-use super::memory;
+use super::{memory, plan};
 use super::state::TaskStatus;
 use rusqlite::{params, Connection};
 use std::sync::Once;
@@ -19,8 +19,37 @@ pub fn setup(conn: &Connection) -> rusqlite::Result<()> {
              verdict TEXT NOT NULL DEFAULT '',
              tool_calls INTEGER NOT NULL DEFAULT 0,
              started INTEGER NOT NULL,
-             updated INTEGER NOT NULL
-         );")
+             updated INTEGER NOT NULL,
+             steps TEXT NOT NULL DEFAULT '[]'
+         );")?;
+    // a database made before M5 has no steps column
+    let has_steps = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == "steps"));
+    if !has_steps { conn.execute_batch("ALTER TABLE tasks ADD COLUMN steps TEXT NOT NULL DEFAULT '[]';")?; }
+    Ok(())
+}
+
+/// Saves a task's step record (the JSON text `plan` writes) as it runs.
+pub fn steps_on(conn: &Connection, id: i64, steps: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE tasks SET steps = ?1 WHERE id = ?2", params![steps, id])?;
+    Ok(())
+}
+
+/// The step records of the newest tasks the app interrupted, newest first.
+pub fn interrupted_steps_on(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT steps FROM tasks WHERE status = 'Interrupted' ORDER BY id DESC LIMIT ?1")?;
+    let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Saves a task's step record. A failure is logged and the request goes on.
+pub fn save_steps(id: Option<i64>, steps: &str) {
+    let (Some(id), Some(conn)) = (id, open_app()) else { return };
+    if let Err(e) = steps_on(&conn, id, steps) { crate::log::line(&format!("buddy tasks: could not save steps: {e}")); }
+}
+
+/// The step records of the newest interrupted tasks, for the side-effect guard. Empty when the database can't be read.
+pub fn interrupted_steps() -> Vec<String> {
+    open_app().and_then(|c| interrupted_steps_on(&c, plan::RECENT).ok()).unwrap_or_default()
 }
 
 /// Saves a new task in its first state. Returns its id.
@@ -173,5 +202,28 @@ mod tests {
         let b = begin_on(&c, "second", 2).unwrap();
         let ids: Vec<i64> = recent_on(&c, 5).unwrap().iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![b, a]);
+    }
+
+    #[test]
+    fn steps_saved_before_an_interruption_are_still_there_after_it() {
+        let c = mem();
+        let id = begin_on(&c, "text sam", 1).unwrap();
+        steps_on(&c, id, "[{\"key\":\"k\"}]").unwrap();
+        set_on(&c, id, TaskStatus::Running, "", 1, 2).unwrap();
+        recover_on(&c, 3).unwrap();
+        assert_eq!(interrupted_steps_on(&c, 5).unwrap(), vec!["[{\"key\":\"k\"}]".to_string()]);
+    }
+
+    #[test]
+    fn a_database_from_before_steps_gets_the_column_and_keeps_its_rows() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE tasks (id INTEGER PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL,
+            verdict TEXT NOT NULL DEFAULT '', tool_calls INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL, updated INTEGER NOT NULL);
+            INSERT INTO tasks (request, status, started, updated) VALUES ('old', 'Completed', 1, 1);").unwrap();
+        setup(&c).unwrap();
+        setup(&c).unwrap();
+        let id = begin_on(&c, "new", 2).unwrap();
+        steps_on(&c, id, "[]").unwrap();
+        assert_eq!(recent_on(&c, 5).unwrap().len(), 2, "the old row is kept");
     }
 }

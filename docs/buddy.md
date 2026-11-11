@@ -96,6 +96,24 @@ Failed, Declined or Cancelled. A request that ends on its own goes through Verif
 Verifying. A move that skips a state is refused and logged. A task still open when the app closed is marked Interrupted on the next start. The Settings > AI
 page lists the 10 newest requests with their state, verdict and tool calls.
 
+## Steps and interrupted tasks
+
+Each tool step of a task is saved in the `steps` column of its `tasks` row as it runs (`agent/plan.rs`). A step is one JSON
+entry: the call, whether it changes something (`side`), its outcome (running, done, failed, declined or blocked) and a short
+detail. The plan calls for a `task_steps` table; this build keeps the steps in the task row, so the schema stays one table.
+
+A step that changes something outside the buddy (a message, a key press, a power action, a file opened, a browser action) is
+refused when one of the five newest interrupted tasks already started or finished the same call. The refusal goes back to the
+model as a failed step, and the user is told to ask again if they want it done. Reads (web search, page read, app and file
+lookup, screen answer, remembering and forgetting facts) may repeat. An unknown tool counts as a change. A step the user
+declined is never treated as done. The `steps` column is added to databases from before this change; existing rows are kept.
+
+### Not built yet for interrupted tasks
+
+- **Resuming.** An interrupted task is marked and its changing steps are blocked. It is not continued; the user asks again.
+- **Declared plans.** The model still plans one tool at a time. Steps are recorded from what it did, not from a plan it wrote.
+- **Recovery per start.** It runs once per app start and assumes requests do not overlap.
+
 ## Retries and fallbacks
 
 - **Retries.** A read-only tool that fails (a search, a page read) is tried once more after 400 ms. Anything that acts is
@@ -181,7 +199,6 @@ protocol. Native tool calling needs an API key, because the tool definitions go 
 - **Semantic memory.** The `Recall` trait is in place, but an embedding model would have to be downloaded, and the privacy
   rule keeps facts off providers, so it needs your decision on a local model first.
 - **Browser tools and other providers in native mode.** Native mode is Claude-only with the browser off.
-- **Active project in the context.** The program in front is read; no project is detected. (M3 did not add a project source.)
 - **Metrics beyond the logs and the tasks table.** The eval scripts are the benchmarks; no dashboard.
 - **Manage tasks by voice.** The Settings list shows them and can cancel one. A cancel stops the request between model calls;
   a tool that is already running finishes first.

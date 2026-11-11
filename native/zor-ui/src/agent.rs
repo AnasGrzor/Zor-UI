@@ -9,6 +9,7 @@ pub mod eval;
 pub mod history;
 pub mod memory;
 pub mod native;
+pub mod plan;
 pub mod policy;
 pub mod intent;
 pub mod project;
@@ -776,6 +777,8 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     tasks::recover_once();
     let task_id = tasks::begin(said);
     *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner()) = task_id;
+    // each tool step is saved on the task; the steps of interrupted tasks decide what is not repeated
+    let record = std::cell::RefCell::new(plan::Steps::new(task_id, &tasks::interrupted_steps()));
     let task = std::cell::RefCell::new(state::Task::new());
     let step = |s: state::TaskStatus| {
         let calls = evidence.borrow().len() as i64;
@@ -799,6 +802,12 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
             evidence.borrow_mut().push(verifier::Check::Failed);
             return Err("That already failed once in this request, so I didn't try it again. Try another way.".to_string());
         }
+        // a changing step an interrupted task already tried is not run again (plan.rs)
+        if let Some(why) = record.borrow_mut().begin(c) {
+            crate::log::line("buddy step refused: an interrupted task already tried it");
+            evidence.borrow_mut().push(verifier::Check::Failed);
+            return Err(why);
+        }
         let declined = std::cell::Cell::new(false);
         let mut ask_user = |q: &str| { let ok = tracked_confirm(q); if !ok { declined.set(true); } ok };
         let mut res = timing.tool(|| exec(c, cfg, &mut ask_user));
@@ -810,6 +819,7 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         }
         let check = if declined.get() { verifier::Check::Declined } else { verifier::check(verifier::kind_of(c), &res) };
         if res.is_err() && !declined.get() && !policy::may_retry(c) { failed.borrow_mut().insert(format!("{c:?}")); }
+        record.borrow_mut().end(&res, declined.get());
         evidence.borrow_mut().push(check);
         res
     };

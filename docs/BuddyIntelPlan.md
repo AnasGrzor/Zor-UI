@@ -1063,7 +1063,31 @@ release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings.
 - Tests: reference words, the newest-shortcut order in a temp folder, the previous-request and question rules, and the budget.
 - Tests after M3: `zorui` 959 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings 59 (unchanged).
 - Live: "what files did I open recently" listed real Recent files; "continue where we left off" answered from the last request.
-- Remaining limitations (M3): no active-project source; "it" is not a reference word; the memory lookup still opens the
-  database on every request; intent rules are keyword-based, so an unusual phrasing gets no earlier request.
+- Remaining limitations (M3): "it" is not a reference word; the memory lookup still opens the database on every request;
+  intent rules are keyword-based, so an unusual phrasing gets no earlier request.
+- Correction: the active-project source (`agent/project.rs`, from a folder with a project marker under Documents or Desktop,
+  or `buddies.projectRoots`) is part of the M3 commit `8c4a892`. An earlier note here said there was none; that was out of date.
+
+**M4 (intent), done on branch `buddy-intel-m1b`.**
+- `agent/intent.rs` classifies each request as Answer, Lookup, Act, Setting or Unclear, with High, Medium or Low confidence.
+  No model call. Context: previous request, conversation, active project, pending question.
+- A clear request goes ahead. One that is clear only with an assumption goes ahead with the assumption stated. An unclear one
+  with nothing to point at gets one question, and the next request is read as the answer.
+- "open A and B" and "open A, B" open each app locally; apps that are not installed are named in the answer.
+- Tests: the classification table, the answer-to-question case, the decision for each confidence, the splitting of app lists.
+- Remaining limitations (M4): keyword-based; the decision is not measured against real requests yet.
+
+**M5 (structured planning and recovery), done on branch `buddy-intel-m5` (based on `buddy-intel-m1b`).**
+- Each tool step is saved in the `steps` column of its `tasks` row as it runs: running, done, failed, declined or blocked.
+  `agent/plan.rs` holds the step records and the guard; `tasks.rs` saves them. The plan named a `task_steps` table; the JSON
+  column keeps one table.
+- A step that changes something (message, key press, power action, file open, browser action) is refused when one of the
+  five newest interrupted tasks already started or finished the same call. Reads may repeat. Unknown tools count as changes.
+- Migration: a database from before M5 gets the column on first open. Run on a copy of a real `buddy.db` (21 tasks): all rows
+  kept, the column added, a new row written.
+- Tests after M5: `zorui` 978 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Six new tests (four in `plan.rs`, two in
+  `tasks.rs`). No warnings from the M5 files; the existing unused `run_loop` warning in `agent.rs` is unchanged.
+- Remaining limitations (M5): no resuming of interrupted tasks; the model still plans one tool at a time; recovery runs once
+  per app start and assumes requests do not overlap; a live restart on a desktop was not run.
 
 **Start with Milestone 1. Inspect the repository, establish the baseline build, and implement the smallest complete, tested intelligence foundation before moving to persistent memory. Do not attempt the entire upgrade in one unverified change.**

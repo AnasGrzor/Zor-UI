@@ -55,6 +55,8 @@ pub fn kind_of(call: &Call) -> Kind {
         WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
         Radio { .. } | Brightness(_) => Kind::ReadBack,
+        // a page that loads or is read is evidence; a click or typing is an action that nothing reports back on
+        Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
         _ => Kind::Action,
     }
 }
@@ -182,5 +184,19 @@ mod tests {
         assert_eq!(kind_of(&Call::Radio { which: "wifi".into(), state: "on".into() }), Kind::ReadBack);
         assert_eq!(kind_of(&Call::Brightness("50".into())), Kind::ReadBack);
         assert_eq!(kind_of(&Call::Volume("up".into())), Kind::Action);
+        let browser = |tool: &str| Call::Browser { tool: tool.into(), args: serde_json::json!({}) };
+        assert_eq!(kind_of(&browser("browser_navigate")), Kind::Lookup, "a page that loads is evidence");
+        assert_eq!(kind_of(&browser("browser_snapshot")), Kind::Lookup);
+        assert_eq!(kind_of(&browser("browser_click")), Kind::Action, "a click reports nothing back");
+        assert_eq!(kind_of(&browser("browser_type")), Kind::Action);
+    }
+
+    #[test]
+    fn a_browser_read_that_came_back_verifies_and_a_click_does_not() {
+        let nav = Call::Browser { tool: "browser_navigate".into(), args: serde_json::json!({}) };
+        assert_eq!(check(kind_of(&nav), &ok("Browser (page text): Page Title: Example Domain")), Check::Verified);
+        let click = Call::Browser { tool: "browser_click".into(), args: serde_json::json!({}) };
+        assert_eq!(check(kind_of(&click), &ok("Clicked.")), Check::Unverified);
+        assert_eq!(judge(&[Check::Verified, Check::Unverified]), Verdict::Unverified, "a click after a loaded page is still unverified");
     }
 }

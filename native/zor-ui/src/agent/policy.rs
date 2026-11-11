@@ -25,7 +25,8 @@ pub fn risk_of(call: &Call) -> Risk {
         | Wallpaper(_) | Message { .. } | Remember(_) | Forget(_) => Risk::Reversible,
         // lock can be undone by signing in; every other power action ends the session
         Power(what) => if what.trim().eq_ignore_ascii_case("lock") { Risk::Reversible } else { Risk::Destructive },
-        TakeOver(_) | Browser { .. } => Risk::Consequential,
+        // a check builds and runs the project's code, so it asks once per workspace (agent::approve)
+        TakeOver(_) | Browser { .. } | RunCheck(_) => Risk::Consequential,
     }
 }
 
@@ -50,6 +51,7 @@ pub fn approval_for(call: &Call) -> Option<String> {
         },
         Call::TakeOver(goal) => Some(crate::drive::question(goal)),
         Call::Browser { .. } => Some("The buddy wants to use its browser for this. Allow it?".into()),
+        Call::RunCheck(name) => Some(format!("Run \"{}\" in the developer workspace? It builds or tests the project's code.", name.trim())),
         _ => None,
     }
 }
@@ -80,6 +82,7 @@ mod tests {
     #[test]
     fn taking_over_the_mouse_and_browsing_are_consequential() {
         assert_eq!(risk_of(&Call::TakeOver("fill the form".into())), Risk::Consequential);
+        assert_eq!(risk_of(&Call::RunCheck("cargo test".into())), Risk::Consequential, "a check asks once per workspace");
         assert_eq!(risk_of(&Call::Browser { tool: "browser_click".into(), args: json!({}) }), Risk::Consequential);
     }
 
@@ -108,6 +111,7 @@ mod tests {
             Call::Power("sleep".into()), Call::Power("restart".into()), Call::Power("shutdown".into()), Call::Power("logout".into()),
             Call::Power("lock".into()), Call::TakeOver("fill the form".into()), Call::Browser { tool: "browser_click".into(), args: json!({}) },
             Call::Open("Spotify".into()), Call::Volume("up".into()), Call::WebSearch("x".into()), Call::FindFile("cv".into()),
+            Call::RunCheck("cargo test".into()), Call::GitStatus,
         ];
         for c in &calls {
             assert_eq!(approval_for(c).is_some(), needs_approval(risk_of(c)), "{c:?}: the question and the level must agree");

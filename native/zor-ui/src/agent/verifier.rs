@@ -19,6 +19,8 @@ pub enum Kind {
     ReadBack,
     /// Something happens on the device or in an app, and nothing reports back what it did (volume, opening an app).
     Action,
+    /// A project check (`run_check`): its exit code is the evidence.
+    Check,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,10 @@ pub enum Check {
     Failed,
     /// The user said no to the tool. Not a failure of the tool: nothing was done, by choice.
     Declined,
+    /// A project check ran and exited 0.
+    Passed,
+    /// A project check ran and did not pass (exit code, or time limit). It stays failed for the whole request.
+    CheckFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +61,7 @@ pub fn kind_of(call: &Call) -> Kind {
         WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
         Radio { .. } | Brightness(_) => Kind::ReadBack,
+        RunCheck(_) => Kind::Check,
         // a page that loads or is read is evidence; a click or typing is an action that nothing reports back on
         Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
         _ => Kind::Action,
@@ -63,9 +70,15 @@ pub fn kind_of(call: &Call) -> Kind {
 
 /// The check for one tool result, from what the tool reported.
 pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
-    let Ok(text) = result else { return Check::Failed };
+    let text = match result {
+        Ok(t) => t,
+        // a check that ran and did not pass stays failed; one that never started (refused, not installed) is a plain failure
+        Err(e) if kind == Kind::Check && e.starts_with("The check ") => return Check::CheckFailed,
+        Err(_) => return Check::Failed,
+    };
     let t = text.trim();
     match kind {
+        Kind::Check => Check::Passed,
         Kind::Play => if t.starts_with("Playing") { Check::Verified } else { Check::Unverified },
         Kind::Memory => if t.starts_with("Remembered") || t.starts_with("Updated what I remember") || t.starts_with("Forgot:") { Check::Verified } else { Check::Unverified },
         Kind::Lookup => if !t.is_empty() && !t.starts_with("No ") { Check::Verified } else { Check::Failed },
@@ -85,10 +98,22 @@ pub fn judge(checks: &[Check]) -> Verdict {
     let ran: Vec<Check> = checks.iter().copied().filter(|c| *c != Check::Declined).collect();
     if ran.is_empty() { return if declined { Verdict::Declined } else { Verdict::Completed }; }
     if declined { return Verdict::Partial; }
+    // a check that did not pass is not undone by a later lookup, so the request is never Completed after one
+    if ran.contains(&Check::CheckFailed) {
+        return if ran.iter().any(|c| !matches!(c, Check::Failed | Check::CheckFailed)) { Verdict::Partial } else { Verdict::Failed };
+    }
     match ran.last() {
         Some(Check::Failed) => if ran.iter().any(|c| *c != Check::Failed) { Verdict::Partial } else { Verdict::Failed },
-        _ => if ran.iter().filter(|c| **c != Check::Failed).all(|c| *c == Check::Verified) { Verdict::Completed } else { Verdict::Unverified },
+        _ => if ran.iter().filter(|c| **c != Check::Failed).all(|c| matches!(c, Check::Verified | Check::Passed)) { Verdict::Completed } else { Verdict::Unverified },
     }
+}
+
+/// Whether an answer says the code works: tests pass, it builds, clippy is clean. A Completed answer that says so with no
+/// project check run is Unverified (`agent::outcome`). Keywords only, so it can miss a claim, never invent one.
+pub fn claims_code_result(answer: &str) -> bool {
+    let a = answer.to_lowercase();
+    ["clippy", "compiles", "compiled", "tests pass", "tests passed", "test passed", "builds", "build passed",
+     "build succeeded", "no errors", "no warnings", "checks pass", "check passed"].iter().any(|k| a.contains(k))
 }
 
 /// The sentence to add to the answer for this verdict, or None when nothing needs saying. An unverified action (volume,
@@ -198,5 +223,28 @@ mod tests {
         let click = Call::Browser { tool: "browser_click".into(), args: serde_json::json!({}) };
         assert_eq!(check(kind_of(&click), &ok("Clicked.")), Check::Unverified);
         assert_eq!(judge(&[Check::Verified, Check::Unverified]), Verdict::Unverified, "a click after a loaded page is still unverified");
+    }
+
+    #[test]
+    fn a_passed_check_is_evidence_and_a_failed_one_is_not_completed() {
+        let run = |s: &str| check(Kind::Check, &ok(s));
+        assert_eq!(kind_of(&Call::RunCheck("cargo test".into())), Kind::Check);
+        assert_eq!(run("The check passed: \"cargo test\" exited with code 0."), Check::Passed, "exit 0 is evidence");
+        assert_eq!(judge(&[Check::Passed]), Verdict::Completed);
+        assert_eq!(check(Kind::Check, &Err("The check failed: \"cargo test\" exited with code 101.".into())), Check::CheckFailed);
+        assert_eq!(check(Kind::Check, &Err("The check ran out of time: \"cargo test\" was stopped.".into())), Check::CheckFailed);
+        assert_eq!(check(Kind::Check, &Err("cargo isn't installed, so \"cargo test\" did not run.".into())), Check::Failed, "a check that never started is a plain failure");
+        assert_eq!(judge(&[Check::CheckFailed]), Verdict::Failed);
+        assert_eq!(judge(&[Check::Passed, Check::CheckFailed]), Verdict::Partial, "a failed check is never Completed");
+        assert_eq!(judge(&[Check::CheckFailed, Check::Verified]), Verdict::Partial, "a later lookup does not clear it");
+        assert_eq!(judge(&[Check::CheckFailed, Check::Declined]), Verdict::Partial);
+    }
+
+    #[test]
+    fn a_code_claim_needs_a_check_and_a_plain_answer_does_not() {
+        assert!(claims_code_result("All tests pass now."));
+        assert!(claims_code_result("cargo clippy is clean."));
+        assert!(!claims_code_result("Playing lofi by X."));
+        assert!(!claims_code_result("Wi-Fi is on."));
     }
 }

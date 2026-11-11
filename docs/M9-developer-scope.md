@@ -1,6 +1,7 @@
 # M9: Developer skill, scope
 
-Status: proposal. Nothing here is built yet. Items marked **Decision** need your answer before M9 starts.
+Status: M9a (read-only) and M9b (checks) are built. M9c (edits) is not started. Items marked **Decided** carry your answer;
+items marked **Open** are still waiting for you.
 
 ## Goal
 
@@ -22,7 +23,15 @@ every risky call goes through the policy layer that already exists (`agent/polic
   `agent::inside()` compares strings only, so a junction or symlink inside a workspace could point outside it. The
   developer tools must not reuse that check as it is.
 - A path that does not resolve inside the workspace is refused with a reason, and the refusal is logged.
-- **Decision:** which folders are workspaces at first. Suggestion: only the Zor-UI repository.
+- **Decided:** the workspace is a folder Buddy creates itself, a new test folder, and it is the only workspace for now.
+  The Zor-UI repository is NOT a workspace. The setting is the existing `buddies.developerWorkspace` key. When it is unset,
+  the developer tools stay unavailable, except that the create helper below may make the test folder when asked.
+- **Test folder:** `developer::create_test_workspace()` writes `%LOCALAPPDATA%\zor-ui\dev-workspace`: a small Cargo project
+  (`Cargo.toml`, `.gitignore`, `src\main.rs`) written by hand, with no `cargo new` and no network. Files already there are
+  kept. It runs only when called, never at startup, and it does not write Settings: you set `buddies.developerWorkspace` to
+  that folder yourself. No button calls it yet; the Settings button comes later.
+- A `..` in the setting is refused. A junction or symlink in the setting is followed (the setting is your own choice, not AI
+  text); the AI's paths are checked as in M9a.
 
 ## Tools and risk levels
 
@@ -38,11 +47,11 @@ bypass the policy (brief section 3.2).
 | `edit_file` | replace text in one file in the workspace, written atomically, with a backup | Reversible | per task, see below |
 | `run_check` | run one allowed command (see Commands) in the workspace, with a timeout | Consequential | per workspace, see below |
 
-**Decision:** should `edit_file` ask each time, or once per task? Suggestion: once per task, with the list of files
+**Open** (for M9c): should `edit_file` ask each time, or once per task? Suggestion: once per task, with the list of files
 shown in the island before the first edit.
 
-**Decision:** should `run_check` ask once per workspace or every time? Suggestion: once per workspace, and the question
-names the command.
+**Decided:** `run_check` asks once per workspace, and the question names the command. The yes is kept in memory for the
+rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no makes the task Declined.
 
 ## Commands (`run_check`)
 
@@ -51,7 +60,16 @@ names the command.
 - Each runs with the workspace as its working directory, with no shell, a time limit (suggest 10 minutes), and output
   capped at a fixed size.
 - Anything not on the list is refused before it runs. Nothing is added to the list by the AI.
-- **Decision:** which extra commands to allow, if any. Suggestion: none beyond cargo for now.
+- **Decided:** no extra commands. The list is exactly `cargo check`, `cargo test`, `cargo build`, `cargo build --release`
+  and `cargo clippy`, held in `developer::CHECKS`. The AI chooses by name; the argument lists are fixed in code.
+- **Built limits (M9b):** no shell (`std::process::Command`, stdin closed); the working directory is the canonical
+  workspace; a wall-clock limit of 10 minutes, after which the child is killed (a cargo child's `rustc` may outlive it on
+  Windows); stdout and stderr are redacted, then cut to their last 16 KB with a note that the start was cut.
+- Verdicts: a check that exits 0 is passing evidence. A check that failed (exit code or time limit) keeps the task from
+  Completed for the whole request, even when a later lookup works. A task that claims a code result (tests pass, builds,
+  clippy clean) with no check run ends Unverified. A refused name asks nothing and starts nothing.
+- Not in M9b: `edit_file`, and the rule that the next check must pass after the last edit (M9c). A failed check is not
+  run again within one request (the generic rule for acting calls refuses a repeat), so a retry needs an edit first.
 
 ## Secrets
 
@@ -79,15 +97,15 @@ names the command.
 
 ## Split
 
-- **M9a (read-only):** `list_tree`, `read_file`, `search_code`, `git_diff`, the workspace check, the secrets rules, and
-  their tests. No approvals needed, so it is safe to ship first.
-- **M9b (checks):** `run_check` with the command list, its approval, and the verifier change.
-- **M9c (edits):** `edit_file`, its approval, the backups, and the task-level verification.
+- **M9a (read-only, built):** `list_tree`, `read_file`, `search_code`, `git_status` (the scope named `git_diff`; the built tool is
+  `git_status`, which prints the status and a diff summary), the workspace check, the secrets rules, and their tests.
+- **M9b (checks, built):** `run_check` with the command list, its approval, the limits, and the verifier change.
+- **M9c (edits, not started):** `edit_file`, its approval, the backups, and the task-level verification.
 
 ## Open decisions, in one list
 
-1. Which folders are workspaces at first (suggest: the Zor-UI repository only).
-2. Whether `edit_file` asks once per task or every time (suggest: once per task).
-3. Whether `run_check` asks once per workspace or every time (suggest: once per workspace).
-4. Which commands beyond cargo to allow (suggest: none).
-5. Whether M9a ships before M9b and M9c (suggest: yes).
+1. Which folders are workspaces at first. **Decided:** a test folder Buddy creates; the Zor-UI repository is not a workspace.
+2. Whether `edit_file` asks once per task or every time. **Open** (decided with M9c; suggestion: once per task).
+3. Whether `run_check` asks once per workspace or every time. **Decided:** once per workspace, for the app session.
+4. Which commands beyond cargo to allow. **Decided:** none; the five cargo entries only.
+5. Whether M9a ships before M9b and M9c. **Done:** M9a shipped first, then M9b.

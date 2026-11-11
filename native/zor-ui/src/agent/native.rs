@@ -42,6 +42,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("read_file", "Reads a text file in the developer workspace. Secret files are refused.", &[("arg", "file path inside the workspace")], &["arg"]),
         tool("search_code", "Finds the lines in the developer workspace that contain the words.", &[("arg", "the words")], &["arg"]),
         tool("git_status", "Shows the git status and a diff summary of the developer workspace.", &[], &[]),
+        tool("run_check", "Runs one fixed check in the developer workspace and says whether it passed. The user is asked once per workspace. Only when asked to build, test or check the project.", &[("arg", "cargo check, cargo test, cargo build, cargo build --release or cargo clippy")], &["arg"]),
     ]
 }
 
@@ -117,7 +118,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 25, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 26, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -227,7 +228,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 25);
+        assert_eq!(names.len(), 26);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

@@ -4,7 +4,11 @@
 
 use crate::bridge::common::hidden;
 use crate::conf::Config;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{mpsc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Config key for the workspace folder. Empty or missing turns the developer tools off.
 const KEY: &str = "buddies.developerWorkspace";
@@ -24,6 +28,7 @@ const SKIP_DIRS: [&str; 3] = ["target", "node_modules", "dist"];
 pub fn workspace(cfg: &Config) -> Result<PathBuf, String> {
     let w = cfg.str(KEY).trim();
     if w.is_empty() { return Err("No developer workspace is set in Settings.".into()); }
+    if Path::new(w).components().any(|c| matches!(c, Component::ParentDir)) { return Err("The developer workspace in Settings has \"..\" in it. Give the full folder path.".into()); }
     std::fs::canonicalize(w).ok().filter(|p| p.is_dir()).ok_or_else(|| "The developer workspace in Settings is not a folder.".to_string())
 }
 
@@ -161,6 +166,128 @@ pub fn git_status(ws: &Path) -> Result<String, String> {
     Ok(redact(&text).chars().take(RESULT_CHARS).collect())
 }
 
+/// One check `run_check` may run. The argument list is fixed here, so no AI text ever becomes an argument.
+#[derive(Debug)]
+pub struct CheckSpec {
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+}
+
+pub static CHECKS: [CheckSpec; 5] = [
+    CheckSpec { name: "cargo check", args: &["check"] },
+    CheckSpec { name: "cargo test", args: &["test"] },
+    CheckSpec { name: "cargo build", args: &["build"] },
+    CheckSpec { name: "cargo build --release", args: &["build", "--release"] },
+    CheckSpec { name: "cargo clippy", args: &["clippy"] },
+];
+/// The wall-clock limit of one check. A check still running at the limit is killed.
+const CHECK_LIMIT: Duration = Duration::from_secs(600);
+/// The most output a check adds to the AI's result. The tail is kept, since a build or test run ends with its answer.
+const OUTPUT_BYTES: usize = 16_384;
+/// Workspaces the user said yes to running checks in. Memory only, for this app session: never Settings, the key store or buddy.db.
+static CHECK_YES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The fixed entry for a check name the AI gave. Only an exact name from the list is accepted.
+pub fn check_named(name: &str) -> Result<&'static CheckSpec, String> {
+    let n = name.trim();
+    CHECKS.iter().find(|c| c.name == n).ok_or_else(|| {
+        let list: Vec<&str> = CHECKS.iter().map(|c| c.name).collect();
+        format!("\"{n}\" is not a check I can run. Use one of: {}.", list.join(", "))
+    })
+}
+
+/// Whether the user already said yes to checks in this workspace during this app session.
+pub fn check_allowed_here(ws: &Path) -> bool { CHECK_YES.lock().is_ok_and(|v| v.iter().any(|p| p == ws)) }
+
+pub fn remember_check_yes(ws: &Path) {
+    if let Ok(mut v) = CHECK_YES.lock() { if !v.iter().any(|p| p == ws) { v.push(ws.to_path_buf()); } }
+}
+
+/// Runs one check in `ws` (a workspace from `workspace`). The caller checks the name and gets the user's yes first.
+pub fn run_check(ws: &Path, name: &str) -> Result<String, String> {
+    let spec = check_named(name)?;
+    run_program(ws, spec.name, "cargo", spec.args, CHECK_LIMIT)
+}
+
+/// Runs `program args` in `ws` with no shell, stdin closed and both output streams captured. A run still going at `limit` is
+/// killed. Ok when it exits 0; otherwise Err, and an Err that starts "The check " is a check that ran and did not pass. The
+/// output is redacted and cut to its last `OUTPUT_BYTES`. `program` comes from the fixed table; tests pass a harmless one.
+pub fn run_program(ws: &Path, label: &str, program: &str, args: &[&str], limit: Duration) -> Result<String, String> {
+    let mut child = hidden(program).args(args).current_dir(ws).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .map_err(|_| format!("{program} isn't installed or could not start, so \"{label}\" did not run."))?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let mut pipes = 0;
+    if let Some(out) = child.stdout.take() { pipes += 1; drain(out, tx.clone()); }
+    if let Some(err) = child.stderr.take() { pipes += 1; drain(err, tx.clone()); }
+    drop(tx);
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
+        }
+    };
+    // a grandchild (rustc under cargo) can hold a pipe open after the child is gone, so the wait for output is short
+    let mut bytes = vec![];
+    for _ in 0..pipes { if let Ok(b) = rx.recv_timeout(Duration::from_secs(2)) { bytes.extend(b); } }
+    let out = cap_tail(&redact(&String::from_utf8_lossy(&bytes)), OUTPUT_BYTES);
+    let head = match status {
+        None => format!("The check ran out of time: \"{label}\" was stopped."),
+        Some(s) if s.success() => format!("The check passed: \"{label}\" exited with code 0."),
+        Some(s) => format!("The check failed: \"{label}\" exited with code {}.", s.code().unwrap_or(-1)),
+    };
+    let text = if out.is_empty() { head } else { format!("{head}\n{out}") };
+    match status {
+        Some(s) if s.success() => Ok(text),
+        _ => Err(text),
+    }
+}
+
+/// Reads a pipe to its end on a thread and sends the last `OUTPUT_BYTES` it kept (a longer read is cut as it goes).
+fn drain(mut pipe: impl Read + Send + 'static, tx: mpsc::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let mut kept = vec![];
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 { break; }
+            kept.extend_from_slice(&chunk[..n]);
+            if kept.len() > 4 * OUTPUT_BYTES { kept.drain(..kept.len() - OUTPUT_BYTES); }
+        }
+        let _ = tx.send(kept);
+    });
+}
+
+/// The last `max` bytes of `text`, from a character boundary, with a note on top when anything was cut.
+pub fn cap_tail(text: &str, max: usize) -> String {
+    if text.len() <= max { return text.to_string(); }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) { start += 1; }
+    format!("(cut short: the start of the output is not shown)\n{}", &text[start..])
+}
+
+/// The test folder for the developer tools: `%LOCALAPPDATA%\zor-ui\dev-workspace`, a small Cargo project written by hand (no
+/// `cargo new`, no network). Files already there are kept. Made only when asked, never at startup. The user then sets
+/// `buddies.developerWorkspace` to the folder.
+#[allow(dead_code)] // no caller yet: the Settings button that asks for it comes after M9b
+pub fn create_test_workspace() -> Result<PathBuf, String> { create_test_workspace_in(&crate::conf::data_dir()) }
+
+fn create_test_workspace_in(root: &Path) -> Result<PathBuf, String> {
+    const FILES: [(&str, &str); 3] = [
+        ("Cargo.toml", "[package]\nname = \"dev-workspace\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"),
+        (".gitignore", "/target\n"),
+        ("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n"),
+    ];
+    let dir = root.join("dev-workspace");
+    std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    for (rel, text) in FILES {
+        let path = dir.join(rel);
+        if path.exists() { continue; }
+        std::fs::write(&path, text).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +390,89 @@ mod tests {
         assert!(workspace(&none).unwrap_err().contains("No developer workspace"));
         let missing = Config::parse(r#"{"buddies":{"developerWorkspace":"Z:\\no\\such\\folder"}}"#);
         assert!(workspace(&missing).unwrap_err().contains("not a folder"));
+    }
+
+    fn cfg_for(path: &Path) -> Config {
+        Config::parse(&serde_json::json!({ "buddies": { "developerWorkspace": path.display().to_string() } }).to_string())
+    }
+
+    #[test]
+    fn the_workspace_setting_is_canonical_and_never_has_dot_dot() {
+        let w = ws("setting");
+        assert_eq!(workspace(&cfg_for(&w)).unwrap(), w, "the setting resolves to its real folder");
+        // a plain (not canonical) path: a \\?\ path does not treat .. as a parent step, so only this form shows the refusal
+        let plain = std::env::temp_dir().join(format!("zorui-dev-setting-{}", std::process::id())).join("src").join("..");
+        let err = workspace(&cfg_for(&plain)).unwrap_err();
+        assert!(err.contains("\"..\""), "a .. in the setting is refused: {err}");
+    }
+
+    #[test]
+    fn check_names_are_the_fixed_list_and_nothing_else() {
+        assert_eq!(check_named("cargo test").unwrap().args, &["test"]);
+        assert_eq!(check_named("  cargo build --release ").unwrap().args, &["build", "--release"]);
+        for bad in ["", "cargo", "CARGO TEST", "cargo publish", "cargo test; del x", "cargo test && echo", "cargo test --", "cmd /C del x"] {
+            assert!(check_named(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(check_named("cargo publish").unwrap_err().contains("cargo clippy"), "the refusal lists what is allowed");
+    }
+
+    #[test]
+    fn output_is_capped_and_the_tail_is_kept() {
+        let long = format!("{}END", "a".repeat(50_000));
+        let capped = cap_tail(&long, OUTPUT_BYTES);
+        assert!(capped.starts_with("(cut short"), "the cut is marked");
+        assert!(capped.len() <= OUTPUT_BYTES + 60 && capped.ends_with("END"), "the end is kept, the start is not");
+        assert_eq!(cap_tail("short", OUTPUT_BYTES), "short");
+        let accents = "é".repeat(20_000);
+        assert!(cap_tail(&accents, 101).ends_with('é'), "a cut never splits a character");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_check_that_runs_past_its_limit_is_stopped() {
+        let w = ws("timeout");
+        let started = Instant::now();
+        // a fast fake command (ping sleeps for 30 seconds) with a 300 ms limit stands in for a long cargo run
+        let r = run_program(&w, "fake slow check", "ping", &["-n", "30", "127.0.0.1"], Duration::from_millis(300));
+        assert!(r.unwrap_err().starts_with("The check ran out of time"));
+        assert!(started.elapsed() < Duration::from_secs(20), "it was stopped, not waited for");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn check_output_is_redacted_and_a_failed_exit_is_a_check_that_failed() {
+        let w = ws("output");
+        let ok = run_program(&w, "fake", "cmd", &["/C", "echo api_key = hunter2"], Duration::from_secs(30)).unwrap();
+        assert!(ok.starts_with("The check passed") && ok.contains("[redacted]") && !ok.contains("hunter2"), "{ok}");
+        let bad = run_program(&w, "fake", "cmd", &["/C", "exit 3"], Duration::from_secs(30)).unwrap_err();
+        assert!(bad.starts_with("The check failed") && bad.contains("code 3"), "{bad}");
+    }
+
+    #[test]
+    fn a_program_that_cannot_start_is_not_a_check_that_ran() {
+        let w = ws("missing");
+        let err = run_program(&w, "fake", "zorui-no-such-program-anywhere", &[], Duration::from_secs(5)).unwrap_err();
+        assert!(!err.starts_with("The check "), "{err}");
+    }
+
+    #[test]
+    fn the_test_workspace_is_a_cargo_project_and_is_never_overwritten() {
+        let root = std::env::temp_dir().join(format!("zorui-dev-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = create_test_workspace_in(&root).unwrap();
+        assert_eq!(dir, root.join("dev-workspace"));
+        assert!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap().contains("name = \"dev-workspace\""));
+        assert!(dir.join("src").join("main.rs").is_file() && dir.join(".gitignore").is_file());
+        std::fs::write(dir.join("Cargo.toml"), "mine").unwrap();
+        create_test_workspace_in(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap(), "mine", "an existing file is kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_check_is_a_fixed_tool_for_the_model() {
+        use crate::agent::{parse_step, Call, Step};
+        assert_eq!(parse_step(r#"{"do":"run_check","arg":"cargo test"}"#), Step::Call { call: Call::RunCheck("cargo test".into()), more: false });
+        assert!(matches!(parse_step(r#"{"do":"run_check"}"#), Step::Bad(_)), "a check needs its name");
     }
 }

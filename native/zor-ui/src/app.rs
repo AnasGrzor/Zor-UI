@@ -257,7 +257,10 @@ impl App {
     }
 
     /// One bar per monitor while config "native" has "bar".
-    fn sync_bars(&mut self) {
+    fn sync_bars(&mut self) { self.place_bars(true) }
+
+    /// `restart_ok`: a bar that moved may restart the app (config changes). A display change rebuilds in place.
+    fn place_bars(&mut self, restart_ok: bool) {
         let want = self.cx.native("bar");
         if !want { self.bars.clear(); self.popup = None; return; }
         let (mons, _) = util::monitors();
@@ -269,11 +272,16 @@ impl App {
         let want: Vec<(i32, i32)> = mons.iter().map(|m| spot(*m)).collect();
         // every config.json change comes here (a hairstyle, a slider): only a bar that must move restarts the app
         if bars_current(&have, &want, self.bars_edge == edge) { return; }
-        if self.started { return restart(); }
+        // Only bars that existed and moved need a new process. With none at all, building them again is enough;
+        // restarting here looped forever (have [] vs want two bars, every pass).
+        if restart_ok && self.started && !have.is_empty() { crate::log::line(&format!("bars moved: have {have:?}, want {want:?}, edge {edge:?} was {:?}", self.bars_edge)); return restart(); }
         self.bars_edge = edge;
         self.bars.clear();
         for (m, (x, y)) in mons.into_iter().zip(want) {
-            let Ok(mut w) = Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left, m.bottom - m.top), edge, (x, y))), "Zor UI / bar", x, y, Z::Normal, false) else { continue };
+            let mut w = match Win::new(Box::new(Bar::new((m.left, m.top, m.right - m.left, m.bottom - m.top), edge, (x, y))), "Zor UI / bar", x, y, Z::Normal, false) {
+                Ok(w) => w,
+                Err(e) => { crate::log::line(&format!("bar window failed at {x},{y}: {e}")); continue; }
+            };
             w.update(&self.g, &self.cx, true);
             w.move_to(x, y);
             w.show();
@@ -732,9 +740,10 @@ impl App {
             return;
         }
         if msg == WM_DISPLAYCHANGE {
-            self.bars.clear();
+            crate::log::line(&format!("display changed: {} bars", self.bars.len()));
+            // Bars stay up unless their monitor spots moved: a rebuild is what flickered on each fullscreen switch.
             self.pops.clear();
-            self.sync_bars();
+            self.place_bars(false);
             desk::sync(self);
             return;
         }
@@ -814,10 +823,12 @@ fn bars_current(have: &[(i32, i32)], want: &[(i32, i32)], same_edge: bool) -> bo
 }
 
 /// Starts a new zorui and exits this one (once, however many messages ask).
+#[track_caller]
 fn restart() {
     use std::{os::windows::process::CommandExt, sync::atomic::AtomicBool};
     static GOING: AtomicBool = AtomicBool::new(false);
     if GOING.swap(true, Ordering::SeqCst) { return; }
+    crate::log::line(&format!("restarting, requested at {}", std::panic::Location::caller()));
     let Ok(exe) = std::env::current_exe() else { GOING.store(false, Ordering::SeqCst); return };
     let spawned = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &restart_script(&exe.to_string_lossy())])
         .creation_flags(0x0800_0000).spawn();
@@ -836,7 +847,7 @@ fn on_monitor(m: RECT, w: RECT) -> bool {
     x >= m.left && x < m.right && y >= m.top && y < m.bottom
 }
 
-fn dpi_scale(r: RECT) -> f32 {
+pub fn dpi_scale(r: RECT) -> f32 {
     let (mut x, mut y) = (96u32, 96u32);
     unsafe {
         let m = MonitorFromPoint(POINT { x: r.left + 1, y: r.top + 1 }, MONITOR_DEFAULTTONEAREST);

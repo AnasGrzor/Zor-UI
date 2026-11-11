@@ -13,3 +13,17 @@ When you add a setting that changes how something looks (a color, size, shape, w
 - Add a unit test for any logic the preview adds (color fallback, sample data). Pixels need no test.
 
 Existing examples: `glass_preview` and `viz_preview` in `native/zor-ui/src/settings/pages.rs`.
+
+## Padding: nothing is squeezed
+
+Every control, card, chip, row, badge and text block gets room around it. Text never touches the edge of its box, and two boxes never share an edge.
+
+- Cards and panels: at least 12 px inside, on every side. Use the existing `CARD_PAD` / `PAD` constants, not a new number.
+- Chips, pills and buttons: at least 6 px above and below inside their row, and 8 px between neighbors. A chip row gets its own top and bottom padding, as `CHIPS_PAD` does.
+- Gaps between sections, cards and agents: at least 8 px. Sections that stack get a gap, never zero.
+- Text inside a fixed-height box: keep the box at least as tall as the line height plus 4 px. A label that does not fit wraps or shortens, it never overlaps its neighbor.
+- Use the constants in the file being drawn. If a value is missing, add a named constant next to the others, with a comment on what it spaces.
+- Check at the narrowest width the panel can reach (see `compact()` in `bar.rs`), not only at the default width.
+- Layout tests: when a height function such as `agent_h` or `session_h` changes, update its test, so the reserved height matches what the draw code uses.
+
+**Why:** squeezed rows read as broken, and the island is small, so every missing pixel shows.

@@ -119,6 +119,9 @@ declined is never treated as done. The `steps` column is added to databases from
 - **Retries.** A read-only tool that fails (a search, a page read) is tried once more after 400 ms. Anything that acts is
   never repeated (`policy::may_retry`).
 - **Replanning.** A failed tool's error goes back to the model, which picks another route. The loop itself does not plan.
+- **Failure hints (M6).** The error also gets one hint for the model: turned off in Settings (do not retry), nothing matched
+  (try find_app or find_file), the PC did not answer (one more try), or a wrong argument (use a listed value). The hint
+  comes from `agent/diagnose.rs`, matched on the tools' current wording. The user never sees it.
 - **Model fallback.** If the model fails before any tool has run, the next model in the fallback list (`ai.fallback1`, `ai.fallback2`) tries the same
   request. After a tool has run, the request is never retried on another model.
 - **Routing.** A request with words like "then", "compare" or "research" goes to `ai.strongModel` when that is set.
@@ -134,6 +137,10 @@ previous request, and the names of recently opened files. Each part is filled on
   the Windows Recent folder go in, labelled as names only and never instructions. Only names are sent, and only on request.
 - **Vague requests.** A request that points back, with no earlier request and no earlier turn, gets one instruction: ask one
   short question about what it means.
+- **Investigate before asking (M6).** An unclear request ("fix this") takes the first object it can find, in this order: the
+  active project, then the window in front (its title is read, nothing is acted on), then the last request or conversation.
+  The buddy states the assumption and goes ahead. It asks one question only when none of these exist. Each question is logged
+  as `buddy asks one question for "<request>": <question>`, so the question rate can be counted from the log.
 - **Budget.** The whole context is cut to 700 characters. `skills.rs` has three skills with their tools and short guidance:
 research (search, read pages), desktop (apps, volume, brightness, media, screen, take-over) and personal (remember, forget,
 files, messages, music). A skill's guidance goes into the request only when its words appear, so most requests carry none.

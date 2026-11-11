@@ -5,6 +5,7 @@
 //! sign out) ask in the island first. A new tool that deletes, sends or types for the user must ask before it runs too.
 
 #[cfg(test)]
+pub mod diagnose;
 pub mod eval;
 pub mod history;
 pub mod memory;
@@ -746,10 +747,12 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     let timing = state::Timing::start();
     // what the buddy asked last time, if anything: this request is its answer
     let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let front = crate::drive::front_title();
     let ctx = intent::Context {
         previous_request: tasks::latest().is_some(),
         conversation: TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false),
-        project: project::wants_project(said) && project::from_title(&crate::drive::front_title(), &project::roots(cfg)).is_some(),
+        project: project::wants_project(said) && project::from_title(&front, &project::roots(cfg)).is_some(),
+        window: assist::short(front.trim(), 80),
         answering: pending.is_some(),
     };
     let a = intent::classify(said, &ctx);
@@ -758,7 +761,8 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     match intent::decide(a, &ctx) {
         // unclear with nothing to point at: the buddy asks one question, and no model is called
         intent::Decision::Ask(q) => {
-            crate::log::line("buddy asks one question: the request is unclear");
+            // every question is logged with its request, so the count of questions per request can be read from the log
+            crate::log::line(&format!("buddy asks one question for \"{}\": {q}", assist::short(said, 120)));
             if let Ok(mut t) = TURNS.lock() { remember(&mut t, said, &q, Instant::now()); }
             history::save(said, &q);
             *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(q.clone());
@@ -820,6 +824,10 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         let check = if declined.get() { verifier::Check::Declined } else { verifier::check(verifier::kind_of(c), &res) };
         if res.is_err() && !declined.get() && !policy::may_retry(c) { failed.borrow_mut().insert(format!("{c:?}")); }
         record.borrow_mut().end(&res, declined.get());
+        // the model reads one hint about what kind of failure this was; the user never sees it (diagnose.rs)
+        if let (Err(e), false) = (&res, declined.get()) {
+            if let Some(h) = diagnose::hint(e) { crate::log::line(&format!("buddy failure hint: {h}")); res = Err(format!("{e} {h}")); }
+        }
         evidence.borrow_mut().push(check);
         res
     };

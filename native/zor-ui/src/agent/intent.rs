@@ -38,6 +38,9 @@ pub struct Context {
     pub conversation: bool,
     /// The window in front is a project folder.
     pub project: bool,
+    /// The title of the window in front, read without acting. Empty when there is none. Something the user can see is
+    /// the likeliest object of "this", so an unclear request with a window in front is assumed, not asked about.
+    pub window: String,
     /// This request answers the question the buddy asked last time.
     pub answering: bool,
 }
@@ -70,8 +73,8 @@ pub fn classify(said: &str, ctx: &Context) -> Assessment {
     let w = words(said);
     let has = |list: &[&str]| w.iter().any(|x| list.contains(&x.as_str()));
     if has(&VAGUE) && has(&REFERENCE) {
-        // the object is unclear: a project in front, or something said or done before, gives it one
-        let confidence = if ctx.project || ctx.previous_request || ctx.conversation { Confidence::Medium } else { Confidence::Low };
+        // the object is unclear: a project or window in front, or something said or done before, gives it one
+        let confidence = if ctx.project || !ctx.window.is_empty() || ctx.previous_request || ctx.conversation { Confidence::Medium } else { Confidence::Low };
         return Assessment { kind: Kind::Unclear, confidence };
     }
     let kind = if has(&LOOKUP) { Kind::Lookup } else if has(&ACT) { Kind::Act } else if has(&SETTING) { Kind::Setting } else { Kind::Answer };
@@ -84,7 +87,9 @@ pub fn decide(a: Assessment, ctx: &Context) -> Decision {
     match a.confidence {
         Confidence::High => Decision::Proceed,
         Confidence::Medium => {
-            let what = if ctx.project { "the active project" } else { "the last thing we talked about" };
+            let what = if ctx.project { "the active project".to_string() }
+                else if !ctx.window.is_empty() { format!("the window in front, \"{}\"", ctx.window) }
+                else { "the last thing we talked about".to_string() };
             Decision::Assume(format!("Taking \"this\" to mean {what}."))
         }
         Confidence::Low => Decision::Ask("Which one do you mean? Tell me what should change, and I'll take it from there.".into()),
@@ -126,6 +131,42 @@ mod tests {
     fn an_answer_to_a_question_the_buddy_asked_is_taken_as_the_answer() {
         let answering = Context { answering: true, ..Context::default() };
         assert_eq!(classify("fix it", &answering), Assessment { kind: Kind::Answer, confidence: Confidence::High }, "the reply resolves the question");
+    }
+
+    /// Investigate first: an unclear request with a window in front takes that window as the object, and asks nothing.
+    #[test]
+    fn an_unclear_request_with_a_window_in_front_assumes_the_window() {
+        let ctx = Context { window: "notes.txt - Notepad".into(), ..Context::default() };
+        let a = classify("fix this", &ctx);
+        assert_eq!(a.confidence, Confidence::Medium);
+        match decide(a, &ctx) {
+            Decision::Assume(s) => assert!(s.contains("notes.txt - Notepad"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Requests that must not ask a question, each with the context it comes with.
+    #[test]
+    fn requests_that_are_clear_or_have_an_object_do_not_ask() {
+        let none = Context::default();
+        let window = Context { window: "main.rs - zor-ui".into(), ..Context::default() };
+        for (said, ctx) in [
+            ("what time is it", &none),
+            ("open Spotify", &none),
+            ("search for news about the election", &none),
+            ("turn wifi off", &none),
+            ("fix the bug in main.rs", &none),
+            ("make it better", &window),
+            ("fix this", &window),
+        ] {
+            assert!(!matches!(decide(classify(said, ctx), ctx), Decision::Ask(_)), "should not ask: {said}");
+        }
+    }
+
+    /// The one case that still asks: an unclear request with nothing on the table.
+    #[test]
+    fn an_unclear_request_with_nothing_to_point_at_still_asks() {
+        assert!(matches!(decide(classify("make it better", &Context::default()), &Context::default()), Decision::Ask(_)));
     }
 
     #[test]

@@ -404,6 +404,17 @@ pub fn power(what: &str, act: &mut dyn FnMut(&str) -> Result<(), String>) -> Res
 /// The one place a risky call asks the user first (`policy::approval_for`). A "no" comes back as an error, which the verifier
 /// records as Declined. The browser asks once per request, and not at all when Settings skips the question.
 fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
+    // every browser step asks once per request, whatever its level, so this comes before the level check; an unknown name is refused
+    if let Call::Browser { tool, .. } = call {
+        if policy::browser_risk(tool).is_none() { return Err(policy::no_such_browser_tool(tool)); }
+        if crate::browse::approved() { return Ok(()); }
+        let q = policy::approval_for(call).unwrap_or_default();
+        let asks = crate::browse::first_step_needs_yes(cfg);
+        if asks && !confirm(&q) { return Err(DECLINED.into()); }
+        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
+        crate::browse::approve_request();
+        return Ok(());
+    }
     if !policy::needs_approval(policy::risk_of(call)) { return Ok(()); }
     // a risky call with no question has no way to be approved, so it does not run
     let Some(q) = policy::approval_for(call) else { return Err("I can't run that safely.".into()) };
@@ -413,14 +424,6 @@ fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> 
         if developer::check_allowed_here(&ws) { return Ok(()); }
         if confirm(&q) { developer::remember_check_yes(&ws); return Ok(()); }
         return Err(DECLINED.into());
-    }
-    if matches!(call, Call::Browser { .. }) {
-        if crate::browse::approved() { return Ok(()); }
-        let asks = crate::browse::first_step_needs_yes(cfg);
-        if asks && !confirm(&q) { return Err(DECLINED.into()); }
-        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
-        crate::browse::approve_request();
-        return Ok(());
     }
     if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
 }

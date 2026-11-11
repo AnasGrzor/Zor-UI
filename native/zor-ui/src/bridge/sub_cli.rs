@@ -60,6 +60,12 @@ fn prompt(msgs: &[Value], system: &str) -> String {
     format!("{system}\n\n{}\n\nAssistant:", turns.join("\n\n"))
 }
 
+/// Antigravity's prompt: the last 12 turns (keeps it under the Windows command-line limit), no tools.
+fn agy_prompt(msgs: &[Value], system: &str) -> String {
+    let recent = &msgs[msgs.len().saturating_sub(12)..];
+    format!("Reply as the assistant to this conversation. Do not use tools.\n\n{}", prompt(recent, system))
+}
+
 /// Streams the reply as {"delta"} lines, then {"done"}.
 pub fn chat(provider: &str, msgs: &[Value], system: &str, out: &Sink) {
     let Some(&(_, cmd, label, args)) = spec(provider) else { out.emit(&json!({ "error": format!("unknown provider {provider}") })); return };
@@ -222,6 +228,14 @@ mod tests {
     fn builds_the_prompt() {
         let p = prompt(&[json!({ "role": "user", "content": "a" }), json!({ "role": "assistant", "content": "b" }), json!({ "role": "user", "content": "c" })], "sys");
         assert_eq!(p, "sys\n\nUser: a\n\nAssistant: b\n\nUser: c\n\nAssistant:");
+    }
+
+    #[test]
+    fn agy_gets_the_last_twelve_turns() {
+        let msgs: Vec<Value> = (0..20).map(|i| json!({ "role": "user", "content": format!("m{i}") })).collect();
+        let p = agy_prompt(&msgs, "sys");
+        assert!(p.starts_with("Reply as the assistant"));
+        assert!(!p.contains("m7\n") && p.contains("User: m8") && p.contains("User: m19"));
     }
 
     #[test]

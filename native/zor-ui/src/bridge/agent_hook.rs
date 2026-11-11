@@ -16,7 +16,7 @@ use super::claude_profile::Root;
 use super::common::{hidden, root};
 use serde_json::{json, Map, Value};
 use std::{
-    io::{IsTerminal, Read, Write},
+    io::{IsTerminal, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -25,6 +25,8 @@ const WAITING: &[&str] = &["PermissionRequest", "Elicitation"];
 const WORKING: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop",
     "PreCompact", "PostCompact", "ElicitationResult", "BeforeAgent", "BeforeTool", "AfterTool", "BeforeModel", "AfterModel", "PreCompress"];
 const DONE: &[&str] = &["Stop", "StopFailure", "AfterAgent", "agent-turn-complete"];
+/// Seconds the PermissionRequest hook may wait for Allow or Deny (permit.rs gives up a little sooner).
+const PERMIT_TIMEOUT: u32 = 120;
 const CLAUDE_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
     "Notification", "Elicitation", "ElicitationResult", "Stop", "StopFailure", "SessionEnd"];
 const CODEX_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"];
@@ -74,7 +76,7 @@ fn model_of(p: &Value) -> Option<Value> {
 fn now_s() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
 
 /// A file-name-safe version of `name` (80 chars at most).
-fn safe(name: &str) -> String {
+pub(super) fn safe(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '_' | '.' | '-') { c } else { '_' }).take(80).collect();
     if s.is_empty() { "default".into() } else { s }
 }
@@ -131,7 +133,46 @@ fn usage_of(p: &Value) -> Option<Map<String, Value>> {
     (!w.is_empty()).then_some(w)
 }
 
-fn write(path: &Path, data: &Value) -> std::io::Result<()> {
+/// Codex keeps its plan limits out of the hook payload. They sit in the session's rollout file, in the newest
+/// `rate_limits` of its token events. Read from the file's tail: the file grows large over a long session.
+fn codex_usage(p: &Value) -> Option<Map<String, Value>> {
+    let path = p["transcript_path"].as_str().map(PathBuf::from).filter(|f| f.is_file())
+        .or_else(|| rollout_of(&home().join(".codex").join("sessions"), first_str(p, &["session_id", "session", "thread-id"])))?;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(256 * 1024))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    codex_windows(&String::from_utf8_lossy(&buf))
+}
+
+/// The session's rollout file: `rollout-<date>-<session id>.jsonl` somewhere under the sessions folder.
+fn rollout_of(dir: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() { return None; }
+    let end = format!("{id}.jsonl");
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() { if let Some(f) = rollout_of(&p, id) { return Some(f); } }
+        else if p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&end)) { return Some(p); }
+    }
+    None
+}
+
+/// The newest rate limits in a rollout's text, named like Claude's windows (300 minutes is five_hour, a week seven_day).
+fn codex_windows(text: &str) -> Option<Map<String, Value>> {
+    text.lines().rev().filter(|l| l.contains("\"rate_limits\"")).find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        let rl = v.pointer("/payload/rate_limits").or(v.get("rate_limits"))?;
+        let w: Map<String, Value> = ["primary", "secondary"].into_iter().filter_map(|k| {
+            let win = rl.get(k)?;
+            let name = match win["window_minutes"].as_u64()? { 300 => "five_hour".to_string(), 10080 => "seven_day".to_string(), _ => k.to_string() };
+            Some((name, json!({ "used_percentage": win["used_percent"].as_f64()?, "resets_at": win["resets_at"].clone() })))
+        }).collect();
+        (!w.is_empty()).then_some(w)
+    })
+}
+
+pub(super) fn write(path: &Path, data: &Value) -> std::io::Result<()> {
     if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, data.to_string())?;
@@ -141,20 +182,27 @@ fn write(path: &Path, data: &Value) -> std::io::Result<()> {
 /// Stores one payload under `agents` (one file per session, so parallel hooks never race).
 fn record(agents: &Path, agent: &str, p: &Value) -> std::io::Result<()> {
     let d = agents.join(safe(agent));
-    if let Some(w) = usage_of(p) {
+    if let Some(w) = usage_of(p).or_else(|| (agent == "codex").then(|| codex_usage(p)).flatten()) {
         let model = p["model"]["display_name"].as_str().unwrap_or("");
         write(&d.join("usage.json"), &json!({ "windows": w, "model": model, "at": now_s() }))?;
     }
     let id = first_str(p, &["session_id", "session", "thread-id"]);
     let f = d.join(format!("{}.json", safe(id)));
     let old: Value = std::fs::read_to_string(&f).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    let Some((state, message)) = state_of(p) else {
+    let Some((state, mut message)) = state_of(p) else {
         // the status line carries no state, but it names the model the session uses now
         if let (Some(m), true) = (model_of(p), old.is_object()) { let mut rec = old; rec["model"] = m; write(&f, &rec)?; }
         return Ok(());
     };
+    // Claude Code's permission_prompt Notification arrives ~6 s after PermissionRequest with a generic text: keep the tool detail.
+    let kept = old["message"].as_str().unwrap_or("");
+    if old["state"] == "waiting" && p["notification_type"] == "permission_prompt" && !kept.is_empty() { message = kept.to_string(); }
     if state == "ended" { let _ = std::fs::remove_file(f); return Ok(()); }
-    write(&f, &session_record(&old, p, state, &message, id, super::agent_restart::alive, super::agent_restart::capture))
+    let mut rec = session_record(&old, p, state, &message, id, super::agent_restart::alive, super::agent_restart::capture);
+    // a permission prompt: the island offers Allow and Deny (permit.rs). Its permission_prompt Notification keeps the mark.
+    let permission = p["hook_event_name"] == "PermissionRequest" || (p["notification_type"] == "permission_prompt" && old["ask"] == "permission");
+    if state == "waiting" && permission { rec["ask"] = json!("permission"); }
+    write(&f, &rec)
 }
 
 /// One session's record: the new state, plus what earlier events learned (process, environment, model, folder).
@@ -180,7 +228,15 @@ pub fn cli(args: &[String]) -> i32 {
     let mut text = String::from_utf8_lossy(&raw).trim_start_matches('\u{feff}').trim().to_string(); // some shells' pipes add a BOM
     if text.is_empty() { if let Some(l) = args.get(1..).and_then(|a| a.last()).filter(|l| l.starts_with('{')) { text = l.clone(); } } // Codex notify passes its JSON as an argument
     // never break the agent over a status update
-    let _ = serde_json::from_str::<Value>(if text.is_empty() { "{}" } else { &text }).ok().map(|p| record(&root().join("agents"), agent, &p));
+    let agents = root().join("agents");
+    if let Ok(p) = serde_json::from_str::<Value>(if text.is_empty() { "{}" } else { &text }) {
+        let asks = super::permit::PERMIT_AGENTS.contains(&agent.as_str()) &&p["hook_event_name"] == "PermissionRequest";
+        let id = first_str(&p, &["session_id", "session", "thread-id"]).to_string();
+        if asks { super::permit::clear(&id); } // a decision left from an earlier prompt must not answer this one
+        let _ = record(&agents, agent, &p);
+        // Claude Code shows its own prompt too: whichever answers first wins, and no answer leaves that prompt alone
+        if asks { if let Some(d) = super::permit::await_answer(&agents, agent, &id) { println!("{}", super::permit::hook_reply(&d)); } }
+    }
     if let Some(cmd) = then {
         use std::process::Stdio;
         if let Ok(mut c) = hidden(&cmd[0]).args(&cmd[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
@@ -210,6 +266,8 @@ fn add_hooks(path: &Path, cmd: &str, events: &[&str], status: bool, timeout: u32
     let mut changed = false;
     let hooks = data.as_object_mut().ok_or("settings is not an object")?.entry("hooks").or_insert_with(|| json!({}));
     for ev in events {
+        // a permission hook waits for the island's answer (permit.rs), so it needs more time than the others
+        let t = if *ev == "PermissionRequest" { PERMIT_TIMEOUT } else { timeout };
         let groups = hooks.as_object_mut().ok_or("hooks is not an object")?.entry(*ev).or_insert_with(|| json!([])).as_array_mut().ok_or("hook list is not an array")?;
         let mut found = false;
         for h in groups.iter_mut().filter_map(|g| g["hooks"].as_array_mut()).flatten() {
@@ -217,9 +275,10 @@ fn add_hooks(path: &Path, cmd: &str, events: &[&str], status: bool, timeout: u32
             found = true;
             let new = rewrap(cmd, &old);
             if new != old { h["command"] = json!(new); changed = true; }
+            if *ev == "PermissionRequest" && h["timeout"] != json!(t) { h["timeout"] = json!(t); changed = true; }
         }
         if !found {
-            let mut h = json!({ "type": "command", "command": cmd, "timeout": timeout });
+            let mut h = json!({ "type": "command", "command": cmd, "timeout": t });
             if status { h["async"] = json!(true); }
             groups.push(json!({ "hooks": [h] }));
             changed = true;
@@ -327,6 +386,17 @@ mod tests {
     }
 
     #[test]
+    fn permission_prompt_keeps_the_tool_detail() {
+        let d = tmp("perm");
+        let send = |p: Value| record(&d, "claude", &p).unwrap();
+        send(json!({ "hook_event_name": "PermissionRequest", "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "npm test" } }));
+        send(json!({ "hook_event_name": "Notification", "session_id": "s1", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash" }));
+        assert_eq!(summary(&d)["claude"]["message"], "Allow Bash: npm test");
+        assert_eq!(summary(&d)["claude"]["state"], "waiting");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn status_line_usage_drops_past_resets() {
         let d = tmp("usage");
         let later = now_s() + 3600.0;
@@ -335,6 +405,26 @@ mod tests {
         let a = &summary(&d)["claude"];
         assert_eq!(a["model"], "Opus");
         assert_eq!(a["usage"].as_object().unwrap().keys().collect::<Vec<_>>(), ["five_hour"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn codex_rate_limits_come_from_the_rollout() {
+        let text = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":4.0,"window_minutes":300,"resets_at":2000000000},"secondary":{"used_percent":1.0,"window_minutes":10080,"resets_at":2000600000}}}}"#;
+        let w = codex_windows(&format!("{text}\n{{\"type\":\"other\"}}\n")).unwrap();
+        assert_eq!(w["five_hour"]["used_percentage"], 4.0);
+        assert_eq!(w["seven_day"]["resets_at"], 2000600000);
+        assert!(codex_windows(r#"{"payload":{"rate_limits":null}}"#).is_none());
+    }
+
+    #[test]
+    fn codex_hook_reads_its_rollout_into_usage() {
+        let d = tmp("codex-usage");
+        let roll = d.join("rollout-x.jsonl");
+        std::fs::write(&roll, r#"{"payload":{"rate_limits":{"primary":{"used_percent":7.0,"window_minutes":300,"resets_at":4102444800}}}}"#).unwrap();
+        record(&d, "codex", &json!({ "session_id": "s1", "hook_event_name": "Stop", "transcript_path": roll })).unwrap();
+        let a = &summary(&d)["codex"];
+        assert_eq!(a["usage"]["five_hour"]["used_percentage"], 7.0);
         let _ = std::fs::remove_dir_all(&d);
     }
 

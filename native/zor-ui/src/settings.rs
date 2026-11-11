@@ -10,6 +10,7 @@
 mod form;
 mod layout;
 mod pages;
+mod wallpaper;
 pub(crate) mod store;
 pub(crate) mod picker;
 
@@ -65,7 +66,7 @@ pub struct Bl { pub id: String, sx: f32, sy: f32, x: f32, y: f32, pub ghost: boo
 
 /// What the Quick page reads from theme.json.
 #[derive(Default)]
-struct Info { mode: String, scheme: String, seed: String, live: bool, stamp: Option<std::time::SystemTime> }
+struct Info { mode: String, scheme: String, seed: String, live: bool, stamp: Option<std::time::SystemTime>, analysis: Value, profile: Value }
 
 /// hub key a desk card sets before opening Settings: "<page key>|<section title>".
 pub const GOTO: &str = "zor-ui.settingsGoto";
@@ -117,6 +118,10 @@ pub struct Settings {
     nav_view: f32,
     /// Hit ids `ACT0..ACT0 + nav_n` belong to the rail (the wheel over them scrolls it).
     nav_n: u32,
+    /// Collapsible sidebar: icon-rail mode when true or when window is compact.
+    pub nav_collapsed: bool,
+    /// Per-category scroll memory so navigation state is preserved across category switches.
+    pub page_scrolls: HashMap<usize, f32>,
     inbox: Inbox,
     /// A copy of the config for background callbacks (they have no `Ctx`).
     cfgc: Config,
@@ -148,6 +153,8 @@ pub struct Settings {
     flash: Option<(String, String, f64)>,
     busy: String,
     info: Info,
+    wallpaper_draft: Option<wallpaper::Draft>,
+    wallpaper_preview_cache: Vec<(String, HashMap<String, u32>)>,
     online: Load<Value>,
     local: Load<Vec<Value>>,
     we: Load<Value>,
@@ -231,9 +238,10 @@ impl Settings {
         let env = std::env::var("ZORUI_RENDER_PAGE").ok();
         let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or_else(|| page_from_key(hub::get(PAGE_KEY).as_deref()));
         let mut s = Settings {
-            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, nav_scroll: Scroll::default(), nav_h: 0.0, nav_view: 0.0, nav_n: 0, inbox: Inbox::default(), cfgc: Config::parse(""),
+            area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, nav_scroll: Scroll::default(), nav_h: 0.0, nav_view: 0.0, nav_n: 0,
+            nav_collapsed: false, page_scrolls: HashMap::new(), inbox: Inbox::default(), cfgc: Config::parse(""),
             over: HashMap::new(), glass_prev: None, buddy_sprites: Default::default(), creator_prev: None, creator_sprites: Default::default(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
-            busy: String::new(), info: Info::default(), online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, claude_arm: None, mons: Load::Idle, wmons: Load::Idle,
+            busy: String::new(), info: Info::default(), wallpaper_draft: None, wallpaper_preview_cache: vec![], online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, claude_arm: None, mons: Load::Idle, wmons: Load::Idle,
             models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
         };
         if std::env::var("ZORUI_RENDER_DEMO").is_ok() { s.demo(); }
@@ -248,15 +256,22 @@ impl Settings {
         self
     }
 
-    /// Shows page `i` and remembers it for the next open.
+    /// Shows page `i` and remembers it for the next open, preserving navigation state per category.
     fn set_page(&mut self, i: usize) {
-        self.page = i;
-        hub::set(PAGE_KEY, Some(PAGES[i].0.to_string()));
+        if self.page != i {
+            self.page_scrolls.insert(self.page, self.scroll.y);
+            self.page = i;
+            hub::set(PAGE_KEY, Some(PAGES[i].0.to_string()));
+            let saved_y = self.page_scrolls.get(&i).copied().unwrap_or(0.0);
+            self.scroll = Scroll::default();
+            self.scroll.y = saved_y;
+        }
     }
 
     /// Close button and Esc: forget the page so the next open starts on Quick, then close.
     fn close_settings(&mut self, cx: &mut Ctx) {
         hub::set(PAGE_KEY, None);
+        self.page_scrolls.clear();
         cx.actions.push(Action::Close("settings".into()));
     }
 
@@ -276,6 +291,17 @@ impl Settings {
     // ------------------------------------------------------------ config values
 
     fn lookup(&self, cfg: &Config, path: &str) -> Value {
+        if let Some(key) = path.strip_prefix("$theme.") {
+            if let Some(d) = &self.wallpaper_draft {
+                return match key {
+                    "perMonitor" => json!(d.per_monitor),
+                    "selection" => d.profile[key].as_str().map(|s| json!(s)).unwrap_or(json!("automatic")),
+                    "intensity" => d.profile[key].as_f64().map(|v| json!(v)).unwrap_or(json!(1.0)),
+                    _ => key.split('.').try_fold(&d.profile, |v, k| v.get(k)).cloned().unwrap_or(json!("")),
+                };
+            }
+            return Value::Null;
+        }
         if let Some((v, _)) = self.over.get(path) { return v.clone(); }
         match cfg.get(path) { Value::Null => default_for(path), v => v.clone() }
     }
@@ -292,6 +318,23 @@ impl Settings {
 
     /// set() in settings.js: remember the value, write it with the bridge.
     fn set(&mut self, path: &str, v: Value) {
+        if let Some(key) = path.strip_prefix("$theme.") {
+            if let Some(d) = &mut self.wallpaper_draft {
+                if key == "perMonitor" { d.per_monitor = v == true; }
+                else {
+                    let mut at = &mut d.profile;
+                    let parts: Vec<_> = key.split('.').collect();
+                    for part in &parts[..parts.len() - 1] {
+                        if !at[*part].is_object() { at[*part] = json!({}); }
+                        at = &mut at[*part];
+                    }
+                    let last = parts[parts.len() - 1];
+                    if key.starts_with("overrides.") && v == "" { if let Some(map) = at.as_object_mut() { map.remove(last); } }
+                    else { at[last] = v; }
+                }
+            }
+            return;
+        }
         self.over.insert(path.into(), (v.clone(), hub::now_ms()));
         store::config_set(self.cfgc_bridge(), path, &v, &self.inbox);
     }
@@ -366,9 +409,12 @@ impl Settings {
         let path = conf::pack_dir().join("theme.json");
         let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if stamp != self.info.stamp || self.info.mode.is_empty() {
+            // External wallpaper changes also replace the per-monitor files shown in Settings.
+            self.wmons = Load::Idle;
             let v: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
             let s = |k: &str, d: &str| v[k].as_str().filter(|s| !s.is_empty()).unwrap_or(d).to_string();
-            self.info = Info { mode: s("mode", "dark"), scheme: s("scheme", "auto"), seed: s("seed", "#6750a4"), live: v["live"].as_str().is_some_and(|l| !l.is_empty()) || v["live"] == true, stamp };
+            if self.wallpaper_draft.as_ref().is_some_and(|d| d.analysis["identity"] != v["analysis"]["identity"]) { self.wallpaper_draft = None; }
+            self.info = Info { mode: s("mode", "dark"), scheme: s("scheme", "auto"), seed: s("seed", "#6750a4"), live: v["live"].as_str().is_some_and(|l| !l.is_empty()) || v["live"] == true, stamp, analysis: v["analysis"].clone(), profile: v["profile"].clone() };
         }
     }
 
@@ -477,7 +523,7 @@ impl Settings {
                 f.orig = text.clone();
                 let v = if list { json!(text.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()) } else { json!(text) };
                 self.set(key, v);
-                self.toast("Saved");
+                if !key.starts_with("$theme.") { self.toast("Saved"); }
             }
             Kind::Num(min, max) if text != f.orig => {
                 f.orig = text.clone();
@@ -556,6 +602,7 @@ impl Settings {
     fn do_named(&mut self, cx: &mut Ctx, name: &'static str, arg: String) {
         let inbox = self.inbox.clone();
         match name {
+            "toggle-nav" => self.nav_collapsed = !self.nav_collapsed,
             "wall" => { self.wmons = Load::Idle; self.retheme(cx, &[], "wall") }
             // a Keybinds chip: start recording a combo for that key, or stop if it is the one recording
             "key-rec" => {
@@ -576,11 +623,13 @@ impl Settings {
                     if r["cancelled"] != true { if let Some(e) = store::failure(&r) { s.toast(&e); } }
                 });
             }
+            "wall-palettes" | "wall-candidate" | "wall-reset" | "wall-cancel" | "wall-apply" => self.wallpaper_action(cx, name, &arg),
+            "mode" | "scheme" if self.info.analysis.is_object() => self.wallpaper_action(cx, name, &arg),
             "mode" => self.retheme(cx, &["-Mode", &arg], "mode"),
             "scheme" => self.retheme(cx, &["-Scheme", &arg], "scheme"),
             "clearcolor" => self.set(&arg, json!("")),
             "pickcolor" => {
-                let start = conf::parse_hex(&self.gs(cx, &arg)).or_else(|| conf::parse_hex(&self.gs(cx, "visualizer.color"))).unwrap_or_else(|| cx.theme.c("primary"));
+                let start = conf::parse_hex(&self.gs(cx, &arg)).or_else(|| self.wallpaper_override_color(&arg)).or_else(|| conf::parse_hex(&self.gs(cx, "visualizer.color"))).unwrap_or_else(|| cx.theme.c("primary"));
                 self.menu = None;
                 self.pick_path = Some(arg);
                 self.picker = Some(picker::Picker::new(start, self.area));
@@ -1151,21 +1200,27 @@ impl View for Settings {
         ui::panel(c, cx, R::new(6.0, 6.0, w - 12.0, h - 12.0), 30.0);
 
         // navigation rail
-        c.rect(R::new(crate::tokens::DIVIDER_X, 28.0, 1.0, h - 56.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.5)); // rail | page
-        let mut nav = Pen::new(c, cx, crate::tokens::NAV_X, 22.0, crate::tokens::NAV_W, 0.0, h);
+        let collapsed = self.nav_collapsed || w < 760.0;
+        let nav_w = if collapsed { crate::tokens::NAV_COLLAPSED_W } else { crate::tokens::NAV_W };
+        let div_x = if collapsed { crate::tokens::DIVIDER_COLLAPSED_X } else { crate::tokens::DIVIDER_X };
+        let page_x = if collapsed { crate::tokens::PAGE_COLLAPSED_X } else { crate::tokens::PAGE_X };
+
+        c.rect(R::new(div_x, 28.0, 1.0, h - 56.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.5)); // rail | page
+        let mut nav = Pen::new(c, cx, crate::tokens::NAV_X, 22.0, nav_w, 0.0, h);
         let list_top = self.nav(&mut nav);
         let mut nav_acts = std::mem::take(&mut nav.acts);
         let (lr, ch) = nav_list(list_top, h);
+        let lr = R::new(crate::tokens::NAV_X, lr.y, nav_w, lr.h);
         c.hit(lr, NAV_BG);
         (self.nav_h, self.nav_view) = (ch, lr.h);
         let mut sc = std::mem::take(&mut self.nav_scroll);
         sc.region(c, cx, lr, ch, |c, top| {
-            let mut pen = Pen::new(c, cx, crate::tokens::NAV_X, top, crate::tokens::NAV_W, 0.0, h);
+            let mut pen = Pen::new(c, cx, crate::tokens::NAV_X, top, nav_w, 0.0, h);
             pen.acts = std::mem::take(&mut nav_acts);
             for (i, (_, ic, label)) in PAGES.iter().enumerate() {
                 let y = top + i as f32 * NAV_STEP;
                 if y + NAV_ITEM_H < lr.y || y > lr.y + lr.h { continue; } // hit spots ignore the clip
-                self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, crate::tokens::NAV_W, NAV_ITEM_H), ic, label, Act::Page(i), i == self.page);
+                self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, nav_w, NAV_ITEM_H), ic, label, Act::Page(i), i == self.page);
             }
             nav_acts = pen.acts;
         });
@@ -1173,7 +1228,7 @@ impl View for Settings {
         self.nav_n = nav_acts.len() as u32;
 
         // page: measure (card heights, content height), then draw what is on screen
-        let r = R::new(crate::tokens::PAGE_X, crate::tokens::PAGE_Y, w - crate::tokens::PAGE_X - 22.0, h - crate::tokens::PAGE_Y - 22.0);
+        let r = R::new(page_x, crate::tokens::PAGE_Y, w - page_x - 22.0, h - crate::tokens::PAGE_Y - 22.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
         let (ch, heads, tags) = {
             let mut dry = Pen::new(c, cx, r.x, r.y, r.w - SCROLL_GAP, r.y, r.y + r.h);
@@ -1392,15 +1447,21 @@ impl Settings {
     pub(crate) fn results(&mut self, p: &mut Pen) {
         let words: Vec<String> = self.query().split_whitespace().map(String::from).collect();
         let hits: Vec<_> = self.index.iter().filter(|(i, s, l, sub)| {
-            let hay = format!("{} {s} {l} {sub}", PAGES[*i].2).to_lowercase();
+            let cat = pages::category_of_page(*i);
+            let hay = format!("{} {} {s} {l} {sub}", cat, PAGES[*i].2).to_lowercase();
             words.iter().all(|w| hay.contains(w))
         }).take(40).cloned().collect();
-        p.h2("search", "Search results", "");
+        p.h2("search", "Search results", &format!("{} matches", hits.len()));
         p.card(|p| {
-            if hits.is_empty() { return p.note("Nothing matches.", 13.0); }
+            if hits.is_empty() {
+                p.note("Nothing matches your search.", 13.0);
+                p.note("Try keywords like wallpaper, keybinds, island, bar, theme, or voice.", 12.0);
+                return;
+            }
             for (i, sect, label, sub) in hits {
                 let Some(r) = p.row(44.0) else { continue };
-                let sub = if sub.is_empty() { PAGES[i].2.to_string() } else { format!("{} > {sub}", PAGES[i].2) };
+                let cat = pages::category_of_page(i);
+                let sub = if sub.is_empty() { format!("{cat} · {}", PAGES[i].2) } else { format!("{cat} · {} > {sub}", PAGES[i].2) };
                 let want = if label == sect { String::new() } else { label.clone() }; // a section title has no control to flash
                 let id = p.act(Act::Goto(i, sect, want));
                 if p.c.hit(r, id) { p.c.rect(r, 12.0, alpha(p.col("onSurface"), 0.08)); }
@@ -1413,6 +1474,28 @@ impl Settings {
     fn nav(&mut self, p: &mut Pen) -> f32 {
         let (x, y0, w) = (p.x, p.y, p.w);
         let name = match p.cx.cfg.str("userName") { "" => "You", n => n }.to_string();
+        if w < 60.0 {
+            // Collapsed navigation rail
+            let av = R::new(x + (w - 38.0) / 2.0, y0 + 6.0, 38.0, 38.0);
+            p.c.circle(av.x + 19.0, av.y + 19.0, 19.0, p.col("primaryContainer"));
+            let file = self.gs(p.cx, "desktop.greet.file");
+            if !(avatar_is_picture(&file) && self.picture(p, &conf::pack_dir().join("images").join(&file), av, 19.0)) {
+                p.c.text(&avatar_initial(&name), av, txt(16.0, 600), p.col("onPrimaryContainer"), Align::Center);
+            }
+            let id = p.act(Act::Do("pick-image", "greet".into()));
+            p.c.hit(av, id);
+            
+            let cid = p.act(Act::Do("toggle-nav", String::new()));
+            ui::icon_btn(p.c, p.cx, R::new(x + (w - 36.0) / 2.0, y0 + 50.0, 36.0, 36.0), cid, "menu", ui::IconKind::Plain, 20.0, false);
+            
+            let bid = p.act(Act::Do("editcfg", String::new()));
+            ui::icon_btn(p.c, p.cx, R::new(x + (w - 36.0) / 2.0, y0 + 92.0, 36.0, 36.0), bid, "edit", ui::IconKind::Tonal, 20.0, false);
+            
+            self.nav_item(p, R::new(x, p.c.h - 22.0 - NAV_ITEM_H, w, NAV_ITEM_H), "close", "Close", Act::Do("close", String::new()), false);
+            return y0 + 138.0;
+        }
+
+        // Expanded navigation rail
         // .me
         let av = R::new(x + 6.0, y0 + 6.0, 42.0, 42.0);
         p.c.circle(av.x + 21.0, av.y + 21.0, 21.0, p.col("primaryContainer"));
@@ -1424,8 +1507,12 @@ impl Settings {
         let id = p.act(Act::Do("pick-image", "greet".into()));
         p.c.hit(av, id); // click the avatar to choose a picture
         let top = y0 + 6.0 + (42.0 - 14.0 * ui::LH - 11.5 * ui::LH) / 2.0;
-        p.c.text(&name, R::new(x + 58.0, top, w - 64.0, 14.0 * ui::LH), txt(14.0, 500), p.col("onSurface"), Align::Left);
-        p.c.text("Windows", R::new(x + 58.0, top + 14.0 * ui::LH, w - 64.0, 11.5 * ui::LH), txt(11.5, 400), p.col("onSurfaceVariant"), Align::Left);
+        p.c.text(&name, R::new(x + 58.0, top, w - 96.0, 14.0 * ui::LH), txt(14.0, 500), p.col("onSurface"), Align::Left);
+        p.c.text("Windows", R::new(x + 58.0, top + 14.0 * ui::LH, w - 96.0, 11.5 * ui::LH), txt(11.5, 400), p.col("onSurfaceVariant"), Align::Left);
+        
+        let cid = p.act(Act::Do("toggle-nav", String::new()));
+        ui::icon_btn(p.c, p.cx, R::new(x + w - 34.0, y0 + 10.0, 32.0, 32.0), cid, "menu_open", ui::IconKind::Plain, 18.0, false);
+
         let line = y0 + 62.0;
         p.c.rect(R::new(x, line, w, 1.0), 0.0, alpha(p.col("outlineVariant"), 0.5));
         let mut y = line + 1.0 + 8.0 + 4.0;
@@ -1451,8 +1538,12 @@ impl Settings {
         if p.c.hit(b, id) && !sel { p.c.rect(b, NAV_R, alpha(p.col("onSurface"), crate::tokens::HOVER_A)); }
         let fg = p.col(if sel { "onSecondaryContainer" } else { "onSurfaceVariant" });
         let icon_col = if sel { ui::accent(p.cx) } else { fg }; // the open page's icon takes the accent
-        p.c.icon(ic, R::new(b.x + 16.0, b.y, 20.0, b.h), ico(20.0, false), icon_col);
-        p.c.text(label, R::new(b.x + 50.0, b.y, b.w - 60.0, b.h), txt(13.5, 400), fg, Align::Left);
+        if b.w < 60.0 {
+            p.c.icon(ic, R::new(b.x + (b.w - 20.0) / 2.0, b.y, 20.0, b.h), ico(20.0, false), icon_col);
+        } else {
+            p.c.icon(ic, R::new(b.x + 16.0, b.y, 20.0, b.h), ico(20.0, false), icon_col);
+            p.c.text(label, R::new(b.x + 50.0, b.y, b.w - 60.0, b.h), txt(13.5, 400), fg, Align::Left);
+        }
     }
 
     /// The open `<select>` list over everything.
@@ -1596,7 +1687,7 @@ mod tests {
     fn contacts_are_added_replaced_and_deleted() {
         let mut st = s();
         let mut cx = Ctx::new(false);
-        let mut add = |st: &mut Settings, cx: &mut Ctx, name: &str, app: &str, value: &str| {
+        let add = |st: &mut Settings, cx: &mut Ctx, name: &str, app: &str, value: &str| {
             for (k, v) in [("contact-name", name), ("contact-value", value)] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
             st.do_named(cx, "contact-app", app.into());
             st.do_named(cx, "add-contact", String::new());
@@ -2105,6 +2196,30 @@ mod tests {
         let cfg = st.keys_cfg(&cx);
         let b = crate::keymap::BINDS.iter().find(|b| b.id == "files").unwrap();
         assert_eq!(crate::keymap::keys_of(&cfg, b), ["Alt+E"]);
+    }
+
+    #[test]
+    fn navigation_collapses_and_restores() {
+        let (mut st, mut cx) = (s(), Ctx::new(false));
+        assert!(!st.nav_collapsed);
+        st.do_named(&mut cx, "toggle-nav", String::new());
+        assert!(st.nav_collapsed);
+        st.do_named(&mut cx, "toggle-nav", String::new());
+        assert!(!st.nav_collapsed);
+    }
+
+    #[test]
+    fn category_switching_preserves_scroll_position() {
+        let mut st = s();
+        st.page = 0;
+        st.scroll.y = 120.0;
+        st.set_page(4); // Switch to Bar
+        assert_eq!(st.scroll.y, 0.0);
+        st.scroll.y = 250.0;
+        st.set_page(0); // Switch back to Quick
+        assert_eq!(st.scroll.y, 120.0, "should restore page 0 scroll position");
+        st.set_page(4); // Switch back to Bar
+        assert_eq!(st.scroll.y, 250.0, "should restore page 4 scroll position");
     }
 }
 

@@ -6,6 +6,7 @@ use crate::{
     app::Ctx,
     gfx::{alpha, ico, txt, Align, Canvas, R},
     hub,
+    menu::Item,
     ui::{self, Edit, TextBox},
     win::{Input, Phase},
 };
@@ -133,27 +134,100 @@ impl Todo {
 
 // ------------------------------------------------------------------ notes
 
-pub struct Notes { pub tb: TextBox, pub focused: bool }
+/// Notes card: shown height of the text box, px. Taller text scrolls inside it.
+const NOTE_MIN: f32 = 110.0;
+const NOTE_MAX: f32 = 220.0;
+
+/// Height of the notes text box for `content` px of wrapped text.
+pub fn note_view_h(content: f32) -> f32 { content.clamp(NOTE_MIN, NOTE_MAX) }
+
+/// Scroll target that brings a caret (top `top`, height `h`, content px) into a `view`-px window at scroll `y`.
+/// None when it is already visible.
+pub fn caret_follow(y: f32, top: f32, h: f32, view: f32) -> Option<f32> {
+    if top < y { Some(top) } else if top + h > y + view { Some(top + h - view) } else { None }
+}
+
+/// A right-click menu choice for the notes card. The menu runs outside the card, so it leaves the command here
+/// and the card applies it at its next paint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NoteCmd { Copy, Cut, Paste, All }
+
+static NOTE_CMD: std::sync::Mutex<Option<NoteCmd>> = std::sync::Mutex::new(None);
+
+fn take_cmd() -> Option<NoteCmd> { NOTE_CMD.lock().unwrap_or_else(|e| e.into_inner()).take() }
+
+/// Items for the notes card's right-click menu.
+pub fn notes_menu() -> Vec<Item> {
+    fn pick(c: NoteCmd) -> impl FnOnce(&mut Ctx) + 'static {
+        move |cx: &mut Ctx| {
+            *NOTE_CMD.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
+            cx.ver += 1; // repaint so the card applies it
+        }
+    }
+    vec![
+        Item::new("content_copy", "Copy", pick(NoteCmd::Copy)),
+        Item::new("content_cut", "Cut", pick(NoteCmd::Cut)),
+        Item::new("content_paste", "Paste", pick(NoteCmd::Paste)),
+        Item::new("select_all", "Select all", pick(NoteCmd::All)),
+    ]
+}
+
+pub struct Notes {
+    pub tb: TextBox,
+    pub focused: bool,
+    scroll: ui::Scroll,
+    /// Last paint's wrapped text height and shown height, for wheel steps.
+    content: f32,
+    view: f32,
+    /// Set by typing or moving the pointer: the next paint scrolls the caret into view.
+    follow: bool,
+}
 
 impl Notes {
-    pub fn new() -> Notes { let mut tb = TextBox::new(true); tb.set(&hub::get(NOTES).unwrap_or_default()); Notes { tb, focused: false } }
+    pub fn new() -> Notes {
+        let mut tb = TextBox::new(true);
+        tb.set(&hub::get(NOTES).unwrap_or_default());
+        Notes { tb, focused: false, scroll: Default::default(), content: 0.0, view: NOTE_MIN, follow: false }
+    }
 
     fn text(&self) -> String { if self.focused { self.tb.text.clone() } else { hub::get(NOTES).unwrap_or_default() } }
 
     pub fn key(&self) -> String { hub::get(NOTES).map_or(0, |s| s.len()).to_string() }
 
     pub fn size(&self, g: &crate::gfx::Gfx) -> f32 {
-        // the textarea is 110 px and scrolls in the browser; here it grows with the text instead
-        head() + g.measure_wrapped(&self.text(), txt(13.0, 400), INNER).max(110.0) + 12.0 + 8.0
+        head() + note_view_h(g.measure_wrapped(&self.text(), txt(13.0, 400), INNER)) + 12.0 + 8.0
     }
 
     pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         if !self.focused { let s = hub::get(NOTES).unwrap_or_default(); if s != self.tb.text { self.tb.set(&s); } }
+        if let Some(cmd) = take_cmd() { self.apply(cmd); }
         let y = h3(c, cx, "sticky_note_2", "Notes");
         let h = c.h - 8.0 - 12.0 - y;
         let r = R::new(18.0, y, INNER, h);
         c.hit(r, AREA);
-        self.tb.draw(c, cx, r, txt(13.0, 400), "Write something", self.focused);
+        let f = txt(13.0, 400);
+        let content = c.g.measure_wrapped(&self.tb.text, f, INNER);
+        self.content = content.max(h);
+        self.view = h;
+        if std::mem::take(&mut self.follow) {
+            let (_, top, ch) = c.g.caret(&self.tb.text, f, INNER, true, self.tb.caret);
+            if let Some(t) = caret_follow(self.scroll.y, top, ch, h) { self.scroll.to(t, self.content, h); }
+        }
+        let (tb, focus) = (&mut self.tb, self.focused);
+        self.scroll.region(c, cx, r, self.content, |c, top| {
+            tb.draw(c, cx, R::new(r.x, top, INNER, content.max(h)), f, "Write something", focus);
+        });
+    }
+
+    fn apply(&mut self, cmd: NoteCmd) {
+        let edit = match cmd {
+            NoteCmd::Copy => { self.tb.copy(); Edit::None }
+            NoteCmd::Cut => self.tb.cut(),
+            NoteCmd::Paste => self.tb.paste(),
+            NoteCmd::All => { self.tb.select_all(); Edit::None }
+        };
+        if edit == Edit::Changed { self.save(); }
+        self.follow = true;
     }
 
     /// `hwnd`: the card's window, which becomes focusable while it is typed in.
@@ -161,14 +235,23 @@ impl Notes {
         match ev {
             Input::Drag(AREA, x, y, Phase::Start) => {
                 self.tb.press(x, y);
+                self.follow = true;
                 if !self.focused { self.focused = true; set_focus(hwnd.load(Ordering::Relaxed), true); }
             }
+            Input::Drag(AREA, x, y, Phase::Move) => { self.tb.drag(x, y); self.follow = true; }
+            Input::Wheel(AREA, d) => self.scroll.wheel(d, self.content, self.view),
             Input::Focus(f) => {
                 self.focused = f;
                 if !f { set_focus(hwnd.load(Ordering::Relaxed), false); }
             }
-            Input::Key { vk, ctrl, shift, alt } if self.focused => if self.tb.key(vk, ctrl, shift, alt) == Edit::Changed { self.save(); },
-            Input::Char(ch) if self.focused => if self.tb.ch(ch) == Edit::Changed { self.save(); },
+            Input::Key { vk, ctrl, shift, alt } if self.focused => {
+                self.follow = true;
+                if self.tb.key(vk, ctrl, shift, alt) == Edit::Changed { self.save(); }
+            }
+            Input::Char(ch) if self.focused => {
+                self.follow = true;
+                if self.tb.ch(ch) == Edit::Changed { self.save(); }
+            }
             _ => {}
         }
     }
@@ -243,6 +326,28 @@ pub fn timer_input(ev: Input, cx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_box_grows_then_scrolls() {
+        assert_eq!(note_view_h(20.0), NOTE_MIN); // short text keeps the 110 px box
+        assert_eq!(note_view_h(150.0), 150.0);
+        assert_eq!(note_view_h(900.0), NOTE_MAX); // past the cap the text scrolls inside
+    }
+
+    #[test]
+    fn caret_scrolls_only_when_hidden() {
+        assert_eq!(caret_follow(0.0, 50.0, 20.0, 100.0), None); // visible
+        assert_eq!(caret_follow(0.0, 120.0, 20.0, 100.0), Some(40.0)); // below: bottom at the view's bottom
+        assert_eq!(caret_follow(80.0, 10.0, 20.0, 100.0), Some(10.0)); // above: top at the view's top
+    }
+
+    #[test]
+    fn notes_menu_command_is_taken_once() {
+        *NOTE_CMD.lock().unwrap() = Some(NoteCmd::Paste);
+        assert_eq!(take_cmd(), Some(NoteCmd::Paste));
+        assert_eq!(take_cmd(), None);
+    }
+
     #[test]
     fn todo_flip_keeps_other_fields() {
         let l = json!([{ "text": "a", "done": false, "id": 7 }, { "text": "b" }]);

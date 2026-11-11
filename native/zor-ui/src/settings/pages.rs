@@ -11,7 +11,7 @@ use crate::{
     ui::{self, IconKind, LH},
 };
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::OnceLock};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 
 /// World clock cities: (time zone, name).
 pub const CITIES: [(&str, &str); 20] = [
@@ -70,6 +70,53 @@ pub const PAGES: [(&str, &str, &str); 13] = [
     ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("contacts", "contacts", "Contacts"),
     ("creator", "person_add", "Create a buddy"), ("voice", "mic", "Voice"), ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
 ];
+
+pub struct CategoryInfo {
+    pub name: &'static str,
+    pub icon: &'static str,
+    pub pages: &'static [usize],
+}
+
+pub const CATEGORIES: [CategoryInfo; 4] = [
+    CategoryInfo { name: "Personalization", icon: "palette", pages: &[0, 2, 3] }, // Quick, Wallpapers, Presets
+    CategoryInfo { name: "Interface", icon: "devices", pages: &[4, 5, 1] },       // Bar & desktop, Dynamic Island, Keybinds
+    CategoryInfo { name: "Buddies & Voice", icon: "pets", pages: &[6, 7, 8, 9] }, // Buddies, Contacts, Create a buddy, Voice
+    CategoryInfo { name: "System", icon: "settings_suggest", pages: &[10, 11, 12] }, // Services, Usage, About
+];
+
+pub fn category_of_page(idx: usize) -> &'static str {
+    for cat in &CATEGORIES {
+        if cat.pages.contains(&idx) {
+            return cat.name;
+        }
+    }
+    "General"
+}
+
+pub fn category_icon_of_page(idx: usize) -> &'static str {
+    for cat in &CATEGORIES {
+        if cat.pages.contains(&idx) {
+            return cat.icon;
+        }
+    }
+    "tune"
+}
+
+/// Finds conflicting keybindings across all registered actions.
+/// Returns a map of normalized key combo string -> list of action labels using it.
+pub fn detect_key_conflicts(cfg: &conf::Config) -> HashMap<String, Vec<&'static str>> {
+    let mut map: HashMap<String, Vec<&'static str>> = HashMap::new();
+    for b in keymap::BINDS {
+        for k in keymap::keys_of(cfg, b) {
+            let norm = k.trim().to_lowercase();
+            if !norm.is_empty() {
+                map.entry(norm).or_default().push(b.label);
+            }
+        }
+    }
+    map.retain(|_, v| v.len() > 1);
+    map
+}
 const SCHEMES: [(&str, &str, &str); 10] = [
     ("auto", "auto_awesome", "Auto"), ("content", "image", "Content"), ("expressive", "palette", "Expressive"),
     ("fidelity", "tonality", "Fidelity"), ("fruit-salad", "nutrition", "Fruit Salad"), ("monochrome", "contrast", "Monochrome"),
@@ -151,7 +198,8 @@ pub struct Tile { pub img: Option<PathBuf>, pub badge: String, pub title: String
 impl Settings {
     pub fn page(&mut self, p: &mut Pen) {
         if self.query().is_empty() {
-            p.title(PAGES[self.page].2, page_blurb(PAGES[self.page].0));
+            let cat = category_of_page(self.page);
+            p.title_cat(PAGES[self.page].2, page_blurb(PAGES[self.page].0), cat);
             self.body(p)
         } else { self.results(p) }
     }
@@ -348,7 +396,7 @@ impl Settings {
     }
 
     fn quick(&mut self, p: &mut Pen) {
-        let (mode, scheme) = (self.info.mode.clone(), self.info.scheme.clone());
+        let (mode, scheme) = self.wallpaper_draft.as_ref().map(|d| (d.mode.clone(), d.scheme.clone())).unwrap_or_else(|| (self.info.mode.clone(), self.info.scheme.clone()));
         p.h2("wallpaper", "Wallpaper & colors", "");
         p.card(|p| {
             if let Some(r) = p.row(248.0) {
@@ -411,6 +459,7 @@ impl Settings {
             }
             if !self.busy.is_empty() { p.spinner_block(); }
         });
+        self.wallpaper_palettes(p);
         let merged = self.monitor_wallpapers(p);
         if let (false, Load::Ready(mons)) = (merged, &self.mons) {
             let mons = mons.clone();
@@ -425,6 +474,8 @@ impl Settings {
         p.h2("style", "Look & feel", "");
         p.card(|p| {
             self.slider(p, "transparency", "Bar & panel transparency", Sl { min: 0.0, max: 0.6, step: 0.02, fmt: Fmt::Pct }, "opacity");
+            self.sw(p, "wallpaperTheme.adaptiveGlass", "Adapt glass to wallpaper", "Increase surface opacity where the wallpaper reduces text contrast", "contrast");
+            self.sw(p, "wallpaperTheme.reducedMotion", "Reduce theme motion", "Apply colors immediately. Windows animation preferences are also respected", "animation");
             let fonts = FONTS.get_or_init(|| p.c.g.families());
             let mut opts = vec![(json!(""), "Default (Google Sans Flex)".to_string())];
             opts.extend(fonts.iter().map(|f| (json!(f), f.clone())));
@@ -610,7 +661,7 @@ impl Settings {
         let v = |s: &Self, k: &str| { let path = format!("desktop.glass.{k}"); match &s.drag_val { Some((q, x)) if *q == path => *x, _ => s.gn(p.cx, &path) } };
         let tint = crate::glass::tint_rgb(&self.gs(p.cx, "desktop.glass.tint"));
         let g = crate::glass::Glass { frost: v(self, "frost") as f32, haze: v(self, "haze") as f32, pull: v(self, "pull") as f32, rim: v(self, "rimWidth") as f32, sheen: v(self, "sheen") as f32,
-            split: v(self, "split") as f32, tint: tint.unwrap_or((0.0, 0.0, 0.0)), tint_strength: if tint.is_some() { v(self, "tintStrength") as f32 } else { 0.0 }, vivid: v(self, "vividness") as f32 };
+            split: v(self, "split") as f32, tint: tint.unwrap_or((0.0, 0.0, 0.0)), tint_strength: if tint.is_some() { v(self, "tintStrength") as f32 } else { 0.0 }, vivid: v(self, "vividness") as f32 }.adapt(&self.cfgc, &p.cx.theme);
         let Some(img) = p.cx.state.v["image"].as_str().filter(|s| !s.is_empty()).map(std::path::PathBuf::from) else { return p.note("Pick a wallpaper picture to see the preview.", 12.0) };
         let (box_, k) = (R::new(r.x + 12.0, r.y + 8.0, r.w - 24.0, H), p.c.scale);
         let (w, h) = ((box_.w * k).round() as u32, (H * k).round() as u32);
@@ -658,7 +709,8 @@ impl Settings {
         p.c.text("Bar", R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
         let edge = crate::bar::Edge::parse(&self.gs(p.cx, "bar.position"));
         let visible = self.gn(p.cx, "bar.trayVisible").max(0.0) as usize;
-        crate::bar::draw_tray_sample(p.c, p.cx, b.x + 10.0, b.y + 36.0, visible, edge);
+        let split = crate::bar::tray_sample_split(self.gb(p.cx, "bar.trayMatchWindows"), visible);
+        crate::bar::draw_tray_sample(p.c, p.cx, b.x + 10.0, b.y + 36.0, split, edge);
     }
 
     /// Sample bar groups at the chosen spacing, drawn by the bar's own group code. Follows the style and group settings above it.
@@ -673,7 +725,80 @@ impl Settings {
         crate::bar::draw_spacing_sample(p.c, p.cx, b.x + 10.0, b.y + 40.0, &spacing, &style, &groups);
     }
 
+    /// Real-time live studio preview showing the bar layout, styles, spacing and Dynamic Island together.
+    fn bar_island_studio(&mut self, p: &mut Pen) {
+        const H: f32 = 120.0;
+        let Some(r) = p.studio_box(H, "Bar & Island Studio", "Live Preview") else { return };
+        let pos = self.gs(p.cx, "bar.position");
+        let style = self.gs(p.cx, "bar.style");
+        let groups = self.gs(p.cx, "bar.groups");
+        let spacing = self.gs(p.cx, "bar.spacing");
+        let preview_area = R::new(r.x + 12.0, r.y + 36.0, r.w - 24.0, H - 44.0);
+        
+        // Desktop wallpaper simulation backdrop
+        p.c.rect(preview_area, 10.0, p.col("surfaceContainer"));
+        
+        // Simulated screen edge bar
+        let bar_h = 32.0;
+        let bar_r = match pos.as_str() {
+            "bottom" => R::new(preview_area.x + 8.0, preview_area.y + preview_area.h - bar_h - 4.0, preview_area.w - 16.0, bar_h),
+            "left" => R::new(preview_area.x + 4.0, preview_area.y + 4.0, 36.0, preview_area.h - 8.0),
+            "right" => R::new(preview_area.x + preview_area.w - 40.0, preview_area.y + 4.0, 36.0, preview_area.h - 8.0),
+            _ => R::new(preview_area.x + 8.0, preview_area.y + 4.0, preview_area.w - 16.0, bar_h),
+        };
+        
+        let bar_bg = match style.as_str() {
+            "clear" => alpha(p.col("surface"), 0.25),
+            "flat" => p.col("surfaceContainerHigh"),
+            "islands" => alpha(p.col("surfaceContainerHigh"), 0.6),
+            _ => p.col("surfaceContainerHighest"),
+        };
+        let bar_radius = if style == "flat" { 0.0 } else { 10.0 };
+        p.c.rect(bar_r, bar_radius, bar_bg);
+        
+        let group_bg = match groups.as_str() {
+            "filled" => p.col("secondaryContainer"),
+            "outlined" => alpha(p.col("outlineVariant"), 0.5),
+            _ => alpha(p.col("surface"), 0.0),
+        };
+        let gap = match spacing.as_str() {
+            "tight" => 4.0,
+            "roomy" => 10.0,
+            _ => 6.0,
+        };
+        
+        // Workspaces preview group
+        let ws_w = 42.0;
+        let ws_r = R::new(bar_r.x + gap, bar_r.y + 4.0, ws_w, bar_r.h - 8.0);
+        if groups != "none" { p.c.rect(ws_r, 6.0, group_bg); }
+        p.c.text("1 · 2", ws_r, txt(11.0, 500), p.col("onSurface"), Align::Center);
+        
+        // Dynamic Island pill on the bar
+        let island_w = (preview_area.w * 0.45).clamp(140.0, 220.0);
+        let island_x = bar_r.x + (bar_r.w - island_w) / 2.0;
+        let island_r = R::new(island_x, bar_r.y + 3.0, island_w, bar_r.h - 6.0);
+        p.c.rect(island_r, 10.0, p.col("inverseSurface"));
+        
+        // Album art dot
+        p.c.circle(island_r.x + 12.0, island_r.y + island_r.h / 2.0, 6.0, p.col("primary"));
+        // Song text
+        p.c.text("Zor Studio", R::new(island_r.x + 24.0, island_r.y, island_r.w - 60.0, island_r.h), txt(11.0, 500), p.col("inverseOnSurface"), Align::Left);
+        // Live visualizer bars in the island
+        let eq_col = p.col("primary");
+        crate::bar::draw_eq(p.c, island_r.x + island_r.w - 22.0, island_r.y + island_r.h - 7.0, eq_col, &crate::bar::EQ_SAMPLE);
+        
+        // Clock group on the right
+        let clock_w = 42.0;
+        let clock_r = R::new(bar_r.x + bar_r.w - clock_w - 6.0, bar_r.y + 4.0, clock_w, bar_r.h - 8.0);
+        if groups != "none" { p.c.rect(clock_r, 6.0, group_bg); }
+        p.c.text("18:50", clock_r, txt(11.0, 500), p.col("onSurface"), Align::Center);
+    }
+
     fn bar(&mut self, p: &mut Pen) {
+        p.h2("preview", "Bar & Island Studio", "");
+        p.card(|p| {
+            self.bar_island_studio(p);
+        });
         p.h2("toolbar", "Bar", "");
         p.card(|p| {
             self.num(p, "workspaces", "Workspaces shown", 1, 20, "grid_view");
@@ -693,7 +818,8 @@ impl Settings {
             self.pick(p, "clockFormat", formats, "Clock format", "Shown as it looks right now", "schedule", 260.0);
             self.seg(p, "tempUnit", &[("C", "°C"), ("F", "°F")], "Temperature", "thermostat");
             self.sw(p, "showKeyboardLayout", "Keyboard layout indicator", "", "keyboard");
-            self.num(p, "bar.trayVisible", "Tray icons shown (0 = all)", 0, 12, "keyboard_arrow_up");
+            self.sw(p, "bar.trayMatchWindows", "Match Windows", "Icons Windows shows on the taskbar go on the bar, the rest in the chevron", "rule");
+            if !self.gb(p.cx, "bar.trayMatchWindows") { self.num(p, "bar.trayVisible", "Tray icons shown (0 = all)", 0, 12, "keyboard_arrow_up"); }
             self.tray_preview(p);
             self.sw(p, "visualizer.bar", "Visualizer in the bar", "Small cava-style bars next to the media", "graphic_eq");
             if self.gb(p.cx, "visualizer.bar") {
@@ -726,6 +852,7 @@ impl Settings {
             self.seg(p, "desktop.clock", &[("cookie", "Cookie"), ("analog", "Analog"), ("digital", "Digital"), ("pixel", "Pixel")], "Clock style", "schedule");
             self.sw(p, "desktop.glass.enable", "Glass cards", "Cards show the wallpaper behind them, blurred and bent at the rim. A preset with glass turns this on", "blur_on");
             if self.get(p.cx, "desktop.glass.enable") == json!(true) {
+                self.sw(p, "desktop.glass.adaptive", "Adaptive card tint", "Use the wallpaper palette and brightness instead of the manual tint below", "contrast");
                 self.slider(p, "desktop.glass.haze", "Glass blur", px(0.0, 20.0, 1.0), "blur_on");
                 self.slider(p, "desktop.glass.pull", "Glass bend at the edge", Sl { min: 0.0, max: 100.0, step: 5.0, fmt: Fmt::PctInt }, "lens_blur");
                 self.slider(p, "desktop.glass.rimWidth", "Glass edge width", px(4.0, 40.0, 1.0), "border_outer");
@@ -1417,17 +1544,36 @@ impl Settings {
         let cfg = self.keys_cfg(p.cx);
         let rec = self.rec.clone();
         let m = keymap::mod_name(&cfg);
+        let conflicts = detect_key_conflicts(&cfg);
+        if !conflicts.is_empty() {
+            p.h2("warning", "Conflicting keybindings", "");
+            p.card(|p| {
+                let note = format!("{} duplicate key combination(s) detected across actions. Resolve conflicts below so actions do not collide.", conflicts.len());
+                p.note(&note, 13.0);
+            });
+        }
         for (n, (ic, group)) in keymap::GROUPS.iter().enumerate() {
             p.h2(ic, group, if n == 0 { "Click a key, then press the new combo. Esc cancels" } else { "" });
             p.card(|p| {
                 for b in keymap::BINDS.iter().filter(|b| b.group == *group) {
-                    let labels: Vec<String> = keymap::keys_of(&cfg, b).into_iter().enumerate()
+                    let raw_keys = keymap::keys_of(&cfg, b);
+                    let has_conflict = raw_keys.iter().any(|k| conflicts.contains_key(&k.trim().to_lowercase()));
+                    let labels: Vec<String> = raw_keys.into_iter().enumerate()
                         .map(|(i, k)| if rec.as_ref().is_some_and(|r| r.0 == b.id && r.1 == i) { "Press a key…".to_string() } else { k }).collect();
                     let reset = keymap::changed(&cfg, b);
-                    let right: f32 = labels.iter().map(|l| chip_w(p.c, l, false) + 6.0).sum::<f32>() + if reset { chip_w(p.c, "", true) + 6.0 } else { 0.0 };
+                    let conflict_label = "Conflict";
+                    let cw = if has_conflict { chip_w(p.c, conflict_label, true) + 6.0 } else { 0.0 };
+                    let right: f32 = labels.iter().map(|l| chip_w(p.c, l, false) + 6.0).sum::<f32>() + if reset { chip_w(p.c, "", true) + 6.0 } else { 0.0 } + cw;
                     if let Some(mut r) = p.row(40.0) {
-                        p.left(r, "", b.label, "", right);
+                        p.left(r, if has_conflict { "warning" } else { "" }, b.label, "", right);
                         if reset { let w = p.chip_right(r, Some("restart_alt"), "", Act::Do("key-reset", b.id.to_string())); r.w -= w + 6.0; }
+                        if has_conflict {
+                            let chip_width = chip_w(p.c, conflict_label, true);
+                            let cr = R::new(r.x + r.w - chip_width, r.y + (r.h - 24.0) / 2.0, chip_width, 24.0);
+                            p.c.rect(cr, 12.0, p.col("errorContainer"));
+                            p.c.text("Conflict", cr, txt(11.0, 500), p.col("onErrorContainer"), Align::Center);
+                            r.w -= chip_width + 6.0;
+                        }
                         for (i, l) in labels.iter().enumerate().rev() {
                             let w = p.chip_right(r, None, l, Act::Do("key-rec", format!("{}:{i}", b.id)));
                             r.w -= w + 6.0;
@@ -1770,7 +1916,7 @@ fn stances_box(p: &mut Pen, title: &str, what: Option<(&crate::buddy::Appearance
     let Some(r) = p.row(h + 12.0) else { return };
     let b = R::new(r.x + 12.0, r.y + 6.0, r.w - 24.0, h);
     p.c.rect(b, 12.0, p.col("surfaceContainer"));
-    p.c.text(title, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
+    p.c.text(title, R::new(b.x + 10.0, b.y + 6.0, b.w - 120.0, 14.0), txt(11.0, 500), p.col("onSurfaceVariant"), Align::Left);
     let Some((ap, sprites)) = what else {
         p.c.text(empty, R::new(b.x + 10.0, b.y + 24.0, b.w - 20.0, h - 30.0), txt(13.0, 400), p.col("onSurfaceVariant"), Align::Center);
         return;
@@ -1780,6 +1926,11 @@ fn stances_box(p: &mut Pen, title: &str, what: Option<(&crate::buddy::Appearance
         let x = b.x + b.w * (i as f32 * 2.0 + 1.0) / 6.0;
         crate::buddy::draw_preview(p.c, ap, sprites, x, feet, stance, p.t, max_h);
         p.c.text(label, R::new(x - 40.0, b.y + h - 17.0, 80.0, 14.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Center);
+        if i == 0 && feet - max_h - 18.0 >= b.y + 16.0 {
+            let bubble = R::new(x - 36.0, feet - max_h - 18.0, 72.0, 16.0);
+            p.c.rect(bubble, 6.0, p.col("secondaryContainer"));
+            p.c.text("Ready!", bubble, txt(10.0, 500), p.col("onSecondaryContainer"), Align::Center);
+        }
     }
 }
 
@@ -1907,5 +2058,34 @@ mod page_header_tests {
         for (key, _, _) in PAGES.iter() { assert!(!page_blurb(key).is_empty(), "{key}"); }
         assert_ne!(page_blurb("quick"), page_blurb("about"));
         assert_ne!(page_blurb("contacts"), page_blurb("buddies"), "the new page has its own line");
+    }
+
+    #[test]
+    fn every_page_maps_to_a_valid_category() {
+        for (idx, (id, _, _)) in PAGES.iter().enumerate() {
+            let cat = category_of_page(idx);
+            assert!(["Personalization", "Interface", "Buddies & Voice", "System"].contains(&cat), "page {id} has valid category {cat}");
+        }
+        assert_eq!(category_of_page(0), "Personalization");
+        assert_eq!(category_of_page(1), "Interface");
+        assert_eq!(category_of_page(6), "Buddies & Voice");
+        assert_eq!(category_of_page(10), "System");
+    }
+
+    #[test]
+    fn key_conflict_detector_identifies_duplicate_combos() {
+        let clean_cfg = conf::Config::parse("{}");
+        let conflicts = detect_key_conflicts(&clean_cfg);
+        // Default config has unique keybinds
+        assert!(conflicts.is_empty(), "default keybindings should have no collisions");
+
+        // When a user sets duplicate keybinds on two different actions
+        let duplicate_cfg = conf::Config::parse(r#"{"keybinds": {"terminal": ["Alt+Enter"], "files": ["Alt+Enter"]}}"#);
+        let conflicts = detect_key_conflicts(&duplicate_cfg);
+        assert_eq!(conflicts.len(), 1, "should detect 1 duplicate combination");
+        assert!(conflicts.contains_key("alt+enter"));
+        let actions = &conflicts["alt+enter"];
+        assert!(actions.contains(&"Terminal"));
+        assert!(actions.contains(&"File Explorer"));
     }
 }

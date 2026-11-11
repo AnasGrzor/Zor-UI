@@ -1,0 +1,31 @@
+{
+    "hooks":  {
+                  "PostToolUse":  [
+                                      {
+                                          "matcher":  "Edit|Write|apply_patch",
+                                          "hooks":  [
+                                                        {
+                                                            "type":  "command",
+                                                            "command":  "C:/Users/Anas/.agents/skills/impeccable/scripts/bin/windows-x64/impeccable.exe hook",
+                                                            "commandWindows":  "C:/Users/Anas/.agents/skills/impeccable/scripts/bin/windows-x64/impeccable.exe hook",
+                                                            "timeout":  5,
+                                                            "statusMessage":  "Checking UI changes"
+                                                        }
+                                                    ]
+                                      }
+                                  ],
+                  "Stop":  [
+                               {
+                                   "hooks":  [
+                                                 {
+                                                     "type":  "command",
+                                                     "command":  "C:/Users/Anas/.agents/skills/impeccable/scripts/bin/windows-x64/impeccable.exe hook",
+                                                     "commandWindows":  "C:/Users/Anas/.agents/skills/impeccable/scripts/bin/windows-x64/impeccable.exe hook",
+                                                     "timeout":  30,
+                                                     "statusMessage":  "Design deep pass"
+                                                 }
+                                             ]
+                               }
+                           ]
+              }
+}

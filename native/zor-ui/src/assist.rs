@@ -689,7 +689,7 @@ fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
 /// Starts recording: the bridge prints states and then the text, which goes to `ask`.
 pub fn listen(cfg: &Config) {
     // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
-    let answering = crate::drive::waiting();
+    let answering = crate::drive::waiting() || crate::bridge::permit::waiting();
     if !answering { crate::drive::request_stop(); crate::browse::request_stop(); }
     let cfg2 = Config(cfg.0.clone());
     let model = cfg.str("buddies.model").to_string();
@@ -710,7 +710,7 @@ pub fn listen(cfg: &Config) {
         if let Some(t) = v["text"].as_str() {
             crate::pill::set(0);
             if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); }
-            else if answering && crate::drive::reply_spoken(t) {} // the take-over heard you
+            else if answering && (crate::drive::reply_spoken(t) || crate::bridge::permit::answer_with(t)) {} // the take-over or a Claude Code permission heard you
             else { ask(&cfg2, t); }
         }
     });

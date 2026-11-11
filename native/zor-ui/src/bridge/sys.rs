@@ -136,7 +136,7 @@ fn launch(name: &str) -> Value {
 // ---------------------------------------------------------------- app-icons
 
 /// Full exe path of process `pid`, if we may query it.
-fn exe_of(pid: u32) -> Option<String> {
+pub(crate) fn exe_of(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];

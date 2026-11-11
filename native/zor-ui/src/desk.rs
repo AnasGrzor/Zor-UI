@@ -239,8 +239,8 @@ impl Card {
     /// The glass fill for `rects` (logical px, the visible shapes in this window), or None when glass is off or
     /// there is no wallpaper picture to look through. Re-made only when something it depends on changed.
     fn glass_back(&mut self, c: &Canvas, cx: &Ctx, rects: &[R]) -> Option<Pixmap> {
-        let glass = crate::glass::Glass::from_cfg(&cx.cfg)?;
-        let img = PathBuf::from(cx.state.v["image"].as_str().filter(|s| !s.is_empty())?);
+        let glass = crate::glass::Glass::from_cfg(&cx.cfg)?.adapt(&cx.cfg, &cx.theme);
+        let img = PathBuf::from(cx.theme.monitor_wallpaper().or_else(|| cx.state.v["image"].as_str()).filter(|s| !s.is_empty())?);
         let r = self.screen_rect()?;
         let (w, h) = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
         let (mons, _) = util::monitors();
@@ -297,7 +297,7 @@ impl View for Card {
     }
 
     fn context(&mut self, _id: u32, cx: &Ctx) -> Vec<Item> {
-        let mut items = vec![];
+        let mut items = if self.id == "notes" { small::notes_menu() } else { vec![] };
         let copy = match self.id.as_str() {
             "clock" => Some(util::clock(util::now().wHour, util::now().wMinute, cx.cfg.get("use24h").as_bool() != Some(false))),
             "text" => Some(cx.cfg.str("desktop.text").to_string()),

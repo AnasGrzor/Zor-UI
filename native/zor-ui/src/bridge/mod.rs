@@ -14,6 +14,7 @@ pub(crate) mod claude_cli;
 pub(crate) mod claude_acct;
 pub(crate) mod claude_profile;
 pub(crate) mod agent_restart;
+pub(crate) mod permit;
 pub(crate) mod common;
 mod football;
 pub mod listen;
@@ -28,7 +29,7 @@ pub(crate) mod sys;
 pub(crate) mod theme;
 mod toggles;
 pub(crate) mod update;
-mod we;
+pub(crate) mod we;
 pub(crate) mod web;
 
 /// Is the `claude` command (Claude Code) installed?

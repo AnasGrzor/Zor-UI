@@ -74,7 +74,7 @@ pub fn mic_look(muted: bool, speaking: bool) -> (&'static str, u32) {
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 
 /// Names of the subkeys of HKCU\`path`.
-fn subkeys(path: &str) -> Vec<String> {
+pub(crate) fn subkeys(path: &str) -> Vec<String> {
     let mut out = vec![];
     unsafe {
         let mut key = HKEY::default();

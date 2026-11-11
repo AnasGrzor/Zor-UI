@@ -33,7 +33,15 @@ use windows::{
 };
 
 mod palette;
+mod intelligence;
 use palette::*;
+static THEME_WORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Settings drafts use the exact apply path, with no I/O or system changes.
+pub(crate) fn preview_profile(analysis: &Value, profile: &Value, dark: bool, scheme: &str) -> std::collections::HashMap<String, u32> {
+    intelligence::generate_profile(analysis, profile, dark, scheme).0.into_iter()
+        .filter_map(|(k, v)| Some((k, crate::conf::parse_hex(&v)?))).collect()
+}
 
 /// The colours (name -> 0xAARRGGBB) `seed` would give with the scheme the user has (what Settings' colour picker
 /// previews). Same maths as run_theme, nothing is written.
@@ -75,7 +83,28 @@ fn load_rgb(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
     }
 }
 
+/// Decode only a small image for color analysis. Full-size pixels are unnecessary here.
+fn load_analysis_rgb(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
+    let f = factory()?;
+    let frame = open_frame(&f, path, true)?;
+    unsafe {
+        let (mut w, mut h) = (0, 0);
+        frame.GetSize(&mut w, &mut h).ok()?;
+        if w == 0 || h == 0 { return None; }
+        let s = (128.0 / w as f64).min(128.0 / h as f64).min(1.0);
+        let (w, h) = (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1));
+        let scaler = f.CreateBitmapScaler().ok()?;
+        scaler.Initialize(&frame, w, h, WICBitmapInterpolationModeHighQualityCubic).ok()?;
+        let conv = f.CreateFormatConverter().ok()?;
+        conv.Initialize(&scaler, &GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        let mut pixels = vec![0; w as usize * h as usize * 3];
+        conv.CopyPixels(std::ptr::null(), w * 3, &mut pixels).ok()?;
+        Some((w as usize, h as usize, pixels))
+    }
+}
+
 /// The wallpaper's seed colour (source_from_image).
+#[cfg(test)]
 fn source_from_image(path: &Path) -> Option<Rgb> {
     let (w, h, px) = load_rgb(path)?;
     Some(source_from_rgb(&px, w, h, 128))
@@ -233,7 +262,18 @@ fn fit_file(src: &str, n: usize, w: i32, h: i32) -> Option<String> {
 }
 
 /// bridge `wall-monitors`: each monitor as { i, w, h, name, file, custom } with the picture it shows, for Settings.
-pub fn call(_cfg: &Config, name: &str, _args: &[&str]) -> Option<Value> {
+pub fn call(_cfg: &Config, name: &str, args: &[&str]) -> Option<Value> {
+    if name == "theme-options" {
+        let _guard = THEME_WORK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+        let p = Paths::live();
+        let state = load_json(&p.state, Value::Null);
+        let image = state["image"].as_str().unwrap_or("");
+        return Some(match intelligence::analysis(Path::new(image), &p.pack, args.contains(&"regenerate")) {
+            Some(a) => json!({"ok":true, "profile": intelligence::profile(&p.pack, &preference_id(&a, state["live"].as_str())), "analysis": a}),
+            None => err("Pick a wallpaper picture to generate palettes"),
+        });
+    }
     if name != "wall-monitors" { return None; }
     unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
     let main = load_json(&Paths::live().state, json!({}))["image"].as_str().unwrap_or("").to_string();
@@ -317,6 +357,48 @@ fn reload_glazewm() {
 
 // ------------------------------------------------------------------ end4_theme.py main
 
+/// Device paths and bounds keep palette routing independent of monitor enumeration elsewhere.
+fn monitor_palettes(dir: &Path, main: Option<&str>, dark: bool, scheme: &str, per_monitor: Option<bool>, primary: Option<(&Value, &BTreeMap<String, String>)>) -> Vec<Value> {
+    let cfg = load_json(&dir.join("config.json"), Value::Null);
+    let separate = per_monitor.unwrap_or(cfg["wallpaperTheme"]["perMonitor"] == true);
+    if !separate && cfg["wallpaperMonitors"].as_object().is_none_or(|m| m.values().all(|v| v.as_str().unwrap_or("").is_empty())) { return vec![]; }
+    let Ok(dw) = (unsafe { CoCreateInstance::<_, IDesktopWallpaper>(&DesktopWallpaper, None, CLSCTX_LOCAL_SERVER) }) else { return vec![] };
+    let mut result = vec![];
+    let mut generated = std::collections::HashMap::new();
+    if let Some((a, colors)) = primary { generated.insert(a["identity"].as_str().unwrap_or("").to_string(), colors.clone()); }
+    for i in 0..unsafe { dw.GetMonitorDevicePathCount() }.unwrap_or(0) {
+        let Some((id, r)) = (unsafe {
+            dw.GetMonitorDevicePathAt(i).ok().and_then(|p| {
+                let id = p.to_string().ok(); CoTaskMemFree(Some(p.0 as *const _));
+                let id = HSTRING::from(id?);
+                Some((id.clone(), dw.GetMonitorRECT(&id).ok()?))
+            })
+        }) else { continue };
+        let (src, _) = monitor_source(&cfg["wallpaperMonitors"], i as usize, main.unwrap_or(""));
+        if let Some(a) = intelligence::analysis(Path::new(&src), dir, false) {
+            let key = a["identity"].as_str().unwrap_or("").to_string();
+            let colors = generated.entry(key.clone()).or_insert_with(|| {
+                if !separate { return BTreeMap::new(); }
+                let profile = intelligence::profile(dir, &key);
+                let own_scheme = profile["scheme"].as_str().unwrap_or(scheme);
+                intelligence::cached_generate(&a, &profile, dark, own_scheme, dir).0
+            });
+            let actual = unsafe { dw.GetWallpaper(&id) }.ok().and_then(|p| unsafe {
+                let path = p.to_string().ok(); CoTaskMemFree(Some(p.0 as *const _)); path
+            }).filter(|p| !p.is_empty()).unwrap_or(src);
+            let mut a = a;
+            if let Some(fitted) = intelligence::analysis(Path::new(&actual), dir, false) { a["regions"] = fitted["regions"].clone(); }
+            result.push(json!({"device": id.to_string_lossy(), "bounds": [r.left, r.top, r.right, r.bottom], "wallpaper":actual, "colors": if separate { json!(colors) } else { json!({}) }, "analysis": a}));
+        }
+    }
+    result
+}
+
+/// Video frames may change each time a live wallpaper starts. Preferences follow the live source.
+fn preference_id(analysis: &Value, live: Option<&str>) -> String {
+    live.filter(|s| !s.is_empty()).map(|s| format!("live:{s}")).unwrap_or_else(|| analysis["identity"].as_str().unwrap_or("").to_string())
+}
+
 /// Where end4_theme.py writes (all parameters so tests can aim them at a temp dir).
 struct Paths {
     state: PathBuf,
@@ -351,34 +433,69 @@ struct Opts {
     mode: Option<String>,
     scheme: Option<String>,
     live: Option<String>,
+    profile: Option<Value>,
+    expected: Option<String>,
+    per_monitor: Option<bool>,
 }
 
 /// end4_theme.py's main(): palette from the image/colour (or the last source), written everywhere,
 /// state.json updated (only the keys the script owns). Err: what stopped it.
 fn run_theme(o: &Opts, p: &Paths) -> Result<Value, String> {
+    let _guard = THEME_WORK.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = load_json(&p.state, json!({}));
     if !state.is_object() { state = json!({}); }
     let s = |k: &str| state[k].as_str().filter(|v| !v.is_empty()).map(String::from);
-    let mode = o.mode.clone().or_else(|| s("mode")).unwrap_or_else(|| "dark".into());
-    let scheme = o.scheme.clone().or_else(|| s("scheme")).unwrap_or_else(|| "auto".into());
+    let mut mode = o.mode.clone().or_else(|| s("mode")).unwrap_or_else(|| "dark".into());
+    let mut scheme = o.scheme.clone().or_else(|| s("scheme")).unwrap_or_else(|| "auto".into());
     let (mut image, mut color) = (o.image.clone(), o.color.clone());
     if image.is_none() && color.is_none() { (image, color) = (s("image"), s("color")); }
     if image.as_deref().is_some_and(|i| !Path::new(i).exists()) { image = None; }
     if image.is_none() && color.is_none() { color = Some("#6750A4".into()); }
 
+    let analysis = image.as_ref().and_then(|i| intelligence::analysis(Path::new(i), &p.pack, false));
+    let live = match &o.live { Some(l) => Some(l.clone()), None if o.image.is_none() && o.color.is_none() => s("live"), None => None };
+    let identity = analysis.as_ref().and_then(|a| a["identity"].as_str());
+    let preference = analysis.as_ref().map(|a| preference_id(a, live.as_deref()));
+    if o.expected.as_deref().is_some_and(|expected| Some(expected) != identity) { return Err("The wallpaper changed. Reopen its palette preview.".into()); }
+    let mut profile = o.profile.clone().unwrap_or_else(|| preference.as_ref().map(|id| intelligence::profile(&p.pack, id)).unwrap_or(Value::Null));
+    if o.scheme.is_none() { if let Some(saved) = profile["scheme"].as_str() { scheme = saved.into(); } }
+    if o.mode.is_none() { if let Some(saved) = profile["mode"].as_str() { mode = saved.into(); } }
+    if profile.is_null() { profile = json!({}); }
+    if let Some(scheme) = &o.scheme { profile["scheme"] = json!(scheme); }
+    if o.profile.is_some() || o.mode.is_some() { profile["mode"] = json!(mode); }
+    intelligence::validate_profile(&profile)?;
     let seed = match (&image, &color) {
-        (Some(i), _) => source_from_image(Path::new(i)).ok_or_else(|| format!("Couldn't read the picture {i}"))?,
+        (Some(i), _) => analysis.as_ref().and_then(|a| a["autoSeed"].as_str()).and_then(hex_rgb).ok_or_else(|| format!("Couldn't read the picture {i}"))?,
         (None, Some(c)) => hex_rgb(c).ok_or_else(|| format!("Not a #RRGGBB colour: {c}"))?,
         _ => return Err("no colour source".into()),
     };
     let dark = mode == "dark";
     let smart = scheme == "auto";
-    let (colors, term, used) = generate(seed, dark, if smart { "tonal-spot" } else { &scheme }, smart);
+    let (colors, term, used, seed) = if let Some(a) = &analysis {
+        intelligence::cached_generate(a, &profile, dark, &scheme, &p.pack)
+    } else {
+        let (c, t, used) = generate(seed, dark, if smart { "tonal-spot" } else { &scheme }, smart);
+        (c, t, used, seed)
+    };
 
-    let live = match &o.live { Some(l) => Some(l.clone()), None if o.image.is_none() && o.color.is_none() => s("live"), None => None };
-    let payload = json!({ "mode": mode, "scheme": scheme, "resolvedScheme": used, "seed": rgb_hex(seed), "wallpaper": image, "live": live, "colors": colors, "term": term });
-    write_theme(&p.pack, &payload);
-    if let Some(i) = &image { write_thumbnail(&p.pack, Path::new(i)); }
+    let monitors = monitor_palettes(&p.pack, image.as_deref(), dark, &scheme, o.per_monitor, analysis.as_ref().map(|a| (a, &colors)));
+    let payload = json!({ "mode": mode, "scheme": scheme, "resolvedScheme": used, "seed": rgb_hex(seed), "wallpaper": image, "live": live, "colors": colors, "term": term, "analysis": analysis, "profile": profile, "monitors": monitors });
+    let previous = load_json(&p.pack.join("theme.json"), Value::Null);
+    if !write_theme(&p.pack, &payload) { return Err("Couldn't save theme.json".into()); }
+    if let Some(per_monitor) = o.per_monitor {
+        let path = p.pack.join("config.json");
+        let mut cfg = load_json(&path, json!({}));
+        if !cfg.is_object() { cfg = json!({}); }
+        if !cfg["wallpaperTheme"].is_object() { cfg["wallpaperTheme"] = json!({}); }
+        cfg["wallpaperTheme"]["perMonitor"] = json!(per_monitor);
+        if !save_json(&path, &cfg) { return Err("Couldn't save monitor theme policy".into()); }
+    }
+    if (o.profile.is_some() || o.scheme.is_some() || o.mode.is_some()) && identity.is_some() {
+        if !intelligence::save_profile(&p.pack, preference.as_deref().unwrap_or(""), &profile) { return Err("Couldn't save wallpaper preferences".into()); }
+    }
+    if previous["analysis"]["identity"] != payload["analysis"]["identity"] || !p.pack.join("wallpaper.jpg").exists() {
+        if let Some(i) = &image { write_thumbnail(&p.pack, Path::new(i)); }
+    }
     let glaze_ok = write_glazewm(&p.glazewm, &colors);
     let flow_ok = write_flow(&p.flow_template, &p.flow_themes, &colors, dark);
     write_terminal(&p.terminal, &colors, &term);
@@ -556,6 +673,8 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
     let (mut image, mut color, mut mode, mut scheme, mut live) = (String::new(), String::new(), String::new(), String::new(), String::new());
     let (mut toggle, mut pick, mut theme_only, mut clear) = (false, false, false, false);
     let mut monitor = String::new();
+    let (mut profile, mut expected) = (None, None);
+    let mut per_monitor = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let name = a.trim_start_matches('-').to_lowercase();
@@ -571,6 +690,13 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
             "themeonly" => theme_only = true,
             "monitor" => monitor = val()?,
             "clear" => clear = true,
+            "profile" => {
+                let value: Value = serde_json::from_str(&val()?).map_err(|_| "Invalid theme preferences")?;
+                intelligence::validate_profile(&value)?;
+                profile = Some(value);
+            }
+            "expectedwallpaper" => expected = Some(val()?),
+            "permonitor" => per_monitor = Some(val()?.parse::<bool>().map_err(|_| "PerMonitor must be true or false")?),
             _ => return Err(format!("A parameter cannot be found that matches parameter name '{name}'.")),
         }
     }
@@ -587,9 +713,12 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
         };
         bridge_json(cfg, "config-set", &[&format!("wallpaperMonitors.{n}"), &json!(file).to_string()]).ok_or("Couldn't save the choice")?;
         if let Some(main) = state["image"].as_str().filter(|i| !i.is_empty() && Path::new(i).exists()) { set_wallpaper(main); }
+        if load_json(&paths.pack.join("config.json"), Value::Null)["wallpaperTheme"]["perMonitor"] == true {
+            run_theme(&Opts::default(), paths)?;
+        }
         return Ok(json!({ "ok": true, "monitor": n, "file": file }));
     }
-    let retheme = toggle || !mode.is_empty() || !scheme.is_empty();
+    let retheme = toggle || !mode.is_empty() || !scheme.is_empty() || profile.is_some() || theme_only;
     if pick || (image.is_empty() && color.is_empty() && !retheme) {
         match pick_file() { Some(f) => image = f, None => return Ok(json!({ "ok": false, "cancelled": true })) }
     }
@@ -630,7 +759,7 @@ fn switch(cfg: &Config, args: &[String], paths: &Paths) -> Result<Value, String>
 
     // 2. Palette -> GlazeWM / Flow Launcher / Terminal.
     let opt = |s: &String| (!s.is_empty()).then(|| s.clone());
-    let result = run_theme(&Opts { image: opt(&image), color: opt(&color), mode: opt(&mode), scheme: opt(&scheme), live: opt(&live) }, paths)
+    let result = run_theme(&Opts { image: opt(&image), color: opt(&color), mode: opt(&mode), scheme: opt(&scheme), live: opt(&live), profile, expected, per_monitor }, paths)
         .map_err(|e| format!("end4_theme produced no output: {e}"))?;
 
     // 3. Windows' own light/dark setting follows the palette.
@@ -661,7 +790,7 @@ mod tests {
         assert_eq!(preview(0xFF80_8080, true, "auto")["primary"], crate::conf::parse_hex(&generate(hex_rgb("#808080").unwrap(), true, "tonal-spot", true).0["primary"]).unwrap());
     }
 
-    fn tmp(name: &str) -> PathBuf {
+    pub(super) fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("zor-ui-theme-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -726,6 +855,32 @@ mod tests {
         assert_eq!(th["seed"], "#E53935");
         assert_eq!(th["colors"]["primary"], r["primary"]);
         assert!(run_theme(&Opts { color: Some("nope".into()), ..Default::default() }, &p).is_err());
+    }
+
+    #[test]
+    fn wallpaper_profiles_restore_and_stale_drafts_write_no_theme() {
+        unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+        let d = tmp("restore");
+        let p = Paths { state: d.join("state.json"), pack: d.join("pack"), glazewm: d.join("glaze.yaml"), flow_template: d.join("template"), flow_themes: d.join("flow"), terminal: d.join("terminal"), reload: false };
+        let a = d.join("a.jpg"); let b = d.join("b.jpg");
+        write_rgb_jpeg(16, 16, &[180, 40, 60].repeat(256), &a).unwrap();
+        write_rgb_jpeg(16, 16, &[40, 80, 180].repeat(256), &b).unwrap();
+        run_theme(&Opts { image: Some(a.to_string_lossy().into()), ..Default::default() }, &p).unwrap();
+        let generated = load_json(&p.pack.join("theme.json"), Value::Null);
+        let profile = json!({"selection":"curated", "seed":"#2288AA", "intensity":0.7, "scheme":"expressive"});
+        run_theme(&Opts { profile: Some(profile.clone()), expected: generated["analysis"]["identity"].as_str().map(String::from), ..Default::default() }, &p).unwrap();
+        let saved = load_json(&p.pack.join("theme.json"), Value::Null);
+        run_theme(&Opts { image: Some(b.to_string_lossy().into()), ..Default::default() }, &p).unwrap();
+        let before = std::fs::read(p.pack.join("theme.json")).unwrap();
+        assert!(run_theme(&Opts { profile: Some(profile), expected: generated["analysis"]["identity"].as_str().map(String::from), ..Default::default() }, &p).is_err());
+        assert_eq!(std::fs::read(p.pack.join("theme.json")).unwrap(), before);
+        run_theme(&Opts { image: Some(a.to_string_lossy().into()), mode: Some("light".into()), ..Default::default() }, &p).unwrap();
+        let restored = load_json(&p.pack.join("theme.json"), Value::Null);
+        assert_eq!(restored["profile"]["seed"], saved["profile"]["seed"]);
+        assert_eq!(restored["profile"]["intensity"], saved["profile"]["intensity"]);
+        assert_eq!(restored["scheme"], "expressive");
+        assert_eq!(restored["mode"], "light");
+        assert_eq!(preference_id(&json!({"identity":"frame-a"}), Some("we:123")), preference_id(&json!({"identity":"frame-b"}), Some("we:123")));
     }
 
     #[test]

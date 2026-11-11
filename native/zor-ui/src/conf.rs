@@ -19,10 +19,11 @@ fn defaults() -> Value {
         "nightLight": { "kelvin": 4500 },
         "record": { "audio": "both", "mic": "" },
         "wallpaperEngine": { "follow": true, "path": "" },
+        "wallpaperTheme": { "perMonitor": false, "adaptiveGlass": true, "reducedMotion": false },
         "timer": { "focus": 25, "short": 5, "long": 15, "cycles": 4 },
         "frame": { "enabled": false, "thickness": 5, "radius": 20 },
         "dock": { "enabled": false, "side": "bottom", "style": "hug", "iconSize": 30, "radius": 30, "pinned": [] },
-        "bar": { "style": "float", "groups": "filled", "spacing": "cozy", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3 },
+        "bar": { "style": "float", "groups": "filled", "spacing": "cozy", "modules": null, "utils": ["snip", "pick", "wall", "mode"], "titleWidth": 34, "trayVisible": 3, "trayMatchWindows": true },
         "font": { "family": "", "size": 1, "weight": 0 },
         "island": {
             "notifications": true, "notifySeconds": 5, "volume": true, "mic": true, "osdSeconds": 2,
@@ -88,7 +89,14 @@ const FALLBACK: &[(&str, Color)] = &[
     ("error", 0xFFFFB4AB), ("onError", 0xFF690005), ("inverseSurface", 0xFFEAE0E7), ("inverseOnSurface", 0xFF342F34),
 ];
 
-pub struct Theme { colors: HashMap<String, Color>, pub dark: bool }
+mod theme_effects;
+pub use theme_effects::{surface_scope, hide_preview};
+pub struct Theme {
+    colors: HashMap<String, Color>, pub dark: bool,
+    regions: Vec<(f64, f64)>,
+    monitors: Vec<theme_effects::MonitorTheme>,
+    transition: Option<theme_effects::Transition>,
+}
 
 impl Theme {
     pub fn parse(text: &str) -> Theme {
@@ -99,11 +107,14 @@ impl Theme {
                 if let Some(c) = v.as_str().and_then(parse_hex) { colors.insert(k.clone(), c); }
             }
         }
-        Theme { colors, dark: raw.get("mode").and_then(Value::as_str) != Some("light") }
+        Theme { colors, dark: raw.get("mode").and_then(Value::as_str) != Some("light"),
+            regions: theme_effects::regions(&raw["analysis"]), monitors: theme_effects::monitors(&raw), transition: None }
     }
     /// A Material colour by its theme.json name ("onSurface"); magenta if a name is mistyped.
     pub fn c(&self, name: &str) -> Color {
-        PREVIEW.with(|p| p.borrow().as_ref().and_then(|m| m.get(name).copied())).or_else(|| self.colors.get(name).copied()).unwrap_or(0xFFFF_00FF)
+        PREVIEW.with(|p| p.borrow().as_ref().and_then(|m| m.get(name).copied()))
+            .or_else(|| self.monitor().and_then(|m| m.colors.get(name).copied()))
+            .or_else(|| self.colors.get(name).copied()).unwrap_or(0xFFFF_00FF)
     }
 }
 

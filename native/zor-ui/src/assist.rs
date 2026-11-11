@@ -227,7 +227,42 @@ fn steam_dir() -> Option<PathBuf> {
     }
 }
 
-/// Everything "open X" can start: Steam games, then Start Menu apps.
+/// (subkey, default value) for each entry under HKLM's App Paths: "notepad.exe" and the exe it starts.
+fn app_path_keys() -> Vec<(String, String)> {
+    use windows::{core::{PCWSTR, PWSTR}, Win32::{Foundation::ERROR_SUCCESS, System::Registry::{RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ}}};
+    const BASE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
+    let mut out = vec![];
+    unsafe {
+        let base: Vec<u16> = BASE.encode_utf16().chain([0]).collect();
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(base.as_ptr()), 0, KEY_READ, &mut key) != ERROR_SUCCESS { return out; }
+        for i in 0.. {
+            let mut name = [0u16; 260];
+            let mut len = name.len() as u32;
+            if RegEnumKeyExW(key, i, PWSTR(name.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None) != ERROR_SUCCESS { break; }
+            let sub = String::from_utf16_lossy(&name[..len as usize]);
+            let full: Vec<u16> = format!(r"{BASE}\{sub}").encode_utf16().chain([0]).collect();
+            let mut buf = [0u16; 520];
+            let mut bytes = (buf.len() * 2) as u32;
+            // a null value name reads the key's default value, the exe path
+            let r = RegGetValueW(HKEY_LOCAL_MACHINE, PCWSTR(full.as_ptr()), PCWSTR::null(), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut bytes));
+            let path = if r == ERROR_SUCCESS { String::from_utf16_lossy(&buf[..(bytes as usize / 2).saturating_sub(1)]) } else { String::new() };
+            out.push((sub, path));
+        }
+        let _ = RegCloseKey(key);
+    }
+    out
+}
+
+/// App Paths entries as launchable items: "notepad.exe" becomes "notepad", lowercased. Entries with no path are skipped.
+fn app_path_items(keys: &[(String, String)]) -> Vec<(String, String)> {
+    keys.iter().filter(|(_, p)| !p.trim().is_empty()).map(|(k, p)| {
+        let k = k.to_lowercase();
+        (k.strip_suffix(".exe").unwrap_or(&k).to_string(), p.trim().trim_matches('"').to_string())
+    }).collect()
+}
+
+/// Everything "open X" can start: Steam games, then Start Menu apps, then App Paths exes (Notepad has no Start Menu shortcut).
 fn launchables(_cfg: &Config) -> Vec<(String, String)> {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let steam = steam_dir().unwrap_or_else(|| PathBuf::from(env("ProgramFiles(x86)")).join("Steam")).join("steamapps");
@@ -235,6 +270,10 @@ fn launchables(_cfg: &Config) -> Vec<(String, String)> {
     for base in [PathBuf::from(env("ProgramData")), PathBuf::from(env("APPDATA"))] {
         shortcuts(&base.join(r"Microsoft\Windows\Start Menu\Programs"), 3, &mut all);
     }
+    all.extend(app_path_items(&app_path_keys()));
+    // Notepad has neither an App Paths key nor a Start Menu shortcut on Windows 11; its exe sits in System32.
+    let sys32 = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32");
+    all.extend(["notepad"].iter().map(|n| (n.to_string(), sys32.join(format!("{n}.exe")))).filter(|(_, p)| p.is_file()).map(|(n, p)| (n, p.to_string_lossy().into_owned())));
     all
 }
 
@@ -747,6 +786,19 @@ mod tests {
     }
 
     fn items(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
+
+    #[test]
+    fn app_paths_keys_become_names_and_skip_empty_paths() {
+        let keys = items(&[("notepad.exe", r"C:\Windows\system32\notepad.exe"), ("Calc.EXE", r#""C:\Windows\system32\calc.exe""#), ("empty.exe", ""), ("blank.exe", "  ")]);
+        assert_eq!(app_path_items(&keys), items(&[("notepad", r"C:\Windows\system32\notepad.exe"), ("calc", r"C:\Windows\system32\calc.exe")]));
+    }
+
+    #[test]
+    fn notepad_matches_an_app_paths_entry() {
+        let all = app_path_items(&items(&[("notepad.exe", r"C:\Windows\system32\notepad.exe"), ("wordpad.exe", r"C:\x\wordpad.exe")]));
+        assert_eq!(best_match("notepad", &all).map(|(n, t)| (n.as_str(), t.as_str())), Some(("notepad", r"C:\Windows\system32\notepad.exe")));
+        assert_eq!(best_match("note", &all).map(|(n, _)| n.as_str()), Some("notepad"), "a prefix still finds it");
+    }
 
     #[test]
     fn parses_what_you_say() {

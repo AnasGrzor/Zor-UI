@@ -114,6 +114,20 @@ declined is never treated as done. The `steps` column is added to databases from
 - **Declared plans.** The model still plans one tool at a time. Steps are recorded from what it did, not from a plan it wrote.
 - **Recovery per start.** It runs once per app start and assumes requests do not overlap.
 
+## Developer tools (M9a, read-only)
+
+The buddy can read a project folder when you ask about the code. Set the folder in the config key
+`buddies.developerWorkspace` (a Settings field comes later). With no folder set, the tools say so and do nothing.
+
+- `list_tree`: the names of files and folders, two levels down at most, capped at 200 entries.
+- `read_file`: the text of one file, cut at 20,000 bytes. Binary files are refused.
+- `search_code`: lines that contain the words, capped at 50 hits.
+- `git_status`: `git status --short` and `git diff --stat` for the workspace, with external diff tools and textconv off.
+
+Every path is resolved to its real location before it is used, so a junction or symlink inside the workspace cannot reach
+outside it. `.env`, key and certificate files, and anything under `.git` are never read. Key-like text is redacted from
+results. Build output, dependencies and dot-folders are skipped. Nothing here writes a file or runs a project.
+
 ## Retries and fallbacks
 
 - **Provider adapters (M7).** Each provider's request shape and stream events live in one `Adapter` (`bridge/web/adapters.rs`).

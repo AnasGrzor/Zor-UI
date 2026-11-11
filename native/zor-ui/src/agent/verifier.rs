@@ -52,7 +52,7 @@ pub fn kind_of(call: &Call) -> Kind {
     match call {
         Play { .. } => Kind::Play,
         Remember(_) | Forget(_) => Kind::Memory,
-        WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) => Kind::Lookup,
+        WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
         Radio { .. } | Brightness(_) => Kind::ReadBack,
         // a page that loads or is read is evidence; a click or typing is an action that nothing reports back on

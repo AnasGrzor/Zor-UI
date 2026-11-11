@@ -38,6 +38,10 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("remember", "Keeps a fact about the user for later: when they ask you to remember something, or when it will matter next time. Never a password, key or account number.", &[("arg", "the fact in one short sentence")], &["arg"]),
         tool("forget", "Deletes the remembered fact that matches, when the user asks you to forget something.", &[("arg", "words from the fact to forget")], &["arg"]),
         tool("take_over","Controls the mouse and keyboard for a task no other tool can reach. The user is asked first; use it last.", &[("arg", "the task")], &["arg"]),
+        tool("list_tree", "Lists the files and folders in the developer workspace set in Settings. Only for a request about the project or its code.", &[("arg", "folder inside the workspace, or empty for its top")], &[]),
+        tool("read_file", "Reads a text file in the developer workspace. Secret files are refused.", &[("arg", "file path inside the workspace")], &["arg"]),
+        tool("search_code", "Finds the lines in the developer workspace that contain the words.", &[("arg", "the words")], &["arg"]),
+        tool("git_status", "Shows the git status and a diff summary of the developer workspace.", &[], &[]),
     ]
 }
 
@@ -111,7 +115,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 21, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 25, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -221,7 +225,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 25);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

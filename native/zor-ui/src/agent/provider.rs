@@ -45,11 +45,22 @@ pub fn add(u: Usage) {
 /// The request's total so far.
 pub fn request_total() -> Usage { *REQUEST.lock().unwrap_or_else(|e| e.into_inner()) }
 
+/// Every prompt token an Anthropic usage object counts: the uncached input plus cache writes and cache reads. None when the
+/// object has no input count.
+fn anthropic_input(u: &Value) -> Option<u64> {
+    let base = u["input_tokens"].as_u64()?;
+    Some(base + u["cache_creation_input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0))
+}
+
 /// The usage event for one parsed stream event of `provider`, or None when the event carries no counts. Providers report running
 /// counts, so the last event that carries one wins (`assist::fold_turn`).
 pub fn usage_event(provider: &str, ev: &Value) -> Option<Value> {
     let (input, output) = match provider {
-        "anthropic" => (ev["message"]["usage"]["input_tokens"].as_u64(), ev["usage"]["output_tokens"].as_u64()),
+        // Anthropic reports cached prompt tokens apart from input_tokens; input here is every prompt token, cached or not
+        "anthropic" => (anthropic_input(&ev["message"]["usage"]), ev["usage"]["output_tokens"].as_u64()),
+        // the Claude subscription's final result line has the same Anthropic counts
+        "claude-cli" if ev["type"] == "result" => (anthropic_input(&ev["usage"]), ev["usage"]["output_tokens"].as_u64()),
+        "claude-cli" => (None, None),
         "gemini" => (ev["usageMetadata"]["promptTokenCount"].as_u64(), ev["usageMetadata"]["candidatesTokenCount"].as_u64()),
         _ => (ev["usage"]["prompt_tokens"].as_u64(), ev["usage"]["completion_tokens"].as_u64()),
     };
@@ -117,6 +128,17 @@ mod tests {
         assert_eq!(request_total(), Usage { input: 40, output: 2 }, "two calls, one total");
         reset();
         assert_eq!(request_total(), Usage::default());
+    }
+
+    #[test]
+    fn the_claude_subscription_result_counts_its_cached_tokens_too() {
+        // the shape of a real `claude -p --output-format stream-json` result line (usage trimmed)
+        let result = json!({ "type": "result", "is_error": false, "result": "ok",
+            "usage": { "input_tokens": 2, "cache_creation_input_tokens": 10199, "cache_read_input_tokens": 3396, "output_tokens": 5 } });
+        assert_eq!(usage_event("claude-cli", &result), Some(json!({ "usage": { "input": 13597, "output": 5 } })));
+        assert_eq!(usage_event("claude-cli", &json!({ "type": "stream_event", "event": {} })), None, "only the result line has counts");
+        let start = json!({ "type": "message_start", "message": { "usage": { "input_tokens": 3, "cache_read_input_tokens": 100 } } });
+        assert_eq!(usage_event("anthropic", &start), Some(json!({ "usage": { "input": 103, "output": null } })), "the API counts cached reads as input too");
     }
 
     #[test]

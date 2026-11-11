@@ -483,7 +483,9 @@ fn blocks_of(m: &Value, openai: bool) -> Value {
     Value::Array(b)
 }
 
-/// What to send for a chat turn: URL, headers and JSON body for `provider`.
+/// What to send for a chat turn: URL, headers and JSON body for `provider`. The chat path calls the adapter directly; this
+/// wrapper is for the request tests.
+#[cfg(test)]
 fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system: &str, temp: f64) -> (String, Vec<(String, String)>, Value) {
     adapters::for_provider(provider).request(model, key, msgs, system, temp)
 }

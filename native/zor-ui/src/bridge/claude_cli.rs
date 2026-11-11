@@ -116,6 +116,8 @@ pub fn chat(model_id: &str, msgs: &[Value], system: &str, out: &Sink) {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // the final result line carries the token counts (agent::provider)
+        if let Some(u) = serde_json::from_str::<Value>(&line).ok().and_then(|v| crate::agent::provider::usage_event("claude-cli", &v)) { out.emit(&u); }
         match read_line(&line) {
             Some(Ev::Delta(t)) => { got = true; out.emit(&json!({ "delta": t })); }
             Some(Ev::Error(e)) => { out.emit(&json!({ "error": e })); failed = true; break; }

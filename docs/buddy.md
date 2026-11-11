@@ -125,6 +125,8 @@ declined is never treated as done. The `steps` column is added to databases from
   command lines need no saved key. Each reply's token counts are logged as `buddy usage: N in, M out` when the provider reports
   them (`agent/provider.rs`). Each task's total over all its model calls is saved on its row as `tokens_in` and `tokens_out`
   (0 when the provider reported none). Databases from before this change get the columns; rows are kept.
+  "In" counts every prompt token, cached or not: Anthropic reports cache reads and writes apart from `input_tokens`, and the
+  counts add them back in. The Claude subscription reports the same counts in its final result line.
 - **Retries.** A read-only tool that fails (a search, a page read) is tried once more after 400 ms. Anything that acts is
   never repeated (`policy::may_retry`).
 - **Replanning.** A failed tool's error goes back to the model, which picks another route. The loop itself does not plan.

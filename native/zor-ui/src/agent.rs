@@ -684,7 +684,8 @@ pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String {
 
 /// Native tool calling runs only when Settings turns it on, the model is Claude, and the browser is off (its tools are not in the native list).
 pub fn native_on(cfg: &Config, model: &str) -> bool {
-    cfg.get("ai.nativeTools").as_bool() == Some(true) && !crate::browse::enabled(cfg) && crate::bridge::web::provider_of(model).as_deref() == Some("anthropic")
+    cfg.get("ai.nativeTools").as_bool() == Some(true) && !crate::browse::enabled(cfg)
+        && crate::bridge::web::provider_of(model).is_some_and(|p| provider::capabilities(&p, false).native_tools)
 }
 
 /// Set when the user cancels the running request from the Settings list. Checked between model calls; a tool already running

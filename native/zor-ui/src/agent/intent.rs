@@ -96,11 +96,49 @@ pub fn decide(a: Assessment, ctx: &Context) -> Decision {
     }
 }
 
+/// Words that point back at the subject of the previous request. "It" is one of them: "fix it" after "open Spotify" means Spotify.
+const POINT_BACK: [&str; 5] = ["it", "this", "that", "them", "those"];
+
+/// The note that resolves a reference word against the previous turn: the words the user said then, and the answer. The request
+/// itself is not changed. None when the request has no reference word, or there is no previous turn to point at.
+pub fn resolve_reference(said: &str, previous: Option<(&str, &str)>) -> Option<String> {
+    let (said_then, answer) = previous?;
+    let lower = said.to_lowercase();
+    let word = words(said).into_iter().find(|w| POINT_BACK.contains(&w.as_str()))
+        .or_else(|| lower.contains("the last one").then(|| "the last one".to_string()))?;
+    Some(format!("\"{word}\" in this request refers to the previous request, \"{}\" (the buddy answered: \"{}\"). If it means something else, go by the words.",
+        crate::assist::short(said_then, 120), crate::assist::short(answer, 120)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn none() -> Context { Context::default() }
+
+    #[test]
+    fn it_in_a_follow_up_resolves_to_the_previous_turn() {
+        let note = resolve_reference("close it", Some(("open Spotify", "Opened Spotify."))).expect("a reference word, a previous turn");
+        assert!(note.contains("\"it\""), "{note}");
+        assert!(note.contains("\"open Spotify\""), "the subject is the previous request: {note}");
+        assert!(note.contains("Opened Spotify."), "{note}");
+        assert!(resolve_reference("fix this", Some(("open Spotify", "Opened Spotify."))).unwrap().contains("\"this\""));
+        assert!(resolve_reference("the last one", Some(("play lofi", "Playing lofi."))).unwrap().contains("\"the last one\""));
+    }
+
+    #[test]
+    fn no_reference_word_or_no_previous_turn_leaves_the_request_alone() {
+        assert_eq!(resolve_reference("open Spotify", Some(("play lofi", "Playing lofi."))), None, "no reference word");
+        assert_eq!(resolve_reference("close it", None), None, "nothing before it to point at");
+        assert_eq!(resolve_reference("what time is", Some(("play lofi", "Playing lofi."))), None, "'is' is not a reference word");
+    }
+
+    #[test]
+    fn a_long_previous_request_is_cut_in_the_note() {
+        let long = "x".repeat(300);
+        let note = resolve_reference("do that", Some((&long, "ok"))).unwrap();
+        assert!(note.matches('x').count() <= 120, "{note}");
+    }
 
     #[test]
     fn a_clear_request_is_high_confidence_and_its_kind_is_read_from_the_words() {

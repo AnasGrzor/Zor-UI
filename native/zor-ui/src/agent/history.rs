@@ -30,7 +30,7 @@ fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs
 
 /// Saves an answered turn to the app's database. A failure is logged and the request goes on.
 pub fn save(said: &str, answer: &str) {
-    let saved = memory::open(&memory::path()).and_then(|c| setup(&c).map_err(|e| e.to_string()).and_then(|_| save_on(&c, said, answer, now()).map_err(|e| e.to_string())));
+    let saved = memory::with_app(|c| setup(c).and_then(|_| save_on(c, said, answer, now())).map_err(|e| e.to_string())).and_then(|r| r);
     if let Err(e) = saved { crate::log::line(&format!("buddy could not save the turn: {e}")); }
 }
 
@@ -40,10 +40,8 @@ static RESTORED: Once = Once::new();
 /// when saved, so the normal expiry still applies.
 pub fn restore(turns: &Mutex<VecDeque<Turn>>) {
     RESTORED.call_once(|| {
-        let Ok(conn) = memory::open(&memory::path()) else { return };
-        if setup(&conn).is_err() { return; }
         let now_s = now();
-        let Ok(rows) = load_on(&conn, now_s) else { return };
+        let Ok(Ok(rows)) = memory::with_app(|c| setup(c).and_then(|_| load_on(c, now_s))) else { return };
         let Ok(mut t) = turns.lock() else { return };
         for (said, answer, at) in rows {
             let age = Duration::from_secs((now_s - at).max(0) as u64);

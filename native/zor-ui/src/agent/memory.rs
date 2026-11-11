@@ -159,14 +159,27 @@ pub fn path() -> PathBuf { conf::data_dir().join("buddy.db") }
 /// The JSON store the earlier build wrote, imported on first open.
 fn legacy_json() -> PathBuf { conf::data_dir().join("buddy-memory.json") }
 
-/// One lock for every read and write from the app, so two requests can't overwrite each other's facts.
-static LOCK: Mutex<()> = Mutex::new(());
+/// The app's one memory connection. It is opened on first use and kept for the process, and its lock serializes every read and
+/// write, so two requests can't overwrite each other's facts. `opens` counts the opens, so a test can check there is one.
+struct Db { conn: Option<Connection>, opens: usize }
 
-fn open_app() -> Result<Connection, String> {
-    let conn = open(&path())?;
-    import_json(&conn, &legacy_json())?;
-    Ok(conn)
+static DB: Mutex<Db> = Mutex::new(Db { conn: None, opens: 0 });
+
+/// Runs `f` on the connection at `path`. The first call opens it (and imports the old JSON store); later calls reuse it. A failed
+/// open is not kept, so the next call tries again.
+fn with_conn<T>(slot: &Mutex<Db>, path: &Path, legacy: &Path, f: impl FnOnce(&Connection) -> T) -> Result<T, String> {
+    let mut db = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if db.conn.is_none() {
+        let conn = open(path)?;
+        import_json(&conn, legacy)?;
+        db.opens += 1;
+        db.conn = Some(conn);
+    }
+    Ok(f(db.conn.as_ref().unwrap_or_else(|| unreachable!("set just above"))))
 }
+
+/// Runs `f` on the app's memory database (`path()`), opened once per process.
+pub fn with_app<T>(f: impl FnOnce(&Connection) -> T) -> Result<T, String> { with_conn(&DB, &path(), &legacy_json(), f) }
 
 /// The facts as the Settings page lists them, oldest first. Cached, so a repaint never opens the database; every write clears it.
 static CACHE: Mutex<Option<Vec<Memory>>> = Mutex::new(None);
@@ -175,39 +188,33 @@ fn changed() { *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None; }
 
 pub fn listing() -> Vec<Memory> {
     if let Some(v) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() { return v.clone(); }
-    let rows = {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        open_app().ok().and_then(|c| all(&c).ok()).unwrap_or_default()
-    };
+    let rows = with_app(|c| all(c).unwrap_or_default()).unwrap_or_default();
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows.clone());
     rows
 }
 
 /// Forgets one fact by id, from the Settings list. True when it existed.
 pub fn forget_id(id: i64) -> Result<bool, String> {
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let conn = open_app()?;
-    let gone = forget(&conn, id)?;
+    let gone = with_app(|c| forget(c, id))??;
     changed();
     Ok(gone)
 }
 
 /// Forgets the stored fact that best matches `query`. The answer is what the buddy says back.
 pub fn forget_matching(query: &str) -> Result<String, String> {
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let conn = open_app()?;
-    let best = search(&conn, query, 1).map_err(|e| format!("could not search memory: {e}"))?;
-    let Some(m) = best.into_iter().next() else { return Ok("I don't remember anything like that.".into()) };
-    forget(&conn, m.id)?;
+    // search and delete in one step under the lock, so the fact found is the fact removed
+    let found = with_app(|c| -> Result<Option<Memory>, String> {
+        let Some(m) = search(c, query, 1).map_err(|e| format!("could not search memory: {e}"))?.into_iter().next() else { return Ok(None) };
+        forget(c, m.id)?;
+        Ok(Some(m))
+    })??;
     changed();
-    Ok(format!("Forgot: {}", m.text))
+    Ok(match found { Some(m) => format!("Forgot: {}", m.text), None => "I don't remember anything like that.".into() })
 }
 
 /// Keeps a fact in the app's memory. The answer is what the buddy says back.
 pub fn remember(text: &str) -> Result<String, String> {
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let conn = open_app()?;
-    let outcome = add(&conn, text, now())?;
+    let outcome = with_app(|c| add(c, text, now()))??;
     changed();
     Ok(match outcome {
         Outcome::Added(_) => format!("Remembered: {}", text.trim()),
@@ -230,9 +237,57 @@ impl Recall for Keyword {
 
 /// Up to `k` facts that match `query`, for the system prompt. A memory that can't be read recalls nothing, and the request goes on.
 pub fn recall(query: &str, k: usize) -> Vec<String> {
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(conn) = open_app() else { return vec![] };
-    Keyword.find(&conn, query, k).unwrap_or_default().into_iter().map(|m| m.text).collect()
+    with_app(|c| Keyword.find(c, query, k).unwrap_or_default().into_iter().map(|m| m.text).collect()).unwrap_or_default()
+}
+
+/// Most memory items the context carries, preferences and project memories together, and most characters they take.
+pub const CONTEXT_ITEMS: usize = 6;
+pub const CONTEXT_MEMORY_CHARS: usize = 600;
+
+/// Words that say how the user wants things done. No kind is stored with a fact (the table has none), so a preference is read
+/// from its text.
+const PREFERENCE_WORDS: &[&str] = &["prefer", "prefers", "preferred", "always", "never", "avoid", "instead", "rather", "style", "don't", "dont"];
+
+/// The words of a text as they are compared with a project's folder name: letters, digits, apostrophes and dashes, lowercased.
+fn tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '-')).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
+}
+
+/// True when the fact says how the user wants something done.
+pub fn is_preference(text: &str) -> bool { tokens(text).iter().any(|t| PREFERENCE_WORDS.contains(&t.as_str())) }
+
+/// True when the fact names the project: one of its words is the project's folder name (lowercase).
+pub fn names_project(text: &str, project: &str) -> bool { tokens(text).iter().any(|t| t == project) }
+
+/// The memory for a request: preferences whose words share something with the request, and facts that name the active project.
+/// Best match first (shared words, then newest), at most `CONTEXT_ITEMS` items and `CONTEXT_MEMORY_CHARS` characters. Anything
+/// else in the table stays out.
+pub fn for_context(conn: &Connection, request: &str, project: Option<&str>) -> rusqlite::Result<Vec<String>> {
+    let terms: BTreeSet<String> = words(request).into_iter().filter(|w| !STOP.contains(&w.as_str())).collect();
+    let project = project.map(str::to_lowercase).filter(|p| !p.is_empty());
+    let mut picked: Vec<(usize, i64, String)> = all(conn)?.into_iter().filter_map(|m| {
+        let shared = words(&m.text).intersection(&terms).count();
+        let of_project = project.as_deref().map_or(false, |p| names_project(&m.text, p));
+        (of_project || (shared > 0 && is_preference(&m.text))).then_some((shared, m.updated, m.text))
+    }).collect();
+    picked.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    let mut out = vec![];
+    let mut chars = 0;
+    for (_, _, text) in picked {
+        if out.len() == CONTEXT_ITEMS { break; }
+        // the joined line has " | " between items, so each item after the first costs three more characters
+        let n = text.chars().count() + if out.is_empty() { 0 } else { 3 };
+        // a long fact that does not fit is skipped, and a shorter one after it may still go in
+        if chars + n > CONTEXT_MEMORY_CHARS { continue; }
+        chars += n;
+        out.push(text);
+    }
+    Ok(out)
+}
+
+/// The memory lines for a request, through the app's one connection. Empty when memory can't be read.
+pub fn context_for(request: &str, project: Option<&str>) -> Vec<String> {
+    with_app(|c| for_context(c, request, project).unwrap_or_default()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -331,6 +386,56 @@ mod tests {
         *CACHE.lock().unwrap() = Some(vec![Memory { id: 1, text: "old".into(), created: 0, updated: 0 }]);
         changed();
         assert!(CACHE.lock().unwrap().is_none(), "the next listing reads the database again");
+    }
+
+    #[test]
+    fn the_connection_is_opened_once_across_lookups() {
+        let path = temp_path("one-open");
+        let legacy = path.with_file_name("no-such-file.json");
+        let slot = Mutex::new(Db { conn: None, opens: 0 });
+        with_conn(&slot, &path, &legacy, |c| add(c, "I prefer short answers", 1).unwrap()).unwrap();
+        for request in ["short answers please", "what about the answers"] {
+            with_conn(&slot, &path, &legacy, |c| for_context(c, request, None).unwrap()).unwrap();
+        }
+        assert_eq!(slot.lock().unwrap().opens, 1, "two lookups and a write, one open");
+    }
+
+    #[test]
+    fn a_project_memory_is_included_for_its_project_and_not_for_another() {
+        let c = mem();
+        add(&c, "zor-ui uses tiny-skia for drawing", 1).unwrap();
+        add(&c, "other-app uses React for its pages", 2).unwrap();
+        let mine = for_context(&c, "what is the status of the build", Some("zor-ui")).unwrap();
+        assert_eq!(mine, vec!["zor-ui uses tiny-skia for drawing".to_string()]);
+        assert!(for_context(&c, "what is the status of the build", Some("notes")).unwrap().is_empty(), "no memory names this project");
+        assert!(for_context(&c, "what is the status of the build", None).unwrap().is_empty(), "no active project, no project memory");
+    }
+
+    #[test]
+    fn a_preference_is_included_when_its_words_match_the_request() {
+        let c = mem();
+        add(&c, "I prefer short answers with no emojis", 1).unwrap();
+        add(&c, "my sister is called Lina", 2).unwrap();
+        assert_eq!(for_context(&c, "give me a short answer on the weather", None).unwrap(), vec!["I prefer short answers with no emojis".to_string()]);
+        assert!(for_context(&c, "open spotify", None).unwrap().is_empty(), "no shared word, no preference");
+        assert!(for_context(&c, "what is my sister called", None).unwrap().is_empty(), "a plain fact is not a preference");
+    }
+
+    #[test]
+    fn the_memory_context_is_capped_in_items_and_characters() {
+        let c = mem();
+        // distinct words, so no two of these count as the same fact
+        let kinds = ["apples", "bananas", "cherries", "dates", "elderberry", "figs", "grapes", "honeydew", "kiwis", "lemons"];
+        for (i, k) in kinds.iter().enumerate() { add(&c, &format!("I prefer {k}"), 10 + i as i64).unwrap(); }
+        let got = for_context(&c, "I prefer tea", None).unwrap();
+        assert_eq!(got.len(), CONTEXT_ITEMS, "more matches than the cap return exactly the cap");
+        assert_eq!(got[0], "I prefer lemons", "the newest match is first");
+        let long = mem();
+        for i in 0..5 { add(&long, &format!("zor-ui note{i} {}", "x".repeat(200)), i).unwrap(); }
+        let got = for_context(&long, "anything", Some("zor-ui")).unwrap();
+        let total: usize = got.iter().map(|s| s.chars().count()).sum();
+        assert!(total <= CONTEXT_MEMORY_CHARS, "{total} characters");
+        assert_eq!(got.len(), 2, "two 200-character facts fit in 600, the rest are left out");
     }
 
     #[test]

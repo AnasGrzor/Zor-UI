@@ -46,6 +46,13 @@ pub fn models() -> Vec<Value> {
         .map(|c| json!({ "id": format!("{}:default", c.0), "name": c.2, "provider": c.0 })).collect()
 }
 
+/// A model id saved in settings before a rename, mapped to its current id. The Gemini CLI became Antigravity; settings that
+/// still hold the old id keep working through this, and nothing in config.json is rewritten.
+pub fn current_id(id: &str) -> &str {
+    const RENAMED: [(&str, &str); 1] = [("gemini-cli:default", "antigravity-cli:default")];
+    RENAMED.iter().find(|(old, _)| *old == id).map_or(id, |(_, new)| new)
+}
+
 /// The whole conversation as one prompt, system text first.
 fn prompt(msgs: &[Value], system: &str) -> String {
     let turns: Vec<String> = msgs.iter()
@@ -192,6 +199,14 @@ mod tests {
     }
 
     /// Lines from a real `codex exec --json` run (one word answer), as Codex printed them.
+    #[test]
+    fn a_saved_gemini_cli_id_maps_to_antigravity_and_other_ids_are_kept() {
+        assert_eq!(current_id("gemini-cli:default"), "antigravity-cli:default");
+        assert_eq!(current_id("antigravity-cli:default"), "antigravity-cli:default");
+        assert_eq!(current_id("gpt-4o-mini"), "gpt-4o-mini");
+        assert_eq!(current_id(""), "");
+    }
+
     #[test]
     fn codex_lines_give_the_message_and_the_turn_counts() {
         assert!(codex_events(r#"{"type":"thread.started","thread_id":"01a1cc10"}"#).is_empty());

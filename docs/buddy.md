@@ -120,6 +120,9 @@ declined is never treated as done. The `steps` column is added to databases from
   Gemini, Anthropic and an OpenAI-style adapter (used by Mistral, OpenRouter, Ollama, custom endpoints and unknown names) exist.
   Adding a provider means one impl and one arm in `for_provider`. Only the Anthropic adapter takes a tool list and reads
   native tool calls; the others leave both alone.
+- **Renamed models (M7).** A model id saved before a rename is mapped when the chat reads it: `gemini-cli:default` becomes
+  `antigravity-cli:default` (`sub_cli::current_id`). Saved settings are not rewritten. Screen questions use the first
+  configured model that can be sent pictures, so a subscription command line is passed over.
 - **Usable models (M7).** A model whose provider needs a key (Gemini, OpenAI, Anthropic, Mistral, OpenRouter) is skipped as a
   strong or fallback model when that key is not saved. The model the user chose is always tried. Ollama and the subscription
   command lines need no saved key. Each reply's token counts are logged as `buddy usage: N in, M out` when the provider reports

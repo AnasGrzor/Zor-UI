@@ -37,6 +37,9 @@ pub(crate) fn claude_installed() -> bool { claude_cli::find().is_some() }
 /// Can the chat model with this id be sent pictures? (Screen help asks before it takes a screenshot.)
 pub(crate) fn model_can_see(id: &str) -> bool { web::can_see_model(id) }
 
+/// The current id of a chat model, for an id saved before a rename (`sub_cli::current_id`).
+pub(crate) fn current_model_id(id: &str) -> String { sub_cli::current_id(id).to_string() }
+
 /// Can the chat model with this id take pictures, judging by the id alone? (Settings hides the ones that can't.)
 pub(crate) fn model_id_can_see(id: &str) -> bool { web::id_can_see(id) }
 

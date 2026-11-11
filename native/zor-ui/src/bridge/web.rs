@@ -515,7 +515,9 @@ fn ai_chat(stdin: &str, out: &Sink) {
         out.emit(&json!({ "error": "bad request" }));
         return;
     };
-    let model = all_models().into_iter().find(|m| m["id"] == req["model"]).unwrap_or_else(|| json!({ "id": req["model"], "provider": "openai" }));
+    // a model id saved before a rename is mapped to its current one (sub_cli::current_id)
+    let model_id = super::sub_cli::current_id(req["model"].as_str().unwrap_or("")).to_string();
+    let model = all_models().into_iter().find(|m| m["id"].as_str() == Some(model_id.as_str())).unwrap_or_else(|| json!({ "id": model_id, "provider": "openai" }));
     let provider = model["provider"].as_str().unwrap_or("openai").to_string();
     let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"]) || !images_of(m).is_empty()).cloned().collect()).unwrap_or_default();
     if !can_see(&provider) && msgs.iter().any(|m| !images_of(m).is_empty()) {

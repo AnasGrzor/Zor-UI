@@ -540,9 +540,12 @@ const SCREEN_OFF: &str = "Screen help is off. Turn on \"Let the buddy see my scr
 /// Settings, Voice, "Let the buddy see my screen". Off unless turned on: the pictures leave this PC.
 fn screen_on(cfg: &Config) -> bool { cfg.get("buddies.screen").as_bool().unwrap_or(false) }
 
-/// The model that answers screen questions: the one picked for screen help, else the sidebar's AI model.
+/// The model that answers screen questions: the first of the one picked for screen help, the sidebar's AI model and a default
+/// that can be sent pictures (`bridge::model_can_see`). When none can, the first one is kept, and the chat says so.
 pub fn screen_model(cfg: &Config) -> String {
-    [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter().find(|m| !m.is_empty()).unwrap_or_default().to_string()
+    let candidates: Vec<String> = [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter()
+        .filter(|m| !m.is_empty()).map(|m| crate::bridge::current_model_id(m)).collect();
+    candidates.iter().find(|m| crate::bridge::model_can_see(m)).or(candidates.first()).cloned().unwrap_or_default()
 }
 
 /// A screen question from the agent. Nothing is captured while screen help or the AI is switched off.
@@ -1062,6 +1065,19 @@ mod tests {
         assert_eq!(t.calls, vec![json!({ "id": "toolu_1", "name": "open", "input": { "arg": "Spotify" } })]);
         assert_eq!(t.bad, vec![json!({ "id": "toolu_2", "name": "play", "message": "tool input is not JSON" })]);
         assert_eq!(fold_turn(&[]), Turn::default());
+    }
+
+    #[test]
+    fn screen_questions_use_a_model_that_can_see_pictures() {
+        // a picked model that can't see (Antigravity, a subscription command line) is passed over for one that can
+        let cfg = Config::parse(r#"{"buddies":{"screenModel":"antigravity-cli:default"},"ai":{"model":"codex-cli:default"}}"#);
+        assert_eq!(screen_model(&cfg), "gemini-2.5-flash");
+        // a saved id from before the rename is mapped first, so it is passed over the same way
+        let old = Config::parse(r#"{"buddies":{"screenModel":"gemini-cli:default"},"ai":{"model":"claude-haiku-5-5"}}"#);
+        assert_eq!(screen_model(&old), "claude-haiku-5-5", "the mapped id can't see, so the next one is used");
+        // the picked model is used when it can see
+        let picked = Config::parse(r#"{"buddies":{"screenModel":"gpt-4o-mini"},"ai":{"model":"claude-haiku-5-5"}}"#);
+        assert_eq!(screen_model(&picked), "gpt-4o-mini");
     }
 
     #[test]

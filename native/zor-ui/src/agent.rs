@@ -4,8 +4,8 @@
 //! Most tools only open things or change a setting you can undo. Power actions that can lose work (sleep, restart, shut down,
 //! sign out) ask in the island first. A new tool that deletes, sends or types for the user must ask before it runs too.
 
-#[cfg(test)]
 pub mod diagnose;
+#[cfg(test)]
 pub mod eval;
 pub mod history;
 pub mod memory;

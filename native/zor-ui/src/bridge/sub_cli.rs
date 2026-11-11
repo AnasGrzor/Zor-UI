@@ -3,8 +3,9 @@
 //! "antigravity-cli:default" and "codex-cli:default"; each CLI picks the model its account allows. Claude has its own
 //! module (claude_cli.rs) because its output is stream-json.
 //!
-//! Codex streams its reply as plain text on stdout. Antigravity's print mode prints one JSON object when it finishes
-//! (`response`, `usage`, `error`), so its reply is read whole and then split into the same events.
+//! Codex prints one JSON event per line (`--json`): the agent's message as it completes, and the turn's token counts at
+//! the end. Antigravity's print mode prints one JSON object when it finishes (`response`, `usage`, `error`), so its reply is
+//! read whole and then split into the same events.
 
 use super::{common::hidden, Sink};
 use serde_json::{json, Value};
@@ -20,7 +21,7 @@ use std::{
 /// arguments are built in `chat_agy` (the prompt is its -p value), so its entry has none here.
 const CLIS: [(&str, &str, &str, &[&str]); 2] = [
     ("antigravity-cli", "agy", "Antigravity subscription", &[]),
-    ("codex-cli", "codex", "ChatGPT subscription", &["exec", "--skip-git-repo-check", "-s", "read-only", "-"]),
+    ("codex-cli", "codex", "ChatGPT subscription", &["exec", "--skip-git-repo-check", "-s", "read-only", "--json", "-"]),
 ];
 
 fn spec(provider: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static [&'static str])> {
@@ -83,7 +84,7 @@ pub fn chat(provider: &str, msgs: &[Value], system: &str, out: &Sink) {
     loop {
         if out.stopped() { let _ = child.kill(); let _ = child.wait(); return; }
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(l) => { got = got || !l.trim().is_empty(); out.emit(&json!({ "delta": l })); }
+            Ok(l) => for e in codex_events(&l) { got = got || e["delta"].is_string(); out.emit(&e); },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -91,6 +92,22 @@ pub fn chat(provider: &str, msgs: &[Value], system: &str, out: &Sink) {
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
     if got || ok { out.emit(&json!({ "done": true })); }
     else { out.emit(&json!({ "error": format!("{cmd} stopped without an answer. Run `{cmd}` once in a terminal to sign in.") })); }
+}
+
+/// What one line of `codex exec --json` means, as the events the chat sends: the agent's message text when it completes, and the
+/// turn's token counts from `turn.completed` (`input_tokens` already includes cached tokens). Other events are not shown.
+pub fn codex_events(line: &str) -> Vec<Value> {
+    let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
+    match v["type"].as_str() {
+        Some("item.completed") if v["item"]["type"] == "agent_message" => {
+            v["item"]["text"].as_str().filter(|t| !t.is_empty()).map(|t| vec![json!({ "delta": t })]).unwrap_or_default()
+        }
+        Some("turn.completed") => match (v["usage"]["input_tokens"].as_u64(), v["usage"]["output_tokens"].as_u64()) {
+            (Some(i), Some(o)) => vec![json!({ "usage": { "input": i, "output": o } })],
+            _ => vec![],
+        },
+        _ => vec![],
+    }
 }
 
 /// Antigravity's print mode: the prompt is the -p value, and the answer is one JSON object printed when the turn ends. `--mode plan`
@@ -172,6 +189,18 @@ mod tests {
     fn text_it_cannot_read_or_an_empty_answer_is_an_error() {
         assert!(parse_agy("not json").unwrap_err().contains("couldn't read"));
         assert!(parse_agy(r#"{"status":"OK","response":"","error":""}"#).unwrap_err().contains("no answer"));
+    }
+
+    /// Lines from a real `codex exec --json` run (one word answer), as Codex printed them.
+    #[test]
+    fn codex_lines_give_the_message_and_the_turn_counts() {
+        assert!(codex_events(r#"{"type":"thread.started","thread_id":"01a1cc10"}"#).is_empty());
+        assert!(codex_events(r#"{"type":"turn.started"}"#).is_empty());
+        assert_eq!(codex_events(r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ok"}}"#), vec![json!({ "delta": "ok" })]);
+        assert_eq!(codex_events(r#"{"type":"turn.completed","usage":{"input_tokens":21287,"cached_input_tokens":12416,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#),
+            vec![json!({ "usage": { "input": 21287, "output": 5 } })], "input_tokens already includes the cached ones");
+        assert!(codex_events(r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls"}}"#).is_empty(), "tool steps are not shown");
+        assert!(codex_events("warning: not json").is_empty());
     }
 
     #[test]

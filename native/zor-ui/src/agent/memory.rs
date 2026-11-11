@@ -154,7 +154,12 @@ pub fn import_json(conn: &Connection, json_path: &Path) -> Result<usize, String>
 fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
 /// The memory database for this PC.
+#[cfg(not(test))]
 pub fn path() -> PathBuf { conf::data_dir().join("buddy.db") }
+
+/// Tests never touch the real buddy.db: the shared connection opens a file of this process in the temp folder.
+#[cfg(test)]
+pub fn path() -> PathBuf { std::env::temp_dir().join(format!("zorui-test-buddy-{}.db", std::process::id())) }
 
 /// The JSON store the earlier build wrote, imported on first open.
 fn legacy_json() -> PathBuf { conf::data_dir().join("buddy-memory.json") }
@@ -180,6 +185,10 @@ fn with_conn<T>(slot: &Mutex<Db>, path: &Path, legacy: &Path, f: impl FnOnce(&Co
 
 /// Runs `f` on the app's memory database (`path()`), opened once per process.
 pub fn with_app<T>(f: impl FnOnce(&Connection) -> T) -> Result<T, String> { with_conn(&DB, &path(), &legacy_json(), f) }
+
+/// How many times the app's connection was opened in this process (tests only).
+#[cfg(test)]
+pub fn opens() -> usize { DB.lock().unwrap_or_else(|e| e.into_inner()).opens }
 
 /// The facts as the Settings page lists them, oldest first. Cached, so a repaint never opens the database; every write clears it.
 static CACHE: Mutex<Option<Vec<Memory>>> = Mutex::new(None);

@@ -5,7 +5,7 @@
 use super::{memory, plan, provider};
 use super::state::TaskStatus;
 use rusqlite::{params, Connection};
-use std::sync::Once;
+use std::sync::{atomic::{AtomicBool, Ordering}, Once};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row { pub id: i64, pub request: String, pub status: String, pub verdict: String, pub tool_calls: i64 }
@@ -47,8 +47,8 @@ pub fn usage_on(conn: &Connection, id: i64, u: provider::Usage) -> rusqlite::Res
 
 /// Saves a task's token total. A failure is logged and the request is done anyway.
 pub fn save_usage(id: Option<i64>, u: provider::Usage) {
-    let (Some(id), Some(conn)) = (id, open_app()) else { return };
-    if let Err(e) = usage_on(&conn, id, u) { crate::log::line(&format!("buddy tasks: could not save tokens: {e}")); }
+    let Some(id) = id else { return };
+    if let Some(Err(e)) = with_db(|c| usage_on(c, id, u)) { crate::log::line(&format!("buddy tasks: could not save tokens: {e}")); }
 }
 
 /// Saves a task's step record (the JSON text `plan` writes) as it runs.
@@ -66,13 +66,13 @@ pub fn interrupted_steps_on(conn: &Connection, limit: i64) -> rusqlite::Result<V
 
 /// Saves a task's step record. A failure is logged and the request goes on.
 pub fn save_steps(id: Option<i64>, steps: &str) {
-    let (Some(id), Some(conn)) = (id, open_app()) else { return };
-    if let Err(e) = steps_on(&conn, id, steps) { crate::log::line(&format!("buddy tasks: could not save steps: {e}")); }
+    let Some(id) = id else { return };
+    if let Some(Err(e)) = with_db(|c| steps_on(c, id, steps)) { crate::log::line(&format!("buddy tasks: could not save steps: {e}")); }
 }
 
 /// The step records of the newest interrupted tasks, for the side-effect guard. Empty when the database can't be read.
 pub fn interrupted_steps() -> Vec<String> {
-    open_app().and_then(|c| interrupted_steps_on(&c, plan::RECENT).ok()).unwrap_or_default()
+    with_db(|c| interrupted_steps_on(c, plan::RECENT).ok()).flatten().unwrap_or_default()
 }
 
 /// Saves a task's plan (the JSON `plan::Plan::to_json` writes), at the start and after each re-plan.
@@ -133,17 +133,31 @@ fn now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EP
 
 static RECOVERED: Once = Once::new();
 
-fn open_app() -> Option<Connection> {
-    let conn = memory::open(&memory::path()).ok()?;
-    setup(&conn).ok()?;
-    Some(conn)
+/// Set once the tasks tables exist on the shared connection, so later calls skip the schema checks.
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Runs `setup` on `conn` unless `ready` is set. `ready` is set only after setup succeeds, so a failed setup runs again on the next call.
+fn ensure_setup(ready: &AtomicBool, conn: &Connection, setup: impl FnOnce(&Connection) -> rusqlite::Result<()>) -> rusqlite::Result<()> {
+    if ready.load(Ordering::Acquire) { return Ok(()); }
+    setup(conn)?;
+    ready.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Runs `f` on the app's shared connection (`memory::with_app`). None when the database can't be opened or set up.
+/// `f` must not call back into `tasks::` or `memory::with_app`: that lock is not reentrant.
+fn with_db<T>(f: impl FnOnce(&Connection) -> T) -> Option<T> {
+    memory::with_app(|c| match ensure_setup(&READY, c, setup) {
+        Ok(()) => Some(f(c)),
+        Err(e) => { crate::log::line(&format!("buddy tasks: could not set up the table: {e}")); None }
+    }).ok().flatten()
 }
 
 /// Marks tasks interrupted by an earlier run, once per start. A failure is logged and the request goes on.
 pub fn recover_once() {
     RECOVERED.call_once(|| {
-        let Some(conn) = open_app() else { return };
-        match recover_on(&conn, now()) {
+        let Some(r) = with_db(|c| recover_on(c, now())) else { return };
+        match r {
             Ok(0) => {}
             Ok(n) => crate::log::line(&format!("buddy tasks: {n} task(s) were interrupted by the last run")),
             Err(e) => crate::log::line(&format!("buddy tasks: could not check for interrupted tasks: {e}")),
@@ -153,17 +167,16 @@ pub fn recover_once() {
 
 /// Saves a task's plan. A failure is logged and the request goes on.
 pub fn save_plan(id: Option<i64>, plan: &str) {
-    let (Some(id), Some(conn)) = (id, open_app()) else { return };
-    if let Err(e) = plan_on(&conn, id, plan) { crate::log::line(&format!("buddy tasks: could not save the plan: {e}")); }
+    let Some(id) = id else { return };
+    if let Some(Err(e)) = with_db(|c| plan_on(c, id, plan)) { crate::log::line(&format!("buddy tasks: could not save the plan: {e}")); }
 }
 
 /// The interrupted task to resume at start, if any. None when the database can't be read.
-pub fn resume_candidate() -> Option<Candidate> { open_app().and_then(|c| resume_candidate_on(&c).ok().flatten()) }
+pub fn resume_candidate() -> Option<Candidate> { with_db(|c| resume_candidate_on(c).ok().flatten()).flatten() }
 
 /// Puts an interrupted task back to Running on its row. A failure is logged and the resume is not done.
 pub fn resume_mark(id: i64) -> bool {
-    let Some(conn) = open_app() else { return false };
-    let r = resume_mark_on(&conn, id, now());
+    let Some(r) = with_db(|c| resume_mark_on(c, id, now())) else { return false };
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     if let Err(e) = &r { crate::log::line(&format!("buddy tasks: could not resume: {e}")); }
     r.is_ok()
@@ -171,15 +184,14 @@ pub fn resume_mark(id: i64) -> bool {
 
 /// Records why an interrupted task waits for the user (its verdict). The status stays Interrupted.
 pub fn wait(id: i64) {
-    let Some(conn) = open_app() else { return };
-    if let Err(e) = conn.execute("UPDATE tasks SET verdict = ?1 WHERE id = ?2", params![plan::WAITING, id]) { crate::log::line(&format!("buddy tasks: could not save the wait: {e}")); }
+    let Some(r) = with_db(|c| c.execute("UPDATE tasks SET verdict = ?1 WHERE id = ?2", params![plan::WAITING, id])) else { return };
+    if let Err(e) = r { crate::log::line(&format!("buddy tasks: could not save the wait: {e}")); }
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Saves a new task for `request`. None when the database can't be used; the request still runs.
 pub fn begin(request: &str) -> Option<i64> {
-    let conn = open_app()?;
-    let id = begin_on(&conn, request, now()).ok();
+    let id = with_db(|c| begin_on(c, request, now()).ok())?;
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     id
 }
@@ -187,8 +199,8 @@ pub fn begin(request: &str) -> Option<i64> {
 /// Records a task's state. A failure is logged and ignored. The Settings list is cleared, so it shows the change.
 pub fn set(id: Option<i64>, status: TaskStatus, verdict: &str, tool_calls: i64) {
     let Some(id) = id else { return };
-    let Some(conn) = open_app() else { return };
-    if let Err(e) = set_on(&conn, id, status, verdict, tool_calls, now()) { crate::log::line(&format!("buddy tasks: could not save a state: {e}")); }
+    let Some(r) = with_db(|c| set_on(c, id, status, verdict, tool_calls, now())) else { return };
+    if let Err(e) = r { crate::log::line(&format!("buddy tasks: could not save a state: {e}")); }
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -201,22 +213,21 @@ pub fn summary_line(rows: &[Row]) -> String {
 
 /// Records how a take-over that a request started ended. Only the state and verdict change: the request's tool count stays.
 pub fn take_over_ended(id: i64, status: TaskStatus) {
-    let Some(conn) = open_app() else { return };
-    let r = conn.execute("UPDATE tasks SET status = ?1, verdict = ?2, updated = ?3 WHERE id = ?4",
-        params![format!("{status:?}"), format!("take-over {status:?}"), now(), id]);
+    let Some(r) = with_db(|c| c.execute("UPDATE tasks SET status = ?1, verdict = ?2, updated = ?3 WHERE id = ?4",
+        params![format!("{status:?}"), format!("take-over {status:?}"), now(), id])) else { return };
     if let Err(e) = r { crate::log::line(&format!("buddy tasks: could not save the take-over's end: {e}")); }
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// The newest saved request and how it ended. None when there is none, or the database can't be read.
-pub fn latest() -> Option<Row> { open_app().and_then(|c| recent_on(&c, 1).ok()).and_then(|v| v.into_iter().next()) }
+pub fn latest() -> Option<Row> { with_db(|c| recent_on(c, 1).ok()).flatten().and_then(|v| v.into_iter().next()) }
 
 /// The newest tasks, as the Settings page lists them. Cached, so a repaint never opens the database.
 static CACHE: std::sync::Mutex<Option<Vec<Row>>> = std::sync::Mutex::new(None);
 
 pub fn listing() -> Vec<Row> {
     if let Some(v) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() { return v.clone(); }
-    let rows = open_app().and_then(|c| recent_on(&c, 10).ok()).unwrap_or_default();
+    let rows = with_db(|c| recent_on(c, 10).ok()).flatten().unwrap_or_default();
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows.clone());
     rows
 }
@@ -330,5 +341,29 @@ mod tests {
         assert!(resume_candidate_on(&c).unwrap().is_none(), "nothing left to resume while it runs");
         set_on(&c, planned, TaskStatus::Interrupted, "", 0, 6).unwrap();
         assert!(resume_candidate_on(&c).unwrap().is_none(), "a second interruption is not resumed again");
+    }
+
+    #[test]
+    fn a_failed_setup_is_tried_again_on_the_next_call() {
+        let c = Connection::open_in_memory().unwrap();
+        let ready = AtomicBool::new(false);
+        let fail = |_: &Connection| -> rusqlite::Result<()> { Err(rusqlite::Error::InvalidQuery) };
+        assert!(ensure_setup(&ready, &c, fail).is_err());
+        assert!(!ready.load(Ordering::Acquire), "a failed setup leaves the flag unset");
+        assert!(ensure_setup(&ready, &c, setup).is_ok());
+        assert!(ready.load(Ordering::Acquire));
+        assert!(ensure_setup(&ready, &c, |_: &Connection| -> rusqlite::Result<()> { panic!("setup runs once") }).is_ok());
+    }
+
+    #[test]
+    fn a_request_opens_the_shared_connection_at_most_once() {
+        // the counter is process-wide, so compare before and after rather than assume a count
+        let before = memory::opens();
+        let id = begin("open Spotify").expect("the task is saved");
+        for _ in 0..3 { set(Some(id), TaskStatus::Running, "", 1); }
+        for _ in 0..5 { save_steps(Some(id), "[]"); }
+        save_usage(Some(id), provider::Usage { input: 10, output: 5 });
+        assert_eq!(latest().map(|r| r.id), Some(id));
+        assert!(memory::opens() - before <= 1, "one open for the whole sequence");
     }
 }

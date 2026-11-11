@@ -1,6 +1,8 @@
 //! Rust port of end4_bridge.py's web-facing commands: secrets (DPAPI), translate, booru, wallpaper
 //! download, the AI chat/models and the preset gallery. HTTP goes through curl.exe (no TLS stack here).
 
+mod adapters;
+
 use super::common::*;
 use super::*;
 use serde_json::json;
@@ -483,52 +485,15 @@ fn blocks_of(m: &Value, openai: bool) -> Value {
 
 /// What to send for a chat turn: URL, headers and JSON body for `provider`.
 fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system: &str, temp: f64) -> (String, Vec<(String, String)>, Value) {
-    let id = model["id"].as_str().unwrap_or("");
-    let role = |m: &Value| m["role"].as_str().unwrap_or("user").to_string();
-    let h = |k: &str, v: &str| (k.to_string(), v.to_string());
-    let mut headers = vec![h("User-Agent", UA), h("Content-Type", "application/json"), h("Accept", "text/event-stream")];
-    match provider {
-        "gemini" => {
-            headers.push(h("x-goog-api-key", key));
-            let contents: Vec<Value> = msgs.iter().map(|m| json!({ "role": if role(m) == "assistant" { "model" } else { "user" }, "parts": gemini_parts(m) })).collect();
-            (format!("https://generativelanguage.googleapis.com/v1beta/models/{id}:streamGenerateContent?alt=sse"), headers,
-             json!({ "contents": contents, "systemInstruction": { "parts": [{ "text": system }] }, "generationConfig": { "temperature": temp } }))
-        }
-        "anthropic" => {
-            headers.push(h("x-api-key", key));
-            headers.push(h("anthropic-version", "2023-06-01"));
-            let messages: Vec<Value> = msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, false) })).collect();
-            ("https://api.anthropic.com/v1/messages".into(), headers,
-             json!({ "model": id, "max_tokens": 4096, "system": system, "temperature": temp, "stream": true, "messages": messages }))
-        }
-        _ => {
-            if !key.is_empty() { headers.push(h("Authorization", &format!("Bearer {key}"))); }
-            if provider == "openrouter" {
-                headers.push(h("HTTP-Referer", "https://github.com/pctrade/end4-pC"));
-                headers.push(h("X-Title", "Zor UI"));
-            }
-            let url = model["endpoint"].as_str().filter(|e| !e.is_empty()).unwrap_or(openai_like(provider)).to_string();
-            let mut messages = vec![json!({ "role": "system", "content": system })];
-            messages.extend(msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, true) })));
-            (url, headers, json!({ "model": id, "stream": true, "temperature": temp, "messages": messages }))
-        }
-    }
+    adapters::for_provider(provider).request(model, key, msgs, system, temp)
 }
 
 /// The lines to emit for one parsed SSE event of `provider`.
 fn sse_events(provider: &str, ev: &Value) -> Vec<Value> {
-    let delta = |t: &Value| t.as_str().filter(|t| !t.is_empty()).map(|t| json!({ "delta": t }));
-    let mut out: Vec<Value> = match provider {
-        "gemini" => ev["candidates"][0]["content"]["parts"].as_array().map(|p| p.iter().filter_map(|x| delta(&x["text"])).collect()).unwrap_or_default(),
-        "anthropic" => match ev["type"].as_str() {
-            Some("content_block_delta") => delta(&ev["delta"]["text"]).into_iter().collect(),
-            Some("error") => vec![json!({ "error": ev["error"]["message"].as_str().unwrap_or("error") })],
-            _ => vec![],
-        },
-        _ => delta(&ev["choices"][0]["delta"]["content"]).into_iter().collect(),
-    };
+    let adapter = adapters::for_provider(provider);
+    let mut out = adapter.events(ev);
     // token counts, when this event carries them (agent::provider)
-    out.extend(crate::agent::provider::usage_event(provider, ev));
+    out.extend(crate::agent::provider::usage_event(adapter.name(), ev));
     out
 }
 

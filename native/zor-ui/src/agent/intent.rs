@@ -69,7 +69,9 @@ pub const PROJECT_WORDS: [&str; 4] = ["project", "repo", "repository", "workspac
 /// Words that point at something already on the table: "this", "that", "them", "those". "It" is decided by `points_at`.
 const REFERENCE: [&str; 4] = ["this", "that", "them", "those"];
 const LOOKUP: [&str; 9] = ["search", "look", "news", "weather", "price", "prices", "score", "scores", "research"];
-const ACT: [&str; 14] = ["open", "play", "volume", "brightness", "click", "message", "remember", "forget", "wallpaper", "lock", "copy", "pause", "skip", "take"];
+const ACT: [&str; 16] = ["open", "play", "volume", "brightness", "click", "message", "remember", "forget", "wallpaper", "lock", "copy", "pause", "skip", "take", "sleep", "browser"];
+/// Words that open a question about the PC or the project ("what files did I open recently"): an answer, even with an action word in it.
+const WH: [&str; 7] = ["what", "how", "which", "who", "where", "when", "why"];
 const SETTING: [&str; 4] = ["turn", "enable", "disable", "switch"];
 
 fn words(said: &str) -> Vec<String> {
@@ -113,7 +115,8 @@ pub fn classify(said: &str, ctx: &Context) -> Assessment {
             else { Confidence::Low };
         return Assessment { kind: Kind::Unclear, confidence };
     }
-    let kind = if has(&LOOKUP) { Kind::Lookup } else if has(&ACT) { Kind::Act } else if has(&SETTING) { Kind::Setting } else { Kind::Answer };
+    let question = w.first().is_some_and(|f| WH.contains(&f.as_str()));
+    let kind = if has(&LOOKUP) { Kind::Lookup } else if question { Kind::Answer } else if has(&ACT) { Kind::Act } else if has(&SETTING) { Kind::Setting } else { Kind::Answer };
     Assessment { kind, confidence: Confidence::High }
 }
 

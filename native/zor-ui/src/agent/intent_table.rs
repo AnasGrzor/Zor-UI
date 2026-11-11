@@ -90,6 +90,21 @@ const TABLE: &[(&str, Around, Want)] = &[
     ("search for news about the election", Around::Nothing, Want::Proceed(Some(Kind::Lookup))),
     ("what's the weather in Oslo", Around::Nothing, Want::Proceed(Some(Kind::Lookup))),
     ("Thanks, that's all.", Around::Nothing, Want::Proceed(None)),
+    // real requests from the logs (buddy.db tasks and turns, zorui.log "buddy request"): 11 distinct, no names, addresses,
+    // numbers or paths in them, so they are kept as the user typed them
+    ("open nonexistentapp", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("turn the volume up", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("turn the volume down", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("turn the volume down, then open nonexistentapp", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("put the PC to sleep", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("use the browser to go to example.com", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("click the Save button on the screen", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("copy live-test-7e", Around::Nothing, Want::Proceed(Some(Kind::Act))),
+    ("what files did I open recently", Around::Nothing, Want::Proceed(Some(Kind::Answer))),
+    ("continue where we left off", Around::Nothing, Want::Ask),
+    ("continue where we left off", Around::Previous, Want::Assume(LAST)),
+    ("how many errors does this project have", Around::Nothing, Want::Proceed(Some(Kind::Answer))),
+    ("how many errors does this project have", Around::Project, Want::Proceed(Some(Kind::Answer))),
 ];
 
 /// (request, whether "it" or another reference word resolves to the previous turn). The previous turn is fixed in the check.
@@ -205,4 +220,31 @@ fn a_vague_request_never_selects_a_consequential_or_destructive_action() {
     // the guard is gone: a clear request is not vague, so the same risky call goes through the usual question
     assert!(!intent::is_assumed());
     assert_eq!(approve(&Call::TakeOver("fill the form".into()), &cfg, &mut |_| false), Err(DECLINED.into()));
+}
+
+/// Every vague row of the table, whatever it was written for: it never goes ahead, and when it is assumed, a consequential or
+/// destructive step is refused. A row with no context asks one question.
+#[test]
+fn no_vague_row_of_the_table_proceeds_or_selects_a_consequential_or_destructive_action() {
+    let cfg = Config(json!({}));
+    let risky = [Call::Power("shutdown".into()), Call::TakeOver("send the form".into()), Call::RunCheck("build".into())];
+    let mut vague_rows = 0;
+    for &(said, around, _) in TABLE {
+        let ctx = context(around);
+        let a = intent::classify(said, &ctx);
+        if !matches!(a.kind, Kind::Unclear | Kind::Followup) { continue; }
+        vague_rows += 1;
+        let d = intent::decide(a, &ctx);
+        assert!(!matches!(d, Decision::Proceed), "\"{said}\" with {around:?}: a vague request went ahead");
+        if matches!(around, Around::Nothing) {
+            assert!(matches!(d, Decision::Ask(_)), "\"{said}\" with no context: expected one question, got {d:?}");
+        }
+        if let Decision::Assume(_) = d {
+            let _assumed = intent::Assumed::request(true);
+            for c in &risky {
+                assert_eq!(approve(c, &cfg, &mut |_| panic!("no question for an assumed request")), Err(intent::ASSUMED_REFUSAL.to_string()), "\"{said}\": {c:?}");
+            }
+        }
+    }
+    assert!(vague_rows >= 10, "the table has vague rows to check: {vague_rows}");
 }

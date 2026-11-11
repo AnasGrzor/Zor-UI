@@ -829,6 +829,15 @@ pub fn outcome(r: &Result<String, String>, checks: &[verifier::Check]) -> (verif
     (verdict, state::status_of(r, verdict, any_effect))
 }
 
+/// The answer with the note for its verdict added, when one is needed (verifier::note, verifier::unverified_claim_note).
+pub fn with_verdict_note(r: Result<String, String>, verdict: verifier::Verdict, checks: &[verifier::Check]) -> Result<String, String> {
+    let note = verifier::note(verdict).or_else(|| verifier::unverified_claim_note(verdict, &r, checks));
+    match (r, note) {
+        (Ok(answer), Some(note)) => Ok(format!("{answer} {note}")),
+        (r, _) => r,
+    }
+}
+
 /// An acting call that already failed in this request is not run again: the model may ask for the same thing twice.
 /// Lookups are not refused, since asking again is harmless.
 pub fn already_failed(failed: &std::collections::HashSet<String>, c: &Call) -> bool {
@@ -969,10 +978,7 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
     if task.borrow_mut().to(end) { tasks::set(task_id, end, &format!("{verdict:?}"), checks.len() as i64); }
     // the tokens the whole request used, over all its model calls (provider.rs)
     tasks::save_usage(task_id, provider::request_total());
-    let r = match (r, verifier::note(verdict)) {
-        (Ok(answer), Some(note)) => Ok(format!("{answer} {note}")),
-        (r, _) => r,
-    };
+    let r = with_verdict_note(r, verdict, &checks);
     crate::browse::end_request();
     crate::browse::close_now();
     crate::log::line(&timing.line());
@@ -1333,6 +1339,23 @@ mod tests {
         assert_eq!(verdict, verifier::Verdict::Completed, "an answer with no claim needs no check");
         let (verdict, end) = outcome(&Ok("All tests pass.".into()), &[verifier::Check::CheckFailed]);
         assert_eq!((verdict, end), (verifier::Verdict::Failed, state::TaskStatus::Failed), "a failed check is never a pass");
+    }
+
+    #[test]
+    fn the_unverified_answer_says_no_check_ran_and_a_completed_one_does_not() {
+        let said = "I did not run a check, so this is unverified.";
+        let claim = Ok("All tests pass.".to_string());
+        let checks = [verifier::Check::Verified];
+        let (verdict, _) = outcome(&claim, &checks);
+        let answer = with_verdict_note(claim, verdict, &checks).unwrap();
+        assert!(answer.contains(said), "an Unverified claim says so: {answer}");
+        let plain = Ok("Playing lofi by X.".to_string());
+        let (verdict, _) = outcome(&plain, &[verifier::Check::Verified]);
+        let answer = with_verdict_note(plain, verdict, &[verifier::Check::Verified]).unwrap();
+        assert!(!answer.contains("did not run a check"), "a Completed answer has no note: {answer}");
+        let passed = Ok("All tests pass.".to_string());
+        let (verdict, _) = outcome(&passed, &[verifier::Check::Passed]);
+        assert!(!with_verdict_note(passed, verdict, &[verifier::Check::Passed]).unwrap().contains(said), "a passed check is not unverified");
     }
 
     #[test]

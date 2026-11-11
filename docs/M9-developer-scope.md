@@ -30,8 +30,9 @@ every risky call goes through the policy layer that already exists (`agent/polic
   (`Cargo.toml`, `.gitignore`, `src\main.rs`) written by hand, with no `cargo new` and no network. Files already there are
   kept. It runs only when called, never at startup, and it does not write Settings: you set `buddies.developerWorkspace` to
   that folder yourself. No button calls it yet; the Settings button comes later.
-- A `..` in the setting is refused. A junction or symlink in the setting is followed (the setting is your own choice, not AI
-  text); the AI's paths are checked as in M9a.
+- A `..` in the setting is refused. A junction or symlink in the setting is refused too, with a reason: the setting is
+  checked before it is resolved (`developer::is_link`: symlink metadata, and the reparse-point attribute on Windows). The
+  AI's paths are checked as in M9a.
 
 ## Tools and risk levels
 
@@ -63,10 +64,11 @@ rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no
 - **Decided:** no extra commands. The list is exactly `cargo check`, `cargo test`, `cargo build`, `cargo build --release`
   and `cargo clippy`, held in `developer::CHECKS`. The AI chooses by name; the argument lists are fixed in code.
 - **Built limits (M9b):** no shell (`std::process::Command`, stdin closed); the working directory is the canonical
-  workspace; a wall-clock limit of 10 minutes, after which the child is killed (a cargo child's `rustc` may outlive it on
-  Windows); stdout and stderr are redacted, then cut to their last 16 KB with a note that the start was cut.
+  workspace; a wall-clock limit of 10 minutes, after which the whole process tree is killed (`taskkill /PID <pid> /T /F`, then
+  `child.kill()`); stdout and stderr are redacted, then cut to their last 16 KB with a note that the start was cut.
 - Verdicts: a check that exits 0 is passing evidence. A check that failed (exit code or time limit) keeps the task from
-  Completed for the whole request, even when a later lookup works. A task that claims a code result (tests pass, builds,
+  Completed, even when a later lookup works. The latest check decides: a later passing check clears an earlier failure,
+  and a failure after a pass makes it fail again. A task that claims a code result (tests pass, builds,
   clippy clean) with no check run ends Unverified. A refused name asks nothing and starts nothing.
 - Not in M9b: `edit_file`, and the rule that the next check must pass after the last edit (M9c). A failed check is not
   run again within one request (the generic rule for acting calls refuses a repeat), so a retry needs an edit first.
@@ -83,7 +85,8 @@ rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no
 
 - After `edit_file`, the next `run_check` is the verification. A task that edited files is not Completed until one
   `run_check` has passed after the last edit (brief section 3.1). The verifier gets a new kind for this.
-- If no check exists for the workspace, the task ends Unverified, and the answer says so.
+- If no check exists for the workspace, the task ends Unverified, and the answer says so. Built: a code claim with no
+  passing check adds "I did not run a check, so this is unverified." to the answer (`agent::with_verdict_note`).
 
 ## Acceptance tests
 
@@ -100,6 +103,8 @@ rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no
 - **M9a (read-only, built):** `list_tree`, `read_file`, `search_code`, `git_status` (the scope named `git_diff`; the built tool is
   `git_status`, which prints the status and a diff summary), the workspace check, the secrets rules, and their tests.
 - **M9b (checks, built):** `run_check` with the command list, its approval, the limits, and the verifier change.
+  Review fixes on top: junction/symlink workspace refused; latest check decides; timeout kills the process tree; the
+  unverified-claim sentence in the answer.
 - **M9c (edits, not started):** `edit_file`, its approval, the backups, and the task-level verification.
 
 ## Open decisions, in one list

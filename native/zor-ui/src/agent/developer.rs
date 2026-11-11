@@ -1,4 +1,4 @@
-//! The developer tools (M9a): read-only access to one workspace folder set in Settings (`buddies.developerWorkspace`). Every path is
+﻿//! The developer tools (M9a): read-only access to one workspace folder set in Settings (`buddies.developerWorkspace`). Every path is
 //! resolved to its real location before it is used, so a junction or symlink inside the workspace cannot reach outside it. Secret
 //! files are never read, and secret-looking text is redacted from every result. Nothing here changes a file or runs a project.
 
@@ -29,7 +29,17 @@ pub fn workspace(cfg: &Config) -> Result<PathBuf, String> {
     let w = cfg.str(KEY).trim();
     if w.is_empty() { return Err("No developer workspace is set in Settings.".into()); }
     if Path::new(w).components().any(|c| matches!(c, Component::ParentDir)) { return Err("The developer workspace in Settings has \"..\" in it. Give the full folder path.".into()); }
+    if is_link(Path::new(w)) { return Err("The developer workspace in Settings is a symlink or junction. Give the real folder path.".into()); }
     std::fs::canonicalize(w).ok().filter(|p| p.is_dir()).ok_or_else(|| "The developer workspace in Settings is not a folder.".to_string())
+}
+
+/// Whether `p` itself (not what it points to) is a symlink or a Windows reparse point such as a junction. Checked before
+/// canonicalizing, since canonicalizing follows the link.
+fn is_link(p: &Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else { return false };
+    #[cfg(windows)]
+    { use std::os::windows::fs::MetadataExt; if m.file_attributes() & 0x400 != 0 { return true; } } // FILE_ATTRIBUTE_REPARSE_POINT
+    m.file_type().is_symlink()
 }
 
 /// The real path of `rel` inside `ws`. Absolute paths, drive or root prefixes, `..`, and anything that resolves outside the
@@ -225,7 +235,7 @@ pub fn run_program(ws: &Path, label: &str, program: &str, args: &[&str], limit: 
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
+            _ => { kill_tree(child.id()); let _ = child.kill(); let _ = child.wait(); break None; }
         }
     };
     // a grandchild (rustc under cargo) can hold a pipe open after the child is gone, so the wait for output is short
@@ -242,6 +252,12 @@ pub fn run_program(ws: &Path, label: &str, program: &str, args: &[&str], limit: 
         Some(s) if s.success() => Ok(text),
         _ => Err(text),
     }
+}
+
+/// Kills `pid` and every process it started (cargo's `rustc`), so a timed-out check leaves nothing running. A failure of
+/// taskkill is ignored: the caller still kills the direct child.
+fn kill_tree(pid: u32) {
+    let _ = hidden("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
 /// Reads a pipe to its end on a thread and sends the last `OUTPUT_BYTES` it kept (a longer read is cut as it goes).
@@ -406,6 +422,25 @@ mod tests {
         assert!(err.contains("\"..\""), "a .. in the setting is refused: {err}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_workspace_setting_that_is_a_junction_is_refused_and_a_plain_folder_is_not() {
+        let target = std::env::temp_dir().join(format!("zorui-dev-ws-target-{}", std::process::id()));
+        let link = std::env::temp_dir().join(format!("zorui-dev-ws-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).unwrap();
+        // a junction needs no admin rights; if mklink fails here, this test fails and says so (it must not pass silently)
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&target).output()
+            .expect("could not start cmd to run mklink");
+        assert!(made.status.success(), "mklink /J failed, so the junction case was NOT tested: {}", String::from_utf8_lossy(&made.stdout));
+        let err = workspace(&cfg_for(&link)).unwrap_err();
+        assert!(err.contains("junction"), "a junction in the setting is refused with a reason: {err}");
+        assert!(workspace(&cfg_for(&target)).is_ok(), "a plain folder is accepted");
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
     #[test]
     fn check_names_are_the_fixed_list_and_nothing_else() {
         assert_eq!(check_named("cargo test").unwrap().args, &["test"]);
@@ -427,15 +462,43 @@ mod tests {
         assert!(cap_tail(&accents, 101).ends_with('é'), "a cut never splits a character");
     }
 
+    /// The timeout tests count PING.EXE processes, so they run one at a time.
+    #[cfg(windows)]
+    static PING_TESTS: Mutex<()> = Mutex::new(());
+
+    #[cfg(windows)]
+    fn ping_exe_count() -> usize {
+        let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq PING.EXE", "/NH"]).output().expect("tasklist");
+        String::from_utf8_lossy(&out.stdout).to_lowercase().matches("ping.exe").count()
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_check_that_runs_past_its_limit_is_stopped() {
+        let _guard = PING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let w = ws("timeout");
         let started = Instant::now();
         // a fast fake command (ping sleeps for 30 seconds) with a 300 ms limit stands in for a long cargo run
         let r = run_program(&w, "fake slow check", "ping", &["-n", "30", "127.0.0.1"], Duration::from_millis(300));
         assert!(r.unwrap_err().starts_with("The check ran out of time"));
         assert!(started.elapsed() < Duration::from_secs(20), "it was stopped, not waited for");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_timed_out_check_leaves_no_grandchild_running() {
+        let _guard = PING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let w = ws("tree");
+        let before = ping_exe_count();
+        // cmd starts ping (the grandchild); the limit kills cmd, and taskkill /T must take ping with it
+        let r = run_program(&w, "fake tree", "cmd", &["/C", "ping -n 60 127.0.0.1 >nul"], Duration::from_secs(1));
+        assert!(r.unwrap_err().starts_with("The check ran out of time"), "the call timed out");
+        if before > 0 {
+            eprintln!("NOTE: {before} PING.EXE already running before the test, so the process count was not checked");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(ping_exe_count(), 0, "no ping.exe started by the test remains after the timeout");
     }
 
     #[cfg(windows)]
@@ -453,6 +516,34 @@ mod tests {
         let w = ws("missing");
         let err = run_program(&w, "fake", "zorui-no-such-program-anywhere", &[], Duration::from_secs(5)).unwrap_err();
         assert!(!err.starts_with("The check "), "{err}");
+    }
+
+    /// Live check, not run by default: `cargo test live_cargo_build_timeout -- --ignored`. Runs the real `cargo build` in a
+    /// temp copy of the test project with a 1-second limit, then fails if a `rustc.exe` it started is still running.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "live: runs the real cargo build; run with --ignored"]
+    fn live_cargo_build_timeout_leaves_no_rustc() {
+        fn rustc_pids() -> std::collections::BTreeSet<String> {
+            let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq rustc.exe", "/NH", "/FO", "CSV"]).output().expect("tasklist");
+            String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.split(',').nth(1)).map(|p| p.trim_matches('"').to_string()).collect()
+        }
+        let root = std::env::temp_dir().join(format!("zorui-dev-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = std::fs::canonicalize(create_test_workspace_in(&root).unwrap()).unwrap();
+        // the hello-world project builds in well under a second, so the build gets generated code (still no dependencies)
+        let body: String = (0..4000).map(|i| format!("pub fn f{i}(x: u64) -> u64 {{ (0..x).fold({i}u64, |a, b| a.wrapping_mul(31).wrapping_add(b)) }}
+")).collect();
+        std::fs::write(dir.join("src").join("main.rs"), format!("{body}fn main() {{ println!(\"{{}}\", f1(3)); }}
+")).unwrap();
+        let before = rustc_pids();
+        let r = run_program(&dir, "cargo build", "cargo", &["build"], Duration::from_secs(1));
+        eprintln!("LIVE cargo build result: {}", r.as_ref().map_or_else(|e| e.lines().next().unwrap_or("").to_string(), |t| t.lines().next().unwrap_or("").to_string()));
+        std::thread::sleep(Duration::from_millis(500));
+        let leftover: Vec<String> = rustc_pids().difference(&before).cloned().collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(r.unwrap_err().starts_with("The check ran out of time"), "the build must outlast the 1-second limit for this check to mean anything");
+        assert!(leftover.is_empty(), "rustc.exe started by the build is still running (pids {leftover:?})");
     }
 
     #[test]

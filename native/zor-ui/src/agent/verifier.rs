@@ -95,10 +95,14 @@ pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
 /// failed. A declined tool is never a failure, but a request where something was declined is only partial at best.
 pub fn judge(checks: &[Check]) -> Verdict {
     let declined = checks.iter().any(|c| *c == Check::Declined);
-    let ran: Vec<Check> = checks.iter().copied().filter(|c| *c != Check::Declined).collect();
+    // the latest check decides: a failure that a later passing check followed is dropped, so it no longer counts
+    let last_pass = checks.iter().rposition(|c| *c == Check::Passed);
+    let ran: Vec<Check> = checks.iter().enumerate()
+        .filter(|(i, c)| **c != Check::Declined && !(**c == Check::CheckFailed && last_pass.is_some_and(|p| p > *i)))
+        .map(|(_, c)| *c).collect();
     if ran.is_empty() { return if declined { Verdict::Declined } else { Verdict::Completed }; }
     if declined { return Verdict::Partial; }
-    // a check that did not pass is not undone by a later lookup, so the request is never Completed after one
+    // a check that failed last is not undone by a later lookup, so the request is never Completed after one
     if ran.contains(&Check::CheckFailed) {
         return if ran.iter().any(|c| !matches!(c, Check::Failed | Check::CheckFailed)) { Verdict::Partial } else { Verdict::Failed };
     }
@@ -125,6 +129,12 @@ pub fn note(verdict: Verdict) -> Option<&'static str> {
         Verdict::Partial => Some("Only part of that was confirmed."),
         Verdict::Failed => Some("I couldn't confirm that it worked."),
     }
+}
+
+/// The sentence for a task that claims a code result with no passing check: its verdict is Unverified (`agent::outcome`).
+pub fn unverified_claim_note(verdict: Verdict, answer: &Result<String, String>, checks: &[Check]) -> Option<&'static str> {
+    let claimed = answer.as_ref().is_ok_and(|a| claims_code_result(a));
+    (verdict == Verdict::Unverified && claimed && !checks.contains(&Check::Passed)).then_some("I did not run a check, so this is unverified.")
 }
 
 #[cfg(test)]
@@ -241,10 +251,29 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_check_decides_for_the_workspace() {
+        assert_eq!(judge(&[Check::CheckFailed, Check::Passed]), Verdict::Completed, "failed then passed: the later pass counts");
+        assert_eq!(judge(&[Check::CheckFailed, Check::Passed, Check::Verified]), Verdict::Completed);
+        assert_eq!(judge(&[Check::Passed, Check::CheckFailed]), Verdict::Partial, "passed then failed: not Completed");
+        assert_eq!(judge(&[Check::Passed, Check::CheckFailed, Check::Passed]), Verdict::Completed);
+        assert_eq!(judge(&[Check::CheckFailed, Check::Passed, Check::CheckFailed]), Verdict::Partial);
+    }
+
+    #[test]
     fn a_code_claim_needs_a_check_and_a_plain_answer_does_not() {
         assert!(claims_code_result("All tests pass now."));
         assert!(claims_code_result("cargo clippy is clean."));
         assert!(!claims_code_result("Playing lofi by X."));
         assert!(!claims_code_result("Wi-Fi is on."));
+    }
+
+    #[test]
+    fn an_unverified_code_claim_says_so_in_the_answer() {
+        let claim = Ok("All tests pass.".to_string());
+        let note = unverified_claim_note(Verdict::Unverified, &claim, &[Check::Verified]);
+        assert_eq!(note, Some("I did not run a check, so this is unverified."));
+        assert_eq!(unverified_claim_note(Verdict::Unverified, &claim, &[Check::Passed, Check::Unverified]), None, "a check ran");
+        assert_eq!(unverified_claim_note(Verdict::Completed, &claim, &[Check::Passed]), None);
+        assert_eq!(unverified_claim_note(Verdict::Unverified, &Ok("Wi-Fi is on.".into()), &[Check::Unverified]), None, "no code claim");
     }
 }

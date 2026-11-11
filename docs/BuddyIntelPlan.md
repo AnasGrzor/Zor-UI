@@ -1,1093 +1,538 @@
-# Zor-UI — Buddy Intelligence Upgrade
+# Zor-UI — Buddy Intelligence Core v2
 
-## Master Engineering Implementation Plan
+## Codebase Audit &amp; Implementation Brief
 
-### 1. Project Objective
+### Mission
 
-Upgrade Buddy, the AI assistant inside Zor-UI, into a highly capable, context-aware, persistent, semi-autonomous assistant.
+Upgrade Zor-UI Buddy from a tool-using desktop assistant into a context-aware, highly autonomous AI agent.
 
-The objective is not simply to give Buddy a better system prompt or connect a more powerful model. The objective is to build a proper intelligence architecture that enables Buddy to:
+The goal is simple:
 
-- Understand complex, multi-part instructions.
-- Break goals into executable steps.
-- Choose the right model for each task.
-- Use existing application tools intelligently.
-- Execute multi-step workflows reliably.
-- Remember useful information between conversations.
-- Understand relevant desktop and application context.
-- Recover from errors and revise its approach.
-- Verify whether tasks were actually completed.
-- Operate autonomously within user-defined safety boundaries.
-- Support different AI providers without coupling the application to one provider.
+**The user should describe the desired outcome. Buddy should infer the intent, gather relevant context, plan the work, execute it, adapt when things go wrong, and verify the result.**
 
-**Important:** Preserve Zor-UI's existing functionality. Upgrade its architecture rather than rebuilding the application from scratch.
+The user should not need to specify every tool, file, intermediate step, or implementation detail.
+
+This is an incremental upgrade to the existing Rust architecture, not a rewrite.
 
 ---
 
-# 2. Existing Architecture: Audit Before Modifying
+## 1. Architectural decisions
 
-Before writing code, inspect the complete repository.
+These decisions are established:
 
-The main project is located in:
+- Agent runtime: Existing native Rust agent.
+- Hermes: Do not integrate.
+- Autonomy: Balanced and context-adaptive.
+- Model routing: Automatic and capability-aware.
+- Memory: Persistent.
+- User modeling: Honcho integration, optional and replaceable.
+- Operational memory: Existing SQLite implementation.
+- Supermemory: Do not integrate yet; keep the architecture extensible.
+- Model providers: Provider-agnostic.
+- Voice: Preserve the existing provider-independent voice architecture.
+- UI: Preserve the existing Buddy interface and personalities.
+- Performance: Minimize RAM, CPU, context size, and unnecessary model calls.
 
-`native/zor-ui`
+Honcho must not become a mandatory dependency. Buddy must continue working without it.
 
-Pay particular attention to:
+## 2. Existing implementation to preserve
 
+Inspect and reuse the existing components before creating alternatives:
 
-| File                                       | Responsibility                                                       |
-| ------------------------------------------ | -------------------------------------------------------------------- |
-| `src/[agent.rs](http://agent.rs)`          | Buddy's agent loop, prompts, tool execution and conversation history |
-| `src/[assist.rs](http://assist.rs)`        | Voice/text intent recognition and AI routing                         |
-| `src/bridge/[web.rs](http://web.rs)`       | AI provider communication and streaming                              |
-| `src/[conf.rs](http://conf.rs)`            | Configuration and application defaults                               |
-| `src/[browse.rs](http://browse.rs)`        | Browser automation                                                   |
-| `src/[drive.rs](http://drive.rs)`          | Desktop automation and UI interaction                                |
-| `src/[mcp.rs](http://mcp.rs)`              | MCP integration                                                      |
-| `src/[proc.rs](http://proc.rs)`            | Process and application integration                                  |
-| `src/[webread.rs](http://webread.rs)`      | Web search and page reading                                          |
-| `src/[media.rs](http://media.rs)`          | Media controls                                                       |
-| `src/[screen.rs](http://screen.rs)`        | Screen-related functionality                                         |
-| `src/settings/[pages.rs](http://pages.rs)` | Settings interface                                                   |
-| `src/[main.rs](http://main.rs)`            | Application module declarations                                      |
+- `native/zor-ui/src/[agent.rs](http://agent.rs)`
+- `native/zor-ui/src/agent/[memory.rs](http://memory.rs)`
+- `native/zor-ui/src/agent/[history.rs](http://history.rs)`
+- `native/zor-ui/src/agent/[routing.rs](http://routing.rs)`
+- `native/zor-ui/src/agent/[policy.rs](http://policy.rs)`
+- `native/zor-ui/src/agent/[tasks.rs](http://tasks.rs)`
+- `native/zor-ui/src/agent/[verifier.rs](http://verifier.rs)`
+- `native/zor-ui/src/agent/[state.rs](http://state.rs)`
+- `native/zor-ui/src/agent/[skills.rs](http://skills.rs)`
+- `native/zor-ui/src/agent/[native.rs](http://native.rs)`
+- `native/zor-ui/src/[assist.rs](http://assist.rs)`
+- `native/zor-ui/src/bridge/[web.rs](http://web.rs)`
+- `native/zor-ui/src/voice/`
 
+Preserve existing provider integrations, SQLite data, Windows capabilities, settings, and working features.
 
-Existing functionality must be reused wherever possible.
-
-Do not replace working integrations with duplicate implementations.
-
-Before modifying anything:
-
-1. Map the existing architecture.
-2. Identify all existing AI providers and their capabilities.
-3. Document current tool interfaces and safety checks.
-4. Identify all existing voice, browser and desktop workflows.
-5. Check the Rust toolchain, dependency versions and build configuration.
-6. Establish a clean baseline build and test result.
-
-Create an implementation checklist and update it as work progresses.
+Do not replace working functionality just to introduce a cleaner abstraction.
 
 ---
 
-# 3. Core Architecture
+## 3. Priority 0 — Reliability and safety
 
-Build the intelligence system around six independent components:
+Implement these before expanding autonomy.
 
-1. Intelligence Core
-2. Automatic Model Router
-3. Agent Planner and Executor
-4. Persistent Memory
-5. Tool and Skill Registry
-6. Safety and Permission Engine
+### 3.1 Make verification authoritative
 
-The architecture should look approximately like this:
+Current issue identified during the codebase audit:
 
-```
-                  USER
-                   |
-                   v
-             BUDDY INTERFACE
-                   |
-                   v
-              AGENT CORE
-                   |
-          +--------+--------+
-          |                 |
-          v                 v
-      CONTEXT            MEMORY
-      ENGINE             ENGINE
-          |                 |
-          +--------+--------+
-                   |
-                   v
-              TASK PLANNER
-                   |
-                   v
-              MODEL ROUTER
-                   |
-          +--------+--------+
-          |        |        |
-          v        v        v
-        Gemini  Claude   OpenAI
-          |        |        |
-          +--------+--------+
-                   |
-                   v
-             TOOL REGISTRY
-                   |
-                   v
-             POLICY ENGINE
-                   |
-                   v
-          EXECUTION ENGINE
-                   |
-          +--------+--------+
-          |        |        |
-          v        v        v
-        Browser  Desktop   App Tools
-          |        |        |
-          +--------+--------+
-                   |
-                   v
-               VERIFIER
-                   |
-                   v
-              FINAL RESULT
-```
+`state::status_of()` can mark a task Completed simply because the agent returned `Ok`, even when `verifier::judge()` determines that the outcome is Partial or Failed.
 
-Every component should have a clearly defined interface.
+Fix this inconsistency.
 
-Avoid tightly coupling the agent to individual providers, tools or storage implementations.
+Requirements:
+
+- Persist the verifier's verdict as part of the task result.
+- Distinguish Completed, Unverified, Partial, Failed, and Cancelled.
+- Require evidence for successful completion.
+- Verify actual outcomes rather than trusting tool return messages.
+- Prevent unsafe retries after actions with side effects.
+- Ensure the final response accurately reflects what was accomplished.
+
+A successful model response must never automatically imply a successful task.
+
+### 3.2 Centralize permission enforcement
+
+The existing risk classifications are:
+
+- ReadOnly
+- Reversible
+- Consequential
+- Destructive
+
+Make the policy layer authoritative.
+
+Rules:
+
+- Read-only actions: automatic.
+- Reversible actions: automatic within approved scope.
+- Consequential actions: require approval.
+- Destructive actions: explicit confirmation.
+- Unknown or unclassified tools: fail closed.
+
+All execution paths, including native tools, browser tools, developer tools, and future integrations, must pass through the same policy boundary.
+
+Do not allow individual tools to bypass it.
 
 ---
 
-# 4. Phase One — Fix and Upgrade the Existing Agent
+## 4. Priority 1 — Context-aware intent engine
 
-**Priority: P0**
+This is the most important intelligence upgrade.
 
-Start by improving the current [`agent.rs`](http://agent.rs) implementation.
+Buddy currently relies heavily on keyword-based context selection.
 
-### Problems to address
+Replace that approach with progressive context gathering.
 
-- The current agent has a fixed step limit.
-- Its execution flow relies heavily on a model-provided `more` boolean.
-- Conversation history is only held in memory.
-- The system prompt is hardcoded.
-- Existing custom system prompt settings are not properly integrated into Buddy.
-- The configured AI temperature is not consistently respected.
-- Tool execution and completion decisions are too tightly coupled.
+### Context sources
 
-### Implementation
+Where available and permitted, gather:
 
-Refactor [`agent.rs`](http://agent.rs) into a facade over smaller agent modules.
+- Active application.
+- Foreground window.
+- Current project and working directory.
+- Relevant open files.
+- Recent file activity.
+- Current screen or selected content when necessary.
+- Recent conversation.
+- Current and previous tasks.
+- Relevant user preferences.
+- Relevant project memories.
 
-Create:
+Do not capture everything indiscriminately.
 
-```
-src/
-  agent.rs
-  agent/
-    planner.rs
-    executor.rs
-    state.rs
-    verifier.rs
-    policy.rs
-    context.rs
-```
+### Intent inference
 
-Keep existing public interfaces working wherever possible.
+Buddy must understand incomplete and vague requests such as:
 
-### Agent execution states
+- "Fix this."
+- "Make it better."
+- "Continue where we left off."
+- "Get this ready for tomorrow."
+- "Build something like that."
+- "Clean up my project."
 
-Implement explicit task states:
+For each request:
 
-```
-enum TaskStatus {
-    Planning,
-    Running,
-    WaitingApproval,
-    Verifying,
-    Completed,
-    Failed,
-    Cancelled,
-}
-```
+1. Identify the likely desired outcome.
+2. Resolve references using conversation and environment context.
+3. Retrieve relevant memories.
+4. Determine whether additional context is needed.
+5. Estimate confidence in the inferred intent.
+6. Decide whether to proceed, inspect further, or ask one concise question.
 
-The model must not decide that a task is finished merely by returning a completion flag.
+Do not ask the user to explain details Buddy can reasonably discover itself.
 
-Completion must depend on execution state and verification evidence.
+When several interpretations are possible, prefer the most likely reversible path and explain the assumption.
 
-### Execution loop
-
-Implement this lifecycle:
-
-1. Receive user request.
-2. Understand the intended outcome.
-3. Retrieve relevant context and memories.
-4. Decide whether planning is necessary.
-5. Create and persist a task.
-6. Execute the next appropriate step.
-7. Check permissions.
-8. Execute the tool.
-9. Record the result.
-10. Evaluate whether the task remains achievable.
-11. Retry or replan if necessary.
-12. Verify the requested outcome.
-13. Mark the task complete only when supported by evidence.
-14. Explain the result to the user.
-
-### Preserve the existing fast path
-
-Keep `assist::parse()` for straightforward deterministic actions.
-
-Do not send every basic command through an expensive multi-step planning loop.
-
-Examples:
-
-- "Open Chrome" → existing direct action.
-- "Turn up the volume" → existing direct action.
-- "Research these three technologies and compare them" → agent planning.
-- "Find the bug in this project, fix it and run the tests" → multi-step agent workflow.
-
-### Prompt construction
-
-Implement:
-
-```
-pub fn build_system_prompt(cfg: &Config) -> String
-```
-
-It should combine:
-
-- Base Buddy instructions.
-- User-configured system prompt.
-- Current task information.
-- Relevant retrieved memories.
-- Relevant desktop context.
-- Available tool descriptions.
-- Current autonomy and safety settings.
-
-Use the configured `ai.temperature`.
+Never infer permission for consequential or destructive actions.
 
 ---
 
-# 5. Phase Two — Provider-Agnostic Intelligence Layer
+## 5. Priority 1 — Structured planning and execution
 
-**Priority: P0**
+Upgrade the current sequential tool loop into a lightweight planning system.
 
-Buddy must not depend on Gemini, OpenAI, Claude or any specific model provider.
+Each task should contain:
 
-Create:
+- User's original request.
+- Inferred objective.
+- Relevant context.
+- Execution steps.
+- Dependencies.
+- Expected results.
+- Completion criteria.
+- Required permissions.
+- Current progress.
+- Verification evidence.
 
-```
-src/
-  intelligence.rs
-  intelligence/
-    provider.rs
-    router.rs
-    request.rs
-    response.rs
-    capabilities.rs
-```
+Requirements:
 
-### Unified provider interface
+- Support multi-step tasks.
+- Persist plans and progress.
+- Recover interrupted tasks safely.
+- Adapt plans when tools fail.
+- Re-plan when new information changes the approach.
+- Avoid blindly replaying side effects.
+- Preserve the existing fast path for simple requests.
 
-Design a normalized interface similar to:
+Do not introduce a heavyweight agent framework.
 
-```
-pub trait ModelProvider: Send + Sync {
-    fn name(&self) -> &'static str;
+Use model reasoning for planning, with Rust responsible for execution, state, permissions, and verification.
 
-    fn capabilities(&self, model: &str)
-        -> ModelCapabilities;
+---
 
-    fn generate(
-        &self,
-        request: ModelRequest
-    ) -> Result<ModelResponse, ModelError>;
-}
-```
+## 6. Priority 1 — Adaptive autonomy
 
-Adapt this interface to the existing application's threading and streaming architecture. Do not introduce an unnecessary async runtime.
+Autonomy should adapt to the request and its risks.
 
-### Normalized request
 
-```
-pub struct ModelRequest {
-    pub system: String,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolDefinition>,
-    pub temperature: f32,
-    pub max_tokens: Option<u32>,
-}
-```
+| Situation                            | Behavior                              |
+| ------------------------------------ | ------------------------------------- |
+| Clear, harmless request              | Act immediately                       |
+| Vague request with strong context    | Infer and act                         |
+| Missing but discoverable information | Investigate first                     |
+| Multiple reasonable interpretations  | Choose the likely safe interpretation |
+| Consequential action                 | Request approval                      |
+| Destructive action                   | Require explicit confirmation         |
+| Failed execution                     | Diagnose and adapt                    |
 
-### Normalized response
 
-```
-pub enum ModelOutput {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
-    Mixed {
-        text: String,
-        calls: Vec<ToolCall>,
-    },
-}
-```
+Buddy should not ask unnecessary questions.
 
-Use a normalized event representation for streaming as well.
+The objective is to minimize user involvement without sacrificing control or safety.
 
-### Model capabilities
+---
 
-Each model should advertise capabilities such as:
+## 7. Priority 1 — Provider-agnostic model architecture
+
+Create a normalized Rust model-provider interface.
+
+It should support:
 
 - Text generation.
-- Vision.
-- Native tool calling.
-- Structured output.
-- Reasoning.
 - Streaming.
-- Context window.
-- Relative cost.
-- Expected latency.
+- Tool calling.
+- Cancellation.
+- Model capability information.
+- Context limits.
+- Usage and token information.
+- Latency and error reporting.
+- Provider fallback.
 
-Do not assume every model supports every capability.
+Retain existing integrations and authentication.
 
-### Automatic model routing
+### Automatic routing
 
-Implement an intelligent router.
+Routing should consider:
 
-It should consider the task rather than blindly using the configured default model.
+- Task complexity.
+- Coding requirements.
+- Vision requirements.
+- Tool-calling requirements.
+- Context size.
+- Provider availability.
+- Latency.
+- Cost.
 
-Examples:
+Use lightweight heuristics initially.
 
+Do not require an additional LLM classification call for every request.
 
-| Task                     | Preferred capability         |
-| ------------------------ | ---------------------------- |
-| Simple conversation      | Fast, inexpensive model      |
-| Complex reasoning        | Strong reasoning model       |
-| Coding                   | Strong coding model          |
-| Screenshot understanding | Vision-capable model         |
-| Long document analysis   | Large context window         |
-| Tool-heavy workflow      | Reliable native tool calling |
-| Local/private task       | Available local model        |
-
-
-The router must:
-
-1. Discover available configured providers and models.
-2. Filter out models that cannot perform the required task.
-3. Rank compatible models.
-4. Select the best available option.
-5. Fall back if the provider fails.
-6. Record routing decisions for debugging.
-
-Allow the user to override automatic routing and select a preferred model.
-
-### Provider compatibility
-
-Extend `bridge/[web.rs](http://web.rs)` rather than replacing it.
-
-Normalize provider-specific tool calls into one internal format.
-
-Support the existing Gemini, Anthropic, OpenAI-compatible, Mistral, OpenRouter and Ollama integrations where their capabilities permit.
-
-Keep CLI integrations compatible even if they initially use a validated JSON-based tool protocol rather than native tool calling.
-
-Never pretend that a model supports native tools if it does not.
+Keep primary-model and strong-model compatibility with existing settings.
 
 ---
 
-# 6. Phase Three — Persistent Memory
+## 8. Priority 2 — Honcho memory integration
 
-**Priority: P0**
+Integrate Honcho as an optional user-modeling backend.
 
-Buddy must retain useful information between conversations and application restarts.
+Its responsibilities:
 
-Implement local persistent storage.
+- Learn user preferences.
+- Understand communication style.
+- Identify recurring patterns.
+- Maintain evolving user profiles.
+- Understand goals and preferences over time.
+- Provide relevant user context during intent inference.
 
-Suggested location:
+Keep SQLite as the source of truth for:
 
-`%LOCALAPPDATA%/zor-ui/buddy.db`
+- Task state.
+- Execution history.
+- Local settings.
+- Operational memory.
+- Recent conversation history.
 
-Use SQLite.
+### Memory architecture
 
-Suggested Rust dependency:
+Separate:
 
-```
-rusqlite = { version = "0.38", features = ["bundled"] }
-```
+1. Semantic memory — stable user facts.
+2. Preference memory — how the user likes things done.
+3. Episodic memory — previous interactions and events.
+4. Project memory — decisions, architecture, and ongoing work.
+5. Working memory — current task context.
 
-Verify compatibility with the repository's Rust toolchain and lockfile before adding it.
+Requirements:
 
-### Database structure
+- Selective memory extraction.
+- Duplicate detection.
+- Confidence and provenance.
+- Memory consolidation.
+- Expiration of outdated information.
+- User-controlled forgetting.
+- Sensitive-data filtering.
+- Configurable external transmission.
+- Bounded retrieval.
 
-Create tables for:
+Do not send all local memory to Honcho or to model providers.
 
-```
-conversations
-messages
-memories
-memory_links
-tasks
-task_steps
-```
+Create a replaceable memory-provider interface.
 
-### Memory categories
-
-Implement:
-
-- User preferences.
-- Personal facts.
-- Projects.
-- Decisions.
-- Important conversation events.
-- Procedures and recurring workflows.
-
-Each memory should contain:
-
-- Unique ID.
-- Category.
-- Content.
-- Project association, if applicable.
-- Source.
-- Confidence.
-- Importance.
-- Creation timestamp.
-- Last updated timestamp.
-- Last accessed timestamp.
-- Optional expiration timestamp.
-- Archived status.
-
-### Memory behavior
-
-Buddy should:
-
-1. Identify potentially useful information.
-2. Decide whether it is worth remembering.
-3. Avoid storing every conversation.
-4. Detect duplicate memories.
-5. Update existing memories when information changes.
-6. Retrieve relevant memories before answering.
-7. Associate memories with ongoing projects.
-8. Avoid injecting irrelevant memories into prompts.
-
-Start with SQLite full-text search.
-
-Design a retrieval interface that can later support vector embeddings without rewriting the memory system.
-
-### Privacy
-
-Memory must be local by default.
-
-Only relevant memory should be included in requests to external model providers.
-
-Add settings to:
-
-- Enable or disable memory.
-- View memories.
-- Search memories.
-- Edit memories.
-- Delete individual memories.
-- Clear conversation history.
-- Exclude selected projects or applications from memory.
-- Disable automatic memory extraction.
-
-Do not silently store sensitive information.
-
-Persist task state and conversation history so Buddy can recover after restarting Zor-UI.
+Do not introduce Supermemory in this milestone.
 
 ---
 
-# 7. Phase Four — Planner, Executor and Verification
+## 9. Priority 2 — Developer capabilities
 
-**Priority: P1**
+Buddy currently lacks a complete developer toolset.
 
-Buddy should operate on objectives rather than isolated tool calls.
+Introduce a permission-controlled Developer skill.
 
-### Planner
+Potential capabilities:
 
-The planner should convert a user request into a structured plan.
-
-Each step should include:
-
-- Step ID.
-- Description.
-- Required tool or capability.
-- Expected output.
-- Dependencies.
-- Success criteria.
-- Approval requirements.
-- Execution status.
-
-### Executor
-
-The executor should:
-
-- Execute steps in dependency order.
-- Persist progress.
-- Capture tool results.
-- Handle errors.
-- Retry recoverable failures.
-- Replan when assumptions change.
-- Support cancellation.
-- Resume interrupted tasks.
-
-### Verifier
-
-Implement independent verification.
-
-Examples:
-
-
-| User request        | Verification                                        |
-| ------------------- | --------------------------------------------------- |
-| Create a file       | Check that the file exists and has expected content |
-| Modify code         | Inspect the diff                                    |
-| Run tests           | Check the actual test exit status                   |
-| Open an application | Confirm the application is running                  |
-| Search the web      | Confirm relevant sources were retrieved             |
-| Complete a workflow | Evaluate every required success criterion           |
-
-
-A successful tool response does not automatically mean the user's overall task is complete.
-
-The verifier should distinguish between:
-
-- Completed.
-- Partially completed.
-- Failed.
-- Unable to verify.
-
-### Execution budgets
-
-Retain sensible limits.
-
-Initial defaults:
-
-- 12 steps for ordinary agent tasks.
-- 90 seconds for ordinary execution.
-- Existing browser-specific limits remain intact.
-- Bounded retries.
-- Maximum context and token budgets.
-- User cancellation support.
-
-Do not allow the model to increase its own execution budget.
-
-Make limits configurable later.
-
----
-
-# 8. Phase Five — Balanced Autonomy and Safety
-
-**Priority: P1**
-
-Buddy should be capable without becoming reckless.
-
-Implement centralized permission handling.
-
-### Risk categories
-
-```
-enum RiskLevel {
-    ReadOnly,
-    Reversible,
-    Consequential,
-    Destructive,
-}
-```
-
-### Permission behavior
-
-
-| Action                       | Default behavior                |
-| ---------------------------- | ------------------------------- |
-| Search the web               | Automatic                       |
-| Read a webpage               | Automatic                       |
-| Inspect files                | Automatic                       |
-| Read project source          | Automatic                       |
-| Open an application          | Automatic                       |
-| Change application settings  | Depends on setting              |
-| Create or edit project files | Allowed within configured scope |
-| Send a message               | Ask first                       |
-| Delete important files       | Ask first                       |
-| Make purchases               | Ask first                       |
-| Shut down the computer       | Ask first                       |
-| Modify security settings     | Ask first                       |
-
-
-Preserve existing safety gates in:
-
-- [`assist.rs`](http://assist.rs)
-- [`browse.rs`](http://browse.rs)
-- [`drive.rs`](http://drive.rs)
-
-Do not bypass existing confirmations.
-
-Approvals must be bound to the exact action and arguments. If the action changes, request approval again.
-
-The model must never be able to grant itself permissions.
-
----
-
-# 9. Phase Six — Unified Tool and Skill System
-
-**Priority: P1**
-
-Buddy already has several useful integrations.
-
-Build a registry that exposes them through a consistent interface.
-
-Create:
-
-```
-src/
-  skills.rs
-  skills/
-    registry.rs
-    developer.rs
-    research.rs
-    desktop.rs
-```
-
-### Tool interface
-
-Each tool should provide:
-
-- Name.
-- Description.
-- Input schema.
-- Risk classification.
-- Required capabilities.
-- Execution function.
-- Structured result.
-- Error information.
-
-Create a registry that can discover available tools and validate their arguments.
-
-### Reuse existing tools
-
-Build adapters around existing functionality:
-
-
-| Existing module                   | Tool capabilities                   |
-| --------------------------------- | ----------------------------------- |
-| [`webread.rs`](http://webread.rs) | Search and read web content         |
-| [`browse.rs`](http://browse.rs)   | Browser interaction                 |
-| [`drive.rs`](http://drive.rs)     | Desktop automation                  |
-| [`assist.rs`](http://assist.rs)   | Application actions and messaging   |
-| [`media.rs`](http://media.rs)     | Media controls                      |
-| [`proc.rs`](http://proc.rs)       | Application and process information |
-| [`screen.rs`](http://screen.rs)   | Screen capture                      |
-| [`mcp.rs`](http://mcp.rs)         | External MCP tools                  |
-
-
-Do not duplicate these implementations.
-
-### Skills versus tools
-
-A tool performs an individual action.
-
-A skill defines how to complete a category of work using multiple tools.
-
-Implement initial built-in skills:
-
-**Developer**
-
-- Inspect a codebase.
+- Inspect project directories.
+- Read and edit files.
+- Search code.
 - Understand project structure.
-- Find bugs.
-- Modify code.
+- Execute terminal commands.
 - Run tests.
-- Review changes.
+- Build projects.
+- Diagnose errors.
+- Review diffs.
+- Verify changes.
 
-**Research**
+Requirements:
 
-- Search multiple sources.
-- Read and compare sources.
-- Extract findings.
-- Identify disagreements.
-- Produce structured reports.
+- Workspace-scoped access.
+- Command risk classification.
+- Explicit approval for risky operations.
+- Safe handling of secrets.
+- No unrestricted shell execution.
+- Verification after changes.
 
-**Desktop**
-
-- Inspect active applications.
-- Navigate application interfaces.
-- Perform approved interactions.
-- Verify outcomes.
-
-**Personal**
-
-- Retrieve relevant memories.
-- Manage tasks.
-- Maintain project context.
-- Recall previous decisions.
-
-External installable skills can come later, after sandboxing and permission controls are established.
+Buddy should be able to understand and work on its own Zor-UI codebase when the user authorizes access.
 
 ---
 
-# 10. Phase Seven — Context Engine
+## 10. Priority 2 — Skills and lightweight delegation
 
-**Priority: P2**
+Expand the existing skills system.
 
-Buddy should understand relevant context without constantly sending unnecessary information to models.
+Preserve Research, Desktop, and Personal skills.
 
-Create a context engine that can provide:
+Introduce:
 
-```
-pub struct AgentContext {
-    pub current_time: String,
-    pub active_window: Option<String>,
-    pub active_application: Option<String>,
-    pub media_context: Option<String>,
-    pub active_project: Option<String>,
-    pub relevant_memories: Vec<String>,
-    pub active_task: Option<String>,
-}
-```
+- Developer.
+- Project management.
+- Browser research.
+- Workflow automation.
 
-Use existing Windows integrations.
+Skills should have:
 
-Retrieve context only when it is relevant to the task.
+- Clear capability descriptions.
+- Required tools.
+- Permissions.
+- Context requirements.
+- Reusable workflows.
+- Versioning.
+- Evaluation criteria.
 
-Examples:
+Support lightweight task delegation when it improves performance.
 
-- Coding request → inspect the active project.
-- Media request → inspect current media state.
-- Application request → inspect running applications.
-- Follow-up question → retrieve relevant conversation and project memory.
-
-Do not capture or transmit screenshots unnecessarily.
-
-Treat webpages, file contents, OCR, window titles and other external text as untrusted data, never as instructions that can override system policy.
+Do not spawn unnecessary subagents for simple requests.
 
 ---
 
-# 11. Phase Eight — Settings and User Experience
+## 11. Performance requirements
 
-**Priority: P2**
+Minimal resource consumption is a core requirement.
 
-Expose the new capabilities in Zor-UI settings.
+- No unnecessary background polling.
+- No always-running heavyweight agent runtime.
+- No unnecessary model calls.
+- Bounded conversation context.
+- Lazy-load skills and providers.
+- Reuse existing SQLite infrastructure.
+- Keep idle memory consumption low.
+- Use asynchronous operations where appropriate.
+- Avoid duplicate context gathering.
+- Measure memory and CPU before and after changes.
 
-Add settings for:
+Do not add a vector database by default.
 
-### Intelligence
-
-- Automatic model routing.
-- Manual model selection.
-- Preferred reasoning model.
-- Preferred coding model.
-- Preferred vision model.
-- Local-model preference.
-- Fallback behavior.
-
-### Autonomy
-
-- Balanced autonomy.
-- Approval requirements.
-- File modification scope.
-- Execution limits.
-
-### Memory
-
-- Enable or disable persistent memory.
-- View and search memories.
-- Edit and delete memories.
-- Clear history.
-- Configure exclusions.
-
-### Tasks
-
-- Show active tasks.
-- Show execution progress.
-- Show completed tasks.
-- Cancel running tasks.
-- Resume interrupted tasks.
-
-Keep the UI consistent with existing Zor-UI design patterns.
-
-Do not overload the interface with technical configuration that ordinary users do not need.
+Only consider embeddings or external memory infrastructure when measured retrieval improvements justify their cost.
 
 ---
 
-# 12. Phase Nine — Testing and Reliability
+## 12. Implementation order
 
-**Priority: P0 throughout implementation**
+Work in small, independently testable milestones.
 
-Create deterministic tests using fake model providers and mock tools.
 
-Test the following scenarios:
+| Milestone | Deliverable                                |
+| --------- | ------------------------------------------ |
+| M0        | Fresh codebase audit and baseline          |
+| M1        | Verification and task-state reliability    |
+| M2        | Centralized permission enforcement         |
+| M3        | Progressive context engine                 |
+| M4        | Intent inference                           |
+| M5        | Structured planning and recovery           |
+| M6        | Adaptive autonomy                          |
+| M7        | Provider abstraction and automatic routing |
+| M8        | Optional Honcho integration                |
+| M9        | Developer skill                            |
+| M10       | Skills, delegation, and evaluation         |
+| M11       | Performance optimization                   |
 
-1. Simple conversational request.
-2. Multi-step task execution.
-3. Model provider failure.
-4. Automatic provider fallback.
-5. Tool argument validation.
-6. Native tool calling.
-7. JSON compatibility tool calling.
-8. Failed tool execution.
-9. Recovery and replanning.
-10. Persistent memory across restarts.
-11. Memory retrieval relevance.
-12. Memory deduplication.
-13. Memory updates.
-14. Sensitive memory exclusion.
-15. Approval for consequential actions.
-16. Rejection of an approval request.
-17. Cancellation during execution.
-18. Interrupted task recovery.
-19. False completion detection.
-20. Context-window overflow.
 
-Add integration tests for realistic workflows.
+Do not implement every milestone in one enormous change.
 
-### Performance and quality metrics
-
-Track:
-
-- Task completion rate.
-- False completion rate.
-- Tool selection accuracy.
-- Planning quality.
-- Memory retrieval relevance.
-- Recovery success rate.
-- Model latency.
-- Token usage.
-- Estimated model cost.
-
-Do not log API keys, sensitive memory contents or private message contents.
+Start with M0 and M1. Report findings before proceeding to M2.
 
 ---
 
-# 13. Implementation Order
+## 13. Testing and acceptance criteria
 
-Do not implement everything in one giant change.
+Every milestone must include tests.
 
-Work in the following milestones.
+### Intent tests
 
-### Milestone 1 — Intelligence Foundation
+Buddy should correctly resolve vague instructions using supplied conversation and environment context.
 
-- Fix Buddy's system prompt.
-- Respect user-configured temperature.
-- Fix the current completion and continuation logic.
-- Introduce normalized model request and response types.
-- Introduce provider abstraction.
-- Implement basic automatic model routing.
-- Support structured tool calls.
-- Add deterministic tests.
+### Planning tests
 
-**Acceptance criteria:** Buddy can complete a multi-step task using more than one configured provider without relying on provider-specific agent logic.
+Buddy should produce executable plans, recover interrupted tasks, and adapt when steps fail.
 
-### Milestone 2 — Persistent Memory
+### Safety tests
 
-- Add SQLite.
-- Add schema and migrations.
-- Persist conversations.
-- Implement memory extraction.
-- Implement retrieval.
-- Implement deduplication and updates.
-- Add memory settings.
-- Persist task state.
+Unknown tools must fail closed. Consequential and destructive actions must not execute without the required approval.
 
-**Acceptance criteria:** Buddy remembers useful information after Zor-UI is closed and reopened, and can retrieve it in a relevant conversation.
+### Verification tests
 
-### Milestone 3 — Autonomous Execution
+A task must never be marked Completed when its required outcome is not verified.
 
-- Implement planner.
-- Implement executor.
-- Implement task state machine.
-- Implement centralized policy.
-- Implement tool registry.
-- Add verification.
-- Add retry and replanning.
-- Preserve existing browser and desktop safeguards.
+### Memory tests
 
-**Acceptance criteria:** Buddy can execute a multi-step workflow, recover from a failed step and verify the final result.
+Memory retrieval should be relevant, bounded, privacy-aware, and independent of Honcho availability.
 
-### Milestone 4 — Skills and Context
+### Provider tests
 
-- Add Developer skill.
-- Add Research skill.
-- Add Desktop skill.
-- Add Personal skill.
-- Add context engine.
-- Improve context selection.
-- Add active task UI.
+Switching model providers must not require changes to the agent orchestration code.
 
-**Acceptance criteria:** Buddy can perform realistic workflows across the existing Zor-UI integrations with relevant context.
+### Performance tests
 
-### Milestone 5 — Optimization
+Measure:
 
-- Improve routing decisions.
-- Add optional semantic memory retrieval.
-- Optimize context usage.
-- Improve latency and token consumption.
-- Add benchmarks.
-- Refine settings and progress UI.
+- Idle RAM.
+- Active RAM.
+- CPU usage.
+- Context size.
+- Token consumption.
+- Model calls per task.
+- Task latency.
 
-**Acceptance criteria:** The assistant is reliable, measurable, configurable and efficient.
+Set concrete baselines before optimization.
 
 ---
 
-# 14. Engineering Constraints
+## 14. Non-negotiable constraints
 
-These are mandatory.
-
-1. Use Rust for the intelligence core.
-2. Preserve the existing application architecture.
-3. Reuse existing browser, desktop, process, media and MCP integrations.
-4. Do not hardcode a single AI provider.
-5. Do not make model-specific assumptions in the planner or executor.
-6. All model communication must pass through the normalized provider layer.
-7. All tool execution must pass through the tool registry and policy engine.
-8. The model must never override user permissions.
-9. Persistent task state must survive application restarts.
-10. Memory must be local by default and user-controlled.
-11. Tool success must not be confused with task completion.
-12. Do not introduce unnecessary heavyweight frameworks.
-13. Do not introduce a separate Python backend.
-14. Do not introduce an always-running external vector database.
-15. Preserve current voice and Buddy UI functionality.
-16. Maintain backward compatibility with existing configuration where practical.
-17. Do not remove existing integrations simply because a new abstraction is introduced.
-18. Keep changes modular, testable and documented.
+- No Hermes integration.
+- No full agent rewrite.
+- No replacement of existing SQLite memory.
+- No mandatory Honcho dependency.
+- No Supermemory integration yet.
+- No removal of existing model providers.
+- No breaking existing voice functionality.
+- No breaking Buddy personalities or UI.
+- No bypassing permission checks.
+- No blind retries of side-effecting operations.
+- No unnecessary heavyweight frameworks.
+- No unnecessary background processes.
+- No unrelated UI redesign.
 
 ---
 
-# 15. How the AI Coding Agent Must Work
-
-Follow this workflow strictly.
-
-**Step 1 — Inspect**
-
-Read the actual source files before proposing changes. Do not rely solely on this document.
-
-**Step 2 — Report**
-
-Produce:
-
-- Architecture assessment.
-- Exact files to change.
-- New files to create.
-- Dependency changes.
-- Potential compatibility problems.
-- Implementation sequence.
-
-**Step 3 — Implement incrementally**
-
-Implement one milestone at a time.
-
-Do not make unrelated refactors.
-
-**Step 4 — Build and test**
-
-After each meaningful change:
-
-- Run formatting.
-- Run `cargo check`.
-- Run relevant unit tests.
-- Run the full test suite when appropriate.
-- Build the Windows application when possible.
-
-Fix regressions before continuing.
-
-**Step 5 — Report honestly**
+## 15. Required deliverables
 
 For every milestone, report:
 
-- What was implemented.
-- Files created or modified.
-- Tests executed.
-- Build status.
-- Known limitations.
-- Remaining tasks.
+1. What was inspected.
+2. What was changed.
+3. Files created or modified.
+4. Architectural decisions.
+5. Dependencies introduced or removed.
+6. Tests added.
+7. Tests executed and their actual results.
+8. Build results.
+9. Performance impact.
+10. Remaining limitations.
 
-Never claim something works without testing it.
+Update the relevant architecture documentation and `docs/[BuddyIntelPlan.md](http://BuddyIntelPlan.md)`.
 
-Do not silently replace a feature with a placeholder.
-
-If a provider does not support a capability, report it and use an explicitly documented fallback.
-
-**Step 6 — Maintain documentation**
-
-Update:
-
-- Architecture documentation.
-- Configuration documentation.
-- Tool and skill documentation.
-- Database schema and migration documentation.
-- Development and testing instructions.
+Do not claim tests or builds passed unless they were actually executed.
 
 ---
 
-# 16. Definition of Done
+## Final product vision
 
-The upgrade is complete when Buddy can:
+Buddy should feel like an intelligent personal computer assistant, not a chatbot with a list of commands.
 
-- Understand a complex user objective.
-- Break it into a sensible plan.
-- Automatically select an appropriate available model.
-- Use different providers without changing agent logic.
-- Call existing tools through a unified registry.
-- Execute multi-step workflows.
-- Recover from errors and replan.
-- Ask permission before consequential actions.
-- Remember relevant information across sessions.
-- Understand relevant desktop and project context.
-- Verify actual outcomes.
-- Resume interrupted tasks.
-- Explain what it did and what it could not do.
+The user should be able to say:
 
-The final result should feel like a capable desktop assistant, not a chatbot with a collection of disconnected commands.
+"Make my project production-ready."
 
-## Status: M0 and M1
+Buddy should understand the project, inspect it, identify the work required, plan the changes, execute safe actions, ask only when necessary, recover from failures, and verify the final result.
 
-**M0 (audit and baseline), done.** The modules this brief names live on `origin/main` (commit `9a41524`, merged to main
-through `8c8d46d`). Findings and their file references are in the M1 plan. Main of this checkout was fast-forwarded to
-`origin/main` for the audit. Baseline on main before any M1 edit: `zorui` 938 passed, 10 ignored; `zorui-svc` 13 passed;
-release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings.
+The user describes the outcome.
 
-**M1 (verification and task-state reliability), done on branch `buddy-intel-m1b`.**
-- Verdict decides the saved state: Completed, Unverified, Partial, Failed, Declined or Cancelled. A model's "Done." after
-  failed tools is saved as Failed (`agent::outcome`, `state::status_of`).
-- A declined tool is `Check::Declined`, not a failure.
-- A failure that a later step recovers from is not counted (`verifier::judge`).
-- Radio and brightness are verified by reading the real state back; brightness is refused unless the level matches.
-- `open`-style acting calls that failed in a request are not run again (`agent::already_failed`).
-- Tests added in `agent/verifier.rs`, `agent/state.rs`, `agent/tasks.rs` and `agent.rs`.
-- Tests after M1: `zorui` 948 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings unchanged at 59.
-- Remaining limitations (M1): volume and opening apps still have no read-back; the repeat block covers only the same call
-  with the same arguments.
+**Buddy figures out how to achieve it.**
+---
 
-**M2 (centralized permission enforcement), done on branch `buddy-intel-m1b`.**
-- Every risky call is asked in one place: `agent::approve`, with the question from `policy::approval_for`. Power (not lock),
-  take-over and the browser are the three cases. The old asks in `power()`, `browse::run` and `drive::start` (for the agent
-  path) are gone.
-- A risky call whose level needs approval but has no question is refused (fails closed).
-- Take-over asks on the request's own thread before it starts, so a "no" is a Declined task, not a silent "Checking with you
-  first." The switches and the model check run before the question, so a take-over that can't run asks nothing.
-- The browser's yes is per request (`browse::approve_request`); `browse::run` refuses a step that arrives without it.
-- Tests: `policy.rs` (level and question agree for every risky call), `agent.rs` (`approve`: a no runs nothing, lock and
-  lookups ask nothing, an unknown risky call is refused), `browse.rs` (a step without approval asks nothing).
-- Tests after M2: `zorui` 951 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings 59 (unchanged).
-- Remaining limitations (M2): the browser's per-step gate still lives in `browse::gate` (it is per action, not per request);
-  the take-over's question text is built in `drive::question`, which `policy` calls.
+## Status
 
-**M3 (progressive context), done on branch `buddy-intel-m1b`.**
-- Two sources added to `AgentContext`: the previous saved request and how it ended (when the words point back), and the
-  names of the five newest Recent-folder shortcuts (when the words ask about files).
-- Intent rules in Rust, no extra model call: a request that points back with nothing earlier gets one instruction to ask one
-  short question.
-- The whole context is cut to 700 characters.
-- Tests: reference words, the newest-shortcut order in a temp folder, the previous-request and question rules, and the budget.
-- Tests after M3: `zorui` 959 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Warnings 59 (unchanged).
-- Live: "what files did I open recently" listed real Recent files; "continue where we left off" answered from the last request.
-- Remaining limitations (M3): "it" is not a reference word; the memory lookup still opens the database on every request;
-  intent rules are keyword-based, so an unusual phrasing gets no earlier request.
-- Correction: the active-project source (`agent/project.rs`, from a folder with a project marker under Documents or Desktop,
-  or `buddies.projectRoots`) is part of the M3 commit `8c4a892`. An earlier note here said there was none; that was out of date.
+This brief (v2) is the source of truth. Milestone numbers are the ones in section 12. Every entry below is backed by code and tests on the branch named.
 
-**M4 (intent), done on branch `buddy-intel-m1b`.**
-- `agent/intent.rs` classifies each request as Answer, Lookup, Act, Setting or Unclear, with High, Medium or Low confidence.
-  No model call. Context: previous request, conversation, active project, pending question.
-- A clear request goes ahead. One that is clear only with an assumption goes ahead with the assumption stated. An unclear one
-  with nothing to point at gets one question, and the next request is read as the answer.
-- "open A and B" and "open A, B" open each app locally; apps that are not installed are named in the answer.
-- Tests: the classification table, the answer-to-question case, the decision for each confidence, the splitting of app lists.
-- Remaining limitations (M4): keyword-based; the decision is not measured against real requests yet.
+| Milestone | Status | Where | Limits |
+| --------- | ------ | ----- | ------ |
+| M0 Fresh audit and baseline | Done | main | Baseline: `zorui` 938 passed, 10 ignored; `zorui-svc` 13 passed; release build 5m 00s; `zorui.exe` 8,103,424 bytes; 59 warnings. |
+| M1 Verification and task state | Done | buddy-intel-m1b | Volume and opening apps have no read-back. The repeat block covers only the same call with the same arguments. |
+| M2 Centralized permissions | Done | buddy-intel-m1b | The browser's per-action gate still lives in `browse::gate`. |
+| M3 Progressive context | Done | buddy-intel-m1b | "It" is not a reference word. Memory lookup opens the database on every request. Intent rules are keyword-based. No preferences or project memories in context. |
+| M4 Intent inference | Done | buddy-intel-m1b | Keyword-based. Not yet measured against real requests. |
+| M5 Structured planning and recovery | Done | buddy-intel-m5 | Steps are recorded from what the model did, not from a declared plan. Interrupted tasks are marked and their side effects blocked, but not resumed. Recovery runs once per app start. A live restart was not run on a desktop. |
+| M6 Adaptive autonomy | Partial | — | Clear requests proceed and consequential actions ask. Missing: investigate before asking, ranking of readings, failure diagnosis. |
+| M7 Provider abstraction and routing | Mostly not started | — | Routing heuristics and fallback chain exist (`routing.rs`). Missing: normalized provider interface, streaming, capability and usage information. |
+| M8 Honcho integration | Not started | — | Only a `Recall` trait for a future backend. |
+| M9 Developer skill | Not started | — | No code tools, terminal or test runner. |
+| M10 Skills, delegation, evaluation | Partial | — | Research, Desktop and Personal skills exist. Missing: Developer, Project management, Browser research, Workflow skills; versioning and evaluation criteria. |
+| M11 Performance | Not started | — | Only the M0 numbers. No optimization and no before-and-after measurements. |
 
-**M5 (structured planning and recovery), done on branch `buddy-intel-m5` (based on `buddy-intel-m1b`).**
-- Each tool step is saved in the `steps` column of its `tasks` row as it runs: running, done, failed, declined or blocked.
-  `agent/plan.rs` holds the step records and the guard; `tasks.rs` saves them. The plan named a `task_steps` table; the JSON
-  column keeps one table.
-- A step that changes something (message, key press, power action, file open, browser action) is refused when one of the
-  five newest interrupted tasks already started or finished the same call. Reads may repeat. Unknown tools count as changes.
-- Migration: a database from before M5 gets the column on first open. Run on a copy of a real `buddy.db` (21 tasks): all rows
-  kept, the column added, a new row written.
-- Tests after M5: `zorui` 978 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed. Six new tests (four in `plan.rs`, two in
-  `tasks.rs`). No warnings from the M5 files; the existing unused `run_loop` warning in `agent.rs` is unchanged.
-- Remaining limitations (M5): no resuming of interrupted tasks; the model still plans one tool at a time; recovery runs once
-  per app start and assumes requests do not overlap; a live restart on a desktop was not run.
+Tests on `buddy-intel-m5` after M5: `zorui` 978 passed, 0 failed, 10 ignored; `zorui-svc` 13 passed.
+M5 migration was run on a copy of a real `buddy.db` (21 tasks): all rows kept, the column added, a new row written.
+Corrections: the active-project source (`agent/project.rs`) is part of the M3 commit `8c4a892`. An earlier note said there was none.
 
-**Start with Milestone 1. Inspect the repository, establish the baseline build, and implement the smallest complete, tested intelligence foundation before moving to persistent memory. Do not attempt the entire upgrade in one unverified change.**
+The earlier "Buddy Intelligence Upgrade" plan (milestones 1–5) is no longer in this file. It is still in the history of `main`.

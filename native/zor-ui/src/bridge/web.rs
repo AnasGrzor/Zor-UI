@@ -536,8 +536,10 @@ fn ai_chat(stdin: &str, out: &Sink) {
         out.emit(&json!({ "error": format!("No API key for {provider}. Type /key {provider} YOUR_KEY") }));
         return;
     }
-    let (url, headers, mut body) = chat_request(&provider, &model, &key, &msgs, system, temp);
-    if provider == "anthropic" { super::native_tools::add_to_body(&mut body, &req["tools"]); }
+    let adapter = adapters::for_provider(&provider);
+    let (url, headers, mut body) = adapter.request(&model, &key, &msgs, system, temp);
+    // the tool list, for the providers that take one (the adapter decides)
+    adapter.add_tools(&mut body, &req["tools"]);
     // The key and body go through curl's config on stdin, so they never show up in the process list.
     let mut conf = format!("url = {}\n", cfg_quote(&url));
     for (k, v) in &headers { conf.push_str(&format!("header = {}\n", cfg_quote(&format!("{k}: {v}")))); }
@@ -561,7 +563,8 @@ fn ai_chat(stdin: &str, out: &Sink) {
         }
     });
     let (mut status, mut other, mut finished) = (0u32, String::new(), false);
-    let mut tools = super::native_tools::ToolParser::default();
+    // the tool-call reader for this provider, when it has one (None: the provider takes no native tools)
+    let mut tools = adapter.new_tools();
     loop {
         if out.stopped() { let _ = child.kill(); let _ = child.wait(); return; }
         let line = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -577,7 +580,7 @@ fn ai_chat(stdin: &str, out: &Sink) {
             if data == "[DONE]" { finished = true; break; }
             if let Ok(ev) = serde_json::from_str::<Value>(data) {
                 for e in sse_events(&provider, &ev) { out.emit(&e); }
-                if provider == "anthropic" {
+                if let Some(tools) = tools.as_mut() {
                     match tools.feed(&ev) {
                         Some(Ok(t)) => { out.emit(&json!({ "tool_use": { "id": t.id, "name": t.name, "input": t.input } })); }
                         Some(Err(f)) => { out.emit(&json!({ "tool_error": { "id": f.id, "name": f.name, "message": f.message } })); }

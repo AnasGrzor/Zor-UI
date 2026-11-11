@@ -3,6 +3,7 @@
 //! `for_provider`. The helpers the requests use (`gemini_parts`, `blocks_of`, `openai_like`, `UA`) stay in `web.rs`.
 
 use super::{blocks_of, gemini_parts, openai_like, UA};
+use crate::bridge::native_tools::{self, ToolParser};
 use serde_json::{json, Value};
 
 /// One provider's wire format.
@@ -13,6 +14,10 @@ pub trait Adapter {
     fn request(&self, model: &Value, key: &str, msgs: &[Value], system: &str, temp: f64) -> (String, Vec<(String, String)>, Value);
     /// The lines to emit for one parsed stream event.
     fn events(&self, ev: &Value) -> Vec<Value>;
+    /// Adds the caller's tool list to a request body. Providers without native tools leave it as it is.
+    fn add_tools(&self, _body: &mut Value, _tools: &Value) {}
+    /// A reader for the tool calls in this provider's stream, when it has native tools.
+    fn new_tools(&self) -> Option<ToolParser> { None }
 }
 
 /// The adapter for a provider. Any name without its own wire format uses the OpenAI-style one (with its endpoint, if the model has one).
@@ -79,6 +84,10 @@ impl Adapter for Anthropic {
             _ => vec![],
         }
     }
+
+    fn add_tools(&self, body: &mut Value, tools: &Value) { native_tools::add_to_body(body, tools); }
+
+    fn new_tools(&self) -> Option<ToolParser> { Some(ToolParser::default()) }
 }
 
 /// OpenAI's wire format, which Mistral, OpenRouter, Ollama, custom endpoints and unknown names also use.
@@ -117,6 +126,21 @@ mod tests {
         assert_eq!(for_provider("anthropic").name(), "anthropic");
         assert_eq!(for_provider("mistral").name(), "mistral");
         assert_eq!(for_provider("some-new-host").name(), "some-new-host");
+    }
+
+    #[test]
+    fn only_anthropic_takes_a_tool_list_and_reads_tool_calls() {
+        let tools = json!([{ "name": "open", "description": "d", "input_schema": {} }]);
+        let mut a = json!({ "model": "m" });
+        for_provider("anthropic").add_tools(&mut a, &tools);
+        assert_eq!(a["tools"], tools, "anthropic gets the tools");
+        assert!(for_provider("anthropic").new_tools().is_some());
+        for p in ["gemini", "openai", "mistral"] {
+            let mut b = json!({ "model": "m" });
+            for_provider(p).add_tools(&mut b, &tools);
+            assert!(b.get("tools").is_none(), "{p} sends no tools");
+            assert!(for_provider(p).new_tools().is_none(), "{p} has no tool calls to read");
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! A task still running when the app closes is marked Interrupted on the next start. A request whose text looks like a
 //! secret is saved as "[private request]".
 
-use super::{memory, plan, provider};
+use super::{memory, plan, provider, DESKTOP};
 use super::state::TaskStatus;
 use rusqlite::{params, Connection};
 use std::sync::{atomic::{AtomicBool, Ordering}, Once};
@@ -30,12 +30,18 @@ pub fn setup(conn: &Connection) -> rusqlite::Result<()> {
     add_missing(conn, "tokens_out", "INTEGER NOT NULL DEFAULT 0")?;
     // the plan (plan.rs JSON) is nullable: a task with no plan is NULL and resumes as before
     add_missing(conn, "plan", "TEXT")?;
-    add_missing(conn, "resumes", "INTEGER NOT NULL DEFAULT 0")
+    add_missing(conn, "resumes", "INTEGER NOT NULL DEFAULT 0")?;
+    // the conversation the request came from (agent.rs DESKTOP, or a remote chat's id); tasks made before it are desktop tasks
+    add_missing(conn, "conversation", "TEXT NOT NULL DEFAULT 'desktop'")
 }
 
-fn add_missing(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> {
-    let has = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == col));
-    if !has { conn.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {col} {decl};"))?; }
+fn add_missing(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> { add_column(conn, "tasks", col, decl) }
+
+/// Adds column `col` to `table` when a database made before the column existed lacks it. `table`, `col` and `decl` are fixed
+/// names from this crate, never user text.
+pub(super) fn add_column(conn: &Connection, table: &str, col: &str, decl: &str) -> rusqlite::Result<()> {
+    let has = conn.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get::<_, String>(1))?.any(|n| n.is_ok_and(|n| n == col));
+    if !has { conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?; }
     Ok(())
 }
 
@@ -81,14 +87,14 @@ pub fn plan_on(conn: &Connection, id: i64, plan: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// An interrupted task with a plan that was not resumed yet. Private requests are never resumed.
-pub struct Candidate { pub id: i64, pub request: String, pub steps: String, pub plan: String }
+/// An interrupted task with a plan that was not resumed yet, and the conversation it belongs to. Private requests are never resumed.
+pub struct Candidate { pub id: i64, pub request: String, pub steps: String, pub plan: String, pub conversation: String }
 
 /// The newest such task, if any.
 pub fn resume_candidate_on(conn: &Connection) -> rusqlite::Result<Option<Candidate>> {
-    let mut stmt = conn.prepare("SELECT id, request, steps, plan FROM tasks WHERE status = 'Interrupted' AND plan IS NOT NULL
+    let mut stmt = conn.prepare("SELECT id, request, steps, plan, conversation FROM tasks WHERE status = 'Interrupted' AND plan IS NOT NULL
         AND resumes = 0 AND request <> '[private request]' ORDER BY id DESC LIMIT 1")?;
-    let mut rows = stmt.query_map([], |r| Ok(Candidate { id: r.get(0)?, request: r.get(1)?, steps: r.get(2)?, plan: r.get(3)? }))?;
+    let mut rows = stmt.query_map([], |r| Ok(Candidate { id: r.get(0)?, request: r.get(1)?, steps: r.get(2)?, plan: r.get(3)?, conversation: r.get(4)? }))?;
     rows.next().transpose()
 }
 
@@ -98,12 +104,17 @@ pub fn resume_mark_on(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<
     Ok(())
 }
 
-/// Saves a new task in its first state. Returns its id.
-pub fn begin_on(conn: &Connection, request: &str, now: i64) -> rusqlite::Result<i64> {
+/// Saves a new task of `conversation` in its first state. Returns its id.
+pub fn begin_in_on(conn: &Connection, request: &str, conversation: &str, now: i64) -> rusqlite::Result<i64> {
     let saved = if memory::is_sensitive(request) { "[private request]" } else { request };
-    conn.execute("INSERT INTO tasks (request, status, started, updated) VALUES (?1, ?2, ?3, ?3)",
-        params![saved, format!("{:?}", TaskStatus::Planning), now])?;
+    conn.execute("INSERT INTO tasks (request, status, started, updated, conversation) VALUES (?1, ?2, ?3, ?3, ?4)",
+        params![saved, format!("{:?}", TaskStatus::Planning), now, conversation])?;
     Ok(conn.last_insert_rowid())
+}
+
+/// `begin_in_on` for a request at the desktop.
+pub fn begin_on(conn: &Connection, request: &str, now: i64) -> rusqlite::Result<i64> {
+    begin_in_on(conn, request, DESKTOP, now)
 }
 
 pub fn set_on(conn: &Connection, id: i64, status: TaskStatus, verdict: &str, tool_calls: i64, now: i64) -> rusqlite::Result<()> {
@@ -120,6 +131,13 @@ pub fn recover_on(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
         n += conn.execute("UPDATE tasks SET status = 'Interrupted', updated = ?1 WHERE status = ?2", params![now, s])?;
     }
     Ok(n)
+}
+
+/// The newest task of `conversation`, if it has one. Other conversations' tasks are never returned.
+pub fn latest_on(conn: &Connection, conversation: &str) -> rusqlite::Result<Option<Row>> {
+    let mut stmt = conn.prepare("SELECT id, request, status, verdict, tool_calls FROM tasks WHERE conversation = ?1 ORDER BY id DESC LIMIT 1")?;
+    let mut rows = stmt.query_map(params![conversation], |r| Ok(Row { id: r.get(0)?, request: r.get(1)?, status: r.get(2)?, verdict: r.get(3)?, tool_calls: r.get(4)? }))?;
+    rows.next().transpose()
 }
 
 /// The newest tasks, newest first.
@@ -189,12 +207,15 @@ pub fn wait(id: i64) {
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// Saves a new task for `request`. None when the database can't be used; the request still runs.
-pub fn begin(request: &str) -> Option<i64> {
-    let id = with_db(|c| begin_on(c, request, now()).ok())?;
+/// Saves a new task for `request` from `conversation`. None when the database can't be used; the request still runs.
+pub fn begin_in(request: &str, conversation: &str) -> Option<i64> {
+    let id = with_db(|c| begin_in_on(c, request, conversation, now()).ok())?;
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     id
 }
+
+/// `begin_in` for a request at the desktop (take-overs started from a fixed phrase, and the tests).
+pub fn begin(request: &str) -> Option<i64> { begin_in(request, DESKTOP) }
 
 /// Records a task's state. A failure is logged and ignored. The Settings list is cleared, so it shows the change.
 pub fn set(id: Option<i64>, status: TaskStatus, verdict: &str, tool_calls: i64) {
@@ -219,8 +240,8 @@ pub fn take_over_ended(id: i64, status: TaskStatus) {
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// The newest saved request and how it ended. None when there is none, or the database can't be read.
-pub fn latest() -> Option<Row> { with_db(|c| recent_on(c, 1).ok()).flatten().and_then(|v| v.into_iter().next()) }
+/// The newest request of `conversation` and how it ended. None when there is none, or the database can't be read.
+pub fn latest_in(conversation: &str) -> Option<Row> { with_db(|c| latest_on(c, conversation).ok().flatten()).flatten() }
 
 /// The newest tasks, as the Settings page lists them. Cached, so a repaint never opens the database.
 static CACHE: std::sync::Mutex<Option<Vec<Row>>> = std::sync::Mutex::new(None);
@@ -245,6 +266,33 @@ mod tests {
         set_on(&c, id, TaskStatus::Completed, "Completed", 1, 11).unwrap();
         let rows = recent_on(&c, 5).unwrap();
         assert_eq!(rows, vec![Row { id, request: "open Spotify".into(), status: "Completed".into(), verdict: "Completed".into(), tool_calls: 1 }]);
+    }
+
+    #[test]
+    fn a_task_records_its_conversation_and_an_old_one_is_a_desktop_task() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE tasks (id INTEGER PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL,
+            verdict TEXT NOT NULL DEFAULT '', tool_calls INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL, updated INTEGER NOT NULL);
+            INSERT INTO tasks (request, status, started, updated) VALUES ('old', 'Completed', 1, 1);").unwrap();
+        setup(&c).unwrap();
+        setup(&c).unwrap(); // a second setup finds the column and changes nothing
+        let remote = begin_in_on(&c, "text sam", "discord:1:2", 2).unwrap();
+        let desk = begin_on(&c, "what time is it", 3).unwrap();
+        let conv = |id: i64| -> String { c.query_row("SELECT conversation FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
+        assert_eq!(conv(remote), "discord:1:2");
+        assert_eq!(conv(desk), DESKTOP);
+        let old: String = c.query_row("SELECT conversation FROM tasks WHERE request = 'old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(old, DESKTOP, "a task saved before the column is a desktop task");
+    }
+
+    #[test]
+    fn latest_is_the_newest_task_of_its_own_conversation() {
+        let c = mem();
+        let desk = begin_on(&c, "open Spotify", 1).unwrap();
+        let remote = begin_in_on(&c, "text sam", "discord:1:2", 2).unwrap();
+        assert_eq!(latest_on(&c, DESKTOP).unwrap().map(|r| r.id), Some(desk), "the remote task is not the desktop's latest");
+        assert_eq!(latest_on(&c, "discord:1:2").unwrap().map(|r| r.id), Some(remote));
+        assert!(latest_on(&c, "discord:9:9").unwrap().is_none(), "a chat with no tasks has no latest");
     }
 
     #[test]
@@ -344,6 +392,16 @@ mod tests {
     }
 
     #[test]
+    fn a_resume_candidate_carries_its_conversation() {
+        let c = mem();
+        let remote = begin_in_on(&c, "compare two laptops and then book one", "discord:1:2", 1).unwrap();
+        plan_on(&c, remote, "{\"steps\":[]}").unwrap();
+        set_on(&c, remote, TaskStatus::Interrupted, "", 0, 2).unwrap();
+        let got = resume_candidate_on(&c).unwrap().expect("the remote task is the candidate");
+        assert_eq!((got.id, got.conversation.as_str()), (remote, "discord:1:2"));
+    }
+
+    #[test]
     fn a_failed_setup_is_tried_again_on_the_next_call() {
         let c = Connection::open_in_memory().unwrap();
         let ready = AtomicBool::new(false);
@@ -364,7 +422,7 @@ mod tests {
         for _ in 0..3 { set(Some(id), TaskStatus::Running, "", 1); }
         for _ in 0..5 { save_steps(Some(id), "[]"); }
         save_usage(Some(id), provider::Usage { input: 10, output: 5 });
-        assert_eq!(latest().map(|r| r.id), Some(id));
+        assert_eq!(latest_in(DESKTOP).map(|r| r.id), Some(id));
         assert!(memory::opens() - before <= 1, "one open for the whole sequence");
     }
 }

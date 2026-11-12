@@ -30,7 +30,7 @@ pub mod verifier;
 
 use crate::{assist, conf::Config, util};
 use serde_json::{json, Value};
-use std::{collections::VecDeque, path::{Component, Path, PathBuf}, sync::Mutex, time::{Duration, Instant, SystemTime}};
+use std::{collections::{BTreeMap, VecDeque}, path::{Component, Path, PathBuf}, sync::Mutex, time::{Duration, Instant, SystemTime}};
 
 /// Tool calls per request, and seconds for the whole request.
 pub const MAX_STEPS: usize = 12;
@@ -43,9 +43,39 @@ pub const MAX_SAY: usize = 400;
 pub const KEEP_TURNS: usize = 6;
 pub const TURN_SECS: u64 = 600;
 
+/// The conversation of requests made at the PC (the island, the sidebar, voice). Remote chats get their own id.
+pub const DESKTOP: &str = "desktop";
+
 /// One remembered turn: what you said, what the buddy answered, and when.
 pub type Turn = (String, String, Instant);
-static TURNS: Mutex<VecDeque<Turn>> = Mutex::new(VecDeque::new());
+
+/// The recent turns of each conversation, keyed by its id (`DESKTOP`, or a remote chat's id).
+static TURNS: Mutex<BTreeMap<String, VecDeque<Turn>>> = Mutex::new(BTreeMap::new());
+
+/// Runs `f` on the turns of `conversation`, empty the first time it is asked for. None when the lock is poisoned.
+fn with_turns<T>(conversation: &str, f: impl FnOnce(&mut VecDeque<Turn>) -> T) -> Option<T> {
+    let mut all = TURNS.lock().ok()?;
+    Some(f(all.entry(conversation.to_string()).or_default()))
+}
+
+/// The question the buddy asked each conversation instead of acting on an unclear request. That conversation's next request
+/// is read as its answer.
+static PENDING: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Where a request came from: the conversation its turns and pending question belong to, and the function that answers its
+/// approvals (`approve` and the take-over checks call it). The desktop asks the island; a remote chat asks through its own
+/// buttons.
+#[derive(Clone, Copy)]
+pub struct Origin<'a> {
+    pub conversation: &'a str,
+    pub confirm: &'a dyn Fn(&str) -> bool,
+}
+
+fn ask_island_yes(q: &str) -> bool { crate::drive::ask_island(q) == crate::drive::Answer::Yes }
+static ASK_ISLAND: fn(&str) -> bool = ask_island_yes;
+
+/// A request made at the PC: its turns are the desktop's, and its approvals ask on the island.
+pub fn desktop() -> Origin<'static> { Origin { conversation: DESKTOP, confirm: &ASK_ISLAND } }
 
 /// Adds a turn and drops the oldest ones over `KEEP_TURNS`.
 pub fn remember(turns: &mut VecDeque<Turn>, said: &str, answer: &str, now: Instant) {
@@ -163,7 +193,7 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
-    pub fn for_request(cfg: &Config, said: &str) -> AgentContext {
+    pub fn for_request(cfg: &Config, said: &str, conversation: &str) -> AgentContext {
         let clock = wants_clock(said).then(|| {
             let t = util::now();
             date_time(t.wYear, t.wMonth, t.wDay, t.wDayOfWeek, t.wHour, t.wMinute)
@@ -181,14 +211,14 @@ impl AgentContext {
         let mut relevant_memories = if memory_on(cfg) { memory::recall(said, 5) } else { vec![] };
         relevant_memories.retain(|m| !memory_context.contains(m));
         let back = points_back(said);
-        let previous_task = if back { tasks::latest().map(|t| format!("Previous request: \"{}\" ({}).", assist::short(&t.request, 120), t.status)) } else { None };
+        let previous_task = if back { tasks::latest_in(conversation).map(|t| format!("Previous request: \"{}\" ({}).", assist::short(&t.request, 120), t.status)) } else { None };
         let recent_files = if wants_recent_files(said) { recent_file_names() } else { vec![] };
         // the conversation's own turns count as something to point at
-        let has_turns = TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false);
+        let has_turns = with_turns(conversation, |t| !t.is_empty()).unwrap_or(false);
         let unresolved = back && previous_task.is_none() && !has_turns;
         let project = if project::wants_project(said) { active.as_deref().map(project::describe) } else { None };
         // "it", "this", "that", "the last one" point at the newest turn, which is already in memory: no database read
-        let last = TURNS.lock().ok().and_then(|t| t.back().map(|(s, a, _)| (s.clone(), a.clone())));
+        let last = with_turns(conversation, |t| t.back().map(|(s, a, _)| (s.clone(), a.clone()))).flatten();
         let reference = intent::resolve_reference(said, last.as_ref().map(|(s, a)| (s.as_str(), a.as_str())));
         AgentContext { clock, active_window, active_application, media, relevant_memories, previous_task, recent_files, unresolved, project, memory_context, reference }
     }
@@ -803,9 +833,12 @@ fn system_for(base: &str, cfg: &Config) -> String {
 /// The request as the model reads it: the context this request needs (only when its words ask for it) and the facts that
 /// match it, then what the user said. It goes in the user turn, not the system text, so the system text stays cached.
 /// `said` is the user's words; `note` is for the AI only (a fixed command that failed, say) and is never stored with the request.
-pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String {
+pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String { request_text_in(cfg, said, note, DESKTOP) }
+
+/// `request_text_with` for a request from `conversation`: the context reads that conversation's last turn.
+pub fn request_text_in(cfg: &Config, said: &str, note: &str, conversation: &str) -> String {
     let mut parts = vec![];
-    let ctx = AgentContext::for_request(cfg, said).render();
+    let ctx = AgentContext::for_request(cfg, said, conversation).render();
     if !ctx.is_empty() { parts.push(ctx); }
     // the skill guidance this request points at (empty for most requests)
     let skills = skills::guidance_for(said);
@@ -832,8 +865,6 @@ pub fn native_allowed(cfg: &Config, provider_name: Option<&str>) -> bool {
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The question the buddy asked instead of acting on an unclear request. The next request is read as its answer.
-static PENDING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
 /// The task of the request being answered, so a take-over it starts can record how it ended.
 static CURRENT_TASK: std::sync::Mutex<Option<i64>> = std::sync::Mutex::new(None);
 
@@ -888,19 +919,27 @@ pub fn already_failed(failed: &std::collections::HashSet<String>, c: &Call) -> b
 pub fn ask(cfg: &Config, said: &str) -> Result<String, String> { ask_with_note(cfg, said, "") }
 
 /// `ask` with a note the AI gets with the request. Only `said` is saved: the task, the turn and its memory keep the user's words.
-pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, String> {
+pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, String> { ask_in(cfg, said, note, &desktop()) }
+
+/// `ask_with_note` for a request from `origin`: its turns, its pending question and its approvals belong to that origin.
+pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<String, String> {
+    let conv = origin.conversation;
     crate::browse::new_request();
     CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::log::line(&format!("buddy request: {}", assist::short(said, 200)));
-    history::restore(&TURNS);
-    let history = TURNS.lock().map(|t| recent(&t, Instant::now())).unwrap_or_default();
+    let restored = history::restore(conv);
+    let history = with_turns(conv, |t| {
+        for turn in restored { t.push_back(turn); }
+        while t.len() > KEEP_TURNS { t.pop_front(); }
+        recent(t, Instant::now())
+    }).unwrap_or_default();
     let timing = state::Timing::start();
-    // what the buddy asked last time, if anything: this request is its answer
-    let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // what the buddy asked last time in this conversation, if anything: this request is its answer
+    let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(conv);
     let front = crate::drive::front_title();
     let ctx = intent::Context {
-        previous_request: tasks::latest().is_some(),
-        conversation: TURNS.lock().map(|t| !t.is_empty()).unwrap_or(false),
+        previous_request: tasks::latest_in(conv).is_some(),
+        conversation: with_turns(conv, |t| !t.is_empty()).unwrap_or(false),
         // the project in front is an object for "clean up my project", so it is looked for only when the request names a project
         project: project::lookup(said, &front, &project::roots(cfg), &project::list_dirs).is_some(),
         window: assist::short(front.trim(), 80),
@@ -917,18 +956,18 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
         intent::Decision::Ask(q) => {
             // every question is logged with its request, so the count of questions per request can be read from the log
             crate::log::line(&format!("buddy asks one question for \"{}\": {q}", assist::short(said, 120)));
-            if let Ok(mut t) = TURNS.lock() { remember(&mut t, said, &q, Instant::now()); }
-            history::save(said, &q);
-            *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(q.clone());
+            with_turns(conv, |t| remember(t, said, &q, Instant::now()));
+            history::save(conv, said, &q);
+            PENDING.lock().unwrap_or_else(|e| e.into_inner()).insert(conv.to_string(), q.clone());
             return Ok(q);
         }
         intent::Decision::Assume(s) => note = format!("{s} {note}"),
         intent::Decision::Proceed => {}
     }
     if let Some(q) = pending { note = format!("(The buddy asked: \"{q}\". This request is the answer.) {note}"); }
-    let framed = request_text_with(cfg, said, &note);
+    let framed = request_text_in(cfg, said, &note, conv);
     tasks::recover_once();
-    run_task(cfg, said, &framed, &history, &timing, Start::New)
+    run_task(cfg, said, &framed, &history, &timing, Start::New, origin)
 }
 
 /// How a run of `run_task` starts: a new task (its row is made there), or an interrupted task resumed on its own row.
@@ -953,18 +992,18 @@ fn run_exec(c: &Call, cfg: &Config, ask_user: &mut dyn FnMut(&str) -> bool) -> R
 }
 
 /// Runs one request as a task: the plan, the tool loop over the model chain, and the verdict. `framed` is the text the model gets.
-fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &state::Timing, start: Start) -> Result<String, String> {
+fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &state::Timing, start: Start, origin: &Origin) -> Result<String, String> {
     let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
     let browser = crate::browse::enabled(cfg);
     let (steps, secs) = if browser { (crate::browse::MAX_STEPS, crate::browse::MAX_SECS) } else { (MAX_STEPS, MAX_SECS) };
-    let confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
+    let confirm = |q: &str| (origin.confirm)(q);
     // each tool's check from the verifier, in the order the tools ran
     let evidence: std::cell::RefCell<Vec<verifier::Check>> = std::cell::RefCell::new(vec![]);
     // acting calls that failed in this request; they are not run again
     let failed = std::cell::RefCell::new(std::collections::HashSet::<String>::new());
     // the task: saved in the database, and each state change is checked by the state machine
     let (task_id, resumed, plan0, next0, record0) = match start {
-        Start::New => { let id = tasks::begin(said); (id, false, None, 0, plan::Steps::new(id, &tasks::interrupted_steps())) }
+        Start::New => { let id = tasks::begin_in(said, origin.conversation);(id, false, None, 0, plan::Steps::new(id, &tasks::interrupted_steps())) }
         Start::Resume { id, prior, plan, next } => (Some(id), true, Some(plan), next, plan::Steps::resumed(Some(id), prior, &tasks::interrupted_steps())),
     };
     *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner()) = task_id;
@@ -1104,8 +1143,10 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     crate::log::line(&answer_line(&r));
     crate::log::line(&format!("buddy status: {end:?}"));
     // only answers are remembered: a failure would teach the AI nothing about what you meant
-    if let (Ok(answer), Ok(mut t)) = (&r, TURNS.lock()) { remember(&mut t, said, answer, Instant::now()); }
-    if let Ok(answer) = &r { history::save(said, answer); }
+    if let Ok(answer) = &r {
+        with_turns(origin.conversation, |t| remember(t, said, answer, Instant::now()));
+        history::save(origin.conversation, said, answer);
+    }
     r
 }
 
@@ -1113,6 +1154,21 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
 /// something is not run: the task stays Interrupted and its verdict says why. Runs on its own thread so start is not held up.
 pub fn resume_on_start() {
     std::thread::spawn(|| resume_pending(Config::load));
+}
+
+/// The origin a resumed task runs with, from the conversation it belongs to. The desktop's asks the island. A remote chat has no
+/// approval channel yet, so its approvals are refused: a step that needs one does not run, and the task says so.
+pub fn origin_for(conversation: &str) -> Origin<'_> {
+    if conversation == DESKTOP { Origin { conversation, confirm: &ASK_ISLAND } } else { Origin { conversation, confirm: &DENY_REMOTE } }
+}
+
+static DENY_REMOTE: fn(&str) -> bool = deny_remote;
+
+/// Refuses an approval for a remote conversation that has no channel to ask on. The question is not logged: it can hold the
+/// user's words.
+fn deny_remote(_question: &str) -> bool {
+    crate::log::line("buddy remote approval: no channel to ask on, refused");
+    false
 }
 
 /// The resume of `resume_on_start`, on the calling thread. `load` gives the Settings, and is called only when a task resumes.
@@ -1129,11 +1185,11 @@ fn resume_pending(load: impl FnOnce() -> Config) {
             crate::log::line(&format!("buddy resume: task {} from planned step {}", c.id, next + 1));
             let cfg = load();
             let note = format!("This request was interrupted. Continue it from planned step {}: {}. Earlier steps are done; do not repeat them.", next + 1, p.steps[next].does);
-            let framed = request_text_with(&cfg, &c.request, &note);
+            let framed = request_text_in(&cfg, &c.request, &note, &c.conversation);
             crate::browse::new_request();
             CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
             let timing = state::Timing::start();
-            let _ = run_task(&cfg, &c.request, &framed, &[], &timing, Start::Resume { id: c.id, prior, plan: p, next });
+            let _ = run_task(&cfg, &c.request, &framed, &[], &timing, Start::Resume { id: c.id, prior, plan: p, next }, &origin_for(&c.conversation));
         }
         plan::Resume::Wait => { crate::log::line(&format!("buddy resume: task {} waits for the user", c.id)); tasks::wait(c.id); }
         plan::Resume::Skip => {}
@@ -1153,6 +1209,27 @@ mod tests {
         assert_eq!(answer_line(&Err("stopped".into())), "buddy failed: stopped");
         let long = "a".repeat(500);
         assert!(answer_line(&Ok(long)).len() < 420, "a long answer is cut");
+    }
+
+    #[test]
+    fn a_resumed_remote_task_refuses_every_approval_and_the_desktops_keeps_its_own() {
+        let remote = origin_for("discord:1:2");
+        assert_eq!(remote.conversation, "discord:1:2");
+        assert!(!(remote.confirm)("delete the report?"), "no channel to ask on, so nothing is approved");
+        assert_eq!(origin_for(DESKTOP).conversation, DESKTOP);
+    }
+
+    #[test]
+    fn each_conversation_keeps_its_own_turns_and_pending_question() {
+        // unique ids: the statics are shared by every test in the process
+        let (a, b) = ("test:origin:a", "test:origin:b");
+        assert_eq!(desktop().conversation, DESKTOP);
+        with_turns(a, |t| remember(t, "hello", "Hi.", Instant::now()));
+        assert_eq!(with_turns(b, |t| t.len()), Some(0), "a remote chat starts with no turns of the desktop's");
+        assert_eq!(with_turns(a, |t| t.len()), Some(1));
+        PENDING.lock().unwrap().insert(a.to_string(), "which one?".to_string());
+        assert_eq!(PENDING.lock().unwrap().remove(b), None, "another conversation does not answer the question");
+        assert_eq!(PENDING.lock().unwrap().remove(a).as_deref(), Some("which one?"));
     }
 
     #[test]

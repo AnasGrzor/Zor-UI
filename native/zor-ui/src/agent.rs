@@ -7,6 +7,8 @@
 pub mod developer;
 pub mod diagnose;
 #[cfg(test)]
+pub mod e2e;
+#[cfg(test)]
 pub mod eval;
 pub mod history;
 pub mod memory;
@@ -931,6 +933,24 @@ pub fn ask_with_note(cfg: &Config, said: &str, note: &str) -> Result<String, Str
 /// How a run of `run_task` starts: a new task (its row is made there), or an interrupted task resumed on its own row.
 pub enum Start { New, Resume { id: i64, prior: Vec<plan::Entry>, plan: plan::Plan, next: usize } }
 
+/// One AI call (the JSON `assist::chat` takes). Under test, the scripted model in `e2e` answers instead.
+fn chat(cfg: &Config, convo: &str) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        if let Some(r) = e2e::model_reply(convo) { return r; }
+    }
+    assist::chat(cfg, convo, 30)
+}
+
+/// One tool call. Under test, the scripted tool in `e2e` answers instead, so no approval is asked there.
+fn run_exec(c: &Call, cfg: &Config, ask_user: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+    #[cfg(test)]
+    {
+        if let Some(r) = e2e::tool_result(c) { return r; }
+    }
+    exec(c, cfg, ask_user)
+}
+
 /// Runs one request as a task: the plan, the tool loop over the model chain, and the verdict. `framed` is the text the model gets.
 fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &state::Timing, start: Start) -> Result<String, String> {
     let model = match cfg.str("ai.model") { "" => "gemini-2.5-flash", m => m };
@@ -957,7 +977,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model, &usable), &usable);
     // a new multi-step request gets its plan before its first tool step; that planning reply is the only extra model call
     if !resumed && plan::wanted(said) {
-        match timing.model(|| plan::plan_if_wanted(said, &chain[0], |c| assist::chat(cfg, c, 30))) {
+        match timing.model(|| plan::plan_if_wanted(said, &chain[0], |c| chat(cfg, c))) {
             Some(p) => { tasks::save_plan(task_id, &p.to_json()); *progress.borrow_mut() = plan::Progress::new(Some(p), 0, false); }
             None => record.borrow_mut().note("plan", "no plan: the planning reply was empty or unreadable, so the task runs as before"),
         }
@@ -982,7 +1002,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     // the one re-plan: a planning call with the request, the plan so far, the steps done and the failure. Its text goes to the model.
     let replan = |why: &str| -> String {
         let (old, done) = { let p = progress.borrow(); (p.plan().cloned(), p.next()) };
-        let new = old.and_then(|o| plan::replan(&chain[0], said, &o, done, why, |c| timing.model(|| assist::chat(cfg, c, 30))));
+        let new = old.and_then(|o| plan::replan(&chain[0], said, &o, done, why, |c| timing.model(|| chat(cfg, c))));
         let text = match &new {
             Some(p) => { record.borrow_mut().note("replanned", &p.objective); tasks::save_plan(task_id, &p.to_json()); format!("New plan: {}", p.to_json()) }
             None => { crate::log::line("buddy replan: no new plan came back, so the task ends"); String::new() }
@@ -1018,12 +1038,12 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
         }
         let declined = std::cell::Cell::new(false);
         let mut ask_user = |q: &str| { let ok = tracked_confirm(q); if !ok { declined.set(true); } ok };
-        let mut res = timing.tool(|| exec(c, cfg, &mut ask_user));
+        let mut res = timing.tool(|| run_exec(c, cfg, &mut ask_user));
         // a read-only lookup that failed (a flaky connection, say) is tried once more; nothing that acts is repeated
         if res.is_err() && policy::may_retry(c) {
             crate::log::line("buddy retry: read-only tool, once more");
             std::thread::sleep(Duration::from_millis(400));
-            res = timing.tool(|| exec(c, cfg, &mut ask_user));
+            res = timing.tool(|| run_exec(c, cfg, &mut ask_user));
         }
         let check = if declined.get() { verifier::Check::Declined } else { verifier::check(verifier::kind_of(c), &res) };
         if res.is_err() && !declined.get() && !policy::may_retry(c) { failed.borrow_mut().insert(format!("{c:?}")); }
@@ -1053,7 +1073,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             let system = build_system_prompt(cfg);
             let budget = budget_for(cfg, model, &system);
             run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
-                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::chat(cfg, convo, 30) }),
+                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { chat(cfg, convo) }),
                 |c| run_tool(c))
         };
         if i + 1 == chain.len() || halt().is_some() || !routing::should_fall_back(&r, !evidence.borrow().is_empty()) { break; }
@@ -1087,27 +1107,30 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
 /// On app start: resumes the newest interrupted task that has a plan, once, from its next unfinished step. A next step that changes
 /// something is not run: the task stays Interrupted and its verdict says why. Runs on its own thread so start is not held up.
 pub fn resume_on_start() {
-    std::thread::spawn(|| {
-        tasks::recover_once();
-        let Some(c) = tasks::resume_candidate() else { return };
-        let Some(p) = plan::parse(&c.plan) else { return };
-        let prior = plan::decode(&c.steps);
-        match plan::resume_action(&p, &prior) {
-            plan::Resume::Run(next) => {
-                if !tasks::resume_mark(c.id) { return; }
-                crate::log::line(&format!("buddy resume: task {} from planned step {}", c.id, next + 1));
-                let cfg = Config::load();
-                let note = format!("This request was interrupted. Continue it from planned step {}: {}. Earlier steps are done; do not repeat them.", next + 1, p.steps[next].does);
-                let framed = request_text_with(&cfg, &c.request, &note);
-                crate::browse::new_request();
-                CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
-                let timing = state::Timing::start();
-                let _ = run_task(&cfg, &c.request, &framed, &[], &timing, Start::Resume { id: c.id, prior, plan: p, next });
-            }
-            plan::Resume::Wait => { crate::log::line(&format!("buddy resume: task {} waits for the user", c.id)); tasks::wait(c.id); }
-            plan::Resume::Skip => {}
+    std::thread::spawn(|| resume_pending(Config::load));
+}
+
+/// The resume of `resume_on_start`, on the calling thread. `load` gives the Settings, and is called only when a task resumes.
+fn resume_pending(load: impl FnOnce() -> Config) {
+    tasks::recover_once();
+    let Some(c) = tasks::resume_candidate() else { return };
+    let Some(p) = plan::parse(&c.plan) else { return };
+    let prior = plan::decode(&c.steps);
+    match plan::resume_action(&p, &prior) {
+        plan::Resume::Run(next) => {
+            if !tasks::resume_mark(c.id) { return; }
+            crate::log::line(&format!("buddy resume: task {} from planned step {}", c.id, next + 1));
+            let cfg = load();
+            let note = format!("This request was interrupted. Continue it from planned step {}: {}. Earlier steps are done; do not repeat them.", next + 1, p.steps[next].does);
+            let framed = request_text_with(&cfg, &c.request, &note);
+            crate::browse::new_request();
+            CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+            let timing = state::Timing::start();
+            let _ = run_task(&cfg, &c.request, &framed, &[], &timing, Start::Resume { id: c.id, prior, plan: p, next });
         }
-    });
+        plan::Resume::Wait => { crate::log::line(&format!("buddy resume: task {} waits for the user", c.id)); tasks::wait(c.id); }
+        plan::Resume::Skip => {}
+    }
 }
 
 #[cfg(test)]

@@ -225,6 +225,10 @@ pub fn with_app<T>(f: impl FnOnce(&Connection) -> T) -> Result<T, String> { with
 #[cfg(test)]
 pub fn opens() -> usize { DB.lock().unwrap_or_else(|e| e.into_inner()).opens }
 
+/// Tests that write the shared database (`with_app`) hold this, so their task rows never mix with another test's (tests only).
+#[cfg(test)]
+pub static SHARED_DB_TESTS: Mutex<()> = Mutex::new(());
+
 /// The facts as the Settings page lists them, oldest first. Cached, so a repaint never opens the database; every write clears it.
 static CACHE: Mutex<Option<Vec<Memory>>> = Mutex::new(None);
 

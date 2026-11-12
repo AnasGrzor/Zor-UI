@@ -358,6 +358,7 @@ mod tests {
     #[test]
     fn a_request_opens_the_shared_connection_at_most_once() {
         // the counter is process-wide, so compare before and after rather than assume a count
+        let _db = memory::SHARED_DB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let before = memory::opens();
         let id = begin("open Spotify").expect("the task is saved");
         for _ in 0..3 { set(Some(id), TaskStatus::Running, "", 1); }

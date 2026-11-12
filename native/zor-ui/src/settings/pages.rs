@@ -1453,6 +1453,30 @@ impl Settings {
                 self.field_ui(p, &format!("key-{id}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), ph, 17.0, false);
             }
         });
+        // the Discord bot, only in the build that has it. Its token goes in the same secret store as the keys above, through the same
+        // save-key and clear-key actions. The switch and the token are not looks, so this card has no preview.
+        #[cfg(feature = "discord")]
+        {
+            use crate::messaging::discord::TOKEN_SECRET;
+            p.h2("forum", "Discord", "");
+            p.card(|p| {
+                self.sw(p, "remote.discord.enabled", "Chat with the buddy on Discord", "Direct messages from a paired account reach the buddy, and its answers come back there. Restart Zor UI after changing this", "forum");
+                let status = crate::messaging::discord::status();
+                if let Some(r) = p.row_sub(44.0, "info", &status, 0.0) { p.left(r, "info", "Bot status", &status, 0.0); }
+                if let Some(r) = p.row(40.0) {
+                    // the token row, laid out as the key rows above
+                    let wsave = chip_w(p.c, "Save", false);
+                    p.left(r, "key", "Bot token", "", 240.0 + 12.0 + wsave + 48.0);
+                    let mut right = r.x + r.w;
+                    let a = p.act(Act::Do("clear-key", TOKEN_SECRET.into()));
+                    ui::icon_btn(p.c, p.cx, R::new(right - 36.0, r.y + 2.0, 36.0, 36.0), a, "delete", IconKind::Plain, 20.0, false);
+                    right -= 48.0;
+                    let a = p.act(Act::Do("save-key", TOKEN_SECRET.into()));
+                    ui::chip(p.c, p.cx, right - wsave, r.y + 4.0, a, None, "Save", false);
+                    self.field_ui(p, &format!("key-{TOKEN_SECRET}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), "Paste bot token", 17.0, false);
+                }
+            });
+        }
         // saved Claude Code logins; Idle means Claude Code isn't installed. No look setting here, so no preview.
         if !matches!(self.claude, Load::Idle) {
             let rows = match &self.claude { Load::Ready(v) => v["accounts"].as_array().cloned().unwrap_or_default(), _ => vec![] };

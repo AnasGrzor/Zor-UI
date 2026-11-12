@@ -21,6 +21,16 @@ pub const TOKEN_SECRET: &str = "discord_bot";
 /// What the Settings page shows: "off", "connecting", "connected", or why the bot stopped.
 pub static STATUS: Mutex<String> = Mutex::new(String::new());
 
+/// What Settings shows: the bot's state, and while no account is paired, where the pairing code is.
+pub fn status() -> String {
+    let s = STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if s.is_empty() { return "Not started. Restart Zor UI after saving the token".to_string(); }
+    if s == "connected" && pairing::paired_in(&pairing::store_path(), PROVIDER).is_empty() {
+        return "Connected. No account paired yet: the pairing code is in remote-pairing.txt in the Zor UI data folder".to_string();
+    }
+    s
+}
+
 fn set_status(s: &str) {
     *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = s.to_string();
     crate::log::line(&format!("discord: {s}"));

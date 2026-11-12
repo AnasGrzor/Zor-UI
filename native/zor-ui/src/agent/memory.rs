@@ -180,7 +180,7 @@ fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs
 /// Keeps a fact in the app's memory, with the kind it is known to have (`fact_kind`) and the active project it names, if any.
 /// The answer is what the buddy says back.
 pub fn remember(text: &str, project: Option<&str>) -> Result<String, String> {
-    let outcome = with_app(|c| add_as(c, text, Some(fact_kind(text, project)), project, now()))??;
+    let outcome = with_app(|c| add_as(c, text, kind_to_save(text, project), project, now()))??;
     changed();
     Ok(match outcome {
         Outcome::Added(_) => format!("Remembered: {}", text.trim()),
@@ -302,6 +302,13 @@ pub fn names_project(text: &str, project: &str) -> bool { tokens(text).iter().an
 /// active project, else a plain fact.
 pub fn fact_kind(text: &str, project: Option<&str>) -> &'static str {
     if is_preference(text) { KIND_PREFERENCE } else if project.is_some() { KIND_PROJECT } else { KIND_SEMANTIC }
+}
+
+/// The kind to store for a save, or None when the save can't say it. With no project in front, a plain fact may still name a
+/// project: None lets `for_context` judge it by its text later, so it reaches that project's context. Stored as semantic it never would.
+/// shortcut: a project fact saved with its window away is found by its text only, not by a stored project name; upgrade if that misses.
+pub fn kind_to_save(text: &str, project: Option<&str>) -> Option<&'static str> {
+    match fact_kind(text, project) { KIND_SEMANTIC => None, kind => Some(kind) }
 }
 
 /// The memory for a request: preferences whose words share something with the request, and project facts for the active project.
@@ -613,5 +620,58 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"this is not a database at all, just text that is longer than a page of bytes".repeat(100)).unwrap();
         assert!(open(&path).is_err());
+    }
+
+    #[test]
+    fn a_project_fact_saved_with_no_project_in_front_is_retrieved_for_its_project() {
+        let c = mem();
+        let text = "Zor-UI uses Rust and tiny-skia for drawing";
+        add_as(&c, text, kind_to_save(text, None), None, 1).unwrap();
+        assert_eq!(for_context(&c, "what is the build status", Some("zor-ui")).unwrap(), vec![text.to_string()], "its text names the project");
+        assert!(for_context(&c, "what is the build status", Some("notes")).unwrap().is_empty(), "another project does not get it");
+        assert!(for_context(&c, "what is the build status", None).unwrap().is_empty(), "no active project, no project fact");
+        assert_eq!(kind_to_save("My sister is called Lina", None), None, "a plain fact keeps no kind; the text rule decides");
+    }
+
+    #[test]
+    fn a_restated_project_fact_keeps_its_project_kind() {
+        let c = mem();
+        let text = "Zor-UI uses Rust and tiny-skia for drawing";
+        add_as(&c, text, Some(KIND_PROJECT), Some("zor-ui"), 1).unwrap();
+        // restated with its window away: the save gives no kind and no project, so the stored ones stay
+        assert!(matches!(add_as(&c, text, kind_to_save(text, None), None, 2).unwrap(), Outcome::Updated(_)));
+        let row = all(&c).unwrap().remove(0);
+        assert_eq!((row.kind.as_deref(), row.project.as_deref()), (Some(KIND_PROJECT), Some("zor-ui")));
+        assert_eq!(for_context(&c, "what is the build status", Some("zor-ui")).unwrap(), vec![text.to_string()]);
+    }
+
+    #[test]
+    fn a_restated_fact_with_a_new_explicit_kind_takes_it() {
+        let c = mem();
+        let text = "Zor-UI uses Rust and tiny-skia for drawing";
+        add_as(&c, text, Some(KIND_PROJECT), Some("zor-ui"), 1).unwrap();
+        add_as(&c, text, Some(KIND_PREFERENCE), None, 2).unwrap();
+        assert_eq!(all(&c).unwrap()[0].kind.as_deref(), Some(KIND_PREFERENCE), "the explicit kind replaces the stored one");
+    }
+
+    #[test]
+    fn a_sensitive_project_fact_is_refused_and_never_returned() {
+        let c = mem();
+        let text = "Zor-UI deploy password is hunter2";
+        assert!(add_as(&c, text, kind_to_save(text, Some("zor-ui")), Some("zor-ui"), 1).is_err(), "a password is never saved");
+        c.execute("INSERT INTO memories (text, created, updated, kind, project) VALUES (?1, 1, 1, ?2, 'zor-ui')", params![text, KIND_PROJECT]).unwrap();
+        assert!(for_context(&c, "zor-ui deploy", Some("zor-ui")).unwrap().is_empty(), "a sensitive row is left out even when it matches");
+    }
+
+    #[test]
+    fn project_facts_saved_with_no_window_still_cap_at_six_items() {
+        let c = mem();
+        // distinct wording, so no two of these count as the same fact
+        let facts = ["Zor-UI uses Rust for the island", "Zor-UI runs on Windows with Win32", "Zor-UI tests run with cargo",
+            "Zor-UI draws with tiny-skia", "Zor-UI stores settings in JSON", "Zor-UI builds a release exe",
+            "Zor-UI has a voice module", "Zor-UI keeps a bar layout"];
+        for (i, text) in facts.iter().enumerate() { add_as(&c, text, kind_to_save(text, None), None, i as i64).unwrap(); }
+        assert_eq!(all(&c).unwrap().len(), facts.len(), "no fact merged into another");
+        assert_eq!(for_context(&c, "zor-ui drawing", Some("zor-ui")).unwrap().len(), CONTEXT_ITEMS);
     }
 }

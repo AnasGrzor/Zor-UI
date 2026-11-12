@@ -161,7 +161,7 @@ pub fn track_from(names: &[String]) -> Option<String> {
 /// shows playing and either nothing was playing before or the track changed. (A browser has one media session for all its tabs and
 /// reports the wrong song, so Spotify is checked on its own page.)
 pub fn took(pre: &Option<(bool, String)>, now: &(bool, String)) -> bool {
-    now.0 && pre.as_ref().map_or(true, |p| !p.0 || p.1 != now.1)
+    now.0 && pre.as_ref().is_none_or(|p| !p.0 || p.1 != now.1)
 }
 
 /// (is it playing, the track) from the Spotify page or app in `window`; None when there is no player bar.

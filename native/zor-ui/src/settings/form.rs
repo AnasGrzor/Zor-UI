@@ -133,11 +133,6 @@ impl<'p, 'a> Pen<'p, 'a> {
         self.y += ROW_GAP;
     }
 
-    /// The page title and a one-line description, above the first section.
-    pub fn title(&mut self, title: &str, desc: &str) {
-        self.title_cat(title, desc, "");
-    }
-
     /// The page title with category eyebrow and description.
     pub fn title_cat(&mut self, title: &str, desc: &str, cat: &str) {
         if self.show(76.0) {
@@ -404,6 +399,7 @@ impl Settings {
     }
 
     /// `pick`: a label with a drop-down (the `<select>`); `opts` are (value, label).
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     pub fn pick(&mut self, p: &mut Pen, path: &str, opts: Vec<(Value, String)>, label: &str, sub: &str, ic: &str, w: f32) {
         p.tag(label, sub);
         let Some(r) = p.row_sub(40.0, ic, sub, w) else { return };
@@ -453,6 +449,7 @@ impl Settings {
     }
 
     /// A text input in `r`. `init`: the text it shows while not being edited (None: it keeps its own, like a search box).
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     pub fn field_ui(&mut self, p: &mut Pen, key: &str, init: Option<&str>, kind: Kind, r: R, placeholder: &str, radius: f32, centre: bool) {
         let foc = self.focus.as_deref() == Some(key) && self.active;
         let multi = r.h > 60.0;

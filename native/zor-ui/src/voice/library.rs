@@ -3,7 +3,9 @@
 //! can cover them; the Settings page calls them and writes the result.
 
 use super::contract::{SpeechSettings, VoiceInfo, VoiceReference};
-use super::profile::{builtin_id, default_voice, ProviderBinding, VoiceProfile, EXT_VERSION};
+use super::profile::{default_voice, ProviderBinding, VoiceProfile, EXT_VERSION};
+#[cfg(test)]
+use super::profile::builtin_id;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 

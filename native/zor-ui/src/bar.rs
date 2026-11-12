@@ -365,7 +365,7 @@ impl Bar {
     fn my_workspaces(&self, cx: &Ctx) -> Vec<u32> {
         let n = cx.cfg.get("workspaces").as_u64().unwrap_or(10) as u32;
         if cx.wm.monitors.len() < 2 { return (1..=n).collect(); }
-        let main = self.monitor(cx).map_or(true, |m| m.x == 0 && m.y == 0);
+        let main = self.monitor(cx).is_none_or(|m| m.x == 0 && m.y == 0);
         split_workspaces(n, cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32, main)
     }
 
@@ -396,7 +396,7 @@ impl Bar {
 /// Straight RGBA icon -> premultiplied BGRA pixmap scaled to `px`.
 pub(crate) fn rgba_to_pixmap(rgba: &[u8], w: u32, h: u32, px: u32) -> Option<Pixmap> {
     let mut src = Pixmap::new(w, h)?;
-    for (d, s) in src.data_mut().chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+    for (d, s) in src.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0.iter()) {
         let a = s[3] as u32;
         d[0] = (s[2] as u32 * a / 255) as u8; d[1] = (s[1] as u32 * a / 255) as u8; d[2] = (s[0] as u32 * a / 255) as u8; d[3] = s[3];
     }

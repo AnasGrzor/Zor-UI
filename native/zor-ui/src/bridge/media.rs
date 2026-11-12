@@ -226,12 +226,12 @@ fn visualizer(bars: usize, out: &Sink) {
         prev = now;
         let level: Vec<f64> = {
             let (Ok(mut s), Ok(t)) = (sh.spec.lock(), sh.last_audio.lock()) else { break };
-            if t.map_or(true, |t| now.duration_since(t) > Duration::from_millis(250)) { s.buf.iter_mut().for_each(|v| *v *= 0.5); }   // nothing playing: let the bars fall
+            if t.is_none_or(|t| now.duration_since(t) > Duration::from_millis(250)) { s.buf.iter_mut().for_each(|v| *v *= 0.5); }   // nothing playing: let the bars fall
             s.frame(dt).to_vec()
         };
         if level.iter().cloned().fold(0.0, f64::max) < 0.01 {
             silent += 1;
-            if silent > fps && silent % fps != 0 { continue; }   // idle: one line per second
+            if silent > fps && !silent.is_multiple_of(fps) { continue; }   // idle: one line per second
         } else {
             silent = 0;
         }

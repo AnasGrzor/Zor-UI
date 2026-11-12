@@ -56,7 +56,7 @@ impl Queue {
     pub fn take(&mut self) -> Option<(Job, Cancel)> {
         let mut best: Option<usize> = None;
         for (i, j) in self.pending.iter().enumerate() {
-            if best.map_or(true, |b| j.priority > self.pending[b].priority) { best = Some(i); }
+            if best.is_none_or(|b| j.priority > self.pending[b].priority) { best = Some(i); }
         }
         let job = self.pending.remove(best?)?;
         let cancel = Cancel::new();

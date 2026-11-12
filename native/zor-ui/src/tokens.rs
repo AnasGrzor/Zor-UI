@@ -40,8 +40,6 @@ pub const HEAD_ICON: f32 = 24.0;
 pub const HEAD_GAP: f32 = 10.0;
 
 // ---- corners ----
-/// Border width of a panel.
-pub const BORDER: f32 = 1.0;
 /// Chip height. A chip is a pill, so its corner radius is half of this.
 pub const CHIP_H: f32 = 32.0;
 pub const CHIP_R: f32 = CHIP_H / 2.0;

@@ -109,7 +109,7 @@ fn built_in_voices_cannot_be_deleted_or_given_a_speed() {
     let mut cx = Ctx::new(false);
     st.do_named(&mut cx, "voice-delete", "builtin:gojo".into());
     st.do_named(&mut cx, "voice-speed", "builtin:gojo:0.5".into());
-    assert!(st.get(&cx, "voice.profiles").as_array().map_or(true, Vec::is_empty), "nothing saved for built-ins");
+    assert!(st.get(&cx, "voice.profiles").as_array().is_none_or(Vec::is_empty), "nothing saved for built-ins");
 }
 
 #[test]

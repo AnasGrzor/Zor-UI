@@ -65,7 +65,7 @@ pub fn run(args: &[String]) {
         }
     }
     // premultiplied BGRA over a flat backdrop -> opaque BGRA
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         let inv = 255 - p[3] as u32;
         for k in 0..3 { p[k] = (p[k] as u32 + FLAT[2 - k] as u32 * inv / 255).min(255) as u8; }
         p[3] = 255;

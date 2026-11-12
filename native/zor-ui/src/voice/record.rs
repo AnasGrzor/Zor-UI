@@ -1,7 +1,9 @@
 //! Records the microphone for a voice reference. It starts the app's own record-audio bridge, which writes raw
 //! 48 kHz stereo f32 until it is killed. On stop, that file becomes a 16-bit WAV that reference::check accepts.
 
-use super::{reference, wav};
+use super::wav;
+#[cfg(test)]
+use super::reference;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -82,7 +84,7 @@ pub fn pcm_to_wav(raw: &[u8]) -> Result<Vec<u8>, String> {
     let frame = 4 * CHANNELS as usize;
     let whole = raw.len() - raw.len() % frame;
     if whole == 0 { return Err("no audio was captured. Check the microphone in Settings".into()); }
-    let pcm: Vec<i16> = raw[..whole].chunks_exact(4)
+    let pcm: Vec<i16> = raw[..whole].as_chunks::<4>().0.iter()
         .map(|b| (f32::from_le_bytes([b[0], b[1], b[2], b[3]]).clamp(-1.0, 1.0) * 32767.0) as i16)
         .collect();
     Ok(wav::encode(RATE, CHANNELS, &pcm))

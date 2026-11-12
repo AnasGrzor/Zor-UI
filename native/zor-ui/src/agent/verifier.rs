@@ -105,7 +105,7 @@ pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
 /// A failed attempt that a later attempt recovers from is not counted: only the last outcome decides whether the request
 /// failed. A declined tool is never a failure, but a request where something was declined is only partial at best.
 pub fn judge(checks: &[Check]) -> Verdict {
-    let declined = checks.iter().any(|c| *c == Check::Declined);
+    let declined = checks.contains(&Check::Declined);
     // the latest check decides: a failure that a later passing check followed is dropped, so it no longer counts
     let last_pass = checks.iter().rposition(|c| *c == Check::Passed);
     let ran: Vec<Check> = checks.iter().enumerate()

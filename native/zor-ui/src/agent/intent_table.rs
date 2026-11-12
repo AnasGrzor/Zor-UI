@@ -137,7 +137,7 @@ fn check_row(said: &str, around: Around, want: Want) -> Result<(), String> {
     let d = intent::decide(a, &ctx);
     let got = format!("{:?} {:?} -> {:?}", a.kind, a.confidence, d);
     let ok = match (want, &d) {
-        (Want::Proceed(kind), Decision::Proceed) => kind.map_or(true, |k| k == a.kind),
+        (Want::Proceed(kind), Decision::Proceed) => kind.is_none_or(|k| k == a.kind),
         (Want::Assume(objective), Decision::Assume(note)) => note.contains(objective),
         (Want::Ask, Decision::Ask(_)) => true,
         _ => false,

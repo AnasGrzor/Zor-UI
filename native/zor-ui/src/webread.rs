@@ -26,7 +26,7 @@ pub fn public_url(url: &str) -> Result<(), String> {
     } else {
         return Err(SCHEME.into());
     };
-    let authority = &rest[..rest.find(|c: char| c == '/' || c == '?' || c == '#').unwrap_or(rest.len())];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
     let host = authority.rsplit('@').next().unwrap_or("").to_ascii_lowercase();
     let name = match host.rsplit_once(':') {
         Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,

@@ -502,7 +502,7 @@ impl Win {
                     let _ = GetWindowRect(self.hwnd, &mut r);
                     let (x, y) = (((lp.0 & 0xFFFF) as i16 as i32 - r.left) as f32 / s, (((lp.0 >> 16) & 0xFFFF) as i16 as i32 - r.top) as f32 / s);
                     let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
-                    let id = self.hit_at(x, y);
+                    let _id = self.hit_at(x, y);
                     let id = self.hits.iter().rev().find(|(r, i)| *i < crate::ui::SBAR && r.contains(x, y)).map_or(0, |&(_, i)| i);
                     if id != 0 { self.view.input(Input::Wheel(id, d), cx); }
                 }
@@ -520,7 +520,8 @@ impl Drop for Win {
             if self.appbar {
                 let mut d = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, ..Default::default() };
                 SHAppBarMessage(ABM_REMOVE, &mut d);
-            }            if !self.dib.is_invalid() { SelectObject(self.dc, self.old); let _ = DeleteObject(HGDIOBJ::from(self.dib)); }
+            }
+            if !self.dib.is_invalid() { SelectObject(self.dc, self.old); let _ = DeleteObject(HGDIOBJ::from(self.dib)); }
             let _ = DeleteDC(self.dc);
             let _ = DestroyWindow(self.hwnd);
         }

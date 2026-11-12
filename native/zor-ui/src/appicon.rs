@@ -50,9 +50,9 @@ static ICON: OnceLock<isize> = OnceLock::new();
 /// The exe's own icon (resource 1, see build.rs); the drawn one only if it has none.
 fn icon() -> Option<HICON> {
     if let Some(&h) = ICON.get() { return Some(HICON(h as _)); }
-    let and = vec![0u8; SIZE * SIZE / 8];
+    let and = [0u8; SIZE * SIZE / 8];
     let made = unsafe {
-        GetModuleHandleW(None).ok().and_then(|m| LoadImageW(m, PCWSTR(1 as *const u16), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR).ok())
+        GetModuleHandleW(None).ok().and_then(|m| LoadImageW(m, PCWSTR(std::ptr::dangling::<u16>()), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR).ok())
             .map(|h| HICON(h.0))
             .or_else(|| CreateIcon(None, SIZE as i32, SIZE as i32, 1, 32, and.as_ptr(), pixels().as_ptr()).ok())?
     };

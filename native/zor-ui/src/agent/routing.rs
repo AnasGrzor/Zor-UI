@@ -35,7 +35,7 @@ pub fn fallback_chain(cfg: &Config, first: &str, usable: &dyn Fn(&str) -> bool) 
     fallbacks.extend(cfg.get("ai.fallbackModels").as_array().into_iter().flatten().filter_map(|x| x.as_str()).map(|m| m.trim().to_string()));
     let mut chain = vec![first.to_string()];
     for m in fallbacks {
-        if m.is_empty() || chain.iter().any(|c| *c == m) { continue; }
+        if m.is_empty() || chain.contains(&m) { continue; }
         if usable(&m) { chain.push(m); } else { crate::log::line(&format!("buddy route: skipping {m}, no saved key")); }
     }
     chain

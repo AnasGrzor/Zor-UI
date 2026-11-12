@@ -287,7 +287,7 @@ fn read_wav(path: &Path) -> Result<Option<Vec<f32>>, String> {
     let (Some((Some(tag), Some(ch), Some(rate), Some(bits))), Some(data)) = (fmt, data) else { return Err("WAV has no fmt or data".into()) };
     if tag != 1 || bits != 16 || ch == 0 { return Err("only 16-bit PCM WAV files are supported".into()); }
     let mono: Vec<f32> = b[data].chunks_exact(2 * ch as usize)
-        .map(|f| f.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).sum::<f32>() / ch as f32).collect();
+        .map(|f| f.as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).sum::<f32>() / ch as f32).collect();
     Ok((!mono.is_empty()).then(|| resample(&mono, rate)))
 }
 
@@ -490,10 +490,10 @@ fn api() -> Result<&'static Api, String> {
             .map_err(|e| format!("could not load the speech engine: {e}"))?;
         let sym = |n: &str| { let c = CString::new(n).unwrap(); GetProcAddress(dll, windows::core::PCSTR(c.as_ptr() as _)).ok_or(format!("speech engine is missing {n}")) };
         Ok(Api {
-            create: std::mem::transmute(sym("SherpaOnnxCreateOfflineRecognizer")?), destroy: std::mem::transmute(sym("SherpaOnnxDestroyOfflineRecognizer")?),
-            stream: std::mem::transmute(sym("SherpaOnnxCreateOfflineStream")?), destroy_stream: std::mem::transmute(sym("SherpaOnnxDestroyOfflineStream")?),
-            accept: std::mem::transmute(sym("SherpaOnnxAcceptWaveformOffline")?), decode: std::mem::transmute(sym("SherpaOnnxDecodeOfflineStream")?),
-            result: std::mem::transmute(sym("SherpaOnnxGetOfflineStreamResult")?), destroy_result: std::mem::transmute(sym("SherpaOnnxDestroyOfflineRecognizerResult")?),
+            create: std::mem::transmute::<unsafe extern "system" fn() -> isize, Fn1>(sym("SherpaOnnxCreateOfflineRecognizer")?), destroy: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineRecognizer")?),
+            stream: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void) -> *const c_void>(sym("SherpaOnnxCreateOfflineStream")?), destroy_stream: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineStream")?),
+            accept: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void, i32, *const f32, i32)>(sym("SherpaOnnxAcceptWaveformOffline")?), decode: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void, *const c_void)>(sym("SherpaOnnxDecodeOfflineStream")?),
+            result: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void) -> *const *const c_char>(sym("SherpaOnnxGetOfflineStreamResult")?), destroy_result: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineRecognizerResult")?),
         })
     }).as_ref().map_err(Clone::clone)
 }

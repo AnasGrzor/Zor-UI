@@ -4,7 +4,7 @@ use crate::{
     assist,
     bar::{self, Bar, Popup},
     conf::{self, Config, State, Theme, Watched},
-    claude_usage, desk, pill, privacy, dock, drive, driveframe, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
+    claude_usage, desk, pill, privacy, dock, driveframe, frame, glaze, guides, buddy, gfx::Gfx, gfx::R, hub, media, menu::{self, Menu}, popup::{self, Pop}, proc, sys, tray, util, viz, weather,
     win::{self, Input, Win, Z},
 };
 use std::{
@@ -427,14 +427,14 @@ impl App {
         self.bars_for_fullscreen();
         self.ticks += 1;
         let n = self.ticks;
-        if n % 60 == 0 {
+        if n.is_multiple_of(60) {
             crate::glass::trim_idle(std::time::Duration::from_secs(30));
             // hand freed pages back to Windows, so Task Manager shows what is really in use
             unsafe { let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(windows::Win32::System::Threading::GetCurrentProcess(), usize::MAX, usize::MAX); }
         }
-        if n % 30 == 0 { crate::appicon::add(self.msg); } // Explorer forgets it when it restarts
+        if n.is_multiple_of(30) { crate::appicon::add(self.msg); } // Explorer forgets it when it restarts
         // hook up coding agents found on the PC: at start (after 2 s), then every 5 minutes for ones installed later
-        if (n == 2 || n % 300 == 0) && self.cx.cfg.get("autoTrackAgents").as_bool() != Some(false) {
+        if (n == 2 || n.is_multiple_of(300)) && self.cx.cfg.get("autoTrackAgents").as_bool() != Some(false) {
             let custom = self.cx.cfg.get("customAgents").clone();
             std::thread::spawn(move || {
                 let added = crate::bridge::agent_hook::auto_install(&custom);
@@ -443,7 +443,7 @@ impl App {
                 post(Box::new(move |cx| cx.notif = Some(Notif { app: "Zor UI".into(), text, until: hub::now_ms() + 6000.0, open: String::new() })));
             });
         }
-        if n % 2 == 0 && self.reload() {
+        if n.is_multiple_of(2) && self.reload() {
             desk::sync(self);
             buddy::sync(self);
             pill::sync(self);
@@ -458,7 +458,7 @@ impl App {
         let popups = !self.pops.is_empty();
         let bars = !self.bars.is_empty() || popups;
         let shows = |id: &str| self.wins.iter().any(|w| w.drag_key.as_deref() == Some(id));
-        if n % 3 == 0 && (bars || shows("resources")) {
+        if n.is_multiple_of(3) && (bars || shows("resources")) {
             self.cx.cpu = self.cpu.usage();
             self.cx.mem = util::memory_usage();
             if shows("resources") || popups { self.cx.disk = util::disk_usage(); }
@@ -466,17 +466,17 @@ impl App {
         }
         if bars {
             let net_fast = bar::layout(&self.cx.cfg).iter().any(|m| m.0 == "netspeed" && m.1 != "hidden");
-            if n % if net_fast { 2 } else { 5 } == 0 { self.cx.net = self.netmon.sample(); self.cx.ver += 1; }
-            if n % 15 == 0 { self.cx.battery = sys::battery(); }
+            if n.is_multiple_of(if net_fast { 2 } else { 5 }) { self.cx.net = self.netmon.sample(); self.cx.ver += 1; }
+            if n.is_multiple_of(15) { self.cx.battery = sys::battery(); }
             self.privacy_check();
-            if n % 2 == 0 && self.cx.cfg.bool("showKeyboardLayout") { self.cx.kb = sys::keyboard(); }
+            if n.is_multiple_of(2) && self.cx.cfg.bool("showKeyboardLayout") { self.cx.kb = sys::keyboard(); }
             // pomodoro phases end here (bar.js renderTimer): whichever bar sees it first announces it
             if let Some(done) = hub::tick(&self.cx.cfg) {
                 hub::set("zor-ui.timerDone", Some(done.clone()));
                 proc::run_bg(&self.cx.cfg, "toggles", &["-Action", "timer-done", "-Value", &done]);
             }
             // a recording that died mustn't leave its chip behind
-            if n % 15 == 0 && hub::get("zor-ui.rec").is_some() {
+            if n.is_multiple_of(15) && hub::get("zor-ui.rec").is_some() {
                 let cfg = Config(self.cx.cfg.0.clone());
                 std::thread::spawn(move || {
                     if proc::bridge(&cfg, "record", &[])["recording"].as_bool() == Some(false) { hub::set("zor-ui.rec", None); post(Box::new(|_| {})); }
@@ -915,7 +915,7 @@ mod tests {
     fn game_mode_needs_two_agreeing_ticks() {
         assert_eq!(super::game_vote(false, true, 0), (false, 1));
         assert_eq!(super::game_vote(false, true, 1), (true, 0));
-        assert_eq!(super::game_vote(false, true, 1).0 && super::game_vote(false, false, 1) == (false, 0), true, "a flicker resets the count");
+        assert!(super::game_vote(false, true, 1).0 && super::game_vote(false, false, 1) == (false, 0), "a flicker resets the count");
         assert_eq!(super::game_vote(true, false, 1), (true, 0));
         assert_eq!(super::game_vote(true, true, 1), (false, 0));
     }

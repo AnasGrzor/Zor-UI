@@ -353,9 +353,9 @@ pub fn for_context(conn: &Connection, request: &str, project: Option<&str>) -> r
     let mut picked: Vec<(usize, i64, String)> = all(conn)?.into_iter().filter_map(|m| {
         if is_sensitive(&m.text) { return None; }
         let shared = words(&m.text).intersection(&terms).count();
-        let for_here = project.is_some() && m.project.as_deref().map_or(false, |p| Some(p.to_lowercase()) == project);
+        let for_here = project.is_some() && m.project.as_deref().is_some_and(|p| Some(p.to_lowercase()) == project);
         let wanted = match m.kind.as_deref() {
-            None => project.as_deref().map_or(false, |p| names_project(&m.text, p)) || (shared > 0 && is_preference(&m.text)),
+            None => project.as_deref().is_some_and(|p| names_project(&m.text, p)) || (shared > 0 && is_preference(&m.text)),
             // a preference with a project is for that project only; one without is for every request it matches
             Some(KIND_PREFERENCE) => shared > 0 && (m.project.is_none() || for_here),
             Some(KIND_PROJECT) => for_here,
@@ -363,7 +363,7 @@ pub fn for_context(conn: &Connection, request: &str, project: Option<&str>) -> r
         };
         wanted.then_some((shared, m.updated, m.text))
     }).collect();
-    picked.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    picked.sort_by_key(|p| std::cmp::Reverse((p.0, p.1)));
     let mut out = vec![];
     let mut chars = 0;
     for (_, _, text) in picked {

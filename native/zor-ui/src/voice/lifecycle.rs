@@ -118,6 +118,7 @@ pub fn install_provider(
 
 /// Installs a whole manifest: the package and every model. Each item needs its own approval, and a missing
 /// one stops the install before anything is downloaded.
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 pub fn install_manifest(
     store: &mut Store,
     providers_root: &Path,
@@ -279,8 +280,8 @@ mod tests {
         let ok = Approval { what: "voice-a".into(), size_bytes: m.size_bytes() };
         // the second file arrives tampered (same size, other bytes)
         let served = vec![
-            (format!("https://example.com/a.onnx"), b"model".to_vec()),
-            (format!("https://example.com/a.onnx.json"), b"XX".to_vec()),
+            ("https://example.com/a.onnx".to_string(), b"model".to_vec()),
+            ("https://example.com/a.onnx.json".to_string(), b"XX".to_vec()),
         ];
         let r = install_model(&mut store, &root, "p", &m, &ok, &serve(served));
         assert!(matches!(r, Err(InstallError::Corrupt(_))));

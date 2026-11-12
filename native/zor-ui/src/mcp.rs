@@ -85,6 +85,7 @@ pub struct Server {
 
 impl Server {
     /// A server over a given pipe pair, without a process; `start` and the tests use it. Does NOT send anything.
+    #[cfg(test)]
     pub fn over(input: Box<dyn Write + Send>, lines: Receiver<String>) -> Server {
         Server { child: None, input, lines, next_id: 1 }
     }
@@ -162,6 +163,7 @@ impl Server {
     }
 
     /// The server's tools: the "tools" array of "tools/list".
+    #[cfg(test)]
     pub fn tools(&mut self, wait: Duration) -> Result<Vec<Value>, String> {
         let result = self.ask("tools/list", json!({}), wait)?;
         Ok(result["tools"].as_array().cloned().unwrap_or_default())

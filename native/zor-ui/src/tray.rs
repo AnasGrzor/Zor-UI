@@ -113,7 +113,7 @@ pub fn is_promoted(settings: &[Setting], exe: &str, uid: Option<u32>, guid: Opti
     if let Some(g) = guid {
         if let Some(s) = settings.iter().find(|s| s.guid.as_deref() == Some(g)) { return s.promoted; }
     }
-    settings.iter().find(|s| exe_matches(&s.exe, exe) && s.uid.map_or(true, |u| Some(u) == uid)).is_some_and(|s| s.promoted)
+    settings.iter().find(|s| exe_matches(&s.exe, exe) && s.uid.is_none_or(|u| Some(u) == uid)).is_some_and(|s| s.promoted)
 }
 
 /// A known-folder path keeps only its part after the GUID, which must end the real exe path.
@@ -156,7 +156,7 @@ struct Live {
 
 impl Live {
     fn refresh(&mut self) {
-        if self.read_at.map_or(true, |t| t.elapsed() > Duration::from_secs(30)) {
+        if self.read_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
             self.settings = read_settings();
             self.read_at = Some(Instant::now());
         }

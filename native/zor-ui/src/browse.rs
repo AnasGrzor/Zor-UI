@@ -194,6 +194,7 @@ pub fn close_now() {
 }
 
 /// Is the browser still open? A request can end with it open: it then closes on its own after `IDLE_SECS`.
+#[cfg(test)]
 pub fn open() -> bool { LIVE.lock().map(|l| l.is_some()).unwrap_or(false) }
 
 /// Has the browser been unused long enough to close?

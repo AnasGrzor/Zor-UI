@@ -54,7 +54,7 @@ pub fn config(url: &str, method: &str, headers: &[(String, String)], body: Body,
         }
     }
     c.push_str(&format!("output = {}\n", quote(out_file)));
-    c.push_str("silent\nshow-error\nmax-time = 120\nwrite-out = \"%{http_code}\"\n");
+    c.push_str("silent\nshow-error\nconnect-timeout = 5\nmax-time = 120\nwrite-out = \"%{http_code}\"\n");
     c
 }
 
@@ -140,6 +140,7 @@ mod tests {
         assert!(c.contains("header = \"Authorization: Bearer k1\""));
         assert!(c.contains("data-binary = \"@C:/t/body\""));
         assert!(c.contains("write-out = \"%{http_code}\""));
+        assert!(c.contains("connect-timeout = 5"), "a dead host fails in 5 s, not after max-time");
     }
 
     #[test]

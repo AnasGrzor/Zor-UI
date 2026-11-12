@@ -60,10 +60,20 @@ fn prompt(msgs: &[Value], system: &str) -> String {
     format!("{system}\n\n{}\n\nAssistant:", turns.join("\n\n"))
 }
 
-/// Antigravity's prompt: the last 12 turns (keeps it under the Windows command-line limit), no tools.
-fn agy_prompt(msgs: &[Value], system: &str) -> String {
-    let recent = &msgs[msgs.len().saturating_sub(12)..];
-    format!("Reply as the assistant to this conversation. Do not use tools.\n\n{}", prompt(recent, system))
+/// The prompt is one command-line argument, and Windows caps a command line at 32,767 characters.
+const AGY_PROMPT_MAX: usize = 24_000;
+/// A .cmd shim runs through cmd.exe, which takes only 8,191 characters on its line (the claude_cli test pins it).
+const AGY_SHIM_PROMPT_MAX: usize = 7_000;
+
+/// Antigravity's prompt: the newest turns, up to 12, that fit in `max` characters. The oldest turns go first. The newest
+/// turn is always kept, even when it alone is over the limit.
+fn agy_prompt(msgs: &[Value], system: &str, max: usize) -> String {
+    let mut recent = &msgs[msgs.len().saturating_sub(12)..];
+    loop {
+        let p = format!("Reply as the assistant to this conversation. Do not use tools.\n\n{}", prompt(recent, system));
+        if p.len() <= max || recent.len() <= 1 { return p; }
+        recent = &recent[1..];
+    }
 }
 
 /// Streams the reply as {"delta"} lines, then {"done"}.
@@ -130,7 +140,10 @@ pub fn codex_events(line: &str) -> Vec<Value> {
 /// Antigravity's print mode: the prompt is the -p value, and the answer is one JSON object printed when the turn ends. `--mode plan`
 /// keeps it read-only. `--disable-slash-commands` is not passed, because with it `--mode plan` does nothing.
 fn chat_agy(exe: PathBuf, msgs: &[Value], system: &str, out: &Sink) {
-    let p = agy_prompt(msgs, system);
+    // a .cmd shim refuses newlines in arguments (Rust std), so its prompt goes on one line.
+    // shortcut: line breaks become spaces for a .cmd shim, upgrade when agy reads its prompt from stdin.
+    let shim = exe.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd"));
+    let p = if shim { agy_prompt(msgs, system, AGY_SHIM_PROMPT_MAX).replace(['\r', '\n'], " ") } else { agy_prompt(msgs, system, AGY_PROMPT_MAX) };
     let spawned = hidden(exe).args(["-p", p.as_str(), "--output-format", "json", "--mode", "plan"])
         .current_dir(std::env::temp_dir()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let mut child = match spawned {
@@ -185,6 +198,28 @@ mod tests {
 
     /// The reply Antigravity printed when the account was over quota (captured from `agy -p ... --output-format json`).
     const QUOTA_REPLY: &str = r#"{"conversation_id":"f465549c","status":"ERROR","response":"","error":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 163h7m0s.","duration_seconds":0,"num_turns":1,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}"#;
+
+    /// Twelve turns of 4,000 characters, each starting with its number, so the test can see which ones were kept.
+    fn long_turns() -> Vec<Value> {
+        (0..12).map(|i| json!({ "role": if i % 2 == 0 { "user" } else { "assistant" }, "content": format!("{i:02}{}", "x".repeat(3998)) })).collect()
+    }
+
+    #[test]
+    fn the_agy_prompt_drops_the_oldest_turns_until_it_fits() {
+        let msgs = long_turns();
+        let p = agy_prompt(&msgs, "sys", AGY_PROMPT_MAX);
+        assert!(p.len() <= AGY_PROMPT_MAX, "{}", p.len());
+        // five 4,000-char turns fit in 24,000 characters, so turns 07 to 11 stay and 00 to 06 go
+        assert!(p.contains("11xxx") && p.contains("07xxx"), "newest turns kept");
+        assert!(!p.contains("06xxx") && !p.contains("00xxx"), "oldest turns dropped");
+        assert!(agy_prompt(&msgs, "sys", AGY_SHIM_PROMPT_MAX).len() <= AGY_SHIM_PROMPT_MAX);
+    }
+
+    #[test]
+    fn the_agy_prompt_keeps_the_newest_turn_when_it_alone_is_too_long() {
+        let p = agy_prompt(&long_turns()[11..], "", 100);
+        assert!(p.contains("11") && p.len() > 100);
+    }
 
     #[test]
     fn the_quota_reply_is_an_error_the_user_can_read() {
@@ -250,7 +285,7 @@ mod tests {
     #[test]
     fn agy_gets_the_last_twelve_turns() {
         let msgs: Vec<Value> = (0..20).map(|i| json!({ "role": "user", "content": format!("m{i}") })).collect();
-        let p = agy_prompt(&msgs, "sys");
+        let p = agy_prompt(&msgs, "sys", AGY_PROMPT_MAX);
         assert!(p.starts_with("Reply as the assistant"));
         assert!(!p.contains("m7\n") && p.contains("User: m8") && p.contains("User: m19"));
     }

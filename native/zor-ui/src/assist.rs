@@ -60,6 +60,20 @@ pub fn say_secs(s: &str) -> f32 { (s.chars().count() as f32 / 14.0).clamp(7.0, 3
 
 /// The last answer the buddy gave, for "say that again".
 static LAST: Mutex<Option<String>> = Mutex::new(None);
+/// Set while a request runs. The cancel flag and the token total are per request, so only one may run at a time.
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Holds the busy flag for one request. Dropping it (the request ends, errors, or panics) frees the buddy for the next.
+pub struct Busy;
+
+/// Takes the busy flag, or None while another request holds it.
+pub fn try_busy() -> Option<Busy> {
+    BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).ok().map(|_| Busy)
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) { BUSY.store(false, std::sync::atomic::Ordering::SeqCst); }
+}
 /// How long an answer stays in the island banner (ms), so one you looked away from can still be read.
 const ANSWER_BANNER_MS: f64 = 60_000.0;
 
@@ -95,22 +109,23 @@ pub fn parse(said: &str) -> Intent {
     let mut t = clean(said);
     // fillers and "please" at the front
     loop {
-        let l = t.to_lowercase();
+        let l = t.to_ascii_lowercase();
         let Some(f) = ["hey", "ok", "okay", "please", "can you", "could you", "would you", "will you"].iter().find(|f| l.strip_prefix(**f).is_some_and(|r| r.is_empty() || r.starts_with([' ', ',']))) else { break };
         t = t[f.len()..].trim_start_matches([' ', ',']);
     }
-    let l = t.to_lowercase();
+    // ASCII lowercase keeps every byte offset of `t` (to_lowercase can change length, e.g. "İ"), so the indices below are safe
+    let l = t.to_ascii_lowercase();
     let rest = |prefixes: &[&str]| prefixes.iter().find(|p| l.starts_with(**p)).map(|p| clean(&t[p.len()..]).to_string()).filter(|r| !r.is_empty());
     if let Some(q) = rest(&["search for ", "search up ", "search ", "google ", "look up ", "look for "]) { return Intent::Search(q); }
     if let Some(m) = rest(&["send a message to ", "send message to ", "message ", "text ", "whatsapp ", "dm "]) {
-        let ml = m.to_lowercase();
+        let ml = m.to_ascii_lowercase();
         let mark = [" saying ", " that says ", " that ", " says ", ": "].iter().filter_map(|k| ml.find(k).map(|i| (i, k.len()))).min();
         let (to, text) = match mark {
             Some((i, n)) => (m[..i].trim(), m[i + n..].trim()),
             None => m.split_once(' ').map_or((m.as_str(), ""), |(a, b)| (a, b)),
         };
         // "Sara on WhatsApp": the app you said they are on
-        let (to, via) = match to.to_lowercase().rfind(" on ") {
+        let (to, via) = match to.to_ascii_lowercase().rfind(" on ") {
             Some(i) if !to[..i].trim().is_empty() && !to[i + 4..].trim().is_empty() && to[i + 4..].split_whitespace().count() <= 3 => (to[..i].trim(), to[i + 4..].trim()),
             _ => (to, ""),
         };
@@ -119,7 +134,7 @@ pub fn parse(said: &str) -> Intent {
     if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run "]) { return Intent::Open(app_name_of(&a).to_string()); }
     if let Some(p) = rest(&["play "]) {
         // "lofi on spotify": the last " on " names the service, unless what follows is too long to be one
-        let (query, service) = match p.to_lowercase().rfind(" on ") {
+        let (query, service) = match p.to_ascii_lowercase().rfind(" on ") {
             Some(i) if !p[..i].trim().is_empty() && !p[i + 4..].trim().is_empty() && p[i + 4..].split_whitespace().count() <= 2 => (p[..i].trim(), p[i + 4..].trim()),
             _ => (p.as_str(), ""),
         };
@@ -650,13 +665,23 @@ pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn
         if v.is_object() { let _ = tx2.send(Some(v)); }
     }, move || { let _ = tx3.send(None); });
     if stream.is_none() { return Err("I can't reach my brain.".into()); }
+    Ok(fold_turn(&collect_events(&rx, std::time::Duration::from_secs(wait_secs))?))
+}
+
+/// Reads stream events until the end (a None, or the sender dropped). A stream that goes quiet for `wait` is an error, not a
+/// short reply, and so is an error event. Split out so the timeout can be tested with a plain channel.
+fn collect_events(rx: &mpsc::Receiver<Option<Value>>, wait: std::time::Duration) -> Result<Vec<Value>, String> {
     let mut events = vec![];
-    // None is the end of the stream; stop on it, on an error, or when nothing comes for `wait_secs`
-    while let Ok(Some(v)) = rx.recv_timeout(std::time::Duration::from_secs(wait_secs)) {
-        if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
-        events.push(v);
+    loop {
+        match rx.recv_timeout(wait) {
+            Ok(Some(v)) => {
+                if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
+                events.push(v);
+            }
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(events),
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(format!("The AI went quiet for {} seconds, so I stopped.", wait.as_secs())),
+        }
     }
-    Ok(fold_turn(&events))
 }
 
 /// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.
@@ -696,10 +721,13 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     Ok(said)
 }
 
-/// Runs `said` on a worker thread and shows the result in the primary buddy's bubble.
+/// Runs `said` on a worker thread and shows the result in the primary buddy's bubble. A request that comes while another
+/// runs is refused at once, so two never share the cancel flag and the token total.
 pub fn ask(cfg: &Config, said: &str) {
+    let Some(busy) = try_busy() else { say_later("I'm still working on the last request.", 3.0); return; };
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
+        let _busy = busy; // held until this request ends, also when it panics
         if is_replay(&said) { let a = last_answer(); say_later(&a, say_secs(&a)); return; }
         say_later("On it…", 3.0);
         // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
@@ -778,6 +806,41 @@ pub fn cancel() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_request_is_refused_while_one_runs_and_the_flag_frees_on_drop() {
+        let first = try_busy().expect("the first request gets the flag");
+        assert!(try_busy().is_none(), "a request during the first is refused");
+        drop(first);
+        assert!(try_busy().is_some(), "the flag is free once the first ends");
+    }
+
+    #[test]
+    fn a_turkish_capital_i_does_not_break_the_intent_offsets() {
+        match parse("message İrem saying çok güzel") {
+            Intent::Message { to, text, .. } => assert_eq!((to.as_str(), text.as_str()), ("İrem", "çok güzel")),
+            other => panic!("not a message: {other:?}"),
+        }
+        match parse("play İstanbul on spotify") {
+            Intent::Play { query, service } => assert_eq!((query.as_str(), service.as_str()), ("İstanbul", "spotify")),
+            other => panic!("not a play: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stream_that_goes_quiet_is_an_error_and_a_finished_one_is_not() {
+        use std::time::Duration;
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        tx.send(Some(json!({ "text": "half" }))).unwrap();
+        assert!(collect_events(&rx, Duration::from_millis(20)).is_err(), "no end marker before the wait: a timeout, not a short reply");
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        tx.send(Some(json!({ "text": "whole" }))).unwrap();
+        tx.send(None).unwrap();
+        assert_eq!(collect_events(&rx, Duration::from_millis(20)).unwrap().len(), 1, "the end marker ends it normally");
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        drop(tx);
+        assert_eq!(collect_events(&rx, Duration::from_millis(20)).unwrap().len(), 0, "a dropped sender is a normal end");
+    }
 
     #[test]
     fn repeat_requests_are_recognised_and_return_the_last_answer() {

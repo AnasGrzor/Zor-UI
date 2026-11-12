@@ -13,7 +13,7 @@
 //! Writes agents\<agent>\<session>.json and usage.json under the data folder; notify.rs reads them.
 
 use super::claude_profile::Root;
-use super::common::{hidden, root};
+use super::common::{hidden, root, save_json};
 use serde_json::{json, Map, Value};
 use std::{
     io::{IsTerminal, Read, Seek, SeekFrom, Write},
@@ -238,13 +238,21 @@ pub fn cli(args: &[String]) -> i32 {
         if asks { if let Some(d) = super::permit::await_answer(&agents, agent, &id) { println!("{}", super::permit::hook_reply(&d)); } }
     }
     if let Some(cmd) = then {
-        use std::process::Stdio;
-        if let Ok(mut c) = hidden(&cmd[0]).args(&cmd[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+        use std::{os::windows::process::CommandExt, process::Stdio};
+        // through cmd.exe, so npx, .cmd shims and && work; a bare spawn finds none of them on Windows
+        if let Ok(mut c) = hidden("cmd").raw_arg(shell_args(cmd)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
             if let Some(mut i) = c.stdin.take() { let _ = i.write_all(&raw); }
             if let Ok(o) = c.wait_with_output() { let _ = std::io::stdout().write_all(&o.stdout); }
         }
     }
     0
+}
+
+/// The arguments for `cmd`: the user's status line as one cmd.exe line. Parts with spaces are quoted again, since the
+/// shell that ran the status line already took its quotes off.
+fn shell_args(parts: &[String]) -> String {
+    let line: Vec<String> = parts.iter().map(|p| if p.contains(' ') && !p.starts_with('"') { format!("\"{p}\"") } else { p.clone() }).collect();
+    format!("/S /C \"{}\"", line.join(" "))
 }
 
 // ------------------------------------------------------------------ install
@@ -301,8 +309,7 @@ fn add_hooks(path: &Path, cmd: &str, events: &[&str], status: bool, timeout: u32
             let bak = path.with_file_name(format!("{}.bak-{}", path.file_name().unwrap_or_default().to_string_lossy(), now_s() as u64));
             std::fs::copy(path, bak).map_err(|e| e.to_string())?;
         }
-        if let Some(d) = path.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
-        std::fs::write(path, serde_json::to_string_pretty(&data).unwrap_or_default()).map_err(|e| e.to_string())?;
+        if !save_json(path, &data) { return Err(format!("can't write {}", path.display())); }
     }
     Ok(changed)
 }
@@ -394,6 +401,13 @@ mod tests {
         assert_eq!(summary(&d)["claude"]["message"], "Allow Bash: npm test");
         assert_eq!(summary(&d)["claude"]["state"], "waiting");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_status_line_is_wrapped_for_cmd() {
+        let parts = ["npx", "-y", "my tool", "&&", "echo"].map(String::from);
+        assert_eq!(shell_args(&parts), r#"/S /C "npx -y "my tool" && echo""#);
+        assert_eq!(shell_args(&["npx".to_string(), "line".to_string()]), r#"/S /C "npx line""#);
     }
 
     #[test]

@@ -308,14 +308,20 @@ impl App {
     fn reload(&mut self) -> bool {
         let mut changed = false;
         if let Some(t) = self.cfg_file.changed() {
-            self.cx.cfg = Config::parse(&t);
-            self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
-                self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
-            let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
-            if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
-            self.ws_main = Some(m);
-            if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
-            changed = true;
+            // A broken config.json keeps the last good settings: parse would give defaults, and the default
+            // workspacesMain would rebind GlazeWM and reset keybinds.
+            if Config::is_broken(&t) {
+                crate::log::line("config.json isn't valid JSON; keeping the last good settings");
+            } else {
+                self.cx.cfg = Config::parse(&t);
+                self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
+                    self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
+                let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
+                if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
+                self.ws_main = Some(m);
+                if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
+                changed = true;
+            }
         }
         if let Some(t) = self.theme_file.changed() {
             let mut theme = Theme::parse(&t);
@@ -724,7 +730,7 @@ impl App {
                             menu::Item::new("settings", "Settings", |cx| cx.actions.push(Action::open("settings"))),
                             menu::Item::new("visibility", "Recover hidden windows", |_| { std::thread::spawn(|| { crate::log::line(&format!("rescue: uncloaked {} windows", crate::rescue::uncloak_all())); }); }),
                             menu::Item::new("restart_alt", "Restart", |_| restart()),
-                            menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); std::process::exit(0); }),
+                            menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); crate::voice::shutdown(); std::process::exit(0); }),
                         ], (p.x, p.y));
                     }
                     _ => {}
@@ -842,6 +848,7 @@ fn restart() {
         .creation_flags(0x0800_0000).spawn();
     if spawned.is_ok() {
         crate::appicon::remove(HWND(MSG_HWND.load(Ordering::Relaxed) as *mut _));
+        crate::voice::shutdown();
         // not process::exit: its cleanup drops the windows, whose handlers panic on the already destroyed thread-locals (a crash report each restart)
         unsafe { let _ = windows::Win32::System::Threading::TerminateProcess(windows::Win32::System::Threading::GetCurrentProcess(), 0); }
         std::process::exit(0);

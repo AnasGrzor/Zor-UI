@@ -23,7 +23,7 @@ use windows::{
             Power::SetSuspendState,
             Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
             Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
-            Threading::{GetCurrentProcessId, GetExitCodeProcess, OpenMutexW, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZATION_SYNCHRONIZE},
+            Threading::{GetCurrentProcessId, GetExitCodeProcess, OpenMutexW, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, SYNCHRONIZATION_SYNCHRONIZE},
             Wmi::{IWbemLocator, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE},
         },
         UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
@@ -145,8 +145,13 @@ fn caffeine_on() -> bool {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
         let mut code = 0u32;
         let alive = GetExitCodeProcess(h, &mut code).is_ok() && code == 259; // STILL_ACTIVE
+        // After a reboot the pid can belong to another process; only our PowerShell helper may be killed.
+        let mut buf = [0u16; 520];
+        let mut n = buf.len() as u32;
+        let ours = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok()
+            && String::from_utf16_lossy(&buf[..n as usize]).to_lowercase().ends_with("\\powershell.exe");
         let _ = CloseHandle(h);
-        alive
+        alive && ours
     }
 }
 

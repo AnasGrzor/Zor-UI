@@ -5,6 +5,7 @@
 use super::{routing, tasks, Call};
 use crate::assist;
 use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The most steps a plan may have; a longer reply is cut to this.
 pub const MAX_PLAN_STEPS: usize = 8;
@@ -171,9 +172,14 @@ pub fn side_effect(call: &Call) -> bool {
 /// The identity of a step: the call as the buddy holds it.
 pub fn key(call: &Call) -> String { format!("{call:?}") }
 
-pub fn encode(steps: &[Entry]) -> String {
-    json!(steps.iter().map(|e| json!({ "key": e.key, "side": e.side, "status": e.status.name(), "detail": e.detail })).collect::<Vec<_>>()).to_string()
+pub fn encode(steps: &[Entry]) -> String { encode_at(steps, now()) }
+
+/// Each step carries the time the record was saved (`at`), so an old interrupted task stops blocking repeats.
+fn encode_at(steps: &[Entry], at: i64) -> String {
+    json!(steps.iter().map(|e| json!({ "key": e.key, "side": e.side, "status": e.status.name(), "detail": e.detail, "at": at })).collect::<Vec<_>>()).to_string()
 }
+
+fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
 /// Steps read back from the database. A step that can't be read is dropped. A missing `side` counts as a change, so it is never repeated.
 pub fn decode(text: &str) -> Vec<Entry> {
@@ -185,12 +191,24 @@ pub fn decode(text: &str) -> Vec<Entry> {
     })).collect()
 }
 
-/// The keys a repeat must not run: changing steps that an interrupted task started (no outcome yet) or finished.
-pub fn blocked_keys(records: &[String]) -> Vec<String> {
-    records.iter().flat_map(|text| decode(text))
+/// How long an interrupted task keeps blocking its changing steps. Past this, the task is old and a repeat is allowed again;
+/// without the window the same step stayed blocked in every later request.
+pub const BLOCK_WINDOW_SECS: i64 = 10 * 60;
+
+/// The keys a repeat must not run: changing steps that an interrupted task started (no outcome yet) or finished, if the task was saved within `BLOCK_WINDOW_SECS`.
+pub fn blocked_keys(records: &[String]) -> Vec<String> { blocked_keys_at(records, now()) }
+
+fn blocked_keys_at(records: &[String], now: i64) -> Vec<String> {
+    records.iter().filter(|text| saved_at(text).is_some_and(|at| now - at <= BLOCK_WINDOW_SECS))
+        .flat_map(|text| decode(text))
         .filter(|e| e.side && matches!(e.status, Outcome::Running | Outcome::Done))
         .map(|e| e.key)
         .collect()
+}
+
+/// When a record was last saved. A record from before the stamp (no `at`) counts as old.
+fn saved_at(text: &str) -> Option<i64> {
+    serde_json::from_str::<Vec<Value>>(text).ok()?.iter().filter_map(|v| v["at"].as_i64()).max()
 }
 
 /// The steps of one request as it runs. With no task id (the database can't be used) nothing is saved and the request goes on.
@@ -258,6 +276,23 @@ mod tests {
         let steps = vec![entry(&Call::Clip("x".into()), Outcome::Done), Entry { key: "k".into(), side: false, status: Outcome::Declined, detail: "no".into() }];
         assert_eq!(decode(&encode(&steps)), steps);
         assert!(decode("not json").is_empty(), "a damaged record is dropped, not a crash");
+    }
+
+    #[test]
+    fn an_interrupted_tasks_changing_step_blocks_a_repeat_only_inside_the_window() {
+        let msg = Call::Message { to: "Sam".into(), text: "hi".into(), via: String::new() };
+        let saved = 10_000;
+        let record = encode_at(&[entry(&msg, Outcome::Done)], saved);
+        let recent = saved + BLOCK_WINDOW_SECS;
+        assert_eq!(blocked_keys_at(&[record.clone()], recent), [key(&msg)], "inside the window: a repeat is refused");
+        assert!(blocked_keys_at(&[record.clone()], recent + 1).is_empty(), "after the window: the step may run again");
+        let unstamped = r#"[{"key":"x","side":true,"status":"done"}]"#.to_string();
+        assert!(blocked_keys_at(&[unstamped], saved).is_empty(), "a record with no stamp counts as old");
+        // within one request: a Steps that starts with a recent interrupted record refuses the repeat, and an old one doesn't
+        let mut steps = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[record], saved) };
+        assert!(steps.begin(&msg).is_some(), "the repeat is refused in the same request");
+        let mut fresh = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[encode_at(&[entry(&msg, Outcome::Done)], saved)], saved + BLOCK_WINDOW_SECS + 1) };
+        assert!(fresh.begin(&msg).is_none());
     }
 
     #[test]

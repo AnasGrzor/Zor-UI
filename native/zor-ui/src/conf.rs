@@ -58,8 +58,13 @@ pub struct Config(pub Value);
 impl Config {
     pub fn parse(text: &str) -> Config {
         let mut v = defaults();
-        if let Ok(file @ Value::Object(_)) = serde_json::from_str::<Value>(text) { merge(&mut v, file); }
+        if let Ok(file @ Value::Object(_)) = serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) { merge(&mut v, file); }
         Config(v)
+    }
+    /// True when `text` is not a JSON object (empty text means no file yet, which is fine). `parse` would silently use defaults.
+    pub fn is_broken(text: &str) -> bool {
+        let t = text.trim_start_matches('\u{feff}');
+        !t.trim().is_empty() && !matches!(serde_json::from_str::<Value>(t), Ok(Value::Object(_)))
     }
     /// config.json as it is on disk now (many callers hold a copy with only the script paths).
     pub fn load() -> Config { Config::parse(&fs::read_to_string(pack_dir().join("config.json")).unwrap_or_default()) }
@@ -158,7 +163,14 @@ impl State {
     /// Applies `f` to the file as it is now and writes it back. The theme scripts write this file too
     /// (live wallpaper, image, mode), so saving the copy read at start-up would erase their keys.
     pub fn update(&mut self, f: impl FnOnce(&mut Value)) {
-        self.v = State::load(self.path.clone()).v;
+        // A file that exists but can't be read as an object is not overwritten: only the copy in memory changes.
+        let disk = match fs::read_to_string(&self.path) {
+            Ok(t) => serde_json::from_str::<Value>(&t).ok().filter(Value::is_object),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(json!({})),
+            Err(_) => None,
+        };
+        let Some(disk) = disk else { f(&mut self.v); return };
+        self.v = disk;
         f(&mut self.v);
         // write then rename, so a crash mid-write never leaves half a file
         let tmp = self.path.with_extension("tmp");
@@ -220,6 +232,26 @@ mod tests {
         assert_eq!(disk["live"], "we:x");
         assert_eq!(disk["leftTab"], "ai");
     }
+    #[test]
+    fn state_update_leaves_a_broken_file_alone() {
+        let path = std::env::temp_dir().join(format!("zor-ui-state-broken-{}.json", std::process::id()));
+        let broken = r#"{"deskPos": {"a": [1, 2]},}"#; // trailing comma
+        fs::write(&path, broken).unwrap();
+        let mut s = State::load(path.clone());
+        s.update(|v| v["leftTab"] = json!("ai"));
+        let on_disk = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(on_disk, broken, "byte-identical");
+        assert_eq!(s.v["leftTab"], "ai", "the change still applies in memory");
+    }
+
+    #[test]
+    fn broken_config_is_detected_but_empty_is_not() {
+        assert!(Config::is_broken("{\"a\": 1,}") && Config::is_broken("[1]"));
+        assert!(!Config::is_broken("") && !Config::is_broken("  \n") && !Config::is_broken("\u{feff}{\"a\": 1}"));
+        assert!(!Config::parse("\u{feff}{\"use24h\": false}").bool("use24h"), "a BOM file is read like any other");
+    }
+
     #[test]
     fn a_visualizer_uses_its_own_color_then_the_shared_one() {
         let c = Config::parse(r##"{"visualizer": {"color": "#112233"}, "island": {"eqColor": "#445566"}}"##);

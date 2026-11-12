@@ -54,8 +54,15 @@ fn truthy(v: &Value) -> bool {
 fn config_set(config: &Path, key: &str, value_json: &str) -> Value {
     if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') { return err("bad key"); }
     let Ok(value) = serde_json::from_str::<Value>(value_json) else { return err("bad value") };
-    let mut cfg = load_json(config, json!({}));
-    if !cfg.is_object() { cfg = json!({}); }
+    // A missing file starts empty; a file that exists but isn't an object is left alone, not overwritten.
+    let mut cfg = match std::fs::read_to_string(config) {
+        Ok(t) => match serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}')) {
+            Ok(v @ Value::Object(_)) => v,
+            _ => return err("config.json has an error, fix it first"),
+        },
+        Err(_) if !config.exists() => json!({}),
+        Err(_) => return err("config.json has an error, fix it first"),
+    };
     let mut node = &mut cfg;
     let parts: Vec<&str> = key.split('.').collect();
     for p in &parts[..parts.len() - 1] {
@@ -368,6 +375,19 @@ mod tests {
         assert_eq!(load_json(&c, json!(null)), json!({ "ai": { "model": "gem" } }));
         assert_eq!(config_set(&c, "bad key", "1")["ok"], false);
         assert_eq!(config_set(&c, "a.b", "{oops")["ok"], false);
+    }
+
+    #[test]
+    fn config_set_never_overwrites_a_broken_file() {
+        let d = tmp("cfg-broken");
+        let c = d.join("config.json");
+        let broken = "{\"ai\": {\"model\": \"gem\"},}"; // trailing comma
+        std::fs::write(&c, broken).unwrap();
+        assert_eq!(config_set(&c, "use24h", "false")["ok"], false);
+        assert_eq!(std::fs::read(&c).unwrap(), broken.as_bytes(), "byte-identical");
+        std::fs::write(&c, "[1, 2]").unwrap(); // valid JSON, not an object: also kept
+        assert_eq!(config_set(&c, "use24h", "false")["ok"], false);
+        assert_eq!(std::fs::read_to_string(&c).unwrap(), "[1, 2]");
     }
 
     #[test]

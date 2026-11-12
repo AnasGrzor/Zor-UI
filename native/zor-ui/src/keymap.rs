@@ -209,6 +209,9 @@ impl Tracker {
 
     pub fn mods(&self) -> u32 { self.held.iter().fold(0, |a, v| a | mod_bit(*v)) }
 
+    /// Forgets the modifiers that are no longer down. Their key-up can be lost (secure desktop, a dropped event).
+    pub fn drop_released(&mut self, is_down: impl Fn(u32) -> bool) { self.held.retain(|h| is_down(*h)); }
+
     pub fn event(&mut self, down: bool, vk: u32, combos: &[(u32, u32)], recording: bool) -> Out {
         if mod_bit(vk) != 0 {
             self.held.retain(|h| *h != vk);
@@ -297,13 +300,15 @@ fn hook_thread() {
 }
 
 unsafe extern "system" fn hook(code: i32, wp: windows::Win32::Foundation::WPARAM, lp: windows::Win32::Foundation::LPARAM) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::{Foundation::LRESULT, UI::WindowsAndMessaging::{CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_SYSKEYDOWN}};
+    use windows::Win32::{Foundation::LRESULT, UI::Input::KeyboardAndMouse::GetAsyncKeyState, UI::WindowsAndMessaging::{CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_SYSKEYDOWN}};
     if code >= 0 {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
         if k.flags.0 & LLKHF_INJECTED.0 == 0 {
             let down = matches!(wp.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
             // try_lock: never make the whole keyboard wait for another thread
             if let Ok(mut s) = SHARED.try_lock() {
+                // the real state, since a key-up the hook missed would leave Win "held" (Win+Enter after unlock)
+                s.tracker.drop_released(|vk| unsafe { GetAsyncKeyState(vk as i32) } < 0);
                 let combos: Vec<(u32, u32)> = s.combos.iter().map(|c| (c.0, c.1)).collect();
                 let mods = s.tracker.mods();
                 let before = s.tracker.eaten().len();
@@ -509,6 +514,24 @@ mod tests {
         assert_eq!(t.eaten().len(), 1, "a repeat adds nothing");
         t.event(false, b'B' as u32, &combos, false);
         assert!(t.eaten().is_empty());
+    }
+
+    #[test]
+    fn a_missed_win_release_does_not_make_the_next_enter_a_win_combo() {
+        let combos = [parse("Win+Enter").unwrap()];
+        let mut t = Tracker::default();
+        t.event(true, 0x5B, &combos, false);
+        t.drop_released(|_| false); // unlocked: the Win key-up never reached the hook
+        assert_eq!(t.event(true, 0x0D, &combos, false), Out::Pass);
+        assert_eq!(t.mods(), 0);
+    }
+
+    #[test]
+    fn a_modifier_still_down_stays_held() {
+        let mut t = Tracker::default();
+        t.event(true, 0xA2, &[], false);
+        t.drop_released(|vk| vk == 0xA2);
+        assert_eq!(t.mods(), CTRL);
     }
 
     #[test]

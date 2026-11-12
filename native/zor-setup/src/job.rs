@@ -147,9 +147,18 @@ fn unregister() {
     if std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p == dir)).unwrap_or(false) {
         let _ = Command::new("cmd.exe")
             .creation_flags(NO_WINDOW)
-            .raw_arg(format!("/c ping -n 4 127.0.0.1 >nul & rmdir /s /q \"{}\"", dir.display()))
+            .raw_arg(exit_then_remove_command(std::process::id(), &dir))
             .spawn();
     }
+}
+
+/// Waits up to ~30 s (one ping per second while the pid is still listed), then removes `dir`.
+/// The exe can't delete itself while it runs, so the cleanup waits for its pid to exit first.
+fn exit_then_remove_command(pid: u32, dir: &std::path::Path) -> String {
+    format!(
+        "/c for /l %i in (1,1,30) do (tasklist /fi \"PID eq {pid}\" | find \"{pid}\" >nul && ping -n 2 127.0.0.1 >nul) & rmdir /s /q \"{}\"",
+        dir.display()
+    )
 }
 
 #[cfg(test)]
@@ -182,6 +191,13 @@ mod tests {
         let (tx, _rx) = channel();
         assert_eq!(stream(Command::new("cmd.exe").args(["/c", "exit 7"]), &tx), Err("PowerShell exited with code 7".to_string()));
         assert_eq!(stream(Command::new("cmd.exe").args(["/c", "echo ok"]), &tx), Ok(()));
+    }
+
+    #[test]
+    fn cleanup_waits_for_this_pid_then_removes_the_quoted_dir() {
+        let cmd = exit_then_remove_command(4242, std::path::Path::new(r"C:\Users\A B\AppData\Local\zor-ui-setup"));
+        assert!(cmd.contains("PID eq 4242"));
+        assert!(cmd.ends_with(r#"& rmdir /s /q "C:\Users\A B\AppData\Local\zor-ui-setup""#));
     }
 
     #[test]

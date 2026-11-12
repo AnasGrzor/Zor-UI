@@ -24,6 +24,12 @@ use windows::{
 pub const STREAMS: &[&str] = &["record-audio"];
 /// Sample rate of the .pcm file (stereo f32le); the mux step reads it with these numbers.
 pub const RATE: u32 = 48000;
+/// The longest recording the child keeps. The app's voice recorder caps its takes at the same length, so an
+/// orphaned child (its app exited while recording) still stops by itself.
+pub const CAP_SECS: u64 = 130;
+
+/// Whether a recording that started `elapsed` ago has reached the cap.
+pub fn cap_reached(elapsed: Duration) -> bool { elapsed >= Duration::from_secs(CAP_SECS) }
 
 type Queue = Arc<Mutex<VecDeque<f32>>>;
 
@@ -65,7 +71,7 @@ pub fn stream(_cfg: &crate::conf::Config, _name: &str, args: &[String], _stdin: 
         });
     }
     let (mut f, t0, mut written) = (std::io::BufWriter::new(file), Instant::now(), 0u64);
-    while !out.stopped() {
+    while !out.stopped() && !cap_reached(t0.elapsed()) {
         std::thread::sleep(Duration::from_millis(20));
         let want = (t0.elapsed().as_secs_f64() * RATE as f64) as u64;
         if want <= written { continue; }
@@ -129,6 +135,13 @@ mod tests {
     use super::*;
 
     fn q(v: &[f32]) -> Queue { Arc::new(Mutex::new(v.iter().copied().collect())) }
+
+    #[test]
+    fn the_child_stops_at_the_cap_and_not_before() {
+        assert!(!cap_reached(Duration::from_secs(CAP_SECS - 1)));
+        assert!(cap_reached(Duration::from_secs(CAP_SECS)));
+        assert_eq!(CAP_SECS, crate::voice::record::CAP_SECS, "the parent's cap and the child's cap match");
+    }
 
     #[test]
     fn every_listed_mode_is_understood() {

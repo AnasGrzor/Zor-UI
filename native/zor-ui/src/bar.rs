@@ -319,7 +319,8 @@ pub struct Bar {
     di_track_until: f64,
     di_scroll_at: f64,
     art: Option<((std::sync::Arc<Vec<u8>>, u32), Pixmap)>,
-    tray_px: HashMap<String, (usize, Pixmap)>,
+    /// Per tray icon: the image it was drawn from (kept alive, so its address can't be reused), the px size, the pixmap.
+    tray_px: HashMap<String, (std::sync::Arc<(Vec<u8>, u32, u32)>, u32, Pixmap)>,
     pills: Vec<(u32, R)>,
     hover: u32,
     ws_names: Vec<String>,
@@ -385,11 +386,10 @@ impl Bar {
 
     fn tray_icon(&mut self, i: &crate::tray::Icon, px: u32) -> Option<Pixmap> {
         let rgba = i.rgba.as_ref()?;
-        let tag = std::sync::Arc::as_ptr(rgba) as usize ^ px as usize;
-        if self.tray_px.get(&i.id).map(|e| e.0) != Some(tag) {
-            self.tray_px.insert(i.id.clone(), (tag, rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px)?));
+        if !self.tray_px.get(&i.id).is_some_and(|e| std::sync::Arc::ptr_eq(&e.0, rgba) && e.1 == px) {
+            self.tray_px.insert(i.id.clone(), (rgba.clone(), px, rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px)?));
         }
-        self.tray_px.get(&i.id).map(|e| e.1.clone())
+        self.tray_px.get(&i.id).map(|e| e.2.clone())
     }
 }
 
@@ -843,6 +843,8 @@ impl Bar {
                     self.tray_tips.clear();
                     let mut els = vec![];
                     let (shown, hidden) = tray_icons(cx);
+                    // drop the images of icons that have gone, so the cache stays one entry per shown icon
+                    self.tray_px.retain(|id, _| shown.iter().any(|i| &i.id == id));
                     for i in shown {
                         if let Some(img) = self.tray_icon(&i, px) {
                             els.push(El::Img(TRAY + self.tray_ids.len() as u32, img, 18.0));

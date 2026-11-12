@@ -141,10 +141,28 @@ pub fn forget(conn: &Connection, id: i64) -> Result<bool, String> {
 
 /// Up to `k` facts that match `query`, best match first. Only the words of the query count, and the common ones don't.
 pub fn search(conn: &Connection, query: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
-    let terms: Vec<String> = words(query).into_iter().filter(|w| !STOP.contains(&w.as_str())).collect();
+    let terms = terms(query, &[]);
     if terms.is_empty() { return Ok(vec![]); }
-    // each word is letters and digits only, so quoting it can't break the search syntax
-    let expr = terms.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(" OR ");
+    ranked(conn, &terms.iter().map(|t| quote(t)).collect::<Vec<_>>().join(" OR "), k)
+}
+
+/// The facts that contain every meaningful word of `query`. Forgetting uses this, so one shared word ("like") can't delete an unrelated fact.
+pub fn search_all(conn: &Connection, query: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
+    let terms = terms(query, FORGET_WORDS);
+    if terms.is_empty() { return Ok(vec![]); }
+    // FTS5 reads space-separated terms as AND
+    ranked(conn, &terms.iter().map(|t| quote(t)).collect::<Vec<_>>().join(" "), k)
+}
+
+/// The query's words that count for matching: not common, not in `drop`.
+fn terms(query: &str, drop: &[&str]) -> Vec<String> {
+    words(query).into_iter().filter(|w| !STOP.contains(&w.as_str()) && !drop.contains(&w.as_str())).collect()
+}
+
+/// Each word is letters and digits only, so quoting it can't break the search syntax.
+fn quote(t: &str) -> String { format!("\"{t}\"") }
+
+fn ranked(conn: &Connection, expr: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.text, m.created, m.updated, m.kind, m.project FROM memory_fts
          JOIN memories m ON m.id = memory_fts.rowid
@@ -154,6 +172,9 @@ pub fn search(conn: &Connection, query: &str, k: usize) -> rusqlite::Result<Vec<
     rows.collect()
 }
 
+/// Words that name the forget itself. They are left out when forgetting, so "forget I like green tea" matches the fact.
+const FORGET_WORDS: &[&str] = &["forget", "forgot"];
+
 /// Imports the facts of the JSON store from the earlier build, once: when the database is empty and the JSON file exists.
 /// The JSON file is renamed afterwards, so it is kept but never read twice.
 pub fn import_json(conn: &Connection, json_path: &Path) -> Result<usize, String> {
@@ -161,16 +182,19 @@ pub fn import_json(conn: &Connection, json_path: &Path) -> Result<usize, String>
     let Ok(text) = std::fs::read_to_string(json_path) else { return Ok(0) };
     if !empty { return Ok(0); }
     let v: Value = serde_json::from_str(&text).map_err(|e| format!("could not read the old memory file: {e}"))?;
+    // one transaction: a failure part way drops the whole import (the rollback runs when `tx` is dropped), so the JSON is read again next time
+    let tx = conn.unchecked_transaction().map_err(|e| format!("could not import memory: {e}"))?;
     let mut n = 0;
     for m in v["memories"].as_array().into_iter().flatten() {
         let (Some(text), Some(created), Some(updated)) = (m["text"].as_str(), m["created"].as_i64(), m["updated"].as_i64()) else { continue };
         if text.trim().is_empty() || is_sensitive(text) { continue; }
-        conn.execute("INSERT INTO memories (text, created, updated) VALUES (?1, ?2, ?3)", params![text, created, updated])
+        tx.execute("INSERT INTO memories (text, created, updated) VALUES (?1, ?2, ?3)", params![text, created, updated])
             .map_err(|e| format!("could not import memory: {e}"))?;
-        conn.execute("INSERT INTO memory_fts (rowid, text) VALUES (?1, ?2)", params![conn.last_insert_rowid(), text])
+        tx.execute("INSERT INTO memory_fts (rowid, text) VALUES (?1, ?2)", params![tx.last_insert_rowid(), text])
             .map_err(|e| format!("could not import memory: {e}"))?;
         n += 1;
     }
+    tx.commit().map_err(|e| format!("could not import memory: {e}"))?;
     let _ = std::fs::rename(json_path, json_path.with_extension("json.migrated"));
     Ok(n)
 }
@@ -250,14 +274,16 @@ pub fn forget_id(id: i64) -> Result<bool, String> {
 
 /// Forgets the stored fact that best matches `query`. The answer is what the buddy says back.
 pub fn forget_matching(query: &str) -> Result<String, String> {
-    // search and delete in one step under the lock, so the fact found is the fact removed
-    let found = with_app(|c| -> Result<Option<Memory>, String> {
-        let Some(m) = search(c, query, 1).map_err(|e| format!("could not search memory: {e}"))?.into_iter().next() else { return Ok(None) };
-        forget(c, m.id)?;
-        Ok(Some(m))
-    })??;
+    let found = with_app(|c| forget_matching_in(c, query))??;
     changed();
     Ok(match found { Some(m) => format!("Forgot: {}", m.text), None => "I don't remember anything like that.".into() })
+}
+
+/// Deletes the best fact that contains all of `query`'s words. Search and delete run in one step under the lock, so the fact found is the fact removed.
+fn forget_matching_in(conn: &Connection, query: &str) -> Result<Option<Memory>, String> {
+    let Some(m) = search_all(conn, query, 1).map_err(|e| format!("could not search memory: {e}"))?.into_iter().next() else { return Ok(None) };
+    forget(conn, m.id)?;
+    Ok(Some(m))
 }
 
 /// How facts are found for a request. Keyword search (FTS5) is the only ranker today. A semantic ranker can implement this
@@ -412,6 +438,35 @@ mod tests {
         assert!(search(&c, "weather tomorrow", 5).unwrap().is_empty(), "no shared word, nothing recalled");
         assert!(search(&c, "what the and", 5).unwrap().is_empty(), "only common words, nothing recalled");
         assert_eq!(search(&c, "lina tea", 1).unwrap().len(), 1, "the limit holds");
+    }
+
+    #[test]
+    fn forgetting_needs_every_meaningful_word_to_match() {
+        let c = mem();
+        add(&c, "I like green tea", 1).unwrap();
+        assert_eq!(forget_matching_in(&c, "forget I like coffee").unwrap(), None, "\"like\" alone must not delete the tea fact");
+        assert_eq!(all(&c).unwrap().len(), 1);
+        assert_eq!(forget_matching_in(&c, "green tea").unwrap().map(|m| m.text), Some("I like green tea".into()));
+        assert!(all(&c).unwrap().is_empty());
+        assert_eq!(forget_matching_in(&c, "forget it").unwrap(), None, "only forget-words and common words: nothing");
+    }
+
+    #[test]
+    fn a_failed_import_leaves_no_rows_behind() {
+        let dir = temp_path("import-rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("buddy-memory.json");
+        // a stray FTS row with the id the second fact would get makes that insert fail
+        std::fs::write(&json, r#"{"memories":[{"text":"I like green tea","created":1,"updated":1},{"text":"My sister is called Lina","created":2,"updated":2}]}"#).unwrap();
+        let c = mem();
+        c.execute("INSERT INTO memory_fts (rowid, text) VALUES (2, 'collides')", []).unwrap();
+        assert!(import_json(&c, &json).is_err());
+        assert!(all(&c).unwrap().is_empty(), "the first fact was rolled back with the failed second one");
+        assert!(json.exists(), "the JSON is kept for a retry");
+        c.execute("DELETE FROM memory_fts", []).unwrap();
+        assert_eq!(import_json(&c, &json), Ok(2));
+        assert_eq!(all(&c).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

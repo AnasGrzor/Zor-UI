@@ -1000,6 +1000,8 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
         ok
     };
     let halt = || progress.borrow().halt();
+    // a summary call is a model call: Stop and Cancel skip it, and the capped result goes to the model instead
+    let halt_or_stop = || stop_check().or_else(|| halt());
     // the one re-plan: a planning call with the request, the plan so far, the steps done and the failure. Its text goes to the model.
     let replan = |why: &str| -> String {
         let (old, done) = { let p = progress.borrow(); (p.plan().cloned(), p.next()) };
@@ -1070,14 +1072,14 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             native::run_native_loop(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
                 |c| run_tool(c),
-                |task, text| timing.model(|| delegate::summarize(model, task, text, cfg)))
+                |task, text| timing.model(|| if halt_or_stop().is_some() { None } else { delegate::summarize(model, task, text, cfg) }))
         } else {
             let system = build_system_prompt(cfg);
             let budget = budget_for(cfg, model, &system);
             run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { chat(cfg, convo) }),
                 |c| run_tool(c),
-                |task, text| timing.model(|| delegate::summarize(model, task, text, cfg)))
+                |task, text| timing.model(|| if halt_or_stop().is_some() { None } else { delegate::summarize(model, task, text, cfg) }))
         };
         if i + 1 == chain.len() || halt().is_some() || !routing::should_fall_back(&r, !evidence.borrow().is_empty()) { break; }
         crate::log::line(&format!("buddy fallback: {model} could not answer, trying the next model"));
@@ -1115,6 +1117,8 @@ pub fn resume_on_start() {
 
 /// The resume of `resume_on_start`, on the calling thread. `load` gives the Settings, and is called only when a task resumes.
 fn resume_pending(load: impl FnOnce() -> Config) {
+    // a request that is running owns the cancel flag and the token total: the resume waits for the next start
+    let Some(_busy) = assist::try_busy() else { crate::log::line("buddy resume: a request is running, so the task waits"); return };
     tasks::recover_once();
     let Some(c) = tasks::resume_candidate() else { return };
     let Some(p) = plan::parse(&c.plan) else { return };

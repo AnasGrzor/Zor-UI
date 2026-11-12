@@ -84,6 +84,23 @@ fn read_line(line: &str) -> Option<Ev> {
     }
 }
 
+/// The system prompt in a temp file, removed when the chat ends. It goes by file because a .cmd shim (npm install)
+/// refuses command-line arguments with newlines, and the prompt has them.
+struct SystemFile(PathBuf);
+
+impl SystemFile {
+    fn write(text: &str) -> std::io::Result<Self> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!("zorui-system-{}-{nanos}.txt", std::process::id()));
+        std::fs::write(&path, text)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for SystemFile {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
 /// Streams the reply as {"delta"} lines, then {"done"}.
 pub fn chat(model_id: &str, msgs: &[Value], system: &str, out: &Sink) {
     let Some(exe) = find() else {
@@ -91,9 +108,14 @@ pub fn chat(model_id: &str, msgs: &[Value], system: &str, out: &Sink) {
         return;
     };
     let pictures = has_images(msgs);
+    let sys = match SystemFile::write(system) {
+        Ok(f) => f,
+        Err(e) => { out.emit(&json!({ "error": format!("claude: {e}") })); return; }
+    };
     let mut cmd = hidden(exe);
     cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", alias(model_id), "--tools", "",
-              "--system-prompt", system, "--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"]);
+              "--system-prompt-file"]).arg(&sys.0)
+        .args(["--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"]);
     if pictures { cmd.args(["--input-format", "stream-json"]); }
     // zor-ui's own environment goes stale after an account switch, so take the active account from the registry
     let root = Root::live();
@@ -137,6 +159,32 @@ mod tests {
     use super::*;
 
     fn delta(t: &str) -> String { json!({ "type": "stream_event", "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": t } } }).to_string() }
+
+    #[test]
+    fn the_system_prompt_file_keeps_its_newlines_and_goes_away_with_the_chat() {
+        let f = SystemFile::write("line one\nline two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&f.0).unwrap(), "line one\nline two\n");
+        let path = f.0.clone();
+        drop(f);
+        assert!(!path.exists());
+    }
+
+    /// What Rust's std does with a .cmd shim (npm installs `claude.cmd`): a newline argument is refused, a 7,000-char
+    /// argument runs, and an 8,500-char one fails at cmd.exe's line limit (8,191). Pins why the prompt can't be an argument.
+    #[test]
+    fn batch_shims_refuse_newline_arguments() {
+        let dir = std::env::temp_dir().join(format!("zorui-cmdshim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bat = dir.join("echo.cmd");
+        std::fs::write(&bat, "@echo off\r\necho %~1\r\n").unwrap();
+        let run = |arg: String| std::process::Command::new(&bat).arg(arg).output().map(|o| o.status.success()).ok();
+        let nl = std::process::Command::new(&bat).arg("line one\nline two").output();
+        let (short, long) = (run("x".repeat(7000)), run("x".repeat(8500)));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(nl.is_err(), "std accepted a newline argument: {nl:?}");
+        assert_eq!(short, Some(true));
+        assert_eq!(long, Some(false));
+    }
 
     #[test]
     fn model_ids_map_to_aliases() {

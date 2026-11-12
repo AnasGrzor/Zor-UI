@@ -330,6 +330,19 @@ fn a_short_tool_result_makes_no_summary_call() {
 }
 
 #[test]
+fn a_stop_during_a_tool_step_skips_the_summary_call() {
+    let _db = fresh_db();
+    let rec = shared();
+    // the tool step itself is where the user presses Stop: the long result must not be sent to the summary call
+    let _fake = install(scripted_sub(&[SEARCH, SAY_DONE], Ok("Headlines."), &rec), tools(&rec, |_| { CANCEL.store(true, std::sync::atomic::Ordering::Relaxed); Ok(long_result()) }));
+    let out = run("look up the news", Start::New);
+    CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(out, Err(CANCELLED.to_string()));
+    let r = rec.lock().unwrap();
+    assert_eq!(r.events, ["turn", "tool"], "no summary call after Stop");
+}
+
+#[test]
 fn delegate_long_false_makes_no_summary_call_and_sends_the_capped_result() {
     let _db = fresh_db();
     let off = Config::parse(&json!({ "ai": { "model": "fake-model", "delegateLong": false } }).to_string());
@@ -357,6 +370,8 @@ fn the_summary_calls_tokens_are_added_to_the_task_total() {
 
 #[test]
 fn a_summary_is_cut_to_the_word_cap() {
+    // a summary adds to the request's token total, so it takes the shared-db lock like the token test does
+    let _db = fresh_db();
     let rec = shared();
     let many = (0..500).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
     let _fake = install(scripted_sub(&[], Ok(many.as_str()), &rec), tools(&rec, |_| Ok(String::new())));

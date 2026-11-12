@@ -39,9 +39,27 @@ use config::VoiceConfig;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Lines waiting behind the one playing. Ambient remarks past this are dropped, not stacked.
 const MAX_PENDING: usize = 4;
+/// How long a failed voice list stays unretried. The Settings page asks on every paint.
+const VOICE_RETRY: Duration = Duration::from_secs(60);
+
+/// Providers whose last voice-list attempt failed, and when. Keeps a paint from calling the network again.
+static FAILED_LISTS: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+
+/// Whether a voice list for `id` failed less than `VOICE_RETRY` before `now`.
+fn list_failed_recently(id: &str, now: Instant) -> bool {
+    lock(&FAILED_LISTS).iter().any(|(p, at)| p == id && now.saturating_duration_since(*at) < VOICE_RETRY)
+}
+
+/// Records a failed list attempt for `id` at `now`, or clears the record after a success (`failed` false).
+fn note_list(id: &str, failed: bool, now: Instant) {
+    let mut f = lock(&FAILED_LISTS);
+    f.retain(|(p, _)| p != id);
+    if failed { f.push((id.to_string(), now)); }
+}
 
 pub struct Engine {
     registry: Mutex<Registry>,
@@ -193,7 +211,9 @@ pub fn clone_profile(p: &mut profile::VoiceProfile) -> Result<String, String> {
 
 /// Names of the providers that can clone and are set up (their health check passes), e.g. ElevenLabs with a key.
 pub fn cloning_providers() -> Vec<String> {
-    lock(&engine().registry).all().iter().filter(|p| p.capabilities().cloning && p.health().is_ok()).map(|p| p.name().to_string()).collect()
+    // the list is copied out first, so health() (a sidecar may take a while) runs without the registry lock
+    let all = lock(&engine().registry).all();
+    all.iter().filter(|p| p.capabilities().cloning && p.health().is_ok()).map(|p| p.name().to_string()).collect()
 }
 
 /// What provider `id` can do, for the Settings page. None when it is not registered.
@@ -226,8 +246,14 @@ pub fn can_speak(id: &str) -> Result<(), String> {
 
 /// The voices provider `id` offers (empty when it is unknown or fails to list them).
 pub fn provider_voices(id: &str) -> Vec<contract::VoiceInfo> {
+    let now = Instant::now();
+    if list_failed_recently(id, now) { return vec![]; }
     let p = lock(&engine().registry).get(id);
-    p.and_then(|p| p.voices().ok()).unwrap_or_default()
+    let Some(p) = p else { return vec![] };
+    match p.voices() {
+        Ok(v) => { note_list(id, false, now); v }
+        Err(_) => { note_list(id, true, now); vec![] }
+    }
 }
 
 /// Where installed providers live: one folder each, with provider.json and its executable.
@@ -362,9 +388,22 @@ pub fn download_bytes(id: &str) -> Option<u64> {
 
 /// Removes an installed provider's files and its record. Its voices stay on disk for a reinstall.
 pub fn remove(id: &str) -> Result<(), String> {
+    // a running session holds the provider's files open (Windows refuses to delete them), so it stops first
+    let running = lock(&engine().registry).get(id);
+    if let Some(p) = running { p.shutdown(); }
     let mut store = lifecycle::Store::load(&store_path());
     lifecycle::remove_provider(&mut store, &providers_root(), &models_root(), id, false).map_err(|e| e.to_string())?;
     store.save(&store_path()).map_err(|e| e.to_string())
+}
+
+/// Called when the app exits: ends a recording in progress and stops the active provider's process, so
+/// nothing is left running or holding files. Does nothing if the voice engine never started.
+pub fn shutdown() {
+    record::shutdown();
+    if let Some(e) = ENGINE.get() {
+        let active = lock(&e.registry).active();
+        if let Some(p) = active { p.shutdown(); }
+    }
 }
 
 /// Speaks the test sentence as Buddy 0, so a chosen voice can be heard without waiting for a reply.
@@ -463,6 +502,16 @@ mod tests {
         let a = approvals_for("piper").unwrap();
         assert_eq!(a.len(), 2, "the package and the voice");
         assert!(download_bytes("nope").is_none());
+    }
+
+    #[test]
+    fn a_failed_voice_list_is_not_retried_inside_the_window() {
+        let t = Instant::now();
+        note_list("retry-test-provider", true, t);
+        assert!(list_failed_recently("retry-test-provider", t + Duration::from_secs(10)));
+        assert!(!list_failed_recently("retry-test-provider", t + VOICE_RETRY), "retried once the window passes");
+        note_list("retry-test-provider", false, t);
+        assert!(!list_failed_recently("retry-test-provider", t), "a success clears the failure");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use super::{provider, Call, MAX_RESULT_CHARS};
 use crate::assist::{self, Turn};
 use crate::conf::Config;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// A tool result longer than this (characters) is summarized before the model reads it.
 pub const DELEGATE_OVER_CHARS: usize = 6000;
@@ -57,11 +57,17 @@ fn ask(cfg: &Config, convo: &str) -> Result<Turn, String> {
     assist::stream_turn_raw(cfg, convo, 30)
 }
 
-/// What the model reads for one tool result of . A browser result is never summarized: its [ref=eN] ids must be quoted
-/// by the next browser step, and a summary drops them.
+/// What the model reads for one tool result. Some kinds are never summarized, because their exact text is the point: a browser
+/// result's [ref=eN] ids must be quoted by the next browser step, and paths, line numbers and compiler errors must stay as they are.
+/// Those get the usual cap only.
 pub fn for_call(task: &str, call: &Call, result: &str, summarize: &mut impl FnMut(&str, &str) -> Option<String>) -> String {
-    if matches!(call, Call::Browser { .. }) { return assist::short(result, MAX_RESULT_CHARS); }
+    if exact_text(call) { return assist::short(result, MAX_RESULT_CHARS); }
     for_model(task, result, summarize)
+}
+
+/// The kinds whose result is read as exact text and never summarized.
+fn exact_text(call: &Call) -> bool {
+    matches!(call, Call::Browser { .. } | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::RunCheck(_))
 }
 
 /// What the model reads for one tool result. A long result gets its summary, when the call answers; anything else gets the result
@@ -97,6 +103,23 @@ mod tests {
         let mut calls = 0;
         let out = for_model("t", "short text", &mut |_, _| { calls += 1; Some("x".into()) });
         assert_eq!(out, "short text");
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn exact_text_kinds_are_returned_unchanged_and_never_summarized() {
+        let exact = [Call::ListTree("src".into()), Call::ReadFile("a.rs".into()), Call::SearchCode("fn main".into()),
+            Call::RunCheck("test".into()), Call::Browser { tool: "snapshot".into(), args: Value::Null }];
+        for call in &exact {
+            let mut calls = 0;
+            let out = for_call("t", call, "src/a.rs:12: error[E0308]: mismatched types", &mut |_, _| { calls += 1; Some("x".into()) });
+            assert_eq!(out, "src/a.rs:12: error[E0308]: mismatched types", "{call:?} is returned unchanged");
+            assert_eq!(calls, 0, "{call:?} makes no summary call");
+        }
+        let long = "p".repeat(7000);
+        let mut calls = 0;
+        let out = for_call("t", &Call::ReadFile("a.rs".into()), &long, &mut |_, _| { calls += 1; Some("x".into()) });
+        assert_eq!(out, assist::short(&long, MAX_RESULT_CHARS), "a long exact-text result keeps the cap");
         assert_eq!(calls, 0);
     }
 

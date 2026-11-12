@@ -32,15 +32,16 @@ type AppVols = Vec<(String, f32, bool)>;
 enum Cmd { Volume(String, f32), Mute(String, bool) }
 
 pub struct Np {
-    art: Option<(usize, u32, Pixmap)>,
-    bg: Option<((usize, u32, u32, Color), Pixmap)>,
+    // Each cache holds the Arc it was made from: the address of a live Arc is never reused, so `Arc::ptr_eq` can't match a freed one.
+    art: Option<(Arc<Vec<u8>>, u32, Pixmap)>,
+    bg: Option<(Option<Arc<Vec<u8>>>, (u32, u32, Color), Pixmap)>,
     // synced lyrics slide
-    lkey: usize,
+    lkey: Option<Arc<Lyrics>>,
     idx: Option<usize>,
     prev: Option<usize>,
     since: f64,
     from: f32,
-    heights: Option<((usize, u32), Vec<f32>)>,
+    heights: Option<(Arc<Lyrics>, u32, Vec<f32>)>,
     scroll: ui::Scroll,
     plain_h: f32,
     seek: R,
@@ -56,7 +57,7 @@ pub struct Np {
 
 impl Np {
     pub fn new() -> Np {
-        Np { art: None, bg: None, lkey: 0, idx: None, prev: None, since: 0.0, from: 0.0, heights: None, scroll: Default::default(), plain_h: 0.0,
+        Np { art: None, bg: None, lkey: None, idx: None, prev: None, since: 0.0, from: 0.0, heights: None, scroll: Default::default(), plain_h: 0.0,
             seek: R::default(), scrub: Default::default(), vol: R::default(), apps: Default::default(), polling: false, tx: None, drag_v: None, anim: 0 }
     }
 }
@@ -180,12 +181,16 @@ fn round_btn(c: &mut Canvas, r: R, id: u32, icon: &str, size: f32, fg: Color, ti
 
 fn ease(t: f32) -> f32 { 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(4) }
 
+/// The same cover (or both none): cache entries are matched by the Arc they were made from.
+fn same_art(a: Option<&Arc<Vec<u8>>>, b: Option<&Arc<Vec<u8>>>) -> bool {
+    match (a, b) { (Some(x), Some(y)) => Arc::ptr_eq(x, y), (None, None) => true, _ => false }
+}
+
 impl Np {
     fn art_for(&mut self, g: &Gfx, m: &Media, px: u32) -> Option<&Pixmap> {
         let bytes = m.art.as_ref()?;
-        let key = Arc::as_ptr(bytes) as usize;
-        if self.art.as_ref().map_or(true, |a| a.0 != key || a.1 != px) {
-            self.art = g.load_image_bytes(bytes, px, px).map(|p| (key, px, p));
+        if self.art.as_ref().map_or(true, |a| !Arc::ptr_eq(&a.0, bytes) || a.1 != px) {
+            self.art = g.load_image_bytes(bytes, px, px).map(|p| (bytes.clone(), px, p));
         }
         self.art.as_ref().map(|a| &a.2)
     }
@@ -428,11 +433,11 @@ impl Np {
         c.rect(card, 23.0, 0xFF22_2222);
         // blurred cover (cached per song and size)
         let (pw, ph) = ((card.w * c.scale).round() as u32, (card.h * c.scale).round() as u32);
-        let key = (m.art.as_ref().map_or(0, |a| Arc::as_ptr(a) as usize), pw, ph, t.c("surface"));
-        if self.bg.as_ref().map_or(true, |b| b.0 != key) {
-            self.bg = cover_bg(c.g, m.art.as_ref().map(|a| a.as_slice()), pw, ph, c.scale, alpha(t.c("surface"), 1.0)).map(|p| (key, p));
+        let surf = t.c("surface");
+        if self.bg.as_ref().map_or(true, |b| !same_art(b.0.as_ref(), m.art.as_ref()) || b.1 != (pw, ph, surf)) {
+            self.bg = cover_bg(c.g, m.art.as_ref().map(|a| a.as_slice()), pw, ph, c.scale, alpha(surf, 1.0)).map(|p| (m.art.clone(), (pw, ph, surf), p));
         }
-        if let Some((_, bg)) = &self.bg { c.clip_round(card, 23.0, |c| c.image(bg, card, 1.0)); }
+        if let Some((_, _, bg)) = &self.bg { c.clip_round(card, 23.0, |c| c.image(bg, card, 1.0)); }
         let (x0, y0) = (18.0, 18.0);
         let right = 4.0 + W2 - 8.0 - 14.0;
         let art_r = R::new(x0, y0, 150.0, 150.0);
@@ -516,26 +521,25 @@ impl Np {
                 self.scroll = sc;
             }
             Lyrics::Synced(lines) => {
-                let key = Arc::as_ptr(&lyr) as usize;
                 let idx = lyrics::current_index(lines, pos);
-                let fresh = key != self.lkey;
+                let fresh = !self.lkey.as_ref().is_some_and(|k| Arc::ptr_eq(k, &lyr));
                 let (base, curf) = (txt(13.0, 400), txt(cur_size, 500));
-                let hkey = (key, (wrap_w * 10.0) as u32);
-                if self.heights.as_ref().map_or(true, |h| h.0 != hkey) {
+                let wk = (wrap_w * 10.0) as u32;
+                if self.heights.as_ref().map_or(true, |h| !Arc::ptr_eq(&h.0, &lyr) || h.1 != wk) {
                     let hs = lines.iter().map(|(_, s)| c.g.measure_wrapped(if s.is_empty() { "♪" } else { s }, base, wrap_w) + 6.0).collect();
-                    self.heights = Some((hkey, hs));
+                    self.heights = Some((lyr.clone(), wk, hs));
                 }
-                let hs = self.heights.as_ref().map(|h| &h.1).cloned().unwrap_or_default();
+                let hs = self.heights.as_ref().map(|h| &h.2).cloned().unwrap_or_default();
                 let cur_h = |i: usize, c: &Canvas| { let s = &lines[i].1; c.g.measure_wrapped(if s.is_empty() { "♪" } else { s }, curf, wrap_w) + 6.0 };
                 let offset = |i: Option<usize>, c: &Canvas| -> f32 {
                     let i = i.unwrap_or(0);
                     if lines.is_empty() { return 0.0; }
-                    let top: f32 = hs[..i].iter().sum();
-                    let h = if idx.is_some() { cur_h(i, c) } else { hs[i] };
+                    let top: f32 = hs.iter().take(i).sum();
+                    let h = if idx.is_some() { cur_h(i, c) } else { hs.get(i).copied().unwrap_or(0.0) };
                     r.h / 2.0 - top - h / 2.0
                 };
                 let target = offset(idx, c);
-                if fresh { self.lkey = key; self.idx = idx; self.prev = None; self.since = now - 10_000.0; self.from = target; }
+                if fresh { self.lkey = Some(lyr.clone()); self.idx = idx; self.prev = None; self.since = now - 10_000.0; self.from = target; }
                 else if idx != self.idx { self.prev = self.idx; self.from = self.shown(now, target); self.idx = idx; self.since = now; }
                 let off = self.shown(now, target);
                 let e = ease(((now - self.since) / 400.0) as f32);
@@ -543,7 +547,7 @@ impl Np {
                 let (mut y, prev) = (off, self.prev);
                 c.clip_round(r, 0.0, |c| for (i, (_, s)) in lines.iter().enumerate() {
                     let is_cur = Some(i) == idx;
-                    let h = if is_cur { cur_h(i, c) } else { hs[i] };
+                    let h = if is_cur { cur_h(i, c) } else { hs.get(i).copied().unwrap_or(0.0) };
                     let k = if is_cur { e } else if Some(i) == prev { 1.0 - e } else { 0.0 };
                     let (top, mid) = (y, y + h / 2.0);
                     y += h;

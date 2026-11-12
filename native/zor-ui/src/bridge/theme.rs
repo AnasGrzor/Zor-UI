@@ -308,7 +308,9 @@ fn write_glazewm(cfg: &Path, c: &BTreeMap<String, String>) -> bool {
     if !found { return false; }
     out.push_str(rest);
     // Python's write_text turns \n into \r\n on Windows; keep the file in the same shape
-    std::fs::write(cfg, out.replace('\n', "\r\n")).is_ok()
+    // through a temp file, so a crash never leaves half of the user's GlazeWM config
+    let tmp = cfg.with_extension("tmp");
+    std::fs::write(&tmp, out.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, cfg)).is_ok()
 }
 
 /// Fills Flow Launcher's theme template. False if there's no template.

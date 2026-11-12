@@ -8,7 +8,7 @@ use crate::{
     gfx::{alpha, Canvas, Gfx, Pixmap, R},
     win::{Input, View},
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 const COLS: usize = 4;
 const CELL: f32 = 38.0;
@@ -21,7 +21,8 @@ pub struct TrayFlyout {
     hover: u32,
     /// Tooltip of each icon, in grid order, as of the last paint.
     tips: Vec<String>,
-    px: HashMap<String, (usize, Pixmap)>,
+    /// Per icon: the image it was drawn from (kept alive, so its address can't be reused), the px size, the pixmap.
+    px: HashMap<String, (Arc<(Vec<u8>, u32, u32)>, u32, Pixmap)>,
 }
 
 /// Window size (CSS px) for `n` icons: up to `COLS` per row.
@@ -48,16 +49,18 @@ impl View for TrayFlyout {
         c.rect(card, 18.0, alpha(t.c("outlineVariant"), 0.45));
         c.rect(R::new(card.x + 1.0, card.y + 1.0, card.w - 2.0, card.h - 2.0), 17.0, layer0);
         let px = (ICON * c.scale).round() as u32;
-        self.tips = tray_icons(cx).1.iter().map(|i| i.tooltip.clone()).collect();
-        for (i, ic) in tray_icons(cx).1.iter().enumerate() {
+        let icons = tray_icons(cx).1;
+        self.tips = icons.iter().map(|i| i.tooltip.clone()).collect();
+        // drop the images of icons that have gone, so the cache stays one entry per icon
+        self.px.retain(|id, _| icons.iter().any(|i| &i.id == id));
+        for (i, ic) in icons.iter().enumerate() {
             let Some(rgba) = ic.rgba.as_ref() else { continue };
-            let tag = std::sync::Arc::as_ptr(rgba) as usize ^ px as usize;
-            if self.px.get(&ic.id).map(|e| e.0) != Some(tag) {
-                if let Some(p) = rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px) { self.px.insert(ic.id.clone(), (tag, p)); }
+            if !self.px.get(&ic.id).is_some_and(|e| Arc::ptr_eq(&e.0, rgba) && e.1 == px) {
+                if let Some(p) = rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px) { self.px.insert(ic.id.clone(), (rgba.clone(), px, p)); }
             }
             let r = cell(i);
             if c.hit(r, 1 + i as u32) && self.hover == 1 + i as u32 { c.rect(r, 10.0, alpha(t.c("onSurface"), 0.08)); }
-            if let Some((_, p)) = self.px.get(&ic.id) { c.image(p, R::new(r.x + (CELL - ICON) / 2.0, r.y + (CELL - ICON) / 2.0, ICON, ICON), 1.0); }
+            if let Some((_, _, p)) = self.px.get(&ic.id) { c.image(p, R::new(r.x + (CELL - ICON) / 2.0, r.y + (CELL - ICON) / 2.0, ICON, ICON), 1.0); }
         }
     }
 

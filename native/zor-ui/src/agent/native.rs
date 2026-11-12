@@ -28,6 +28,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("message", "Opens a chat with the text ready. The user presses Enter to send. The text is exactly what the user asked to say, in their own words; never write a different message.",&[("to", "contact name"), ("text", "the message"), ("via", "app or empty")], &["to", "text"]),
         tool("volume", "Sets the speaker volume.", &[("arg", "up, down, mute, unmute, or 0 to 100")], &["arg"]),
         tool("brightness", "Sets the screen brightness.", &[("arg", "up, down, or 1 to 100")], &["arg"]),
+        tool("metrics", "Reads how busy this PC's CPU, memory and disk are right now. Use it for usage or load questions, not a screenshot.", &[("arg", "cpu, memory, disk, or empty for all")], &[]),
         tool("radio", "Switches a radio.", &[("which", "wifi or bluetooth"), ("state", "on, off or toggle")], &["which"]),
         tool("power", "Lock, sleep, restart, shutdown or logout. The user is asked before anything but lock.", &[("arg", "lock, sleep, restart, shutdown or logout")], &["arg"]),
         tool("clipboard", "Puts text on the clipboard.", &[("arg", "the text")], &["arg"]),
@@ -118,7 +119,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 26, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 27, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -244,7 +245,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

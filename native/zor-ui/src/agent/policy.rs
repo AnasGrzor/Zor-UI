@@ -22,7 +22,7 @@ pub enum Risk {
 pub fn risk_of(call: &Call) -> Risk {
     use Call::*;
     match call {
-        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus => Risk::ReadOnly,
+        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) => Risk::ReadOnly,
         Open(_) | Url(_) | Play { .. } | Media(_) | Volume(_) | Brightness(_) | Radio { .. } | Clip(_) | OpenFile(_)
         | Wallpaper(_) | Message { .. } | Remember(_) | Forget(_) => Risk::Reversible,
         // lock can be undone by signing in; every other power action ends the session

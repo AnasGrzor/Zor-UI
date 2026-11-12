@@ -13,6 +13,7 @@ pub mod e2e;
 pub mod eval;
 pub mod history;
 pub mod memory;
+pub mod metrics;
 pub mod native;
 pub mod plan;
 pub mod policy;
@@ -281,6 +282,8 @@ pub enum Call {
     ReadFile(String),
     SearchCode(String),
     GitStatus,
+    /// The PC's CPU, memory or disk use right now (`metrics.rs`). Read-only.
+    Metrics(String),
     /// One fixed check by name (`developer::CHECKS`); the AI never supplies the argv.
     RunCheck(String),
 }
@@ -310,6 +313,7 @@ Tools:\n\
 {\"do\":\"media\",\"arg\":\"play, pause, next or previous\"} controls the player that is already running\n\
 {\"do\":\"message\",\"to\":\"contact name\",\"text\":\"message\",\"via\":\"app or empty\"} opens a chat with the text ready; the user presses Enter to send. The text is exactly what the user asked to say, in their own words; never write a different message\n\
 {\"do\":\"volume\",\"arg\":\"up, down, mute, unmute, or 0 to 100\"} sets the speaker volume\n\
+{\"do\":\"metrics\",\"arg\":\"cpu, memory, disk, or empty for all\"} reads how busy this PC's CPU, memory and disk are right now. Use it for questions about usage or load, not a screenshot\n\
 {\"do\":\"brightness\",\"arg\":\"up, down, or 1 to 100\"} sets the screen brightness\n\
 {\"do\":\"radio\",\"which\":\"wifi or bluetooth\",\"state\":\"on, off or toggle\"} switches a radio\n\
 {\"do\":\"power\",\"arg\":\"lock, sleep, restart, shutdown or logout\"} the user is asked before anything but lock\n\
@@ -350,6 +354,8 @@ pub fn parse_step(reply: &str) -> Step {
         "play" => need(s("query"), "\"query\"").map(|query| Call::Play { query, service: s("service") }),
         "media" => need(s("arg"), "\"arg\"").map(Call::Media),
         "volume" => need(s("arg"), "\"arg\"").map(Call::Volume),
+        // optional: empty reads all three
+        "metrics" => Ok(Call::Metrics(s("arg"))),
         "brightness" => need(s("arg"), "\"arg\"").map(Call::Brightness),
         "radio" => need(s("which"), "\"which\"").map(|which| Call::Radio { which, state: s("state") }),
         "power" => need(s("arg"), "\"arg\"").map(Call::Power),
@@ -587,6 +593,7 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::Open(n) => readback::open_reply(assist::run(assist::Intent::Open(n.clone()), cfg), n, &readback::running_images, &|t| std::thread::sleep(t), &|| stop_check().is_some()),
         Call::Message { to, text, via } => assist::run(assist::Intent::Message { to: to.clone(), text: text.clone(), via: via.clone() }, cfg),
         Call::Url(u) => open_url(cfg, u),
+        Call::Metrics(what) => metrics::read(what),
         Call::Play { query, service } => play(cfg, query, service),
         Call::FindApp(q) => {
             let names = assist::app_names(cfg, q);
@@ -936,6 +943,14 @@ pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<S
     let timing = state::Timing::start();
     // what the buddy asked last time in this conversation, if anything: this request is its answer
     let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(conv);
+    // a plain question about the PC's load is read from the counters: no model call, no task
+    if let (None, Some(what)) = (&pending, metrics::asked_for(said)) {
+        crate::log::line(&format!("buddy fast path: {what} read without the model"));
+        let answer = match metrics::read(what) { Ok(a) | Err(a) => a };
+        with_turns(conv, |t| remember(t, said, &answer, Instant::now()));
+        history::save(conv, said, &answer);
+        return Ok(answer);
+    }
     let front = crate::drive::front_title();
     let ctx = intent::Context {
         previous_request: tasks::latest_in(conv).is_some(),
@@ -1346,6 +1361,8 @@ mod tests {
     #[test]
     fn reads_pc_tools() {
         assert_eq!(call("{\"do\":\"volume\",\"arg\":\"down\"}"), Some(Call::Volume("down".into())));
+        assert_eq!(call("{\"do\":\"metrics\",\"arg\":\"cpu\"}"), Some(Call::Metrics("cpu".into())));
+        assert_eq!(call("{\"do\":\"metrics\"}"), Some(Call::Metrics(String::new())), "the argument is optional: empty reads all");
         assert_eq!(call("{\"do\":\"radio\",\"which\":\"wifi\",\"state\":\"off\"}"), Some(Call::Radio { which: "wifi".into(), state: "off".into() }));
         assert_eq!(call("{\"do\":\"power\",\"arg\":\"lock\"}"), Some(Call::Power("lock".into())));
         assert_eq!(call("{\"do\":\"find_file\",\"arg\":\"cv\"}"), Some(Call::FindFile("cv".into())));

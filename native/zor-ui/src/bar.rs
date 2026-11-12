@@ -495,12 +495,13 @@ fn fit(widths: &[f32], i: usize, gap: f32, room: f32, min: f32) -> Option<f32> {
 /// Its width is animated, so it cuts its own title to the cap: a hovered (wide) one gives way instead
 /// of covering its neighbours, and a collapsed one may grow back to the same cap.
 fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (f32, Option<f32>) {
+    use crate::tokens::BAR_GROUP_GAP;
     const MARGIN: f32 = 12.0; // least gap between the side groups and the centre, each side
     const AIR: f32 = 40.0; // spare room wanted on top of the least gaps
     if room > 1300.0 { return (0.0, None); } // a wide screen keeps the layout it always had
     let free = |s: &[Vec<Pill>; 3]| {
         let sum = |v: &Vec<Pill>, gap: f32| v.iter().map(&w).sum::<f32>() + gap * v.len().saturating_sub(1) as f32;
-        room - (sum(&s[0], 6.0) + sum(&s[1], 5.0) + sum(&s[2], 6.0) + 2.0 * MARGIN)
+        room - (sum(&s[0], BAR_GROUP_GAP) + sum(&s[1], BAR_GROUP_GAP) + sum(&s[2], BAR_GROUP_GAP) + 2.0 * MARGIN)
     };
     while free(sides) < AIR {
         let widest = sides.iter_mut().flatten().filter(|p| p.id == MEDIA && p.fixed.is_none())
@@ -612,7 +613,11 @@ impl Bar {
                         None => els.push(El::Ico("smart_toy", 18.0, true, fg)),
                     }
                     let pct = u.map(|u| format!(" · {}%", u["used_percentage"].as_f64().unwrap_or(0.0).round())).unwrap_or_default();
-                    els.push(El::Txt(format!("{}{pct}", s(&a["label"])), txt(13.0, 400), fg, text_w));
+                    // the newest working session's tool; "×N" when several sessions of this agent are working
+                    let ws: Vec<&Value> = a["sessions"].as_array().into_iter().flatten().filter(|x| x["state"] == "working").collect();
+                    let tool = ws.first().map(|x| s(&x["tool"])).filter(|t| !t.is_empty()).map(|t| format!(" · {t}")).unwrap_or_default();
+                    let count = if ws.len() > 1 { format!(" ×{}", ws.len()) } else { String::new() };
+                    els.push(El::Txt(format!("{}{count}{tool}{pct}", s(&a["label"])), txt(13.0, 400), fg, text_w));
                 }
             }
             "osd" => {
@@ -738,7 +743,7 @@ impl Bar {
                         None => ("Desktop".into(), self.monitor(cx).and_then(|m| m.workspaces.iter().find(|w| w.displayed)).map_or("Windows".into(), |w| format!("Workspace {}", w.display))),
                     };
                     let max = c.w * cx.cfg.get("bar.titleWidth").as_f64().unwrap_or(34.0) as f32 / 100.0; // .aw-title max-width: 34vw
-                    let pad = if matches!(cx.cfg.str("bar.style"), "islands" | "clear") { (16.0, 16.0) } else { (6.0, 6.0) };
+                    let pad = if matches!(cx.cfg.str("bar.style"), "islands" | "clear") { (16.0, 16.0) } else { (crate::tokens::BAR_GROUP_PAD, crate::tokens::BAR_GROUP_PAD) };
                     // one line, like the clock pill: "App • Title"
                     let text = if title == app { app } else { format!("{app} • {title}") };
                     out.push(Pill { kind: Kind::Aw, ..group(WINDOW, vec![El::Txt(text, txt(13.5, 400), fg, max)], pad, 0.0) });
@@ -789,7 +794,7 @@ impl Bar {
                 "clock" => {
                     let now = util::now();
                     let text = if v { util::clock(now.wHour, now.wMinute, cx.cfg.get("use24h").as_bool() != Some(false)) } else { sys::luxon(cx.cfg.str("clockFormat"), &now) };
-                    out.push(group(CLOCK, vec![El::Txt(text, txt(13.5, 400), fg, 400.0)], (10.0, 10.0), 6.0));
+                    out.push(group(CLOCK, vec![El::Txt(text, txt(13.5, 400), fg, 400.0)], (crate::tokens::CLOCK_PAD, crate::tokens::CLOCK_PAD), crate::tokens::BAR_GROUP_GAP));
                     if !island_has("timer") {
                         if let Some((done, icon, text)) = Self::timer_chip(cx) {
                             let f = if done { t.c("onPrimary") } else { fg };
@@ -985,7 +990,7 @@ impl View for Bar {
             (false, false) => (6.0, 6.0, c.w - 12.0, 44.0),
             (false, true) => (6.0, 6.0, c.w - 12.0, c.h - 12.0),
         };
-        let pad = if flat { 10.0 } else { 5.0 };
+        let pad = if flat { crate::tokens::BAR_EDGE_FLAT } else { crate::tokens::BAR_EDGE };
         let (cx_, cy) = (bx + bw / 2.0, by + bh / 2.0);
         if !matches!(style, "islands" | "clear") {
             let bar = R::new(bx, by, bw, bh);
@@ -1005,23 +1010,24 @@ impl View for Bar {
         let mut sides = [self.pills(c, cx, "left", fit_w), self.pills(c, cx, "center", fit_w), self.pills(c, cx, "right", fit_w)];
         let placed: Vec<(usize, usize, R)> = if v {
             let sp = spacing_extra(cx.cfg.str("bar.spacing"));
-            let (avail, gaps) = (bh - 2.0 * pad, [6.0 + sp, 5.0 + sp, 6.0 + sp]);
+            let (avail, gaps) = (bh - 2.0 * pad, [crate::tokens::BAR_GROUP_GAP + sp; 3]);
             let heights = |sides: &[Vec<Pill>; 3]| [0, 1, 2].map(|i| sides[i].iter().map(pill_h).collect::<Vec<f32>>());
             let mut hs = heights(&sides);
             let need = |hs: &[Vec<f32>; 3], g: [f32; 3]| hs.iter().zip(g).map(|(h, g)| h.iter().sum::<f32>() + g * h.len().saturating_sub(1) as f32).sum::<f32>();
-            // too many groups for the monitor's height: tighten the padding and gaps
-            let tight = need(&hs, gaps) > avail;
-            if tight {
-                for p in sides.iter_mut().flatten() { p.gap = p.gap.min(2.0); if p.kind != Kind::Plain { p.pad = (3.0, 3.0); } }
+            // too many groups for the monitor's height: drop the least important ones, the order compact() uses,
+            // rather than squeezing padding and gaps below the bar's minimum
+            for id in [VIZ, CLAUDE, WEATHER, NET, UTIL, TIMER] {
+                if need(&hs, gaps) <= avail { break; }
+                for s in sides.iter_mut() { s.retain(|p| p.id != id); }
                 hs = heights(&sides);
             }
-            place_column(&hs, bx + pad, pw, by + pad, avail, if tight { [2.0; 3] } else { gaps })
+            place_column(&hs, bx + pad, pw, by + pad, avail, gaps)
         } else {
             let (inner_x, inner_w) = (bx + pad, bw - 2.0 * pad);
             let (extra, cap) = compact(&mut sides, inner_w, |p| pill_w(c.g, p)); // a narrow (portrait) screen
             self.island_cap = cap;
             let sp = spacing_extra(cx.cfg.str("bar.spacing"));
-            let (g5, g6) = (5.0 + extra + sp, 6.0 + extra + sp);
+            let (g5, g6) = (crate::tokens::BAR_GROUP_GAP + extra + sp, crate::tokens::BAR_GROUP_GAP + extra + sp);
             let mut widths: Vec<Vec<f32>> = sides.iter().map(|s| s.iter().map(|p| pill_w(c.g, p)).collect()).collect();
             let sum = |w: &[f32], gap: f32| w.iter().sum::<f32>() + gap * w.len().saturating_sub(1) as f32;
             let cw = sum(&widths[1], g5);
@@ -1655,11 +1661,11 @@ mod tests {
         let mut roomy = mk();
         assert_eq!(compact(&mut roomy, 2000.0, |p| p.fixed.unwrap()), (0.0, None)); // a wide screen is left alone
         assert_eq!(roomy.iter().flatten().count(), 5);
-        // 900 wide + 11 of gaps + 24 of margin = 935 and 40 of air wanted: the visualizer goes, 50 is left over
+        // 900 wide + 8 of group gap + 24 of margin = 932 wanted with the visualizer; it goes, then 48 is left and 40 of it is air
         let mut s = mk();
         let extra = compact(&mut s, 880.0, |p| p.fixed.unwrap()).0;
         assert_eq!(ids(&s), vec![LAUNCHER, WEATHER, NET, SYS]);
-        assert!((extra - 10.0 / 3.0).abs() < 1e-3); // 10 spare over 3 gaps
+        assert!((extra - 8.0 / 3.0).abs() < 1e-3); // 8 spare over 3 gaps
         // plenty of spare room widens the gaps, up to 7
         let mut s = mk();
         assert_eq!(compact(&mut s, 1200.0, |p| p.fixed.unwrap()).0, 7.0);

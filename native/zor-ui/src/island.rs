@@ -47,9 +47,33 @@ const ASK_SEND: u32 = 15;
 const ASK_MIC: u32 = 16;
 const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
+/// The tab row: TAB + the tab's index (Now, Agents, Inbox). Above NOTIF + index, so input() checks it first.
+const TAB: u32 = 200;
+const TABS_H: f32 = 30.0;
+/// AI agents spacing: from the usage bars to the first session, between session cards, between agents, and inside a card.
+const SESS_LEAD: f32 = 12.0;
+const SESS_GAP: f32 = crate::tokens::ITEM_GAP;
+const AGENT_GAP: f32 = crate::tokens::SECTION_GAP;
+const CARD_PAD: f32 = crate::tokens::CARD_INSET;
+const USAGE_GAP: f32 = crate::tokens::USAGE_GAP;
+const BLOCK_GAP: f32 = crate::tokens::BLOCK_GAP;
+const CARD_R: f32 = 14.0;
+/// Padding above and below the filter chips, inside the chips row.
+const CHIPS_PAD: f32 = crate::tokens::CHIP_EDGE_PAD;
+/// The filter chips row under the AI agents title: the chips with CHIPS_PAD above and below, then their gap.
+const CHIPS_ROW: f32 = 24.0 + 2.0 * CHIPS_PAD;
+/// The AI agents title, then the gap down to the chip row; and the gap from the chip row down to the first agent.
+const AGENTS_HEAD: f32 = 16.0 + crate::tokens::SP_M;
+const CHIPS_TO_AGENTS: f32 = crate::tokens::SP_L;
+/// Filter chips: Needs you, Working, Idle. Above NOTIF + index, so input() checks them first.
+const FILTER: u32 = 210;
+/// An agent's header: a tap opens or folds its sessions. AGENT_TOGGLE + index, checked before NOTIF.
+const AGENT_TOGGLE: u32 = 240;
 
 /// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
-enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value) }
+/// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
+/// Agents carries the sessions the filter shows and (needs you, working, idle) counted over all of them.
+enum Sec { Ask(String), Permit(String, String), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -75,6 +99,12 @@ pub struct Island {
     notif_open: Option<Value>,
     body_scroll: ui::Scroll,
     body_full: f32,
+    /// The open tab: 0 Now, 1 Agents, 2 Inbox. Asks and permission prompts show above it whatever it is.
+    tab: u8,
+    /// The filter chip on: "waiting", "working" or "idle"; None shows every session.
+    filter: Option<&'static str>,
+    /// Agents whose sessions are folded away, by label.
+    collapsed: Vec<String>,
 }
 
 impl Island {
@@ -83,7 +113,12 @@ impl Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
             seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
             reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
-            notif_open: None, body_scroll: Default::default(), body_full: 0.0 }
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: 1, filter: None, collapsed: Vec::new() }
+    }
+
+    /// Whether a section belongs to the open tab (asks and permission prompts are handled before this).
+    fn in_tab(&self, sec: &Sec) -> bool {
+        matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)))
     }
 }
 
@@ -102,6 +137,78 @@ pub fn ago(now: f64, t: f64) -> String {
 fn dp(cx: &Ctx, k: &str) -> bool { cx.cfg.get(&format!("island.panel.{k}")).as_bool() != Some(false) }
 fn lh(size: f32) -> f32 { size * ui::LH }
 fn s(v: &Value, k: &str) -> String { v[k].as_str().unwrap_or("").to_string() }
+
+/// Sessions an agent lists before "+N more".
+const AGENT_SESSIONS: usize = 5;
+
+/// Height of the AI agents section: its title, then each agent's block. Matches what agents() draws.
+fn agents_h(list: &[Value], collapsed: &[String]) -> f32 {
+    AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS + list.iter().map(|a| agent_h(a, !collapsed.contains(&s(a, "label")))).sum::<f32>()
+}
+
+/// Sessions the filter chip keeps: "waiting", "working" or "idle"; None keeps all. Agents stay, with their sessions cut down.
+fn filter_sessions(mut list: Vec<Value>, want: Option<&str>) -> Vec<Value> {
+    // No chip on: idle sessions fold into one count line per agent, so the cards left are the ones that need attention
+    let Some(want) = want else {
+        for a in list.iter_mut() {
+            let all: Vec<Value> = a["sessions"].as_array().into_iter().flatten().cloned().collect();
+            let (idle, busy): (Vec<Value>, Vec<Value>) = all.into_iter().partition(|s| state_group(s) == "idle");
+            a["idle"] = json!(idle.len());
+            a["sessions"] = Value::Array(busy);
+        }
+        return list;
+    };
+    for a in list.iter_mut() {
+        let kept: Vec<Value> = a["sessions"].as_array().into_iter().flatten().filter(|s| state_group(s) == want).cloned().collect();
+        a["sessions"] = Value::Array(kept);
+        a["idle"] = json!(0);
+    }
+    list
+}
+
+/// The chip a session falls under: its state, with everything that isn't waiting or working counted as idle.
+fn state_group(sess: &Value) -> &'static str {
+    match sess["state"].as_str() { Some("waiting") => "waiting", Some("working") => "working", _ => "idle" }
+}
+
+/// (needs you, working, idle) over every session of every agent.
+fn count_states(list: &[Value]) -> (usize, usize, usize) {
+    let mut n = (0, 0, 0);
+    for s in list.iter().flat_map(|a| a["sessions"].as_array().into_iter().flatten()) {
+        match state_group(s) { "waiting" => n.0 += 1, "working" => n.1 += 1, _ => n.2 += 1 }
+    }
+    n
+}
+
+/// Height of one agent's block: header, usage bars, sessions, and the "+N more" line.
+fn agent_h(a: &Value, open: bool) -> f32 {
+    let usage = a["usage"].as_object().map_or(0.0, |u| u.len() as f32 * (USAGE_GAP + lh(12.0)));
+    let sessions = a["sessions"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let idle = a["idle"].as_u64().unwrap_or(0) as usize;
+    if sessions.is_empty() && idle == 0 { return 18.0 + usage + AGENT_GAP; }
+    if !open { return 18.0 + usage + BLOCK_GAP + lh(12.0) + AGENT_GAP; } // folded: a count line stands in for the sessions
+    let lead = if sessions.is_empty() { 0.0 } else { SESS_LEAD };
+    let shown: f32 = sessions.iter().take(AGENT_SESSIONS).map(session_h).sum();
+    let more = if sessions.len() > AGENT_SESSIONS { BLOCK_GAP + lh(12.0) } else { 0.0 };
+    let idle_line = if idle > 0 { BLOCK_GAP + lh(12.0) } else { 0.0 };
+    18.0 + usage + lead + shown + more + idle_line + AGENT_GAP
+}
+
+/// Height of one session: the first line, the busy line while it waits or works, its subagent lines, and the gap below.
+fn session_h(sess: &Value) -> f32 {
+    let busy = if matches!(sess["state"].as_str(), Some("waiting" | "working")) { 4.0 + lh(12.0) } else { 0.0 };
+    let subs = sess["subs"].as_array().map_or(0.0, |v| v.len() as f32 * (3.0 + lh(11.5)));
+    2.0 * CARD_PAD + 18.0 + busy + subs + SESS_GAP
+}
+
+/// A session's spend, e.g. "62% ctx · 184k · $1.20": whichever parts the agent sent.
+fn spend_text(sp: &Value) -> String {
+    let mut parts = vec![];
+    if let Some(c) = sp["ctx"].as_f64() { parts.push(format!("{}% ctx", c.round())); }
+    if let Some(t) = sp["tok"].as_f64() { parts.push(if t >= 1e6 { format!("{:.1}M", t / 1e6) } else if t >= 1e3 { format!("{}k", (t / 1e3).round()) } else { format!("{t}") }); }
+    if let Some(c) = sp["cost"].as_f64() { parts.push(format!("${c:.2}")); }
+    parts.join(" · ")
+}
 
 /// "resets 14:05", or with the weekday when more than a day away.
 fn resets(cx: &Ctx, at: f64) -> String {
@@ -173,9 +280,10 @@ impl Island {
         if dp(cx, "agents") {
             let list = cx.agents.clone();
             if !list.is_empty() {
-                let h = 16.0 + list.iter().map(|a| 10.0 + 18.0 + if a["state"] == "waiting" { 6.0 + lh(12.5) } else { 0.0 }
-                    + a["usage"].as_object().map_or(0.0, |u| u.len() as f32 * (6.0 + lh(12.0)))).sum::<f32>();
-                v.push((Sec::Agents(list), h));
+                let counts = count_states(&list);
+                let shown = filter_sessions(list, self.filter);
+                let h = agents_h(&shown, &self.collapsed);
+                v.push((Sec::Agents(shown, counts), h));
             }
         }
         if dp(cx, "notifications") {
@@ -194,7 +302,19 @@ impl Island {
                 v.push((Sec::Notifs(n), h));
             }
         }
-        v
+        // the asks stay on top; under them, the tab row and only the open tab's sections
+        let (mut out, rest): (Vec<_>, Vec<_>) = v.into_iter().partition(|p| matches!(p.0, Sec::Ask(_) | Sec::Permit(..)));
+        let running: usize = hub::get_json("zor-ui.agents").as_array().map_or(0, |l| l.iter()
+            .map(|a| (a["waiting"].as_u64().unwrap_or(0) + a["working"].as_u64().unwrap_or(0)) as usize).sum());
+        let inbox = self.notifs.lock().map(|n| n.len()).unwrap_or(0);
+        out.push((Sec::Tabs(running, inbox), TABS_H));
+        let shown: Vec<(Sec, f32)> = rest.into_iter().filter(|p| self.in_tab(&p.0)).collect();
+        if shown.is_empty() {
+            out.push((Sec::Empty(["Nothing playing, no timer or recording", "No agents running", "No notifications"][self.tab as usize]), 16.0));
+        } else {
+            out.extend(shown);
+        }
+        out
     }
 
     /// Height of the lyrics area under the controls: 0 when off or hidden, one line for the "No lyrics found" note, else the full area.
@@ -374,7 +494,7 @@ impl Island {
         }
     }
 
-    fn agents(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value]) {
+    fn agents(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], counts: (usize, usize, usize)) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
         c.text("AI agents", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
@@ -385,10 +505,18 @@ impl Island {
             c.icon("clear_all", R::new(b.x + 9.0, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
             c.text("Dismiss", R::new(b.x + 29.0, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
         }
-        let mut y = y + 26.0;
+        let now = hub::now_ms() / 1000.0;
+        self.chips(c, cx, x, y + AGENTS_HEAD, counts);
+        let mut y = y + AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS;
         for a in list {
             let state = s(a, "state");
             let (label, model) = (s(a, "label"), s(a, "model"));
+            // the header row folds this agent's usage and sessions away; the chevron says which
+            let open = !self.collapsed.contains(&label);
+            let k = list.iter().position(|x| s(x, "label") == label).unwrap_or(0) as u32;
+            let head = R::new(x - 4.0, y - 4.0, w + 8.0, 26.0);
+            if c.hit(head, AGENT_TOGGLE + k) { c.rect(head, 9.0, alpha(t.c("onSurface"), 0.06)); }
+            c.icon(if open { "expand_more" } else { "chevron_right" }, R::new(x, y + 1.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
             let (pill, bg, fg) = match state.as_str() {
                 "waiting" => ("Needs you", t.c("tertiaryContainer"), t.c("onTertiaryContainer")),
                 "working" => ("Working", t.c("secondaryContainer"), t.c("onSecondaryContainer")),
@@ -396,32 +524,161 @@ impl Island {
             };
             let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 16.0;
             let lw = c.g.measure(&label, txt(13.0, 500)).0.ceil() + 2.0;
-            c.text(&label, R::new(x, y, lw.min(w - pw - 8.0), 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
-            if !model.is_empty() { c.text(&model, R::new(x + lw + 8.0, y, (w - lw - pw - 16.0).max(0.0), 18.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left); }
+            c.text(&label, R::new(x + 20.0, y, lw.min(w - pw - 28.0), 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
+            if !model.is_empty() { c.text(&model, R::new(x + 20.0 + lw + 8.0, y, (w - lw - pw - 36.0).max(0.0), 18.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left); }
             c.rect(R::new(x + w - pw, y, pw, 18.0), 9.0, bg);
             c.text(pill, R::new(x + w - pw, y, pw, 18.0), txt(11.0, 400), fg, Align::Center);
             y += 18.0;
-            if state == "waiting" {
-                let msg = a["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("Needs your input");
-                c.text(msg, R::new(x, y + 6.0, w, lh(12.5)), txt(12.5, 400), t.c("tertiary"), Align::Left);
-                y += 6.0 + lh(12.5);
-            }
+            // usage older than 90 s is greyed out, not shown as current
+            let fade = |col| if now - a["usageAt"].as_f64().unwrap_or(0.0) > 90.0 { alpha(col, 0.45) } else { col };
             for (k, u) in a["usage"].as_object().into_iter().flatten() {
-                y += 6.0;
+                y += USAGE_GAP;
                 let used = u["used_percentage"].as_f64().unwrap_or(0.0);
                 let rs = resets(cx, u["resets_at"].as_f64().unwrap_or(0.0));
                 let rw = c.g.measure(&rs, txt(11.0, 400)).0.ceil();
                 let h = lh(12.0);
-                c.text(usage_name(k), R::new(x, y, 56.0, h), txt(12.0, 400), t.c("onSurface"), Align::Left);
+                c.text(usage_name(k), R::new(x, y, 56.0, h), txt(12.0, 400), fade(t.c("onSurface")), Align::Left);
                 let bar = R::new(x + 64.0, y + (h - 6.0) / 2.0, (w - 64.0 - 38.0 - rw - 24.0).max(10.0), 6.0);
-                c.rect(bar, 3.0, alpha(t.c("primary"), 0.18));
-                c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), 3.0, t.c("primary"));
-                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + 8.0, y, 38.0, h), txt(12.0, 500), t.c("onSurface"), Align::Right);
-                c.text(&rs, R::new(x + w - rw - 2.0, y, rw + 4.0, h), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+                c.rect(bar, 3.0, fade(alpha(t.c("primary"), 0.18)));
+                c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), 3.0, fade(t.c("primary")));
+                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + 8.0, y, 38.0, h), txt(12.0, 500), fade(t.c("onSurface")), Align::Right);
+                c.text(&rs, R::new(x + w - rw - 2.0, y, rw + 4.0, h), txt(11.0, 400), fade(t.c("onSurfaceVariant")), Align::Right);
                 y += h;
             }
-            y += 10.0;
+            let all = a["sessions"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let idle = a["idle"].as_u64().unwrap_or(0) as usize;
+            if !open && (!all.is_empty() || idle > 0) {
+                c.text(&format!("{} sessions", all.len() + idle), R::new(x, y + BLOCK_GAP, w, lh(12.0)), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+                y += BLOCK_GAP + lh(12.0);
+            }
+            let sessions = if open { all } else { &[] };
+            if !sessions.is_empty() { y += SESS_LEAD; }
+            for sess in sessions.iter().take(AGENT_SESSIONS) { y = self.session(c, cx, x, y, w, sess, now); }
+            if sessions.len() > AGENT_SESSIONS {
+                c.text(&format!("+{} more", sessions.len() - AGENT_SESSIONS), R::new(x, y + BLOCK_GAP, w, lh(12.0)), txt(12.0, 500), t.c("primary"), Align::Left);
+                y += BLOCK_GAP + lh(12.0);
+            }
+            if open && idle > 0 {
+                c.text(&format!("{idle} idle hidden, tap Idle to show"), R::new(x, y + BLOCK_GAP, w, lh(12.0)), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Left);
+                y += BLOCK_GAP + lh(12.0);
+            }
+            y += AGENT_GAP;
         }
+    }
+
+    /// The tab row: Now, Agents and Inbox. The open one is filled; a count badge shows what is waiting in it.
+    fn tabs(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, running: usize, inbox: usize) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let gap = 4.0;
+        let tw = (w - 2.0 * gap) / 3.0;
+        let items = [("Now", "music_note", 0), ("Agents", "smart_toy", running), ("Inbox", "notifications", inbox)];
+        for (k, (label, icon, count)) in items.into_iter().enumerate() {
+            let r = R::new(x + k as f32 * (tw + gap), y, tw, TABS_H);
+            let hover = c.hit(r, TAB + k as u32);
+            let on = self.tab as usize == k;
+            if on { c.rect(r, TABS_H / 2.0, t.c("secondaryContainer")); }
+            else if hover { c.rect(r, TABS_H / 2.0, alpha(t.c("onSurface"), 0.08)); }
+            let fg = if on { t.c("onSecondaryContainer") } else { t.c("onSurfaceVariant") };
+            let lw = c.g.measure(label, txt(13.0, 500)).0.ceil();
+            let bw = if count > 0 { c.g.measure(&count.to_string(), txt(11.0, 500)).0.ceil() + 10.0 } else { 0.0 };
+            let total = 16.0 + 6.0 + lw + if count > 0 { 6.0 + bw } else { 0.0 };
+            let sx = r.x + (r.w - total) / 2.0;
+            c.icon(icon, R::new(sx, r.y + (TABS_H - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), fg);
+            c.text(label, R::new(sx + 22.0, r.y, lw + 2.0, TABS_H), txt(13.0, 500), fg, Align::Left);
+            if count > 0 {
+                let b = R::new(sx + 22.0 + lw + 6.0, r.y + (TABS_H - 16.0) / 2.0, bw, 16.0);
+                c.rect(b, 8.0, t.c("primary"));
+                c.text(&count.to_string(), b, txt(11.0, 500), t.c("onPrimary"), Align::Center);
+            }
+        }
+    }
+
+    /// One session: folder and spend on the first line, what it is doing (or its waiting message) and how long on the
+    /// second, and its subagents indented under it. Returns the y below it.
+    /// The filter chips: Needs you, Working and Idle, each with its count. The one on filters the sessions; a second tap clears it.
+    fn chips(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, counts: (usize, usize, usize)) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let gap = crate::tokens::CHIP_EDGE_PAD;
+        let cw = (w - 2.0 * gap) / 3.0;
+        let items = [("Needs you", "waiting", counts.0), ("Working", "working", counts.1), ("Idle", "idle", counts.2)];
+        for (k, (label, key, n)) in items.into_iter().enumerate() {
+            let r = R::new(x + k as f32 * (cw + gap), y + CHIPS_PAD, cw, 24.0);
+            let hover = c.hit(r, FILTER + k as u32);
+            let on = self.filter == Some(key);
+            let (fill, fg) = if on { (t.c("primary"), t.c("onPrimary")) } else { (t.c("surfaceContainer"), t.c("onSurfaceVariant")) };
+            c.rect(r, 12.0, if hover && !on { alpha(t.c("onSurface"), 0.08) } else { fill });
+            // each state has its own colour: a dot and the count take it, so the three chips tell apart at a glance
+            let accent = if on { t.c("onPrimary") } else { match key { "waiting" => t.c("tertiary"), "working" => t.c("primary"), _ => t.c("onSurfaceVariant") } };
+            let dot_col = if on { t.c("onPrimary") } else { match key { "waiting" => t.c("tertiary"), "working" => t.c("primary"), _ => t.c("outlineVariant") } };
+            let font = txt(12.0, 500);
+            let count = n.to_string();
+            let (lw, nw) = (c.g.measure(label, font).0.ceil(), c.g.measure(&count, font).0.ceil());
+            let dot = 8.0;
+            let total = dot + crate::tokens::SP_XS + lw + crate::tokens::SP_S + nw;
+            let mut sx = r.x + (r.w - total) / 2.0;
+            c.rect(R::new(sx, r.y + (r.h - dot) / 2.0, dot, dot), dot / 2.0, dot_col);
+            sx += dot + crate::tokens::SP_XS;
+            c.text(label, R::new(sx, r.y, lw + 2.0, r.h), font, fg, Align::Left);
+            sx += lw + crate::tokens::SP_S;
+            c.text(&count, R::new(sx, r.y, nw + 2.0, r.h), font, accent, Align::Left);
+        }
+    }
+
+    /// One session as a card: a rounded background behind its content, and the gap below it.
+    fn session(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, w: f32, sess: &Value, now: f64) -> f32 {
+        let (t, h) = (&cx.theme, session_h(sess) - SESS_GAP);
+        let bg = if s(sess, "state") == "waiting" { alpha(t.c("tertiaryContainer"), 0.5) } else { t.c("surfaceContainer") };
+        c.rect(R::new(x, y, w, h), CARD_R, bg);
+        self.session_body(c, cx, x + CARD_PAD, y + CARD_PAD, w - 2.0 * CARD_PAD, sess, now);
+        y + h + SESS_GAP
+    }
+
+    /// The content of one session: folder and spend, the busy line, and subagents. Drawn inside its card.
+    fn session_body(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, w: f32, sess: &Value, now: f64) -> f32 {
+        let t = &cx.theme;
+        let state = s(sess, "state");
+        let (pill, bg, fg) = match state.as_str() {
+            "waiting" => ("Needs you", t.c("tertiaryContainer"), t.c("onTertiaryContainer")),
+            "working" => ("Working", t.c("secondaryContainer"), t.c("onSecondaryContainer")),
+            _ => ("Idle", t.c("surfaceContainerHigh"), t.c("onSurface")),
+        };
+        // the folder's name, or the session id when the agent sent no folder
+        let folder = Some(s(sess, "cwd")).filter(|p| !p.is_empty()).map_or(s(sess, "id"), |p| {
+            p.rsplit(['/', '\\']).find(|x| !x.is_empty()).unwrap_or("").to_string()
+        });
+        let spend = spend_text(&sess["spend"]);
+        let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 16.0;
+        let sw = if spend.is_empty() { 0.0 } else { c.g.measure(&spend, txt(11.0, 400)).0.ceil() + 8.0 };
+        let fw = c.g.measure(&folder, txt(13.0, 500)).0.ceil().min((w - pw - sw - 16.0).max(40.0));
+        c.text(&folder, R::new(x, y, fw, 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
+        // the spend ends 8 px before the state pill
+        if sw > 0.0 { c.text(&spend, R::new(x + w - pw - 8.0 - sw, y, sw, 18.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
+        c.rect(R::new(x + w - pw, y, pw, 18.0), 9.0, bg);
+        c.text(pill, R::new(x + w - pw, y, pw, 18.0), txt(11.0, 400), fg, Align::Center);
+        let mut y = y + 18.0;
+        let since = sess["since"].as_f64().unwrap_or(0.0);
+        let busy = matches!(state.as_str(), "waiting" | "working");
+        if busy {
+            let (what, col) = if state == "waiting" {
+                (s(sess, "message"), t.c("tertiary"))
+            } else {
+                (Some(s(sess, "tool")).filter(|t| !t.is_empty()).unwrap_or("Working".into()), t.c("onSurfaceVariant"))
+            };
+            let tm = if since > 0.0 { hub::clock(now - since) } else { String::new() };
+            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + 8.0;
+            c.text(&what, R::new(x, y + 4.0, w - tw, lh(12.0)), txt(12.0, 400), col, Align::Left);
+            if !tm.is_empty() { c.text(&tm, R::new(x + w - tw, y + 4.0, tw, lh(12.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
+            y += 4.0 + lh(12.0);
+        }
+        for sb in sess["subs"].as_array().into_iter().flatten() {
+            let (at, tm) = (x + 14.0, hub::clock(now - sb["since"].as_f64().unwrap_or(now)));
+            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + 8.0;
+            c.icon("subdirectory_arrow_right", R::new(x + 2.0, y + 3.0, 12.0, 12.0), ico(12.0, false), t.c("primary"));
+            c.text(&format!("{} · {}", s(sb, "type"), s(sb, "tool")), R::new(at, y + 3.0, w - 14.0 - tw, lh(11.5)), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
+            c.text(&tm, R::new(x + w - tw, y + 3.0, tw, lh(11.5)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+            y += 3.0 + lh(11.5);
+        }
+        y + SESS_GAP
     }
 
     fn notifs(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value]) {
@@ -552,7 +809,9 @@ impl View for Island {
                 Sec::Rec => self.rec(c, cx, x, y),
                 Sec::Timer => self.timer(c, cx, x, y),
                 Sec::Idle => self.idle(c, cx, x, y),
-                Sec::Agents(l) => self.agents(c, cx, x, y, l),
+                Sec::Tabs(running, inbox) => self.tabs(c, cx, x, y, *running, *inbox),
+                Sec::Empty(msg) => c.text(*msg, R::new(x, y, W - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left),
+                Sec::Agents(l, counts) => self.agents(c, cx, x, y, l, *counts),
                 Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
                 Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
             }
@@ -609,6 +868,21 @@ impl View for Island {
                         std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &[id.as_str()]); });
                     }
                 }
+                i if (TAB..TAB + 3).contains(&i) => { self.tab = (i - TAB) as u8; self.notif_open = None; }
+                i if (FILTER..FILTER + 3).contains(&i) => {
+                    let want = ["waiting", "working", "idle"][(i - FILTER) as usize];
+                    self.filter = if self.filter == Some(want) { None } else { Some(want) };
+                }
+                i if (AGENT_TOGGLE..AGENT_TOGGLE + 32).contains(&i) => {
+                    // same order as the painted list: filter_sessions keeps every agent in place
+                    let list = hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default();
+                    if let Some(label) = list.get((i - AGENT_TOGGLE) as usize).map(|a| s(a, "label")) {
+                        match self.collapsed.iter().position(|l| *l == label) {
+                            Some(p) => { self.collapsed.remove(p); }
+                            None => self.collapsed.push(label),
+                        }
+                    }
+                }
                 i if i >= NOTIF => {
                     self.notif_open = self.notifs.lock().ok().and_then(|n| n.get((i - NOTIF) as usize).cloned());
                     self.body_scroll = Default::default();
@@ -651,6 +925,60 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_spend_shows_only_what_the_agent_sent() {
+        assert_eq!(spend_text(&json!({ "ctx": 62.0, "tok": 184000.0, "cost": 1.2 })), "62% ctx · 184k · $1.20");
+        assert_eq!(spend_text(&json!({ "tok": 5000.0 })), "5k", "a Codex session has tokens only");
+        assert_eq!(spend_text(&Value::Null), "");
+    }
+
+    #[test]
+    fn agent_block_height_counts_sessions_and_the_more_line() {
+        let sess = json!({ "state": "working", "subs": [{ "type": "Plan" }] });
+        let idle = json!({ "state": "idle" });
+        let three = json!({ "label": "Claude", "usage": {}, "sessions": [sess, idle.clone(), idle.clone()] });
+        // header, the lead before the sessions, then a working card (padding, line, busy line, one subagent line, gap),
+        // two idle cards (padding, line, gap), then the agent gap
+        let idle_card = 2.0 * CARD_PAD + 18.0 + SESS_GAP;
+        let work_card = 2.0 * CARD_PAD + 18.0 + (4.0 + lh(12.0)) + (3.0 + lh(11.5)) + SESS_GAP;
+        assert_eq!(agent_h(&three, true), 18.0 + SESS_LEAD + work_card + 2.0 * idle_card + AGENT_GAP);
+        assert_eq!(agent_h(&three, false), 18.0 + BLOCK_GAP + lh(12.0) + AGENT_GAP, "folded, the sessions give way to one count line");
+        let many = json!({ "label": "Claude", "usage": {}, "sessions": vec![idle.clone(); 7] });
+        assert_eq!(agent_h(&many, true), 18.0 + SESS_LEAD + 5.0 * idle_card + BLOCK_GAP + lh(12.0) + AGENT_GAP, "only 5 sessions are drawn, then +N more");
+        assert_eq!(agents_h(&[], &[]), AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS);
+        assert_eq!(agents_h(&[json!({ "label": "Claude", "sessions": [] })], &["Claude".to_string()]), AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS + 18.0 + AGENT_GAP);
+    }
+
+    #[test]
+    fn filter_chips_count_and_cut_the_sessions() {
+        let list = json!([
+            { "label": "Claude", "sessions": [{ "state": "waiting" }, { "state": "working" }, { "state": "done" }] },
+            { "label": "Codex", "sessions": [{ "state": "idle" }] }
+        ]);
+        let list = list.as_array().unwrap().clone();
+        assert_eq!(count_states(&list), (1, 1, 2), "done counts as idle");
+        let waiting = filter_sessions(list.clone(), Some("waiting"));
+        assert_eq!(waiting[0]["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(waiting[1]["sessions"].as_array().unwrap().len(), 0, "an agent with nothing matching stays, empty");
+        let quiet = filter_sessions(list.clone(), None);
+        assert_eq!(quiet[0]["sessions"].as_array().unwrap().len(), 2, "no chip: waiting and working stay as cards");
+        assert_eq!(quiet[0]["idle"], 1, "the done session folds into a count");
+        assert_eq!(quiet[1]["idle"], 1);
+        let idle = filter_sessions(list, Some("idle"));
+        assert_eq!(idle[0]["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn each_tab_shows_its_own_sections_and_asks_stay_out_of_the_tabs() {
+        let mut island = Island::new((0.0, 0.0));
+        island.tab = 0;
+        assert!(island.in_tab(&Sec::Media) && island.in_tab(&Sec::Timer) && !island.in_tab(&Sec::Agents(vec![], (0, 0, 0))));
+        island.tab = 1;
+        assert!(island.in_tab(&Sec::Agents(vec![], (0, 0, 0))) && !island.in_tab(&Sec::Notifs(vec![])));
+        island.tab = 2;
+        assert!(island.in_tab(&Sec::Notifs(vec![])) && island.in_tab(&Sec::NotifDetail(json!({}))) && !island.in_tab(&Sec::Media));
+    }
 
     #[test]
     fn lyrics_area_shrinks_to_the_note_when_there_are_no_lyrics() {

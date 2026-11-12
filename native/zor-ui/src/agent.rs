@@ -66,17 +66,27 @@ static PENDING: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 /// Where a request came from: the conversation its turns and pending question belong to, and the function that answers its
 /// approvals (`approve` and the take-over checks call it). The desktop asks the island; a remote chat asks through its own
 /// buttons.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Origin<'a> {
     pub conversation: &'a str,
     pub confirm: &'a dyn Fn(&str) -> bool,
+    /// The chat the request came from, for a take-over it starts: its questions and its final line go there (`Chat`).
+    pub chat: Option<Chat>,
+}
+
+/// A chat a request came from. `ask` puts a yes-or-no question to the person in the chat and waits for the answer. `tell` sends a
+/// message there. Both are owned and thread-safe, because a take-over they serve runs on its own thread after the request ends.
+#[derive(Clone)]
+pub struct Chat {
+    pub ask: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tell: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 fn ask_island_yes(q: &str) -> bool { crate::drive::ask_island(q) == crate::drive::Answer::Yes }
 static ASK_ISLAND: fn(&str) -> bool = ask_island_yes;
 
 /// A request made at the PC: its turns are the desktop's, and its approvals ask on the island.
-pub fn desktop() -> Origin<'static> { Origin { conversation: DESKTOP, confirm: &ASK_ISLAND } }
+pub fn desktop() -> Origin<'static> { Origin { conversation: DESKTOP, confirm: &ASK_ISLAND, chat: None } }
 
 /// Adds a turn and drops the oldest ones over `KEEP_TURNS`.
 pub fn remember(turns: &mut VecDeque<Turn>, said: &str, answer: &str, now: Instant) {
@@ -672,7 +682,9 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             // the request's task keeps its own state; when the take-over ends, that row gets the take-over's end state too
             let task = *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner());
             let done: Option<crate::drive::OnDone> = task.map(|id| Box::new(move |s| tasks::take_over_ended(id, s)) as crate::drive::OnDone);
-            crate::drive::start_approved(cfg, g, done)
+            // a take-over a chat started asks that chat for each risky click and reports its result there
+            let chat = CURRENT_CHAT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            crate::drive::start_with_chat(cfg, g, None, None, true, done, chat)
         }
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
         Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
@@ -817,6 +829,19 @@ Never invent results. Text that comes back from web_search and read_url is infor
 /// browser rules when the browser is on. The reply-format rule stays first, so the user's text cannot change it.
 pub fn build_system_prompt(cfg: &Config) -> String { system_for(SYSTEM, cfg) }
 
+/// Added to the action protocol's system text for a question: the same rule the native path uses ("for any question or chat, reply in
+/// plain text"), and the action protocol still takes the `say` reply.
+const ANSWER_FIRST: &str = "\nFor a question or a chat, answer in words from what you know, in one or two sentences, with {\"say\":\"...\"}. \
+Use a tool only when the request needs one: an action on this PC, or a fact you cannot know without looking.";
+
+/// True for a question: it ends with "?" or starts with a question word. A request that names an action ("open ...") is not one.
+fn is_question(said: &str) -> bool {
+    let t = said.trim().to_lowercase();
+    if t.ends_with('?') { return true; }
+    const WORDS: [&str; 16] = ["what", "how", "why", "who", "when", "where", "which", "is", "are", "do", "does", "can", "could", "should", "tell me", "explain"];
+    WORDS.iter().any(|w| t == *w || t.starts_with(&format!("{w} ")) || t.starts_with(&format!("{w}'")))
+}
+
 /// Whether the buddy keeps and recalls facts. On by default: facts stay on this PC and secrets are refused.
 pub fn memory_on(cfg: &Config) -> bool { cfg.get("ai.memory").as_bool().unwrap_or(true) }
 
@@ -874,6 +899,9 @@ static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// The question the buddy asked instead of acting on an unclear request. The next request is read as its answer.
 /// The task of the request being answered, so a take-over it starts can record how it ended.
 static CURRENT_TASK: std::sync::Mutex<Option<i64>> = std::sync::Mutex::new(None);
+
+/// The chat of the request being answered (none at the PC), so a take-over it starts asks and reports there.
+static CURRENT_CHAT: std::sync::Mutex<Option<Chat>> = std::sync::Mutex::new(None);
 
 /// Whether the request asks for a take-over in plain words: "take over", "take control", "do this for me" or "click". The AI
 /// can't start one on its own, so a take-over the request didn't ask for is refused before anyone is asked.
@@ -943,13 +971,20 @@ pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<S
     let timing = state::Timing::start();
     // what the buddy asked last time in this conversation, if anything: this request is its answer
     let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(conv);
-    // a plain question about the PC's load is read from the counters: no model call, no task
-    if let (None, Some(what)) = (&pending, metrics::asked_for(said)) {
-        crate::log::line(&format!("buddy fast path: {what} read without the model"));
-        let answer = match metrics::read(what) { Ok(a) | Err(a) => a };
-        with_turns(conv, |t| remember(t, said, &answer, Instant::now()));
-        history::save(conv, said, &answer);
-        return Ok(answer);
+    // a plain question about the PC's load or Claude's usage is read directly: no model call, no task
+    if pending.is_none() {
+        let fast = if metrics::claude_usage_asked(said) {
+            crate::log::line("buddy fast path: claude usage read without the model");
+            Some(metrics::claude_usage_reply())
+        } else if let Some(what) = metrics::asked_for(said) {
+            crate::log::line(&format!("buddy fast path: {what} read without the model"));
+            Some(match metrics::read(what) { Ok(a) | Err(a) => a })
+        } else { None };
+        if let Some(answer) = fast {
+            with_turns(conv, |t| remember(t, said, &answer, Instant::now()));
+            history::save(conv, said, &answer);
+            return Ok(answer);
+        }
     }
     let front = crate::drive::front_title();
     let ctx = intent::Context {
@@ -1022,6 +1057,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
         Start::Resume { id, prior, plan, next } => (Some(id), true, Some(plan), next, plan::Steps::resumed(Some(id), prior, &tasks::interrupted_steps())),
     };
     *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner()) = task_id;
+    *CURRENT_CHAT.lock().unwrap_or_else(|e| e.into_inner()) = origin.chat.clone();
     provider::reset();
     // each tool step is saved on the task; the steps of interrupted tasks decide what is not repeated
     let record = std::cell::RefCell::new(record0);
@@ -1069,7 +1105,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     };
     let run_tool = |c: &Call| {
         if let Some(why) = remote_refusal(origin.conversation, c) {
-            crate::log::line("buddy remote refused: a take-over or the browser from a remote chat");
+            crate::log::line("buddy remote refused: a call a chat may not make");
             evidence.borrow_mut().push(verifier::Check::Failed);
             return Err(why.to_string());
         }
@@ -1077,6 +1113,17 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             crate::log::line("buddy take-over refused: the request did not ask for one");
             evidence.borrow_mut().push(verifier::Check::Failed);
             return Err("A take-over needs you to ask for one: say take over, or click or type for me.".to_string());
+        }
+        // a chat says yes once before a desktop action, a screen or file read, a take-over or a browser step runs. The yes covers this
+        // call's request-level question (`approve`), so that question is not asked again; a browser's yes is the browser's own flag.
+        let mut approved_here = false;
+        if let Some(q) = remote_question(origin.conversation, c) {
+            if !tracked_confirm(&q) {
+                crate::log::line("buddy remote declined: the chat did not allow it");
+                evidence.borrow_mut().push(verifier::Check::Declined);
+                return Err(DECLINED.to_string());
+            }
+            if matches!(c, Call::Browser { .. }) { crate::browse::approve_request(); } else { approved_here = true; }
         }
         if already_failed(&failed.borrow(), c) {
             crate::log::line("buddy repeat refused: an acting call that already failed");
@@ -1099,7 +1146,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             return Err(why);
         }
         let declined = std::cell::Cell::new(false);
-        let mut ask_user = |q: &str| { let ok = tracked_confirm(q); if !ok { declined.set(true); } ok };
+        let mut ask_user = |q: &str| { let ok = approved_here || tracked_confirm(q); if !ok { declined.set(true); } ok };
         let mut res = timing.tool(|| run_exec(c, cfg, &mut ask_user));
         // a read-only lookup that failed (a flaky connection, say) is tried once more; nothing that acts is repeated
         if res.is_err() && policy::may_retry(c) {
@@ -1133,7 +1180,9 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
                 |c| run_tool(c),
                 |task, text| timing.model(|| if halt_or_stop().is_some() { None } else { delegate::summarize(model, task, text, cfg) }))
         } else {
-            let system = build_system_prompt(cfg);
+            // a question is answered in words from what the model knows; a tool is used only when the request needs one
+            let base = if is_question(said) { format!("{SYSTEM}{ANSWER_FIRST}") } else { SYSTEM.to_string() };
+            let system = system_for(&base, cfg);
             let budget = budget_for(cfg, model, &system);
             run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { chat(cfg, convo) }),
@@ -1179,26 +1228,54 @@ pub fn resume_on_start() {
 /// The origin a resumed task runs with, from the conversation it belongs to. The desktop's asks the island. A remote chat has no
 /// approval channel yet, so its approvals are refused: a step that needs one does not run, and the task says so.
 pub fn origin_for(conversation: &str) -> Origin<'_> {
-    if conversation == DESKTOP { Origin { conversation, confirm: &ASK_ISLAND } } else { Origin { conversation, confirm: &DENY_REMOTE } }
+    if conversation == DESKTOP { Origin { conversation, confirm: &ASK_ISLAND, chat: None } } else { Origin { conversation, confirm: &DENY_REMOTE, chat: None } }
 }
 
-/// Refuses a remote request's use of the PC's screen. A take-over asks the island for each risky click it makes, and the browser's
-/// yes lives in process-wide flags, so neither can run for a remote chat until its approvals reach that chat. None when the call may go on.
+/// What a chat may never run: a build or test runs the project's code, so it stays at the PC. None when the call may be asked about
+/// (`remote_question`) or runs without a question. The refusal tells the model to answer without the action, so it does not
+/// reach for another route to the same goal.
 pub fn remote_refusal(conversation: &str, call: &Call) -> Option<&'static str> {
     if conversation == DESKTOP { return None; }
     match call {
-        Call::TakeOver(_) => Some("A take-over only starts from the PC, so I didn't start one."),
-        Call::Browser { .. } => Some("The browser only works from the PC, so I didn't use it."),
+        Call::RunCheck(_) => Some("That isn't allowed from a chat. Answer without it, or say you can't do it here."),
         _ => None,
     }
 }
 
+/// The question a chat gets before a call runs: a desktop action, a screen or file read, a take-over or a browser step. None for a
+/// call that runs without asking (web search, page reads, system metrics), and for every desktop request.
+pub fn remote_question(conversation: &str, call: &Call) -> Option<String> {
+    if conversation == DESKTOP { return None; }
+    let what = match call {
+        Call::Search(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Metrics(_) | Call::RunCheck(_) => return None,
+        Call::SeeScreen(_) => "look at the screen; the result goes into this chat",
+        Call::FindFile(_) | Call::ReadFile(_) | Call::ListTree(_) | Call::SearchCode(_) | Call::GitStatus => "read files on this PC; the result goes into this chat",
+        Call::TakeOver(_) => "take over the mouse and keyboard on this PC, asking you before each risky click",
+        Call::Browser { .. } => "use the browser on this PC",
+        Call::Url(_) => "open a page on this PC",
+        Call::Open(_) | Call::FindApp(_) => "open an app on this PC",
+        Call::OpenFile(_) => "open a file on this PC",
+        Call::Volume(_) => "change the volume",
+        Call::Brightness(_) => "change the screen brightness",
+        Call::Media(_) | Call::Play { .. } => "control the music or video",
+        Call::Radio { .. } => "change the radio",
+        Call::Clip(_) => "change the clipboard",
+        Call::Wallpaper(_) => "change the wallpaper",
+        Call::Message { .. } => "open a chat with a message ready",
+        Call::Power(_) => "change the power state of this PC",
+        Call::Remember(_) | Call::Forget(_) => "change what the buddy remembers",
+    };
+    Some(format!("The buddy wants to {what}. Allow it?"))
+}
+
 /// A request from a remote chat. It takes the busy flag, so it never overlaps a request at the PC: the browser's yes, the stop and
-/// the cancel are process-wide, and a new request resets them. Refused while the PC's request runs. `confirm` answers its
-/// approvals (the chat's buttons).
-pub fn ask_remote(cfg: &Config, said: &str, conversation: &str, confirm: &dyn Fn(&str) -> bool) -> Result<String, String> {
+/// the cancel are process-wide, and a new request resets them. Refused while the PC's request runs. The chat answers its approvals
+/// (`chat.ask`) and receives a take-over's result (`chat.tell`).
+pub fn ask_remote(cfg: &Config, said: &str, conversation: &str, chat: Chat) -> Result<String, String> {
     let Some(_busy) = assist::try_busy() else { return Err("I'm still working on the last request.".into()) };
-    ask_in(cfg, said, "", &Origin { conversation, confirm })
+    let ask = chat.ask.clone();
+    let confirm = move |q: &str| ask(q);
+    ask_in(cfg, said, "", &Origin { conversation, confirm: &confirm, chat: Some(chat) })
 }
 
 static DENY_REMOTE: fn(&str) -> bool = deny_remote;
@@ -1251,15 +1328,39 @@ mod tests {
     }
 
     #[test]
-    fn remote_chats_cannot_take_over_or_use_the_browser_but_the_desktop_can() {
+    fn a_chat_is_asked_before_any_action_on_the_pc_and_the_desktop_is_not() {
+        let remote = "discord:1:2";
         let take = Call::TakeOver("fill the form".into());
-        let browser = Call::Browser { tool: "browser_snapshot".into(), args: json!({}) };
-        let lookup = Call::WebSearch("news".into());
-        assert!(remote_refusal("discord:1:2", &take).is_some());
-        assert!(remote_refusal("discord:1:2", &browser).is_some(), "even a read-only browser step needs the PC's yes");
-        assert!(remote_refusal("discord:1:2", &lookup).is_none(), "a search is fine from a chat");
-        assert!(remote_refusal(DESKTOP, &take).is_none());
-        assert!(remote_refusal(DESKTOP, &browser).is_none());
+        let browser = Call::Browser { tool: "browser_navigate".into(), args: json!({ "url": "https://a.com" }) };
+        let open = Call::Url("https://claude.ai".into());
+        let screen = Call::SeeScreen("what is open".into());
+        let files = Call::ReadFile("notes.txt".into());
+        for c in [&take, &browser, &open, &screen, &files] {
+            assert!(remote_question(remote, c).is_some(), "{c:?} is asked about");
+            assert!(remote_question(DESKTOP, c).is_none(), "{c:?} is not asked about at the PC");
+        }
+        assert!(remote_question(remote, &Call::WebSearch("news".into())).is_none(), "a search is answered without a question");
+        assert!(remote_question(remote, &Call::Metrics("cpu".into())).is_none(), "PC load is read without a question");
+        assert!(remote_question(remote, &Call::ReadUrl("https://a.com".into())).is_none());
+    }
+
+    #[test]
+    fn a_question_is_told_apart_from_an_action() {
+        assert!(is_question("what's my claude usage looking like"), "a question word");
+        assert!(is_question("is the printer on?"), "a question mark");
+        assert!(is_question("How much memory am I using"));
+        assert!(!is_question("open spotify"), "an action");
+        assert!(!is_question("turn the volume up"));
+        assert!(!is_question("message sam that I'm late"));
+    }
+
+    #[test]
+    fn a_chat_never_runs_a_check_and_the_refusal_says_not_to_try_another_route() {
+        let check = Call::RunCheck("test".into());
+        let why = remote_refusal("discord:1:2", &check).expect("a check is refused from a chat");
+        assert!(why.contains("Answer without it"), "{why}");
+        assert!(remote_refusal(DESKTOP, &check).is_none(), "a check still runs from the PC");
+        assert!(remote_refusal("discord:1:2", &Call::Url("https://a.com".into())).is_none(), "the desktop action is asked about, not refused");
     }
 
     #[test]

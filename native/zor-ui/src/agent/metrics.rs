@@ -4,6 +4,38 @@
 use crate::util::{self, Cpu};
 use std::time::Duration;
 
+/// Words a plain question about the PC can be made of. Any other word sends the request to the model.
+const ALLOWED: [&str; 26] = ["what's", "whats", "what", "is", "are", "my", "the", "current", "currently", "right", "now", "how", "much", "how's",
+    "hows", "of", "in", "on", "this", "pc", "computer", "a", "am", "i", "doing", "and"];
+/// Words that say a question is about usage.
+const USE: [&str; 9] = ["usage", "use", "using", "load", "busy", "full", "percentage", "percent", "used"];
+/// Words a plain question about Claude usage can be made of, on top of `ALLOWED`.
+const CLAUDE_WORDS: [&str; 17] = ["claude", "ai", "that", "your", "looking", "like", "limit", "limits", "quota", "left", "remaining", "session",
+    "week", "weekly", "plan", "hour", "day"];
+
+/// The lower-case words of `said`, without punctuation.
+fn words_of(said: &str) -> Vec<String> {
+    said.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(String::from).collect()
+}
+
+/// True for a plain question about Claude's plan usage: "what's my claude usage looking like". It needs the word "claude" and a
+/// word about a limit or usage. Any other word sends it to the model.
+pub fn claude_usage_asked(said: &str) -> bool {
+    let words = words_of(said);
+    if words.is_empty() || words.len() > 10 || !words.iter().any(|w| w == "claude") { return false; }
+    let known = |w: &str| ALLOWED.contains(&w) || CLAUDE_WORDS.contains(&w) || USE.contains(&w) || w == "5" || w == "7";
+    let about_usage = words.iter().any(|w| USE.contains(&w.as_str()) || matches!(w.as_str(), "limit" | "limits" | "quota" | "left" | "remaining" | "session" | "week" | "weekly"));
+    words.iter().all(|w| known(w)) && about_usage
+}
+
+/// The answer to a Claude usage question, read from the plan's usage endpoint (`claude_usage::fetch`).
+pub fn claude_usage_reply() -> String {
+    match crate::claude_usage::fetch() {
+        Some(u) => format!("Claude usage: 5-hour session {}%, 7-day {}%.", u.session, u.week),
+        None => "I couldn't read Claude usage right now.".to_string(),
+    }
+}
+
 /// How long the CPU is sampled. Its reading covers this window, so it is the use right now, not since an earlier question.
 const CPU_WINDOW: Duration = Duration::from_millis(300);
 
@@ -18,10 +50,7 @@ fn cpu_now() -> f32 {
 /// of these words count, so a request with any other word (an action, a name, a longer sentence) returns None and goes to the model.
 pub fn asked_for(said: &str) -> Option<&'static str> {
     const MEASURES: [(&str, &str); 6] = [("cpu", "cpu"), ("processor", "cpu"), ("memory", "memory"), ("ram", "memory"), ("disk", "disk"), ("storage", "disk")];
-    const ALLOWED: [&str; 26] = ["what's", "whats", "what", "is", "are", "my", "the", "current", "currently", "right", "now", "how", "much", "how's",
-        "hows", "of", "in", "on", "this", "pc", "computer", "a", "am", "i", "doing", "and"];
-    const USE: [&str; 9] = ["usage", "use", "using", "load", "busy", "full", "percentage", "percent", "used"];
-    let words: Vec<String> = said.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(String::from).collect();
+    let words = words_of(said);
     if words.is_empty() || words.len() > 8 { return None; }
     let known = |w: &str| ALLOWED.contains(&w) || USE.contains(&w) || MEASURES.iter().any(|(m, _)| *m == w);
     if !words.iter().all(|w| known(w)) { return None; }
@@ -99,6 +128,21 @@ mod tests {
         assert_eq!(asked_for("cpu"), None, "a bare word has no question in it");
         assert_eq!(asked_for("what's my CPU usage in the last hour and why is it high"), None, "a longer request");
         assert_eq!(asked_for("load the report"), None, "load is only a usage word when the rest is about the PC");
+    }
+
+    #[test]
+    fn a_plain_question_about_claude_usage_is_answered_without_the_model() {
+        assert!(claude_usage_asked("what's my claude usage looking like"));
+        assert!(claude_usage_asked("how much of my claude limit is left?"));
+        assert!(claude_usage_asked("claude weekly limit"));
+    }
+
+    #[test]
+    fn a_claude_request_with_an_action_or_no_usage_word_goes_to_the_model() {
+        assert!(!claude_usage_asked("open claude usage page"), "an action is not a plain question");
+        assert!(!claude_usage_asked("claude"), "no question about usage");
+        assert!(!claude_usage_asked("what's my cpu usage"), "no claude in it");
+        assert!(!claude_usage_asked("what's my claude usage in the last hour and why"), "a longer question");
     }
 
     #[test]

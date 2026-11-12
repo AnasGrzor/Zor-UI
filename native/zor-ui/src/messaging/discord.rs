@@ -100,19 +100,26 @@ impl EventHandler for Handler {
         }
 
         if text.is_empty() { return; }
+        // "stop" ends what the buddy is doing for this PC: the request, a browser run, a take-over
+        if text.eq_ignore_ascii_case("stop") {
+            crate::agent::cancel_running();
+            crate::browse::request_stop();
+            crate::drive::request_stop();
+            let _ = msg.channel_id.say(&ctx.http, "Stopped.").await;
+            return;
+        }
+        // "typing" shows from now until the answer is sent: dropping the guard stops it
+        let typing = msg.channel_id.start_typing(&ctx.http);
         let conv = conversation_id(PROVIDER, user, msg.channel_id.get());
         crate::log::line(&format!("discord request: {} characters", text.chars().count()));
-        // the request's approvals are buttons in this DM, pressed by this account
-        let (http, handle, channel) = (ctx.http.clone(), Handle::current(), msg.channel_id);
-        let answer = tokio::task::spawn_blocking(move || {
-            let confirm = |question: &str| approve_in_chat(&handle, &http, channel, user, question);
-            crate::agent::ask_remote(&Config::load(), &text, &conv, &confirm)
-        }).await;
+        let chat = chat_in(ctx.http.clone(), Handle::current(), msg.channel_id, user);
+        let answer = tokio::task::spawn_blocking(move || crate::agent::ask_remote(&Config::load(), &text, &conv, chat)).await;
         let answer = match answer {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => e,
             Err(_) => "Something went wrong on my side.".to_string(),
         };
+        drop(typing);
         for piece in split(&answer, DISCORD_LIMIT) {
             if let Err(e) = msg.channel_id.say(&ctx.http, piece).await {
                 crate::log::line(&format!("discord: could not send an answer: {e}"));
@@ -172,6 +179,23 @@ fn approve_in_chat(handle: &Handle, http: &Arc<Http>, channel: ChannelId, user: 
     WAITING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     crate::log::line(&format!("discord approval: {}", if yes { "allowed" } else { "not allowed" }));
     yes
+}
+
+/// The DM as a `Chat`: its questions are Allow and Deny buttons that `user` presses, and what it is told goes to the same channel.
+/// Both can be used from the request's thread or a take-over's thread, which is outside the runtime.
+fn chat_in(http: Arc<Http>, handle: Handle, channel: ChannelId, user: u64) -> crate::agent::Chat {
+    let (ask_handle, ask_http) = (handle.clone(), http.clone());
+    crate::agent::Chat {
+        ask: Arc::new(move |question: &str| approve_in_chat(&ask_handle, &ask_http, channel, user, question)),
+        tell: Arc::new(move |text: &str| {
+            for piece in split(text, DISCORD_LIMIT) {
+                if let Err(e) = handle.block_on(channel.say(&http, piece)) {
+                    crate::log::line(&format!("discord: could not send a result: {e}"));
+                    break;
+                }
+            }
+        }),
+    }
 }
 
 /// The file the pairing code is written to, for the PC owner to read.

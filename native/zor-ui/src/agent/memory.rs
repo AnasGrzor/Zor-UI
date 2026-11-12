@@ -276,7 +276,12 @@ impl Recall for Keyword {
 /// Up to `k` facts that match `query`, for the system prompt. A memory that can't be read recalls nothing, and the request goes on.
 /// A sensitive-looking fact is never recalled, even one stored before the save check existed.
 pub fn recall(query: &str, k: usize) -> Vec<String> {
-    with_app(|c| Keyword.find(c, query, k).unwrap_or_default().into_iter().filter(|m| !is_sensitive(&m.text)).map(|m| m.text).collect()).unwrap_or_default()
+    with_app(|c| recall_in(c, query, k)).unwrap_or_default()
+}
+
+/// `recall` on one connection: the matching facts, sensitive ones left out.
+fn recall_in(conn: &Connection, query: &str, k: usize) -> Vec<String> {
+    Keyword.find(conn, query, k).unwrap_or_default().into_iter().filter(|m| !is_sensitive(&m.text)).map(|m| m.text).collect()
 }
 
 /// Most memory items the context carries, preferences and project memories together, and most characters they take.
@@ -649,9 +654,29 @@ mod tests {
     fn a_restated_fact_with_a_new_explicit_kind_takes_it() {
         let c = mem();
         let text = "Zor-UI uses Rust and tiny-skia for drawing";
-        add_as(&c, text, Some(KIND_PROJECT), Some("zor-ui"), 1).unwrap();
-        add_as(&c, text, Some(KIND_PREFERENCE), None, 2).unwrap();
-        assert_eq!(all(&c).unwrap()[0].kind.as_deref(), Some(KIND_PREFERENCE), "the explicit kind replaces the stored one");
+        // saved as a project fact, the way `remember` saves it with the window on zor-ui
+        add_as(&c, text, kind_to_save(text, Some("zor-ui")), Some("zor-ui"), 1).unwrap();
+        // restated with a preference in it: the save path (`kind_to_save`) gives the new kind, and the same fact is updated
+        let restated = "Zor-UI uses Rust and tiny-skia for drawing, never use other libraries";
+        assert_eq!(kind_to_save(restated, Some("zor-ui")), Some(KIND_PREFERENCE));
+        assert!(matches!(add_as(&c, restated, kind_to_save(restated, Some("zor-ui")), Some("zor-ui"), 2).unwrap(), Outcome::Updated(_)));
+        let row = all(&c).unwrap().remove(0);
+        assert_eq!((row.kind.as_deref(), row.project.as_deref()), (Some(KIND_PREFERENCE), Some("zor-ui")), "new kind, project kept");
+        // restated with its window away: no project in front, the kind still comes and the stored project stays
+        let again = "Zor-UI uses Rust and tiny-skia for drawing, never use other libraries, ever";
+        assert!(matches!(add_as(&c, again, kind_to_save(again, None), None, 3).unwrap(), Outcome::Updated(_)));
+        let row = all(&c).unwrap().remove(0);
+        assert_eq!((row.kind.as_deref(), row.project.as_deref()), (Some(KIND_PREFERENCE), Some("zor-ui")));
+    }
+
+    #[test]
+    fn a_sensitive_fact_is_never_recalled() {
+        let c = mem();
+        // stored the old way, bypassing the save check: it shares words with the query and must not come back
+        insert_raw(&c, "I prefer short answers, my PIN code is 4821", Some(KIND_PREFERENCE));
+        add_as(&c, "I prefer short answers in English", Some(KIND_PREFERENCE), None, 2).unwrap();
+        assert_eq!(recall_in(&c, "short answers", 5), vec!["I prefer short answers in English".to_string()], "only the safe fact");
+        assert!(recall_in(&c, "pin code", 5).is_empty(), "a sensitive fact is never recalled");
     }
 
     #[test]

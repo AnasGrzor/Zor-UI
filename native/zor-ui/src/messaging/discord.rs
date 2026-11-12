@@ -9,11 +9,23 @@ use super::{conversation_id, pairing, split, Seen, DISCORD_LIMIT};
 use crate::conf::Config;
 use serenity::{
     async_trait,
+    builder::{CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage},
     client::{Client, Context, EventHandler},
-    model::{channel::Message, gateway::{GatewayIntents, Ready}},
+    http::Http,
+    model::{
+        application::{ButtonStyle, Interaction},
+        channel::Message,
+        gateway::{GatewayIntents, Ready},
+        id::ChannelId,
+    },
 };
-use std::{sync::{mpsc, Mutex, OnceLock}, time::{Duration, Instant}};
-use tokio::sync::watch;
+use std::{
+    collections::{hash_map::RandomState, BTreeMap},
+    hash::{BuildHasher, Hasher},
+    sync::{mpsc, Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+use tokio::{runtime::Handle, sync::watch};
 
 pub const PROVIDER: &str = super::DISCORD;
 
@@ -48,6 +60,21 @@ impl EventHandler for Handler {
         set_status("connected");
     }
 
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Interaction::Component(pressed) = interaction else { return };
+        let Some((choice, id)) = pressed.data.custom_id.split_once(':') else { return };
+        let outcome = press(&mut WAITING.lock().unwrap_or_else(|e| e.into_inner()), id, pressed.user.id.get(), choice == "yes");
+        let response = match outcome {
+            Press::Answered(true) => CreateInteractionResponse::UpdateMessage(CreateInteractionResponseMessage::new().content("Allowed.").components(vec![])),
+            Press::Answered(false) => CreateInteractionResponse::UpdateMessage(CreateInteractionResponseMessage::new().content("Not allowed.").components(vec![])),
+            Press::NotYours => CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().ephemeral(true).content("Only the account that asked can answer this.")),
+            Press::Gone => CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().ephemeral(true).content("This request is no longer waiting for an answer.")),
+        };
+        if let Err(e) = pressed.create_response(&ctx.http, response).await {
+            crate::log::line(&format!("discord: could not answer a button press: {e}"));
+        }
+    }
+
     async fn message(&self, ctx: Context, msg: Message) {
         // only direct messages from people: no bots (including this one), no servers
         if msg.author.bot || msg.guild_id.is_some() { return; }
@@ -75,7 +102,12 @@ impl EventHandler for Handler {
         if text.is_empty() { return; }
         let conv = conversation_id(PROVIDER, user, msg.channel_id.get());
         crate::log::line(&format!("discord request: {} characters", text.chars().count()));
-        let answer = tokio::task::spawn_blocking(move || crate::agent::ask_remote(&Config::load(), &text, &conv)).await;
+        // the request's approvals are buttons in this DM, pressed by this account
+        let (http, handle, channel) = (ctx.http.clone(), Handle::current(), msg.channel_id);
+        let answer = tokio::task::spawn_blocking(move || {
+            let confirm = |question: &str| approve_in_chat(&handle, &http, channel, user, question);
+            crate::agent::ask_remote(&Config::load(), &text, &conv, &confirm)
+        }).await;
         let answer = match answer {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => e,
@@ -88,6 +120,58 @@ impl EventHandler for Handler {
             }
         }
     }
+}
+
+/// How long an approval waits for a button press before it counts as Deny.
+const APPROVAL_SECS: u64 = 120;
+
+/// An approval waiting for a press: the account that may press, and where its answer goes. Its id is in the buttons' custom ids.
+struct Waiting {
+    user: u64,
+    answer: mpsc::Sender<bool>,
+}
+
+static WAITING: Mutex<BTreeMap<String, Waiting>> = Mutex::new(BTreeMap::new());
+
+/// What a press on an approval's button does.
+#[derive(Debug, PartialEq, Eq)]
+enum Press {
+    /// The request is answered now, with this answer, and is gone.
+    Answered(bool),
+    /// Someone else pressed it. The request still waits.
+    NotYours,
+    /// Nothing waits under that id: it was answered, or it ran out of time.
+    Gone,
+}
+
+/// Applies a press. Only the account that was asked may answer, and only once: an answer removes its request.
+fn press(waiting: &mut BTreeMap<String, Waiting>, id: &str, by: u64, yes: bool) -> Press {
+    match waiting.get(id).map(|w| w.user) {
+        None => Press::Gone,
+        Some(asked) if asked != by => Press::NotYours,
+        Some(_) => {
+            if let Some(w) = waiting.remove(id) { let _ = w.answer.send(yes); }
+            Press::Answered(yes)
+        }
+    }
+}
+
+/// Asks the account in `channel` whether the buddy may do `question`, with an Allow and a Deny button. Runs on the request's
+/// worker thread and waits for the press up to `APPROVAL_SECS`; no press, or a failed send, counts as Deny.
+fn approve_in_chat(handle: &Handle, http: &Arc<Http>, channel: ChannelId, user: u64, question: &str) -> bool {
+    let id = format!("{:016x}", RandomState::new().build_hasher().finish());
+    let (answer, heard) = mpsc::channel();
+    WAITING.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Waiting { user, answer });
+    let buttons = CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("yes:{id}")).label("Allow").style(ButtonStyle::Success),
+        CreateButton::new(format!("no:{id}")).label("Deny").style(ButtonStyle::Danger),
+    ]);
+    let message = CreateMessage::new().content(question).components(vec![buttons]);
+    let sent = handle.block_on(channel.send_message(http, message));
+    let yes = sent.is_ok() && heard.recv_timeout(Duration::from_secs(APPROVAL_SECS)).unwrap_or(false);
+    WAITING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    crate::log::line(&format!("discord approval: {}", if yes { "allowed" } else { "not allowed" }));
+    yes
 }
 
 /// The file the pairing code is written to, for the PC owner to read.
@@ -194,6 +278,31 @@ fn start(token: &str, running: &mut Option<Running>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn waiting_for(user: u64) -> (BTreeMap<String, Waiting>, mpsc::Receiver<bool>) {
+        let (answer, heard) = mpsc::channel();
+        let mut map = BTreeMap::new();
+        map.insert("a1".to_string(), Waiting { user, answer });
+        (map, heard)
+    }
+
+    #[test]
+    fn only_the_asked_account_answers_an_approval_and_only_once() {
+        let (mut map, heard) = waiting_for(42);
+        assert_eq!(press(&mut map, "a1", 7, true), Press::NotYours, "someone else's press changes nothing");
+        assert!(map.contains_key("a1"), "the request still waits");
+        assert_eq!(press(&mut map, "a1", 42, true), Press::Answered(true));
+        assert_eq!(heard.recv().ok(), Some(true), "the answer reaches the request");
+        assert_eq!(press(&mut map, "a1", 42, true), Press::Gone, "a second press finds nothing");
+        assert_eq!(press(&mut map, "unknown", 42, true), Press::Gone);
+    }
+
+    #[test]
+    fn a_deny_press_answers_no() {
+        let (mut map, heard) = waiting_for(42);
+        assert_eq!(press(&mut map, "a1", 42, false), Press::Answered(false));
+        assert_eq!(heard.recv().ok(), Some(false));
+    }
 
     #[test]
     fn the_switch_and_the_token_decide_what_runs() {

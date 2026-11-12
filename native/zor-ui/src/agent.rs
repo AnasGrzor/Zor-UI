@@ -1179,10 +1179,11 @@ pub fn remote_refusal(conversation: &str, call: &Call) -> Option<&'static str> {
 }
 
 /// A request from a remote chat. It takes the busy flag, so it never overlaps a request at the PC: the browser's yes, the stop and
-/// the cancel are process-wide, and a new request resets them. Refused while the PC's request runs.
-pub fn ask_remote(cfg: &Config, said: &str, conversation: &str) -> Result<String, String> {
+/// the cancel are process-wide, and a new request resets them. Refused while the PC's request runs. `confirm` answers its
+/// approvals (the chat's buttons).
+pub fn ask_remote(cfg: &Config, said: &str, conversation: &str, confirm: &dyn Fn(&str) -> bool) -> Result<String, String> {
     let Some(_busy) = assist::try_busy() else { return Err("I'm still working on the last request.".into()) };
-    ask_in(cfg, said, "", &origin_for(conversation))
+    ask_in(cfg, said, "", &Origin { conversation, confirm })
 }
 
 static DENY_REMOTE: fn(&str) -> bool = deny_remote;

@@ -1053,6 +1053,11 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
         text
     };
     let run_tool = |c: &Call| {
+        if let Some(why) = remote_refusal(origin.conversation, c) {
+            crate::log::line("buddy remote refused: a take-over or the browser from a remote chat");
+            evidence.borrow_mut().push(verifier::Check::Failed);
+            return Err(why.to_string());
+        }
         if matches!(c, Call::TakeOver(_)) && !take_over_asked(said) {
             crate::log::line("buddy take-over refused: the request did not ask for one");
             evidence.borrow_mut().push(verifier::Check::Failed);
@@ -1162,6 +1167,24 @@ pub fn origin_for(conversation: &str) -> Origin<'_> {
     if conversation == DESKTOP { Origin { conversation, confirm: &ASK_ISLAND } } else { Origin { conversation, confirm: &DENY_REMOTE } }
 }
 
+/// Refuses a remote request's use of the PC's screen. A take-over asks the island for each risky click it makes, and the browser's
+/// yes lives in process-wide flags, so neither can run for a remote chat until its approvals reach that chat. None when the call may go on.
+pub fn remote_refusal(conversation: &str, call: &Call) -> Option<&'static str> {
+    if conversation == DESKTOP { return None; }
+    match call {
+        Call::TakeOver(_) => Some("A take-over only starts from the PC, so I didn't start one."),
+        Call::Browser { .. } => Some("The browser only works from the PC, so I didn't use it."),
+        _ => None,
+    }
+}
+
+/// A request from a remote chat. It takes the busy flag, so it never overlaps a request at the PC: the browser's yes, the stop and
+/// the cancel are process-wide, and a new request resets them. Refused while the PC's request runs.
+pub fn ask_remote(cfg: &Config, said: &str, conversation: &str) -> Result<String, String> {
+    let Some(_busy) = assist::try_busy() else { return Err("I'm still working on the last request.".into()) };
+    ask_in(cfg, said, "", &origin_for(conversation))
+}
+
 static DENY_REMOTE: fn(&str) -> bool = deny_remote;
 
 /// Refuses an approval for a remote conversation that has no channel to ask on. The question is not logged: it can hold the
@@ -1209,6 +1232,18 @@ mod tests {
         assert_eq!(answer_line(&Err("stopped".into())), "buddy failed: stopped");
         let long = "a".repeat(500);
         assert!(answer_line(&Ok(long)).len() < 420, "a long answer is cut");
+    }
+
+    #[test]
+    fn remote_chats_cannot_take_over_or_use_the_browser_but_the_desktop_can() {
+        let take = Call::TakeOver("fill the form".into());
+        let browser = Call::Browser { tool: "browser_snapshot".into(), args: json!({}) };
+        let lookup = Call::WebSearch("news".into());
+        assert!(remote_refusal("discord:1:2", &take).is_some());
+        assert!(remote_refusal("discord:1:2", &browser).is_some(), "even a read-only browser step needs the PC's yes");
+        assert!(remote_refusal("discord:1:2", &lookup).is_none(), "a search is fine from a chat");
+        assert!(remote_refusal(DESKTOP, &take).is_none());
+        assert!(remote_refusal(DESKTOP, &browser).is_none());
     }
 
     #[test]

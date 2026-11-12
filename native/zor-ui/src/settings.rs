@@ -1095,6 +1095,12 @@ impl Settings {
                 });
             }
             "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| s.keys = Load::Idle),
+            // a new pairing code for the Discord bot; the card shows it until it is used or runs out
+            "discord-pair" => { crate::messaging::pairing::new_code(std::time::Instant::now()); }
+            // the account stops reaching the buddy from its next message
+            "discord-revoke" => {
+                if let Ok(id) = arg.parse::<u64>() { crate::messaging::pairing::unpair(crate::messaging::DISCORD, id); }
+            }
             "save-key" => {
                 let Some(f) = self.fields.get_mut(&format!("key-{arg}")) else { return };
                 let v = f.tb.text.trim().to_string();

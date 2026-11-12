@@ -13,7 +13,7 @@ use serenity::{
 };
 use std::{sync::Mutex, time::{Duration, Instant}};
 
-pub const PROVIDER: &str = "discord";
+pub const PROVIDER: &str = super::DISCORD;
 
 /// The name the bot token is saved under in the DPAPI secret store (`bridge::web::secret_get`). `ZORUI_DISCORD_BOT_KEY` also works.
 pub const TOKEN_SECRET: &str = "discord_bot";
@@ -25,7 +25,7 @@ pub static STATUS: Mutex<String> = Mutex::new(String::new());
 pub fn status() -> String {
     let s = STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if s.is_empty() { return "Not started. Restart Zor UI after saving the token".to_string(); }
-    if s == "connected" && pairing::paired_in(&pairing::store_path(), PROVIDER).is_empty() {
+    if s == "connected" && pairing::paired(PROVIDER).is_empty() {
         return "Connected. No account paired yet: the pairing code is in remote-pairing.txt in the Zor UI data folder".to_string();
     }
     s
@@ -53,11 +53,11 @@ impl EventHandler for Handler {
         let user = msg.author.id.get();
         let text = msg.content.trim().to_string();
 
-        if !pairing::paired_in(&pairing::store_path(), PROVIDER).contains(&user) {
+        if !pairing::paired(PROVIDER).contains(&user) {
             // an unpaired sender can only pair, with the code the PC shows; anything else gets no reply
             let reply = match pairing::redeem(&text, Instant::now()) {
                 pairing::Redeem::Paired => {
-                    if !pairing::pair_in(&pairing::store_path(), PROVIDER, user) { set_status("could not save the pairing"); }
+                    if !pairing::pair(PROVIDER, user) { set_status("could not save the pairing"); }
                     let _ = std::fs::remove_file(code_file());
                     "Paired. Send me a message and I'll answer here."
                 }
@@ -97,7 +97,7 @@ pub fn start() {
     if !cfg.bool("remote.discord.enabled") { set_status("off"); return; }
     let token = crate::bridge::web::secret_get(TOKEN_SECRET);
     if token.is_empty() { set_status("no bot token saved"); return; }
-    if pairing::paired_in(&pairing::store_path(), PROVIDER).is_empty() {
+    if pairing::paired(PROVIDER).is_empty() {
         let code = pairing::new_code(Instant::now());
         let note = format!("Pairing code for Discord: {code}\r\nSend it to the bot in a direct message within {} minutes.\r\n", pairing::CODE_SECS / 60);
         let _ = std::fs::write(code_file(), note);

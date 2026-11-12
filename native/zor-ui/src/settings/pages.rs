@@ -1475,6 +1475,27 @@ impl Settings {
                     ui::chip(p.c, p.cx, right - wsave, r.y + 4.0, a, None, "Save", false);
                     self.field_ui(p, &format!("key-{TOKEN_SECRET}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), "Paste bot token", 17.0, false);
                 }
+                // pairing: a code to send from the account, then the paired accounts, each one revocable
+                use crate::messaging::{pairing, DISCORD};
+                let sub = match pairing::active_code(std::time::Instant::now()) {
+                    Some((code, secs)) => format!("Send {code} to the bot in a direct message. It expires in {} min", secs.div_ceil(60)),
+                    None => "Make a code, then send it to the bot in a direct message".to_string(),
+                };
+                let w = chip_w(p.c, "New code", true) + 12.0;
+                if let Some(r) = p.row_sub(44.0, "link", &sub, w) {
+                    p.left(r, "link", "Pair an account", &sub, w);
+                    p.chip_right(r, Some("add"), "New code", Act::Do("discord-pair", String::new()));
+                }
+                let paired = pairing::paired(DISCORD);
+                if paired.is_empty() { p.note("No account is paired. Only paired accounts reach the buddy", 12.0); }
+                for id in paired {
+                    let ids = id.to_string();
+                    let w = chip_w(p.c, "Revoke", true) + 12.0;
+                    if let Some(r) = p.row_sub(44.0, "person", "", w) {
+                        p.left(r, "person", "Paired account", &ids, w);
+                        p.chip_right(r, Some("link_off"), "Revoke", Act::Do("discord-revoke", ids));
+                    }
+                }
             });
         }
         // saved Claude Code logins; Idle means Claude Code isn't installed. No look setting here, so no preview.

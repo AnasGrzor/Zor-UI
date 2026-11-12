@@ -11,6 +11,9 @@ pub mod discord;
 
 use std::collections::{HashSet, VecDeque};
 
+/// The provider name of Discord, as the paired-account file and the conversation ids spell it.
+pub const DISCORD: &str = "discord";
+
 /// The most characters one Discord message holds.
 pub const DISCORD_LIMIT: usize = 2000;
 

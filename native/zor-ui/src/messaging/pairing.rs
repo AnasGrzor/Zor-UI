@@ -5,7 +5,7 @@
 use crate::bridge::common::{load_json, save_json};
 use serde_json::{json, Value};
 use std::{
-    collections::hash_map::RandomState,
+    collections::{hash_map::RandomState, BTreeMap},
     hash::{BuildHasher, Hasher},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -49,6 +49,17 @@ pub fn redeem(text: &str, now: Instant) -> Redeem {
     redeem_in(&mut PENDING.lock().unwrap_or_else(|e| e.into_inner()), text, now)
 }
 
+/// The pending code and the seconds it has left, when one is still usable (not expired, not locked).
+pub fn active_code(now: Instant) -> Option<(String, u64)> {
+    active_in(&PENDING.lock().unwrap_or_else(|e| e.into_inner()), now)
+}
+
+fn active_in(pending: &Option<Pending>, now: Instant) -> Option<(String, u64)> {
+    let p = pending.as_ref()?;
+    let age = now.saturating_duration_since(p.made).as_secs();
+    (age <= CODE_SECS && p.tries < MAX_TRIES).then(|| (p.code.clone(), CODE_SECS - age))
+}
+
 fn looks_like_code(text: &str) -> bool { text.len() == 6 && text.bytes().all(|b| b.is_ascii_digit()) }
 
 fn redeem_in(pending: &mut Option<Pending>, text: &str, now: Instant) -> Redeem {
@@ -74,11 +85,46 @@ pub fn paired_in(path: &Path, provider: &str) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// Adds `id` to the paired ids of `provider` in the file at `path`. Returns whether the file was saved.
-pub fn pair_in(path: &Path, provider: &str, id: u64) -> bool {
-    let mut ids = paired_in(path, provider);
+/// The paired ids per provider, as last read from or written to the file. Drawing the Settings page and checking each message
+/// use this, so the file is read once. Only `pair` and `unpair` write the file, and they update this too.
+static PAIRED: Mutex<BTreeMap<String, Vec<u64>>> = Mutex::new(BTreeMap::new());
+
+/// The paired ids of `provider`. Read from the file the first time, then from the cache.
+pub fn paired(provider: &str) -> Vec<u64> {
+    cached(&mut PAIRED.lock().unwrap_or_else(|e| e.into_inner()), &store_path(), provider)
+}
+
+/// Pairs `id` with `provider`. Returns whether the file was saved; the cache changes only then.
+pub fn pair(provider: &str, id: u64) -> bool {
+    pair_cached(&mut PAIRED.lock().unwrap_or_else(|e| e.into_inner()), &store_path(), provider, id)
+}
+
+/// Removes `id` from `provider`. Its messages are refused from the next one on. Returns whether the file was saved.
+pub fn unpair(provider: &str, id: u64) -> bool {
+    unpair_cached(&mut PAIRED.lock().unwrap_or_else(|e| e.into_inner()), &store_path(), provider, id)
+}
+
+fn cached(map: &mut BTreeMap<String, Vec<u64>>, path: &Path, provider: &str) -> Vec<u64> {
+    map.entry(provider.to_string()).or_insert_with(|| paired_in(path, provider)).clone()
+}
+
+fn pair_cached(map: &mut BTreeMap<String, Vec<u64>>, path: &Path, provider: &str, id: u64) -> bool {
+    let mut ids = cached(map, path, provider);
     if ids.contains(&id) { return true; }
     ids.push(id);
+    let saved = save_ids(path, provider, &ids);
+    if saved { map.insert(provider.to_string(), ids); }
+    saved
+}
+
+fn unpair_cached(map: &mut BTreeMap<String, Vec<u64>>, path: &Path, provider: &str, id: u64) -> bool {
+    let ids: Vec<u64> = cached(map, path, provider).into_iter().filter(|&i| i != id).collect();
+    let saved = save_ids(path, provider, &ids);
+    if saved { map.insert(provider.to_string(), ids); }
+    saved
+}
+
+fn save_ids(path: &Path, provider: &str, ids: &[u64]) -> bool {
     let mut data = load_json(path, json!({}));
     if !data.is_object() { data = json!({}); }
     data[provider] = json!(ids.iter().map(|i| i.to_string()).collect::<Vec<_>>());
@@ -125,15 +171,43 @@ mod tests {
     }
 
     #[test]
+    fn the_shown_code_counts_down_and_disappears_when_it_expires_or_locks() {
+        let made = Instant::now();
+        let mut p = pending("123456", made);
+        assert_eq!(active_in(&p, made + Duration::from_secs(60)), Some(("123456".to_string(), CODE_SECS - 60)));
+        assert_eq!(active_in(&p, made + Duration::from_secs(CODE_SECS + 1)), None, "an expired code is not shown");
+        for _ in 0..MAX_TRIES { redeem_in(&mut p, "000000", made); }
+        assert_eq!(active_in(&p, made), None, "a locked code is not shown");
+        assert_eq!(active_in(&None, made), None);
+    }
+
+    #[test]
+    fn an_unpaired_account_is_refused_again_and_the_others_stay() {
+        let dir = std::env::temp_dir().join(format!("zorui-unpair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("remote-chats.json");
+        let mut map = BTreeMap::new();
+        pair_cached(&mut map, &path, "discord", 42);
+        pair_cached(&mut map, &path, "discord", 7);
+        assert!(unpair_cached(&mut map, &path, "discord", 42));
+        assert_eq!(cached(&mut map, &path, "discord"), vec![7], "only the revoked account goes");
+        assert_eq!(paired_in(&path, "discord"), vec![7], "the file agrees with the cache");
+        assert!(unpair_cached(&mut map, &path, "discord", 99), "revoking an unknown id changes nothing and still saves");
+        assert_eq!(cached(&mut map, &path, "discord"), vec![7]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn paired_ids_are_kept_per_provider_and_not_repeated() {
         let dir = std::env::temp_dir().join(format!("zorui-pairing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("remote-chats.json");
-        assert!(pair_in(&path, "discord", 42));
-        assert!(pair_in(&path, "discord", 42));
-        assert!(pair_in(&path, "discord", 7));
+        let mut map = BTreeMap::new();
+        assert!(pair_cached(&mut map, &path, "discord", 42));
+        assert!(pair_cached(&mut map, &path, "discord", 42));
+        assert!(pair_cached(&mut map, &path, "discord", 7));
         assert_eq!(paired_in(&path, "discord"), vec![42, 7]);
-        assert!(paired_in(&path, "whatsapp").is_empty(), "another provider has no pairs");
+        assert!(cached(&mut map, &path, "whatsapp").is_empty(), "another provider has no pairs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

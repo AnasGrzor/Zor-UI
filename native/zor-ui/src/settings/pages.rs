@@ -1460,7 +1460,7 @@ impl Settings {
             use crate::messaging::discord::TOKEN_SECRET;
             p.h2("forum", "Discord", "");
             p.card(|p| {
-                self.sw(p, "remote.discord.enabled", "Chat with the buddy on Discord", "Direct messages from a paired account reach the buddy, and its answers come back there. Restart Zor UI after changing this", "forum");
+                self.sw(p, "remote.discord.enabled", "Chat with the buddy on Discord", "Direct messages from a paired account reach the buddy, and its answers come back there", "forum");
                 let status = crate::messaging::discord::status();
                 if let Some(r) = p.row_sub(44.0, "info", &status, 0.0) { p.left(r, "info", "Bot status", &status, 0.0); }
                 if let Some(r) = p.row(40.0) {

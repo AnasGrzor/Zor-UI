@@ -228,11 +228,20 @@ fn plan(dw: &IDesktopWallpaper, main: &str, own: &Value) -> windows::core::Resul
         let r = unsafe { dw.GetMonitorRECT(&id) }.unwrap_or_default();
         let (n, w, h) = (out.len(), r.right - r.left, r.bottom - r.top);
         let (src, custom) = monitor_source(own, n, main);
+        // no main picture in state (a solid-color theme): show what Windows has on this monitor
+        let src = if src.is_empty() { windows_picture(dw, &id) } else { src };
         let file = if w > 0 && h > 0 { fit_file(&src, n, w, h) } else { None }.unwrap_or(src);
         let name = crate::util::monitor_label(&names, (r.left, r.top), n);
         out.push(Plan { id, w, h, name, file, custom });
     }
     Ok(out)
+}
+
+/// The picture Windows shows on one monitor; empty for a solid color.
+fn windows_picture(dw: &IDesktopWallpaper, id: &HSTRING) -> String {
+    unsafe { dw.GetWallpaper(id) }.ok().and_then(|p| unsafe {
+        let path = p.to_string().ok(); CoTaskMemFree(Some(p.0 as *const _)); path
+    }).unwrap_or_default()
 }
 
 /// `src` cut to the shape of a `w` x `h` monitor, saved as pack/wp-<n>-<hash>.jpg; None when it already fits (or can't be read).
@@ -390,9 +399,7 @@ fn monitor_palettes(dir: &Path, main: Option<&str>, dark: bool, scheme: &str, pe
                 let own_scheme = profile["scheme"].as_str().unwrap_or(scheme);
                 intelligence::cached_generate(&a, &profile, dark, own_scheme, dir).0
             });
-            let actual = unsafe { dw.GetWallpaper(&id) }.ok().and_then(|p| unsafe {
-                let path = p.to_string().ok(); CoTaskMemFree(Some(p.0 as *const _)); path
-            }).filter(|p| !p.is_empty()).unwrap_or(src);
+            let actual = Some(windows_picture(&dw, &id)).filter(|p| !p.is_empty()).unwrap_or(src);
             let mut a = a;
             if let Some(fitted) = intelligence::analysis(Path::new(&actual), dir, false) { a["regions"] = fitted["regions"].clone(); }
             result.push(json!({"device": id.to_string_lossy(), "bounds": [r.left, r.top, r.right, r.bottom], "wallpaper":actual, "colors": if separate { json!(colors) } else { json!({}) }, "analysis": a}));

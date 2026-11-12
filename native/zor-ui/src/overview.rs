@@ -186,6 +186,9 @@ fn tile(c: &mut Canvas, cx: &Ctx, r: R, w: &GWin, id: Option<u32>, sel: bool, di
 
 impl View for Overview {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
+
+    // BODIES..CLIP_LIST: the empty area of a workspace column and the clipboard list's scroll area; tiles and clips win where they overlap
+    fn hand(&self, id: u32) -> bool { !(id == 0 || id == CLIP_LIST || (BODIES..CLIP_LIST).contains(&id)) }
     fn key(&self, _: &Ctx) -> String { String::new() }
     fn frame_ms(&self) -> u32 { if self.focus { 500 } else { 0 } } // the caret blinks
 

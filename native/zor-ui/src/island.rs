@@ -69,6 +69,8 @@ const CHIPS_TO_AGENTS: f32 = crate::tokens::SP_L;
 const FILTER: u32 = 210;
 /// An agent's header: a tap opens or folds its sessions. AGENT_TOGGLE + index, checked before NOTIF.
 const AGENT_TOGGLE: u32 = 240;
+/// A session card: a tap brings its window forward, or resumes it when it has ended. SESSION + index into `cards`.
+const SESSION: u32 = 280;
 
 /// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
 /// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
@@ -105,6 +107,8 @@ pub struct Island {
     filter: Option<&'static str>,
     /// Agents whose sessions are folded away, by label.
     collapsed: Vec<String>,
+    /// (agent id, session id) of each session card the last paint drew, in hit order.
+    cards: Vec<(String, String)>,
 }
 
 impl Island {
@@ -113,7 +117,7 @@ impl Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
             seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
             reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
-            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: 1, filter: None, collapsed: Vec::new() }
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: 1, filter: None, collapsed: Vec::new(), cards: Vec::new() }
     }
 
     /// Whether a section belongs to the open tab (asks and permission prompts are handled before this).
@@ -121,6 +125,9 @@ impl Island {
         matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)))
     }
 }
+
+/// Width the question wraps to. The text is drawn 8 px narrower than the row, so the height is measured at the same width.
+fn question_width() -> f32 { W - 2.0 * PAD - 8.0 }
 
 /// Height the question gets: all of it, from one line up to `ASK_MAX_LINES` (it scrolls past that).
 fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
@@ -267,8 +274,8 @@ impl Island {
     fn plan(&self, g: &Gfx, cx: &Ctx) -> Vec<(Sec, f32)> {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
-        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Ask(q), h)); }
-        if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
+        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())); v.push((Sec::Ask(q), h)); }
+        if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
@@ -424,7 +431,7 @@ impl Island {
         c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         let y = y + 26.0;
         let f = txt(13.0, 400);
-        self.ask_full = c.g.measure_wrapped(q, f, w);
+        self.ask_full = c.g.measure_wrapped(q, f, question_width());
         let qr = R::new(x, y, w, ask_h(self.ask_full));
         c.hit(qr, ASK_Q);
         let full = self.ask_full;
@@ -506,6 +513,7 @@ impl Island {
             c.text("Dismiss", R::new(b.x + 29.0, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
         }
         let now = hub::now_ms() / 1000.0;
+        self.cards.clear();
         self.chips(c, cx, x, y + AGENTS_HEAD, counts);
         let mut y = y + AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS;
         for a in list {
@@ -553,7 +561,13 @@ impl Island {
             }
             let sessions = if open { all } else { &[] };
             if !sessions.is_empty() { y += SESS_LEAD; }
-            for sess in sessions.iter().take(AGENT_SESSIONS) { y = self.session(c, cx, x, y, w, sess, now); }
+            for sess in sessions.iter().take(AGENT_SESSIONS) {
+                // the whole card is the target: a tap opens that session (see the SESSION arm of input)
+                let idx = self.cards.len() as u32;
+                self.cards.push((s(a, "id"), s(sess, "id")));
+                c.hit(R::new(x, y, w, session_h(sess) - SESS_GAP), SESSION + idx);
+                y = self.session(c, cx, x, y, w, sess, now);
+            }
             if sessions.len() > AGENT_SESSIONS {
                 c.text(&format!("+{} more", sessions.len() - AGENT_SESSIONS), R::new(x, y + BLOCK_GAP, w, lh(12.0)), txt(12.0, 500), t.c("primary"), Align::Left);
                 y += BLOCK_GAP + lh(12.0);
@@ -872,6 +886,14 @@ impl View for Island {
                 i if (FILTER..FILTER + 3).contains(&i) => {
                     let want = ["waiting", "working", "idle"][(i - FILTER) as usize];
                     self.filter = if self.filter == Some(want) { None } else { Some(want) };
+                }
+                i if (SESSION..SESSION + 64).contains(&i) => {
+                    if let Some((agent, id)) = self.cards.get((i - SESSION) as usize).cloned() {
+                        // off the UI thread: resuming starts a process and focusing waits on Windows
+                        std::thread::spawn(move || {
+                            if let Err(e) = crate::bridge::agent_restart::open_session(&agent, &id) { crate::log::line(&format!("open session {id}: {e}")); }
+                        });
+                    }
                 }
                 i if (AGENT_TOGGLE..AGENT_TOGGLE + 32).contains(&i) => {
                     // same order as the painted list: filter_sessions keeps every agent in place

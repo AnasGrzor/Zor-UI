@@ -530,6 +530,21 @@ fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (
     (((free(sides) - AIR).max(0.0) / gaps as f32).min(7.0), cap)
 }
 
+/// The agent pill's text: the label, the newest working tool and the usage percent.
+/// Shared by the pill and the island version preview in Settings.
+pub fn agent_pill_text(label: &str, tool: &str, pct: &str) -> String {
+    let tool = if tool.is_empty() { String::new() } else { format!(" · {tool}") };
+    format!("{label}{tool}{pct}")
+}
+
+/// The sample agent the island version preview draws: a Claude agent on a Bash tool.
+pub fn island_version_sample() -> (&'static str, &'static str, &'static str) { ("Claude", "Bash: npm test", " · 33%") }
+
+/// Identifies one pending permission: its session and the time it was asked. A new prompt gets a new key.
+fn permit_key(a: &Value) -> Option<String> {
+    a["permit"].is_object().then(|| format!("{}|{}", a["permit"]["session"].as_str().unwrap_or(""), a["permit"]["at"]))
+}
+
 fn pill_w(g: &Gfx, p: &Pill) -> f32 {
     if let Some(w) = p.fixed { return w; }
     let inner: f32 = p.els.iter().map(|e| el_w(g, e)).sum::<f32>() + p.gap * p.els.len().saturating_sub(1) as f32;
@@ -551,8 +566,11 @@ impl Bar {
     /// diProviders() in bar.js: what the island could show, most important first; .2 = wins outright.
     fn island_list(cx: &Ctx) -> Vec<(&'static str, bool)> {
         let di = |k: &str| cx.cfg.get(&format!("island.{k}")).as_bool() != Some(false);
-        let agents = &cx.agents;
-        let asks = di("agents") && agents.iter().any(|a| a["state"] == "waiting");
+        let agents = &cx.agents; // agent state from Ctx (04018b9), not the shared store
+        // a permission the user clicked on the pill leaves the pill; the panel still shows it until it is answered
+        // the current island keeps every prompt on the pill; the new one lets a clicked prompt leave it
+        let seen = if cx.cfg.str("island.version") == "current" { None } else { hub::get("zor-ui.permitSeen") };
+        let asks = di("agents") && agents.iter().any(|a| a["state"] == "waiting" && !(permit_key(a).is_some() && permit_key(a) == seen));
         let now = hub::now_ms();
         let mut l = vec![];
         if cx.notif.as_ref().is_some_and(|n| n.until > now) { l.push(("notification", true)); }
@@ -613,11 +631,10 @@ impl Bar {
                         None => els.push(El::Ico("smart_toy", 18.0, true, fg)),
                     }
                     let pct = u.map(|u| format!(" · {}%", u["used_percentage"].as_f64().unwrap_or(0.0).round())).unwrap_or_default();
-                    // the newest working session's tool; "×N" when several sessions of this agent are working
+                    // the newest working session's tool
                     let ws: Vec<&Value> = a["sessions"].as_array().into_iter().flatten().filter(|x| x["state"] == "working").collect();
-                    let tool = ws.first().map(|x| s(&x["tool"])).filter(|t| !t.is_empty()).map(|t| format!(" · {t}")).unwrap_or_default();
-                    let count = if ws.len() > 1 { format!(" ×{}", ws.len()) } else { String::new() };
-                    els.push(El::Txt(format!("{}{count}{tool}{pct}", s(&a["label"])), txt(13.0, 400), fg, text_w));
+                    let tool = ws.first().map(|x| s(&x["tool"])).unwrap_or_default();
+                    els.push(El::Txt(agent_pill_text(&s(&a["label"]), &tool, &pct), txt(13.0, 400), fg, text_w));
                 }
             }
             "osd" => {
@@ -1179,7 +1196,12 @@ impl Bar {
                 }
                 cx.notif = None;
             }
-            (ISLAND, Btn::Left) => { let a = cx.cfg.str("island.click").to_string(); act(self, if a.is_empty() { "panel" } else { &a }, cx) }
+            (ISLAND, Btn::Left) => {
+                // the pill's permission leaves the pill now; it stays in the panel until it is answered
+                if let Some(k) = hub::get_json("zor-ui.agents").as_array().and_then(|l| l.iter().find_map(permit_key)) { hub::set("zor-ui.permitSeen", Some(k)); }
+                let a = cx.cfg.str("island.click").to_string();
+                act(self, if a.is_empty() { "panel" } else { &a }, cx)
+            }
             (ISLAND, Btn::Right) => { let a = cx.cfg.str("island.rightClick").to_string(); act(self, if a.is_empty() { "sidebar-left" } else { &a }, cx) }
             (i, Btn::Left) if (WS..WS + 0x100).contains(&i) => if let Some(n) = self.ws_names.get((i - WS) as usize) { crate::glaze::command(&format!("focus --workspace {n}")); },
             (i, Btn::Right) if (WS..WS + 0x100).contains(&i) || i == WS => self.open_here(cx, "overview"),
@@ -1375,6 +1397,24 @@ mod tests {
     }
 
     /// The island's equalizer bars show while media plays and are gone when it is paused.
+    #[test]
+    fn the_agent_pill_text_is_the_label_the_tool_and_the_usage() {
+        let (label, tool, pct) = island_version_sample();
+        assert_eq!(agent_pill_text(label, tool, pct), "Claude · Bash: npm test · 33%");
+        assert_eq!(agent_pill_text("Codex", "", ""), "Codex", "no tool dot without a tool");
+    }
+
+    #[test]
+    fn a_clicked_permission_is_keyed_by_its_session_and_time() {
+        let a = serde_json::json!({ "permit": { "session": "s1", "at": 5.0 } });
+        let again = serde_json::json!({ "permit": { "session": "s1", "at": 5.0 } });
+        let newer = serde_json::json!({ "permit": { "session": "s1", "at": 6.0 } });
+        assert!(permit_key(&a).is_some());
+        assert_eq!(permit_key(&a), permit_key(&again), "the same prompt keeps its key");
+        assert_ne!(permit_key(&a), permit_key(&newer), "a new prompt in the same session is a new key");
+        assert_eq!(permit_key(&serde_json::json!({ "permit": null })), None);
+    }
+
     #[test]
     fn island_equalizer_only_while_playing() {
         unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }

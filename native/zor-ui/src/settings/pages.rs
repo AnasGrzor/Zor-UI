@@ -338,9 +338,34 @@ impl Settings {
         }
     }
 
+    /// The island version setting, live: each version's agent pill text, from the same function the pill uses
+    /// (bar::agent_pill_text), with sample data (bar::island_version_sample). The chosen version is marked. The panel
+    /// itself is not drawn here: it needs live data, so only the pill text differs in the preview.
+    fn island_version_preview(&mut self, p: &mut Pen) {
+        const H: f32 = 64.0;
+        let Some(r) = p.row(H + 12.0) else { return };
+        let selected = self.gs(p.cx, "island.version");
+        let (label, tool, pct) = crate::bar::island_version_sample();
+        let gap = 10.0;
+        let w = (r.w - 24.0 - gap) / 2.0;
+        for (i, (name, version)) in [("New island", "new"), ("Current island", "current")].into_iter().enumerate() {
+            let b = R::new(r.x + 12.0 + i as f32 * (w + gap), r.y + 6.0, w, H);
+            p.c.rect(b, 12.0, p.col("surfaceContainer"));
+            let title = if selected == version { p.col("primary") } else { p.col("onSurfaceVariant") };
+            p.c.text(name, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), title, Align::Left);
+            let pill = R::new(b.x + 10.0, b.y + 28.0, b.w - 20.0, 24.0);
+            p.c.rect(pill, 12.0, p.col("secondaryContainer"));
+            let text = crate::bar::agent_pill_text(label, tool, pct);
+            p.c.text(&text, R::new(pill.x + 12.0, pill.y, pill.w - 24.0, pill.h), txt(13.0, 400), p.col("onSecondaryContainer"), Align::Left);
+        }
+    }
+
     fn island(&mut self, p: &mut Pen) {
         p.h2("pill", "What the island shows", "");
         p.card(|p| {
+            self.seg(p, "island.version", &[("new", "New island"), ("current", "Current island")], "Island version", "swap_horiz");
+            self.island_version_preview(p);
+            p.note("Switch takes effect after you restart zor-ui. The current island is the committed version, without session cards or the new permission handling.", 12.0);
             p.note("The island picks the most important of these. Move it or hide it in Bar & desktop > Bar layout. Anything turned off here shows on the bar as usual.", 12.0);
             self.sw(p, "island.notifications", "New notifications", "The app and title, for a few seconds", "notifications");
             self.num(p, "island.notifySeconds", "Notification seconds", 1, 30, "timer");

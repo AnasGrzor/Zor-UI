@@ -29,6 +29,8 @@ pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
     // "settings:presets" opens the settings on that page (used by `--render`); an unknown page keeps the first
     if let Some(page) = name.strip_prefix("settings:") { return Some(Box::new(Settings::new(area).on_page(page))); }
     Some(match name {
+        // island.version picks the panel: "new" is the activity model in island.rs, "current" the committed one in island_legacy.rs
+        "island-panel" if crate::conf::Config::load().str("island.version") == "current" => Box::new(crate::island_legacy::Island::new(area)),
         "island-panel" => Box::new(Island::new(area)),
         "tray-flyout" => Box::new(crate::tray_flyout::TrayFlyout::default()),
         "overview" => Box::new(Overview::new(area)),

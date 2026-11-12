@@ -143,6 +143,9 @@ impl Home {
 }
 
 impl Tab for Home {
+    // 105: the plain lyrics scroll area, no click action
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | 105) }
+
     fn frame_ms(&self) -> u32 { if self.playing { 50 } else { 0 } }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx, r: R) {

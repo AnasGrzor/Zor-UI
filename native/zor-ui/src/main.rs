@@ -24,6 +24,7 @@ mod glaze;
 mod buddy;
 mod hub;
 mod island;
+mod island_legacy;
 mod keymap;
 mod cast;
 mod claude_usage;

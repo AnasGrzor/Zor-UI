@@ -16,6 +16,7 @@ pub(crate) mod claude_profile;
 pub(crate) mod agent_restart;
 pub(crate) mod permit;
 pub(crate) mod common;
+mod agy_usage;
 mod football;
 pub mod listen;
 mod media;

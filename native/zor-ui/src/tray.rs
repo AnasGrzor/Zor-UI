@@ -438,6 +438,17 @@ mod standin_tests {
     }
 
     #[test]
+    fn windows_of_splits_ours_from_the_rest() {
+        unsafe {
+            // STATIC, not BUTTON: the veil test counts BUTTON windows and runs in parallel
+            let b = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("split test"), WS_POPUP, 0, 0, 10, 10, None, None, None, None).unwrap();
+            assert!(windows_of("STATIC", true).contains(&b));
+            assert!(!windows_of("STATIC", false).contains(&b));
+            let _ = DestroyWindow(b);
+        }
+    }
+
+    #[test]
     fn only_the_taskbar_class_is_guarded() {
         // no such window exists in the test process, so the guard has nothing to report
         assert_eq!(guard_standin(), None);

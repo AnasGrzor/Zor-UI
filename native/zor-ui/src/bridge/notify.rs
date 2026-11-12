@@ -442,7 +442,14 @@ fn agents_watch(out: &Sink) {
     };
     let (mut stamp, mut last, mut sent) = (None, None, Instant::now());
     let mut first = true;
+    let mut usage_at: Option<Instant> = None;
     loop {
+        // Antigravity's quota comes from the agy CLI, not a hook: ask it at start and every 10 minutes.
+        if usage_at.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
+            usage_at = Some(Instant::now());
+            let d = dir.clone();
+            std::thread::spawn(move || super::agy_usage::refresh(&d));
+        }
         let now = stamps();
         if first || Some(&now) != stamp.as_ref() || sent.elapsed() > Duration::from_secs(30) {
             first = false;

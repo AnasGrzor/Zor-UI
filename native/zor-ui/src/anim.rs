@@ -68,6 +68,82 @@ pub fn grow(elapsed: f32, h: i32) -> (i32, u8, bool) {
     (rows.clamp(1, h.max(1)), ((t / 0.4).min(1.0) * 255.0).round() as u8, t >= 1.0)
 }
 
+/// Control points of `cubic-bezier(.45,0,.2,1)`, the island's shrink curve (the Coucou close curve).
+pub const CLOSE_BEZIER: [f32; 4] = [0.45, 0.0, 0.2, 1.0];
+/// Seconds the island's shrink takes.
+pub const CLOSE_SECS: f32 = 0.34;
+
+/// CSS-style `cubic-bezier(x1, y1, x2, y2)` at progress `x` (0..=1): the eased value. Bisection on x, 24 steps.
+pub fn bezier(p: [f32; 4], x: f32) -> f32 {
+    let [x1, y1, x2, y2] = p;
+    let at = |a: f32, b: f32, t: f32| 3.0 * (1.0 - t) * (1.0 - t) * t * a + 3.0 * (1.0 - t) * t * t * b + t * t * t;
+    let x = x.clamp(0.0, 1.0);
+    let (mut lo, mut hi, mut t) = (0.0f32, 1.0f32, x);
+    for _ in 0..24 {
+        if at(x1, x2, t) < x { lo = t } else { hi = t }
+        t = (lo + hi) / 2.0;
+    }
+    at(y1, y2, t)
+}
+
+/// A value that moves by a spring (grow) or by a timed curve (shrink). A retarget never snaps: a spring that
+/// takes over a curve keeps the curve's speed, and a curve that takes over a spring starts where the spring is.
+#[derive(Default)]
+pub struct Motion { s: Spring, curve: Option<Curve> }
+
+#[derive(Clone, Copy)]
+struct Curve { from: f32, to: f32, t0: Instant, dur: f32, p: [f32; 4] }
+
+impl Curve {
+    fn at(&self, now: Instant) -> f32 {
+        let x = (now.duration_since(self.t0).as_secs_f32() / self.dur).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * bezier(self.p, x)
+    }
+}
+
+impl Motion {
+    /// The value as of the last `tick`.
+    pub fn value(&self) -> f32 { self.s.x }
+
+    /// Sets the value at once, with no motion.
+    pub fn jump(&mut self, v: f32) { self.curve = None; self.s = Spring { x: v, v: 0.0, to: v, last: None }; }
+
+    /// Springs to `to` (grow). A move in flight keeps its speed.
+    pub fn spring_to(&mut self, to: f32) { self.spring_to_at(to, Instant::now()) }
+
+    fn spring_to_at(&mut self, to: f32, now: Instant) {
+        if let Some(c) = self.curve.take() {
+            // Hand the curve's speed (units per second, a 1 ms difference) to the spring.
+            let (b, a) = (c.at(now), c.at(now + std::time::Duration::from_millis(1)));
+            self.s = Spring { x: b, v: (a - b) * 1000.0, to, last: None };
+            return;
+        }
+        // Unlike Spring::set, never snaps: only `jump` places the value.
+        if (to - self.s.to).abs() < 0.5 { return; }
+        self.s.to = to;
+        if !self.s.moving() { self.s.last = None; }
+    }
+
+    /// Eases to `to` on the shrink curve, from the current value.
+    pub fn curve_to(&mut self, to: f32, now: Instant) {
+        self.curve = Some(Curve { from: self.s.x, to, t0: now, dur: CLOSE_SECS, p: CLOSE_BEZIER });
+        self.s.to = to;
+    }
+
+    /// Steps to `now` and returns the value.
+    pub fn tick(&mut self, now: Instant) -> f32 {
+        let Some(c) = self.curve else { return self.s.tick(now) };
+        self.s.x = c.at(now);
+        if now.duration_since(c.t0).as_secs_f32() >= c.dur {
+            self.curve = None;
+            self.s = Spring { x: c.to, v: 0.0, to: c.to, last: None };
+        }
+        self.s.x
+    }
+
+    pub fn moving(&self) -> bool { self.curve.is_some() || self.s.moving() }
+}
+
 /// `a` to `b` (ARGB), channel by channel.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let ch = |s: u32| {
@@ -159,5 +235,75 @@ mod tests {
         assert_eq!(mix(0xFF000000, 0xFFFFFFFF, 1.0), 0xFFFFFFFF);
         assert_eq!(mix(0xFF102030, 0xFF305070, 0.5), 0xFF203850);
         assert_eq!(mix(0x00FF0000, 0xFF0000FF, 0.5), 0x80800080);
+    }
+
+    fn after(t: Instant, ms: u64) -> Instant { t + std::time::Duration::from_millis(ms) }
+
+    #[test]
+    fn bezier_hits_both_ends_and_never_goes_back() {
+        assert!(bezier(CLOSE_BEZIER, 0.0).abs() < 1e-4);
+        assert!((bezier(CLOSE_BEZIER, 1.0) - 1.0).abs() < 1e-4);
+        let mut prev = 0.0;
+        for i in 0..=100 {
+            let y = bezier(CLOSE_BEZIER, i as f32 / 100.0);
+            assert!(y >= prev - 1e-5, "dipped at {i}");
+            prev = y;
+        }
+    }
+
+    #[test]
+    fn curve_eases_out_and_ends_on_time() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.jump(0.0);
+        m.curve_to(100.0, t0);
+        let mid = m.tick(after(t0, 170));
+        assert!(mid > 50.0 && mid < 100.0, "mid {mid}");
+        assert!(m.moving());
+        assert_eq!(m.tick(after(t0, 340)), 100.0);
+        assert!(!m.moving());
+    }
+
+    #[test]
+    fn spring_takes_over_a_curve_without_a_jump_or_a_stop() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.jump(0.0);
+        m.curve_to(100.0, t0);
+        let now = after(t0, 100);
+        let x = m.tick(now);
+        m.spring_to_at(0.0, now); // reverse mid-curve
+        assert_eq!(m.value(), x, "no snap");
+        assert!(m.s.v > 0.0, "keeps moving the way the curve was going");
+        let mut t = now;
+        for _ in 0..240 { t = after(t, 16); m.tick(t); }
+        assert!(!m.moving() && m.value().abs() < 0.5, "settles on the new target: {}", m.value());
+    }
+
+    #[test]
+    fn curve_takes_over_a_spring_from_where_it_is() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.jump(0.0);
+        m.spring_to_at(100.0, t0);
+        m.s.last = Some(t0);
+        let mut t = t0;
+        for _ in 0..10 { t = after(t, 16); m.tick(t); }
+        let x = m.value();
+        assert!(x > 0.0 && m.moving());
+        m.curve_to(0.0, t);
+        assert_eq!(m.tick(t), x, "starts from where the spring is");
+        assert!(m.tick(after(t, 340)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_stalled_spring_frame_is_clamped_after_a_takeover() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.jump(0.0);
+        m.spring_to_at(100.0, t0);
+        m.s.last = Some(t0);
+        let x = m.tick(after(t0, 5000));
+        assert!(x < 150.0, "a 5 s stall moved it to {x}");
     }
 }

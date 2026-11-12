@@ -30,7 +30,7 @@ fn spec(provider: &str) -> Option<&'static (&'static str, &'static str, &'static
 
 /// Path of the command: on PATH, else npm's global folder, else the folder Antigravity's installer uses (`~\.gemini\bin`,
 /// which the app's own environment may not have on its PATH). None when it isn't installed.
-fn find(cmd: &str) -> Option<PathBuf> {
+pub(super) fn find(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let npm = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("npm"));
     let agy = std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join(".gemini").join("bin"));

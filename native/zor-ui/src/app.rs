@@ -166,6 +166,40 @@ thread_local!(pub static APP: RefCell<Option<App>> = const { RefCell::new(None) 
 
 const TICK: usize = 1;
 const FRAME: usize = 2;
+
+/// Frame pacer for 16 ms views: while on, one thread posts FRAME once per DWM composition (DwmFlush), so frames
+/// land on the screen's refresh instead of on a 16 ms SetTimer, which fires every 15.6 or 31 ms.
+static PACE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+static PACE_THREAD: OnceLock<()> = OnceLock::new();
+
+fn pace_set(on: bool, msg: HWND) {
+    let (lock, cv) = &PACE;
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if *g == on { return; }
+    *g = on;
+    cv.notify_all();
+    drop(g);
+    if on {
+        let msg = msg.0 as isize;
+        PACE_THREAD.get_or_init(|| {
+            std::thread::spawn(move || loop {
+                {
+                    let mut g = lock_pace();
+                    while !*g { g = PACE.1.wait(g).unwrap_or_else(|e| e.into_inner()); }
+                }
+                let t = std::time::Instant::now();
+                unsafe {
+                    let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                    let _ = PostMessageW(HWND(msg as *mut _), WM_TIMER, WPARAM(FRAME), LPARAM(0));
+                }
+                // DwmFlush returns at once when composition is off: don't spin
+                if let Some(rest) = std::time::Duration::from_millis(1).checked_sub(t.elapsed()) { std::thread::sleep(rest); }
+            });
+        });
+    }
+}
+
+fn lock_pace() -> std::sync::MutexGuard<'static, bool> { PACE.0.lock().unwrap_or_else(|e| e.into_inner()) }
 const HOVER: usize = 3;
 /// While the tray flyout is open: watches for a click outside it, the only thing that closes it.
 const OUTSIDE: usize = 4;
@@ -360,13 +394,16 @@ impl App {
     fn frames(&mut self) {
         if self.game.is_some() { return; }
         let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
-        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding);
+        // a 16 ms view counts as gliding too: its frames need the 1 ms timer resolution (the island spring never set gliding)
+        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
         if glide != self.hires {
             unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
             self.hires = glide;
         }
         if ms != self.frame {
-            unsafe { if ms > 0 { SetTimer(self.msg, FRAME, ms, None); } else { let _ = KillTimer(self.msg, FRAME); } }
+            let pace = ms == 16;
+            pace_set(pace, self.msg);
+            unsafe { if ms > 0 && !pace { SetTimer(self.msg, FRAME, ms, None); } else { let _ = KillTimer(self.msg, FRAME); } }
             self.frame = ms;
         }
     }
@@ -401,6 +438,7 @@ impl App {
         (self.menu, self.popup, self.pending, self.shown) = (None, None, None, None);
         let hid = self.bars.iter().chain(self.wins.iter()).filter(|w| w.visible()).map(|w| { w.hide(); w.hwnd }).collect();
         self.game = Some(hid);
+        pace_set(false, self.msg);
         unsafe { let _ = KillTimer(self.msg, FRAME); }
         self.frame = 0;
     }

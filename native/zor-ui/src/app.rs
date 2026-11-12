@@ -197,6 +197,8 @@ impl App {
         buddy::sync(&mut app);
         // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
         crate::agent::resume_on_start();
+        // the chat bots (Discord, when built with the feature and enabled in Settings), on their own threads
+        crate::messaging::start();
         dock::sync(&mut app);
         frame::sync(&mut app);
         guides::sync(&mut app);

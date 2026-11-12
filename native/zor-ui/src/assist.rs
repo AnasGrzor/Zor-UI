@@ -633,6 +633,16 @@ pub fn fold_turn(events: &[Value]) -> Turn {
 /// Runs one `ai-chat` conversation and returns its reply with any tool calls. A stream error fails the whole reply.
 /// Gives up when nothing arrives for `wait_secs`.
 pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
+    let turn = stream_turn_raw(cfg, convo, wait_secs)?;
+    if let Some(u) = turn.usage {
+        crate::log::line(&format!("buddy usage: {} in, {} out", u.input, u.output));
+        provider::add(u);
+    }
+    Ok(turn)
+}
+
+/// `stream_turn` without the token count: the caller adds `Turn::usage` itself (`agent::delegate` does).
+pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
     let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
@@ -646,12 +656,7 @@ pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, St
         if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
         events.push(v);
     }
-    let turn = fold_turn(&events);
-    if let Some(u) = turn.usage {
-        crate::log::line(&format!("buddy usage: {} in, {} out", u.input, u.output));
-        provider::add(u);
-    }
-    Ok(turn)
+    Ok(fold_turn(&events))
 }
 
 /// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.

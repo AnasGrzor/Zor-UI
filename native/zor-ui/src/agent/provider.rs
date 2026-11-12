@@ -156,7 +156,7 @@ mod tests {
             let sent = std::cell::RefCell::new(vec![]);
             let r = crate::agent::run_loop_with(model, "system", 0.3, &[], "what time is it", 3, std::time::Duration::from_secs(5), usize::MAX,
                 |convo| { sent.borrow_mut().push(convo.to_string()); Ok("{\"say\":\"It is noon.\"}".to_string()) },
-                |_| Ok(String::new()));
+                |_| Ok(String::new()), |_, _| None);
             (r, sent.into_inner())
         };
         let (a, sent_a) = run("claude-haiku-5-5");

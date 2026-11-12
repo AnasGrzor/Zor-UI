@@ -4,6 +4,7 @@
 //! Most tools only open things or change a setting you can undo. Power actions that can lose work (sleep, restart, shut down,
 //! sign out) ask in the island first. A new tool that deletes, sends or types for the user must ask before it runs too.
 
+pub mod delegate;
 pub mod developer;
 pub mod diagnose;
 #[cfg(test)]
@@ -716,12 +717,12 @@ pub fn budget_for(cfg: &Config, model: &str, system: &str) -> usize {
 /// Answers `said`: asks the AI, runs the tool it picks, feeds the result back, and repeats until it says it is done. `ask` runs one
 /// AI conversation (the JSON `assist::chat` takes) and `run` one tool, so a test can script both.
 pub fn run_loop(model: &str, said: &str, max_steps: usize, limit: Duration, ask: impl FnMut(&str) -> Result<String, String>, run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
-    run_loop_with(model, SYSTEM, 0.3, &[], said, max_steps, limit, usize::MAX, ask, run)
+    run_loop_with(model, SYSTEM, 0.3, &[], said, max_steps, limit, usize::MAX, ask, run, |_, _| None)
 }
 
 /// `run_loop` under a given system prompt and temperature, with earlier turns (`recent`) placed before `said`.
 #[allow(clippy::too_many_arguments)]
-pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&str) -> Result<String, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
+pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&str) -> Result<String, String>, mut run: impl FnMut(&Call) -> Result<String, String>, mut summarize: impl FnMut(&str, &str) -> Option<String>) -> Result<String, String> {
     let start = Instant::now();
     let mut msgs = history.to_vec();
     msgs.push(json!({ "role": "user", "content": said }));
@@ -745,7 +746,7 @@ pub fn run_loop_with(model: &str, system: &str, temp: f64, history: &[Value], sa
                 crate::log::line(&format!("buddy tool {call:?} more={more}: {}", match &res { Ok(r) => format!("ok: {}", assist::short(r, 200)), Err(e) => format!("failed: {}", assist::short(e, 200)) }));
                 match res {
                     Ok(r) if !more && !matches!(call, Call::FindApp(_) | Call::FindFile(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Browser { .. }) => return Ok(r),
-                    Ok(r) => format!("Result: {}", assist::short(&r, MAX_RESULT_CHARS)),
+                    Ok(r) => format!("Result: {}", delegate::for_call(said, &call, &r, &mut summarize)),
                     Err(e) => format!("Failed: {e}"),
                 }
             }
@@ -1068,13 +1069,15 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             let budget = budget_for(cfg, model, &system);
             native::run_native_loop(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
-                |c| run_tool(c))
+                |c| run_tool(c),
+                |task, text| timing.model(|| delegate::summarize(model, task, text, cfg)))
         } else {
             let system = build_system_prompt(cfg);
             let budget = budget_for(cfg, model, &system);
             run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
                 |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { chat(cfg, convo) }),
-                |c| run_tool(c))
+                |c| run_tool(c),
+                |task, text| timing.model(|| delegate::summarize(model, task, text, cfg)))
         };
         if i + 1 == chain.len() || halt().is_some() || !routing::should_fall_back(&r, !evidence.borrow().is_empty()) { break; }
         crate::log::line(&format!("buddy fallback: {model} could not answer, trying the next model"));
@@ -1180,7 +1183,7 @@ mod tests {
     fn earlier_turns_and_the_system_text_reach_the_ai() {
         let history = [json!({ "role": "user", "content": "play lofi" }), json!({ "role": "assistant", "content": "{\"say\":\"Playing.\"}" })];
         let mut seen = String::new();
-        let r = run_loop_with("m", "SYS", 0.3, &history, "louder", 3, Duration::from_secs(5), usize::MAX, |c| { seen = c.to_string(); Ok("{\"say\":\"Done.\"}".into()) }, |_| Ok(String::new()));
+        let r = run_loop_with("m", "SYS", 0.3, &history, "louder", 3, Duration::from_secs(5), usize::MAX, |c| { seen = c.to_string(); Ok("{\"say\":\"Done.\"}".into()) }, |_| Ok(String::new()), |_, _| None);
         assert_eq!(r, Ok("Done.".into()));
         let v: Value = serde_json::from_str(&seen).unwrap();
         assert_eq!(v["system"], "SYS");
@@ -1626,7 +1629,7 @@ mod tests {
         let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX, |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies.get(n).copied().unwrap_or("{\"say\":\"Done.\"}").to_string()) }, |_| {
             page += 1;
             Ok(char::from(b'A' + page - 1).to_string().repeat(2000))
-        });
+        }, |_, _| None);
         assert_eq!(r, Ok("Done.".into()));
         let last = seen.borrow().last().cloned().unwrap();
         let v: Value = serde_json::from_str(&last).unwrap();
@@ -1649,7 +1652,7 @@ mod tests {
     #[test]
     fn the_configured_temperature_reaches_the_request() {
         let seen = RefCell::new(String::new());
-        let r = run_loop_with("m", SYSTEM, 0.9, &[], "x", 3, Duration::from_secs(5), usize::MAX, |c| { *seen.borrow_mut() = c.to_string(); Ok("{\"say\":\"ok\"}".into()) }, |_| Ok(String::new()));
+        let r = run_loop_with("m", SYSTEM, 0.9, &[], "x", 3, Duration::from_secs(5), usize::MAX, |c| { *seen.borrow_mut() = c.to_string(); Ok("{\"say\":\"ok\"}".into()) }, |_| Ok(String::new()), |_, _| None);
         assert_eq!(r, Ok("ok".into()));
         let v: Value = serde_json::from_str(&seen.borrow()).unwrap();
         assert_eq!(v["temperature"], 0.9);
@@ -1715,7 +1718,7 @@ mod tests {
     #[test]
     fn a_stop_from_the_user_ends_the_loop_at_once() {
         let ran = RefCell::new(0);
-        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX, |_| Err(crate::browse::STOPPED.into()), |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX, |_| Err(crate::browse::STOPPED.into()), |_| { *ran.borrow_mut() += 1; Ok(String::new()) }, |_, _| None);
         assert_eq!(r, Err(crate::browse::STOPPED.into()));
         assert_eq!(*ran.borrow(), 0, "no tool runs after the stop");
     }
@@ -1809,12 +1812,55 @@ mod tests {
     }
 
     #[test]
+    fn a_long_tool_result_is_summarized_once_and_a_short_one_is_not() {
+        let replies = ["{\"do\":\"web_search\",\"arg\":\"a\"}", "{\"say\":\"Done.\"}"];
+        let seen = RefCell::new(vec![]);
+        let calls = RefCell::new(vec![]);
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX,
+            |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies[n].to_string()) },
+            |_| Ok("z".repeat(7000)),
+            |task, text| { calls.borrow_mut().push((task.to_string(), text.chars().count())); Some("the summary".into()) });
+        assert_eq!(r, Ok("Done.".into()));
+        assert_eq!(*calls.borrow(), [("x".to_string(), 7000)], "one summary call, for the task's text");
+        let second: Value = serde_json::from_str(&seen.borrow()[1]).unwrap();
+        assert_eq!(second["messages"][2]["content"], "Result: Summary of the tool result: the summary", "the model reads the summary");
+
+        let short = RefCell::new(0);
+        let turns = RefCell::new(0);
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX,
+            |_| { let n = *turns.borrow(); *turns.borrow_mut() += 1; Ok(replies[n].to_string()) },
+            |_| Ok("short".into()),
+            |_, _| { *short.borrow_mut() += 1; Some("unused".into()) });
+        assert!(r.is_ok());
+        assert_eq!(*short.borrow(), 0, "a short result makes no summary call");
+    }
+
+    #[test]
+    fn a_long_browser_snapshot_is_never_summarized_and_keeps_its_ref_ids() {
+        let replies = ["{\"do\":\"browser\",\"tool\":\"browser_snapshot\"}", "{\"say\":\"Done.\"}"];
+        let seen = RefCell::new(vec![]);
+        let snapshot = "- button \"Save\" [ref=e1]\n".repeat(300);
+        let summaries = RefCell::new(0);
+        let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX,
+            |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies[n].to_string()) },
+            |_| Ok(snapshot.clone()),
+            |_, _| { *summaries.borrow_mut() += 1; Some("a summary without ids".into()) });
+        assert_eq!(r, Ok("Done.".into()));
+        assert_eq!(*summaries.borrow(), 0, "a browser result is never summarized");
+        let second: Value = serde_json::from_str(&seen.borrow()[1]).unwrap();
+        let fed = second["messages"][2]["content"].as_str().unwrap();
+        assert!(fed.starts_with("Result: - button \"Save\" [ref=e1]"), "the model gets the capped snapshot: {}", fed.chars().take(60).collect::<String>());
+        assert!(fed.contains("[ref=e1]"), "the ref ids reach the model");
+        assert!(fed.chars().count() <= MAX_RESULT_CHARS + 16, "{} chars", fed.chars().count());
+    }
+
+    #[test]
     fn a_long_tool_result_is_cut_before_the_ai_sees_it() {
         let seen = RefCell::new(vec![]);
         let replies = ["{\"do\":\"web_search\",\"arg\":\"a\"}", "{\"say\":\"Done.\"}"];
         let r = run_loop_with("m", "SYS", 0.3, &[], "x", 6, Duration::from_secs(5), usize::MAX,
             |c| { let n = seen.borrow().len(); seen.borrow_mut().push(c.to_string()); Ok(replies[n].to_string()) },
-            |_| Ok("z".repeat(10_000)));
+            |_| Ok("z".repeat(10_000)), |_, _| None);
         assert_eq!(r, Ok("Done.".into()));
         let second: Value = serde_json::from_str(&seen.borrow()[1]).unwrap();
         let fed = second["messages"][2]["content"].as_str().unwrap();

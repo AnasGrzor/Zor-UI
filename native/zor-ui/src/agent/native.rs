@@ -2,7 +2,7 @@
 //! back through `parse_step`, the same validator the JSON protocol uses, so both paths accept and refuse the same things.
 //! `run_native_loop` runs it for a Claude model when native tools are on (`agent::native_on`).
 
-use super::{fit_to_budget, parse_step, Call, Step, MAX_RESULT_CHARS, MAX_SAY};
+use super::{delegate, fit_to_budget, parse_step, Call, Step, MAX_SAY};
 use crate::assist::Turn;
 use crate::bridge::native_tools;
 use serde_json::{json, Value};
@@ -57,7 +57,7 @@ pub fn step_from_tool(name: &str, input: &Value) -> Step {
 /// is plain text, which ends the request. Calls that can't be read are answered with an error so the model can try again.
 /// `ask` sends one conversation (`convo` carries the tool list) and returns the reply; `run` runs one tool.
 #[allow(clippy::too_many_arguments)]
-pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&Value) -> Result<Turn, String>, mut run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
+pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], said: &str, max_steps: usize, limit: Duration, budget: usize, mut ask: impl FnMut(&Value) -> Result<Turn, String>, mut run: impl FnMut(&Call) -> Result<String, String>, mut summarize: impl FnMut(&str, &str) -> Option<String>) -> Result<String, String> {
     let start = Instant::now();
     let mut msgs = history.to_vec();
     msgs.push(json!({ "role": "user", "content": said }));
@@ -82,7 +82,7 @@ pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], 
         let mut results = vec![];
         for c in &turn.calls {
             let (text, is_error) = match step_from_tool(c["name"].as_str().unwrap_or(""), &c["input"]) {
-                Step::Call { call, .. } => match run(&call) { Ok(r) => (crate::assist::short(&r, MAX_RESULT_CHARS), false), Err(e) => (format!("Failed: {e}"), true) },
+                Step::Call { call, .. } => match run(&call) { Ok(r) => (delegate::for_call(said, &call, &r, &mut summarize), false), Err(e) => (format!("Failed: {e}"), true) },
                 Step::Bad(why) => (why, true),
                 Step::Say(_) => ("Use a tool, or answer in plain text.".into(), true),
             };
@@ -114,7 +114,7 @@ mod tests {
         let seen = RefCell::new(Vec::<Value>::new());
         let r = run_native_loop("claude-sonnet-5-5", "SYS", 0.4, &[], "open spotify", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
-            |c| { assert!(matches!(c, Call::Open(a) if a == "Spotify")); Ok("Opened Spotify.".into()) });
+            |c| { assert!(matches!(c, Call::Open(a) if a == "Spotify")); Ok("Opened Spotify.".into()) }, |_, _| None);
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
@@ -134,7 +134,7 @@ mod tests {
         let seen = RefCell::new(Vec::<Value>::new());
         let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
-            |_| Err("No app called Nope.".into()));
+            |_| Err("No app called Nope.".into()), |_, _| None);
         assert_eq!(r, Ok("Sorry, it failed.".into()));
         let result = seen.borrow()[1]["messages"][2]["content"][0].clone();
         assert_eq!(result["is_error"], true);
@@ -149,7 +149,7 @@ mod tests {
         let ran = RefCell::new(0);
         let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
-            |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
+            |_| { *ran.borrow_mut() += 1; Ok(String::new()) }, |_, _| None);
         assert_eq!(r, Ok("Done.".into()));
         assert_eq!(*ran.borrow(), 0);
         let assistant = seen.borrow()[1]["messages"][1]["content"][0].clone();
@@ -165,22 +165,38 @@ mod tests {
         let seen = RefCell::new(Vec::<Value>::new());
         let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
-            |_| panic!("an unknown tool must not run"));
+            |_| panic!("an unknown tool must not run"), |_, _| None);
         assert_eq!(r, Ok("Okay.".into()));
         assert_eq!(seen.borrow()[1]["messages"][2]["content"][0]["is_error"], true);
     }
 
     #[test]
     fn a_plain_text_reply_ends_the_request_and_empty_text_is_an_error() {
-        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("Hi there.")), |_| Ok(String::new()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("Hi there.")), |_| Ok(String::new()), |_, _| None);
         assert_eq!(r, Ok("Hi there.".into()));
-        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("  ")), |_| Ok(String::new()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "hi", 4, Duration::from_secs(5), usize::MAX, |_| Ok(text("  ")), |_| Ok(String::new()), |_, _| None);
         assert_eq!(r, Err("I got no answer from the AI.".into()));
     }
 
     #[test]
+    fn a_long_tool_result_goes_back_as_its_summary_after_one_summary_call() {
+        let turns = RefCell::new(vec![text("Done."), calls(&[("toolu_5", "web_search", json!({ "arg": "news" }))])]);
+        let seen = RefCell::new(Vec::<Value>::new());
+        let sums = RefCell::new(0);
+        let r = run_native_loop("claude-sonnet-5-5", "SYS", 0.3, &[], "news", 4, Duration::from_secs(5), usize::MAX,
+            |convo| { seen.borrow_mut().push(convo.clone()); Ok(turns.borrow_mut().pop().unwrap()) },
+            |_| Ok("n".repeat(7000)),
+            |_, _| { *sums.borrow_mut() += 1; Some("short summary".into()) });
+        assert_eq!(r, Ok("Done.".into()));
+        assert_eq!(*sums.borrow(), 1, "one summary call");
+        let result = seen.borrow()[1]["messages"][2]["content"][0].clone();
+        assert_eq!(result["content"], "Summary of the tool result: short summary");
+        assert_eq!(result["is_error"], false);
+    }
+
+    #[test]
     fn the_loop_stops_after_the_step_budget() {
-        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 2, Duration::from_secs(5), usize::MAX, |_| Ok(calls(&[("t", "media", json!({ "arg": "next" }))])), |_| Ok("Skipped.".into()));
+        let r = run_native_loop("m", "SYS", 0.3, &[], "x", 2, Duration::from_secs(5), usize::MAX, |_| Ok(calls(&[("t", "media", json!({ "arg": "next" }))])), |_| Ok("Skipped.".into()), |_, _| None);
         assert_eq!(r, Err("I couldn't finish that in a few steps.".into()));
     }
 
@@ -189,7 +205,7 @@ mod tests {
         let ran = RefCell::new(0);
         let r = run_native_loop("m", "SYS", 0.3, &[], "x", 4, Duration::from_secs(5), usize::MAX,
             |_| Err(crate::browse::STOPPED.into()),
-            |_| { *ran.borrow_mut() += 1; Ok(String::new()) });
+            |_| { *ran.borrow_mut() += 1; Ok(String::new()) }, |_, _| None);
         assert_eq!(r, Err(crate::browse::STOPPED.into()));
         assert_eq!(*ran.borrow(), 0);
     }

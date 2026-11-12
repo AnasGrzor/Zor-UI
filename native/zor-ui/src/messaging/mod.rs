@@ -62,10 +62,11 @@ impl Seen {
     }
 }
 
-/// Starts the enabled chat transports. Called once at app start, and returns at once.
-pub fn start() {
+/// Brings the chat transports in line with config.json and the saved secrets: started when enabled, stopped when switched off. Called
+/// at app start, on each config reload, and after a token changes. Returns at once; the work runs on a background thread.
+pub fn sync() {
     #[cfg(feature = "discord")]
-    discord::start();
+    discord::request_sync();
 }
 
 #[cfg(test)]

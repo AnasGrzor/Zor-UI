@@ -2,7 +2,8 @@
 //! `discord` feature (`cargo build --features discord`). Servers (guilds) are ignored: only direct messages are read.
 //!
 //! The bot runs on its own thread with its own current-thread Tokio runtime, so the app's runtime keeps its features. The buddy
-//! itself runs on the blocking pool (`spawn_blocking`), so a long request does not stop the gateway's heartbeat.
+//! itself runs on the blocking pool (`spawn_blocking`), so a long request does not stop the gateway's heartbeat. `sync` starts,
+//! stops and restarts the bot to match Settings, so a switch takes effect without a restart.
 
 use super::{conversation_id, pairing, split, Seen, DISCORD_LIMIT};
 use crate::conf::Config;
@@ -11,7 +12,8 @@ use serenity::{
     client::{Client, Context, EventHandler},
     model::{channel::Message, gateway::{GatewayIntents, Ready}},
 };
-use std::{sync::Mutex, time::{Duration, Instant}};
+use std::{sync::{mpsc, Mutex, OnceLock}, time::{Duration, Instant}};
+use tokio::sync::watch;
 
 pub const PROVIDER: &str = super::DISCORD;
 
@@ -24,7 +26,7 @@ pub static STATUS: Mutex<String> = Mutex::new(String::new());
 /// What Settings shows: the bot's state, and while no account is paired, where the pairing code is.
 pub fn status() -> String {
     let s = STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if s.is_empty() { return "Not started. Restart Zor UI after saving the token".to_string(); }
+    if s.is_empty() { return "Not started yet".to_string(); }
     if s == "connected" && pairing::paired(PROVIDER).is_empty() {
         return "Connected. No account paired yet: the pairing code is in remote-pairing.txt in the Zor UI data folder".to_string();
     }
@@ -62,8 +64,8 @@ impl EventHandler for Handler {
                     "Paired. Send me a message and I'll answer here."
                 }
                 pairing::Redeem::Wrong => "That code is wrong.",
-                pairing::Redeem::Expired => "That code expired. Restart Zor UI for a new one.",
-                pairing::Redeem::Locked => "Too many wrong codes. Restart Zor UI for a new one.",
+                pairing::Redeem::Expired => "That code expired. Ask the PC for a new one.",
+                pairing::Redeem::Locked => "Too many wrong codes. Ask the PC for a new one.",
                 pairing::Redeem::NoCode => return,
             };
             let _ = msg.channel_id.say(&ctx.http, reply).await;
@@ -91,28 +93,128 @@ impl EventHandler for Handler {
 /// The file the pairing code is written to, for the PC owner to read.
 fn code_file() -> std::path::PathBuf { crate::conf::data_dir().join("remote-pairing.txt") }
 
-/// Starts the bot when Settings enables it and a token is saved. Returns at once; the bot runs on its own thread.
-pub fn start() {
-    let cfg = Config::load();
-    if !cfg.bool("remote.discord.enabled") { set_status("off"); return; }
-    let token = crate::bridge::web::secret_get(TOKEN_SECRET);
-    if token.is_empty() { set_status("no bot token saved"); return; }
+/// The running bot: the sender that stops it, and the token it runs with. A different token restarts it.
+struct Running {
+    stop: watch::Sender<bool>,
+    token: String,
+}
+
+static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+static SYNC: OnceLock<mpsc::Sender<()>> = OnceLock::new();
+
+/// Asks the sync worker to look again at the switch and the token. Returns at once: nothing here reads a file or a secret, so the
+/// UI thread never waits on the disk.
+pub fn request_sync() {
+    let tx = SYNC.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        if std::thread::Builder::new().name("discord-sync".into()).spawn(move || sync_worker(rx)).is_err() {
+            set_status("could not start the sync thread");
+        }
+        tx
+    });
+    let _ = tx.send(());
+}
+
+/// Runs one pass per request. Requests that pile up while a pass runs become one more pass, which reads the newest state anyway.
+fn sync_worker(rx: mpsc::Receiver<()>) {
+    while rx.recv().is_ok() {
+        while rx.try_recv().is_ok() {}
+        if let Some(enabled) = switch_on_disk() { sync_now(enabled); }
+    }
+}
+
+/// The switch as config.json says it now. None when the file can't be read or is broken: the bot then stays as it is.
+fn switch_on_disk() -> Option<bool> {
+    let text = std::fs::read_to_string(crate::conf::pack_dir().join("config.json")).ok()?;
+    if Config::is_broken(&text) {
+        crate::log::line("discord: config.json is broken, keeping the bot as it is");
+        return None;
+    }
+    Some(Config::parse(&text).bool("remote.discord.enabled"))
+}
+
+/// Brings the bot in line with the switch and the saved token: runs it when the switch is on and a token is saved, stops it when
+/// the switch is off or the token is cleared, and restarts it when the token changed. Runs on the sync worker only.
+fn sync_now(enabled: bool) {
+    let token = if enabled { crate::bridge::web::secret_get(TOKEN_SECRET) } else { String::new() };
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let action = step(enabled, &token, running.as_ref().map(|r| r.token.as_str()));
+    if action == Step::Keep { return; }
+    if let Some(old) = running.take() { let _ = old.stop.send(true); }
+    match action {
+        Step::Keep | Step::Stop => {}
+        Step::Off => set_status("off"),
+        Step::NoToken => set_status("no bot token saved"),
+        Step::Start => start(&token, &mut *running),
+    }
+}
+
+/// What `sync` does: the switch, the saved token, and the token of the bot that runs (None when none runs).
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// The bot already runs with this token.
+    Keep,
+    /// The switch is off or the token was cleared while the bot ran: it stops.
+    Stop,
+    /// Off, and nothing runs.
+    Off,
+    /// On, but there is no token to connect with.
+    NoToken,
+    /// On with a token that no bot runs with yet (a changed token stops the old bot first).
+    Start,
+}
+
+fn step(enabled: bool, token: &str, running: Option<&str>) -> Step {
+    match (enabled, token.is_empty(), running) {
+        (false, _, Some(_)) => Step::Stop,
+        (false, _, None) => Step::Off,
+        (true, true, Some(_)) => Step::Stop,
+        (true, true, None) => Step::NoToken,
+        (true, false, Some(r)) if r == token => Step::Keep,
+        (true, false, _) => Step::Start,
+    }
+}
+
+/// Makes the pairing code if no account is paired, and starts the bot thread with `token`.
+fn start(token: &str, running: &mut Option<Running>) {
     if pairing::paired(PROVIDER).is_empty() {
         let code = pairing::new_code(Instant::now());
         let note = format!("Pairing code for Discord: {code}\r\nSend it to the bot in a direct message within {} minutes.\r\n", pairing::CODE_SECS / 60);
         let _ = std::fs::write(code_file(), note);
     }
-    let spawned = std::thread::Builder::new().name("discord".into()).spawn(move || run(token));
-    if spawned.is_err() { set_status("could not start the thread"); }
+    let (stop, stop_rx) = watch::channel(false);
+    let worker_token = token.to_string();
+    match std::thread::Builder::new().name("discord".into()).spawn(move || run(worker_token, stop_rx)) {
+        Ok(_) => *running = Some(Running { stop, token: token.to_string() }),
+        Err(_) => set_status("could not start the thread"),
+    }
 }
 
-fn run(token: String) {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_switch_and_the_token_decide_what_runs() {
+        assert_eq!(step(false, "", None), Step::Off);
+        assert_eq!(step(false, "t", None), Step::Off, "a saved token does not start a switched-off bot");
+        assert_eq!(step(false, "t", Some("t")), Step::Stop, "switching off stops it");
+        assert_eq!(step(true, "", None), Step::NoToken);
+        assert_eq!(step(true, "", Some("t")), Step::Stop, "clearing the token stops it");
+        assert_eq!(step(true, "t", None), Step::Start);
+        assert_eq!(step(true, "t", Some("t")), Step::Keep, "a reload with nothing changed does not restart it");
+        assert_eq!(step(true, "new", Some("old")), Step::Start, "a new token starts the bot again with it");
+    }
+}
+
+fn run(token: String, mut stop: watch::Receiver<bool>) {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => { set_status(&format!("could not start the runtime: {e}")); return; }
     };
     rt.block_on(async move {
-        // a stopped gateway is connected again, after a wait that doubles up to five minutes
+        // a dropped connection is made again after a wait that doubles up to five minutes
         let mut wait = 5u64;
         loop {
             set_status("connecting");
@@ -120,11 +222,18 @@ fn run(token: String) {
             let handler = Handler { seen: Mutex::new(Seen::new(512)) };
             match Client::builder(&token, intents).event_handler(handler).await {
                 Ok(mut client) => {
-                    if let Err(e) = client.start().await { set_status(&format!("stopped: {e}")); }
+                    let shards = client.shard_manager.clone();
+                    tokio::select! {
+                        r = client.start() => { if let Err(e) = r { set_status(&format!("stopped: {e}")); } }
+                        _ = stop.changed() => { shards.shutdown_all().await; set_status("off"); return; }
+                    }
                 }
                 Err(e) => set_status(&format!("could not connect: {e}")),
             }
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                _ = stop.changed() => { set_status("off"); return; }
+            }
             wait = (wait * 2).min(300);
         }
     });

@@ -1094,7 +1094,11 @@ impl Settings {
                     s.toast(&if r["ok"] == true { ok.to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() });
                 });
             }
-            "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| s.keys = Load::Idle),
+            "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| {
+                s.keys = Load::Idle;
+                // a cleared Discord token stops the bot
+                crate::messaging::sync();
+            }),
             // a new pairing code for the Discord bot; the card shows it until it is used or runs out
             "discord-pair" => { crate::messaging::pairing::new_code(std::time::Instant::now()); }
             // the account stops reaching the buddy from its next message
@@ -1108,6 +1112,8 @@ impl Settings {
                 f.tb.set("");
                 store::bridge(cx, &inbox, "secret-set", vec![arg, v], |s, r| {
                     s.keys = Load::Idle;
+                    // a new Discord token takes effect at once
+                    crate::messaging::sync();
                     let m = if r["ok"] == true { "Key saved".to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() };
                     s.toast(&m);
                 });

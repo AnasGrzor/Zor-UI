@@ -198,7 +198,7 @@ impl App {
         // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
         crate::agent::resume_on_start();
         // the chat bots (Discord, when built with the feature and enabled in Settings), on their own threads
-        crate::messaging::start();
+        crate::messaging::sync();
         dock::sync(&mut app);
         frame::sync(&mut app);
         guides::sync(&mut app);
@@ -316,6 +316,8 @@ impl App {
                 crate::log::line("config.json isn't valid JSON; keeping the last good settings");
             } else {
                 self.cx.cfg = Config::parse(&t);
+                // a switch in Settings turns a chat bot on or off here, without a restart
+                crate::messaging::sync();
                 self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
                     self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
                 let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;

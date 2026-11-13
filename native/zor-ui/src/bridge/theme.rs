@@ -317,7 +317,9 @@ fn write_glazewm(cfg: &Path, c: &BTreeMap<String, String>) -> bool {
     if !found { return false; }
     out.push_str(rest);
     // Python's write_text turns \n into \r\n on Windows; keep the file in the same shape
-    std::fs::write(cfg, out.replace('\n', "\r\n")).is_ok()
+    // through a temp file, so a crash never leaves half of the user's GlazeWM config
+    let tmp = cfg.with_extension("tmp");
+    std::fs::write(&tmp, out.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, cfg)).is_ok()
 }
 
 /// Fills Flow Launcher's theme template. False if there's no template.
@@ -333,7 +335,9 @@ fn write_flow(template: &Path, themes_dir: &Path, c: &BTreeMap<String, String>, 
         out = out.replace(&format!("{{{{{k}}}}}"), &v);
     }
     let _ = std::fs::create_dir_all(themes_dir);
-    std::fs::write(themes_dir.join("zor-ui.xaml"), out.replace('\n', "\r\n")).is_ok()
+    // temp file then rename, so a crash never leaves Flow Launcher a half-written theme
+    let (path, tmp) = (themes_dir.join("zor-ui.xaml"), themes_dir.join("zor-ui.xaml.tmp"));
+    std::fs::write(&tmp, out.replace('\n', "\r\n")).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
 }
 
 /// Windows Terminal fragment with an "zor-ui" colour scheme.
@@ -348,7 +352,10 @@ fn write_terminal(frag_dir: &Path, c: &BTreeMap<String, String>, t: &BTreeMap<St
         s.insert(format!("bright{}{}", n[..1].to_uppercase(), &n[1..]), get(t, &format!("term{}", i + 8)));
     }
     let _ = std::fs::create_dir_all(frag_dir);
-    let _ = std::fs::write(frag_dir.join("zor-ui.json"), serde_json::to_string_pretty(&json!({ "schemes": [s] })).unwrap_or_default());
+    // temp file then rename, so a crash never leaves Windows Terminal a half-written scheme file
+    let (path, tmp) = (frag_dir.join("zor-ui.json"), frag_dir.join("zor-ui.json.tmp"));
+    let text = serde_json::to_string_pretty(&json!({ "schemes": [s] })).unwrap_or_default();
+    let _ = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path));
 }
 
 /// Asks GlazeWM to reload its config (best effort, 10 s at most).
@@ -829,6 +836,11 @@ mod tests {
         std::fs::write(&t, "{{BG}} {{FG}} {{COLORSCHEME}} {{PRIMARY}}").unwrap();
         assert!(write_flow(&t, &d.join("themes"), &colors(), false));
         assert_eq!(std::fs::read_to_string(d.join("themes").join("zor-ui.xaml")).unwrap(), "#000002 #000003 Light #000000");
+        assert!(!d.join("themes").join("zor-ui.xaml.tmp").exists(), "temp file is renamed away");
+        // a second write replaces the file in place
+        std::fs::write(&t, "{{BG}} dark").unwrap();
+        assert!(write_flow(&t, &d.join("themes"), &colors(), true));
+        assert_eq!(std::fs::read_to_string(d.join("themes").join("zor-ui.xaml")).unwrap(), "#000002 dark");
         assert!(!write_flow(&d.join("none"), &d.join("themes"), &colors(), true));
     }
 
@@ -842,6 +854,10 @@ mod tests {
         assert_eq!(s["name"], "zor-ui");
         assert_eq!(s["brightPurple"], json!(term["term13"]));
         assert_eq!(s["black"], json!(term["term0"]));
+        assert!(!d.join("zor-ui.json.tmp").exists(), "temp file is renamed away");
+        // a second write replaces the file in place
+        write_terminal(&d, &colors(), &term);
+        assert!(serde_json::from_str::<Value>(&std::fs::read_to_string(d.join("zor-ui.json")).unwrap()).is_ok());
     }
 
     #[test]

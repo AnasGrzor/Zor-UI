@@ -86,7 +86,9 @@ pub fn apply_split(main: u32) {
     let path = crate::conf::home().join(r".glzr\glazewm\config.yaml");
     let Ok(old) = std::fs::read_to_string(&path) else { return };
     let Some(new) = bind_split(&old, main) else { return };
-    if std::fs::write(&path, new).is_ok() { command("wm-reload-config"); }
+    // write then rename, so a crash mid-write never leaves a truncated config.yaml
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, new).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() { command("wm-reload-config"); }
 }
 
 /// The same on one container ("close" or "move --workspace 3" for window `id`, "focus" to focus it).
@@ -103,6 +105,18 @@ pub fn focus_cmds(id: &str, minimized: bool) -> Vec<String> {
 pub fn focus(id: &str, minimized: bool) { for c in focus_cmds(id, minimized) { command(&c); } }
 
 #[cfg(test)]
+mod socket_tests {
+    // A hung-peer write is not reproducible on loopback (Windows buffers huge writes), so this checks the setting.
+    #[test]
+    fn link_has_a_one_second_write_timeout() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        super::tune(&c);
+        assert_eq!(c.write_timeout().unwrap(), Some(super::WRITE_TIMEOUT));
+    }
+}
+
+#[cfg(test)]
 mod focus_tests {
     #[test]
     fn restores_minimized_only() {
@@ -110,6 +124,15 @@ mod focus_tests {
         assert_eq!(super::focus_cmds("a", true), vec!["focus --container-id a", "--id a set-tiling"]);
     }
 }
+
+/// Socket options for the GlazeWM link. The write timeout matters: `OUT` is locked while a command is
+/// written, so a hung GlazeWM must not block that write (and the UI thread behind it) forever.
+fn tune(s: &TcpStream) {
+    s.set_nodelay(true).ok();
+    s.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
+}
+
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn send(s: &mut TcpStream, text: &str) -> std::io::Result<()> {
     // client frames are masked (RFC 6455); a zero mask leaves the bytes as they are
@@ -173,7 +196,7 @@ pub fn connected() -> bool { matches!(OUT.get().map(|m| m.lock().map(|s| s.is_so
 
 fn session(on: &impl Fn(Wm)) -> Result<(), ()> {
     let mut s = TcpStream::connect(("127.0.0.1", 6123)).map_err(|_| ())?;
-    s.set_nodelay(true).ok();
+    tune(&s);
     s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:6123\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ZW5kNC1wQy1uYXRpdmUhIQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").map_err(|_| ())?;
     let mut r = BufReader::new(s.try_clone().map_err(|_| ())?);
     let mut line = String::new();

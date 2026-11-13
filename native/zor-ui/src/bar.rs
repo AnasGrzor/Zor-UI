@@ -319,7 +319,8 @@ pub struct Bar {
     di_track_until: f64,
     di_scroll_at: f64,
     art: Option<((std::sync::Arc<Vec<u8>>, u32), Pixmap)>,
-    tray_px: HashMap<String, (usize, Pixmap)>,
+    /// Per tray icon: the image it was drawn from (kept alive, so its address can't be reused), the px size, the pixmap.
+    tray_px: HashMap<String, (std::sync::Arc<(Vec<u8>, u32, u32)>, u32, Pixmap)>,
     pills: Vec<(u32, R)>,
     hover: u32,
     ws_names: Vec<String>,
@@ -385,11 +386,10 @@ impl Bar {
 
     fn tray_icon(&mut self, i: &crate::tray::Icon, px: u32) -> Option<Pixmap> {
         let rgba = i.rgba.as_ref()?;
-        let tag = std::sync::Arc::as_ptr(rgba) as usize ^ px as usize;
-        if self.tray_px.get(&i.id).map(|e| e.0) != Some(tag) {
-            self.tray_px.insert(i.id.clone(), (tag, rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px)?));
+        if !self.tray_px.get(&i.id).is_some_and(|e| std::sync::Arc::ptr_eq(&e.0, rgba) && e.1 == px) {
+            self.tray_px.insert(i.id.clone(), (rgba.clone(), px, rgba_to_pixmap(&rgba.0, rgba.1, rgba.2, px)?));
         }
-        self.tray_px.get(&i.id).map(|e| e.1.clone())
+        self.tray_px.get(&i.id).map(|e| e.2.clone())
     }
 }
 
@@ -550,8 +550,7 @@ impl Bar {
     /// diProviders() in bar.js: what the island could show, most important first; .2 = wins outright.
     fn island_list(cx: &Ctx) -> Vec<(&'static str, bool)> {
         let di = |k: &str| cx.cfg.get(&format!("island.{k}")).as_bool() != Some(false);
-        let agents = hub::get_json("zor-ui.agents");
-        let agents = agents.as_array().cloned().unwrap_or_default();
+        let agents = &cx.agents;
         let asks = di("agents") && agents.iter().any(|a| a["state"] == "waiting");
         let now = hub::now_ms();
         let mut l = vec![];
@@ -592,8 +591,7 @@ impl Bar {
                 els.push(El::Txt(format!("{} · {}", n.app, n.text), txt(13.0, 400), fg, wide_w));
             }
             "agent" => {
-                let agents = hub::get_json("zor-ui.agents");
-                let agents = agents.as_array().cloned().unwrap_or_default();
+                let agents = &cx.agents;
                 let waiting: Vec<&Value> = agents.iter().filter(|a| a["state"] == "waiting").collect();
                 let a = waiting.first().copied().or_else(|| agents.iter().find(|a| a["state"] == "working"))?;
                 let s = |v: &Value| v.as_str().unwrap_or("").to_string();
@@ -845,6 +843,8 @@ impl Bar {
                     self.tray_tips.clear();
                     let mut els = vec![];
                     let (shown, hidden) = tray_icons(cx);
+                    // drop the images of icons that have gone, so the cache stays one entry per shown icon
+                    self.tray_px.retain(|id, _| shown.iter().any(|i| &i.id == id));
                     for i in shown {
                         if let Some(img) = self.tray_icon(&i, px) {
                             els.push(El::Img(TRAY + self.tray_ids.len() as u32, img, 18.0));
@@ -1383,6 +1383,16 @@ mod tests {
             let p = bar.island(&mut c, &cx, &|_| true).expect("island with media");
             assert_eq!(p.els.iter().any(|e| matches!(e, El::Eq(..))), playing, "playing {playing}");
         }
+    }
+
+    /// The island shows a waiting agent over playing media when cx.agents has one, and the media when cx.agents is empty.
+    #[test]
+    fn island_shows_agent_from_ctx() {
+        let mut cx = Ctx::new(false);
+        cx.media = Some(crate::media::Media { playing: true, title: "t".into(), current: true, ..Default::default() });
+        assert_eq!(Bar::island_list(&cx).first().map(|p| p.0), Some("media"));
+        cx.agents = vec![serde_json::json!({ "label": "a", "state": "waiting" })];
+        assert_eq!(Bar::island_list(&cx).first().map(|p| p.0), Some("agent"));
     }
 
     /// The pill shows only while media plays, in both the island and the media slot; paused or no session gives none.

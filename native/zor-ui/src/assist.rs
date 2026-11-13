@@ -5,7 +5,7 @@
 //! AI model from the sidebar, which picks tools and retries when one fails (agent.rs). Nothing is ever sent for you:
 //! messages open in the app and wait for you to press Enter.
 
-use crate::{conf::Config, proc, screen, util};
+use crate::{agent::provider, conf::Config, proc, screen, util};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -71,6 +71,20 @@ pub fn say_secs(s: &str) -> f32 { (s.chars().count() as f32 / 14.0).clamp(7.0, 3
 
 /// The last answer the buddy gave, for "say that again".
 static LAST: Mutex<Option<String>> = Mutex::new(None);
+/// Set while a request runs. The cancel flag and the token total are per request, so only one may run at a time.
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Holds the busy flag for one request. Dropping it (the request ends, errors, or panics) frees the buddy for the next.
+pub struct Busy;
+
+/// Takes the busy flag, or None while another request holds it.
+pub fn try_busy() -> Option<Busy> {
+    BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).ok().map(|_| Busy)
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) { BUSY.store(false, std::sync::atomic::Ordering::SeqCst); }
+}
 /// How long an answer stays in the island banner (ms), so one you looked away from can still be read.
 const ANSWER_BANNER_MS: f64 = 60_000.0;
 
@@ -106,22 +120,23 @@ pub fn parse(said: &str) -> Intent {
     let mut t = clean(said);
     // fillers and "please" at the front
     loop {
-        let l = t.to_lowercase();
+        let l = t.to_ascii_lowercase();
         let Some(f) = ["hey", "ok", "okay", "please", "can you", "could you", "would you", "will you"].iter().find(|f| l.strip_prefix(**f).is_some_and(|r| r.is_empty() || r.starts_with([' ', ',']))) else { break };
         t = t[f.len()..].trim_start_matches([' ', ',']);
     }
-    let l = t.to_lowercase();
+    // ASCII lowercase keeps every byte offset of `t` (to_lowercase can change length, e.g. "İ"), so the indices below are safe
+    let l = t.to_ascii_lowercase();
     let rest = |prefixes: &[&str]| prefixes.iter().find(|p| l.starts_with(**p)).map(|p| clean(&t[p.len()..]).to_string()).filter(|r| !r.is_empty());
     if let Some(q) = rest(&["search for ", "search up ", "search ", "google ", "look up ", "look for "]) { return Intent::Search(q); }
     if let Some(m) = rest(&["send a message to ", "send message to ", "message ", "text ", "whatsapp ", "dm "]) {
-        let ml = m.to_lowercase();
+        let ml = m.to_ascii_lowercase();
         let mark = [" saying ", " that says ", " that ", " says ", ": "].iter().filter_map(|k| ml.find(k).map(|i| (i, k.len()))).min();
         let (to, text) = match mark {
             Some((i, n)) => (m[..i].trim(), m[i + n..].trim()),
             None => m.split_once(' ').map_or((m.as_str(), ""), |(a, b)| (a, b)),
         };
         // "Sara on WhatsApp": the app you said they are on
-        let (to, via) = match to.to_lowercase().rfind(" on ") {
+        let (to, via) = match to.to_ascii_lowercase().rfind(" on ") {
             Some(i) if !to[..i].trim().is_empty() && !to[i + 4..].trim().is_empty() && to[i + 4..].split_whitespace().count() <= 3 => (to[..i].trim(), to[i + 4..].trim()),
             _ => (to, ""),
         };
@@ -130,7 +145,7 @@ pub fn parse(said: &str) -> Intent {
     if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run "]) { return Intent::Open(app_name_of(&a).to_string()); }
     if let Some(p) = rest(&["play "]) {
         // "lofi on spotify": the last " on " names the service, unless what follows is too long to be one
-        let (query, service) = match p.to_lowercase().rfind(" on ") {
+        let (query, service) = match p.to_ascii_lowercase().rfind(" on ") {
             Some(i) if !p[..i].trim().is_empty() && !p[i + 4..].trim().is_empty() && p[i + 4..].split_whitespace().count() <= 2 => (p[..i].trim(), p[i + 4..].trim()),
             _ => (p.as_str(), ""),
         };
@@ -238,7 +253,42 @@ fn steam_dir() -> Option<PathBuf> {
     }
 }
 
-/// Everything "open X" can start: Steam games, then Start Menu apps.
+/// (subkey, default value) for each entry under HKLM's App Paths: "notepad.exe" and the exe it starts.
+fn app_path_keys() -> Vec<(String, String)> {
+    use windows::{core::{PCWSTR, PWSTR}, Win32::{Foundation::ERROR_SUCCESS, System::Registry::{RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ}}};
+    const BASE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
+    let mut out = vec![];
+    unsafe {
+        let base: Vec<u16> = BASE.encode_utf16().chain([0]).collect();
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(base.as_ptr()), 0, KEY_READ, &mut key) != ERROR_SUCCESS { return out; }
+        for i in 0.. {
+            let mut name = [0u16; 260];
+            let mut len = name.len() as u32;
+            if RegEnumKeyExW(key, i, PWSTR(name.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None) != ERROR_SUCCESS { break; }
+            let sub = String::from_utf16_lossy(&name[..len as usize]);
+            let full: Vec<u16> = format!(r"{BASE}\{sub}").encode_utf16().chain([0]).collect();
+            let mut buf = [0u16; 520];
+            let mut bytes = (buf.len() * 2) as u32;
+            // a null value name reads the key's default value, the exe path
+            let r = RegGetValueW(HKEY_LOCAL_MACHINE, PCWSTR(full.as_ptr()), PCWSTR::null(), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut bytes));
+            let path = if r == ERROR_SUCCESS { String::from_utf16_lossy(&buf[..(bytes as usize / 2).saturating_sub(1)]) } else { String::new() };
+            out.push((sub, path));
+        }
+        let _ = RegCloseKey(key);
+    }
+    out
+}
+
+/// App Paths entries as launchable items: "notepad.exe" becomes "notepad", lowercased. Entries with no path are skipped.
+fn app_path_items(keys: &[(String, String)]) -> Vec<(String, String)> {
+    keys.iter().filter(|(_, p)| !p.trim().is_empty()).map(|(k, p)| {
+        let k = k.to_lowercase();
+        (k.strip_suffix(".exe").unwrap_or(&k).to_string(), p.trim().trim_matches('"').to_string())
+    }).collect()
+}
+
+/// Everything "open X" can start: Steam games, then Start Menu apps, then App Paths exes (Notepad has no Start Menu shortcut).
 fn launchables(_cfg: &Config) -> Vec<(String, String)> {
     let env = |k: &str| std::env::var(k).unwrap_or_default();
     let steam = steam_dir().unwrap_or_else(|| PathBuf::from(env("ProgramFiles(x86)")).join("Steam")).join("steamapps");
@@ -246,6 +296,10 @@ fn launchables(_cfg: &Config) -> Vec<(String, String)> {
     for base in [PathBuf::from(env("ProgramData")), PathBuf::from(env("APPDATA"))] {
         shortcuts(&base.join(r"Microsoft\Windows\Start Menu\Programs"), 3, &mut all);
     }
+    all.extend(app_path_items(&app_path_keys()));
+    // Notepad has neither an App Paths key nor a Start Menu shortcut on Windows 11; its exe sits in System32.
+    let sys32 = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32");
+    all.extend(["notepad"].iter().map(|n| (n.to_string(), sys32.join(format!("{n}.exe")))).filter(|(_, p)| p.is_file()).map(|(n, p)| (n, p.to_string_lossy().into_owned())));
     all
 }
 
@@ -255,16 +309,43 @@ pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.listen").as_bool().unwra
 /// One action's switch in Settings; on unless turned off.
 /// Starts the installed app or game that best matches `name` (Start Menu shortcuts, Steam games).
 pub fn launch_app(cfg: &Config, name: &str) -> Result<String, String> {
-    let items = launchables(cfg);
-    match best_match(name, &items) {
-        Some((n, target)) if crate::bridge::sys::shell_open(target) => Ok(format!("Opening {}.", short(n, 40))),
-        Some((n, _)) => Err(format!("Windows couldn't open {}.", short(n, 40))),
-        None => match web_version(name) {
-            Some((label, url)) if crate::bridge::sys::shell_open(url) => Ok(format!("{label} isn't installed, so I opened it in your browser.")),
-            Some(_) => Err("Windows couldn't open the browser.".into()),
-            None => Err(format!("I can't find {} on this PC.", short(name, 40))),
-        },
+    if let Some(r) = open_installed(cfg, name) { return r; }
+    // "discord and valorant": each app opens here, and the ones not installed are said, without a round trip to the AI
+    let parts = split_apps(name);
+    if parts.len() > 1 {
+        let (mut opened, mut missing) = (vec![], vec![]);
+        for p in &parts { match open_installed(cfg, p) { Some(Ok(_)) => opened.push(p.as_str()), _ => missing.push(p.as_str()) } }
+        return match (opened.is_empty(), missing.is_empty()) {
+            (true, _) => Err(format!("I can't find {} on this PC.", short(name, 40))),
+            (false, true) => Ok(format!("Opened {}.", opened.join(" and "))),
+            (false, false) => Ok(format!("Opened {}. I can't find {} on this PC.", opened.join(" and "), missing.join(" and "))),
+        };
     }
+    match web_version(name) {
+        Some((label, url)) if crate::bridge::sys::shell_open(url) => Ok(format!("{label} isn't installed, so I opened it in your browser.")),
+        Some(_) => Err("Windows couldn't open the browser.".into()),
+        None => Err(format!("I can't find {} on this PC.", short(name, 40))),
+    }
+}
+
+/// The app names in "discord and valorant" or "a, b and c", one each.
+pub fn split_apps(name: &str) -> Vec<String> {
+    name.split(" and ").flat_map(|p| p.split(',')).map(|p| app_name_of(p.trim()).to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+/// Opens the installed app or game `name` names: the best match by its start, else the one installed name that holds every word
+/// of it. None when there is no such app.
+fn open_installed(cfg: &Config, name: &str) -> Option<Result<String, String>> {
+    let items = launchables(cfg);
+    let (n, target) = match best_match(name, &items) {
+        Some((n, t)) => (n.to_string(), t.to_string()),
+        None => {
+            let names = app_names(cfg, name);
+            let [only] = names.as_slice() else { return None };
+            items.iter().find(|(n, _)| n == only).map(|(n, t)| (n.clone(), t.clone()))?
+        }
+    };
+    Some(if crate::bridge::sys::shell_open(&target) { Ok(format!("Opening {}.", short(&n, 40))) } else { Err(format!("Windows couldn't open {}.", short(&n, 40))) })
 }
 
 /// Apps that have a website, for when the app isn't installed: (name you say, label, address).
@@ -432,7 +513,12 @@ fn find_and_message(cfg: &Config, to: &str, text: &str, via: &str) -> Result<Str
     let on = if via.is_empty() { String::new() } else { format!(" on {via}") };
     let shown = format!("find {to}{on} and message them: \"{text}\"");
     let (cfg2, via2) = (Config(cfg.0.clone()), via.to_string());
-    crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))))
+    // a take-over that still asks in the island: saved as a task, ended as Declined on a no or as its end state when it finishes
+    let task = crate::agent::tasks::begin(&shown);
+    let done: crate::drive::OnDone = Box::new(move |status| crate::agent::tasks::set(task, status, &format!("{status:?}"), 0));
+    let r = crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))), false, Some(done));
+    if r.is_err() { crate::agent::tasks::set(task, crate::agent::state::TaskStatus::Failed, "Failed", 0); }
+    r
 }
 
 /// The link that opens a chat with `text` ready, and what to tell you to do next.
@@ -499,9 +585,7 @@ pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
         Intent::Screen(_) if !screen_on(cfg) => Err(SCREEN_OFF.into()),
         Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Screen(t) => screen_help(cfg, &t),
-        Intent::Drive(_) if !crate::drive::enabled(cfg) => Err(DRIVE_OFF.into()),
-        Intent::Drive(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
-        Intent::Drive(g) => crate::drive::start(cfg, &g),
+        Intent::Drive(g) => crate::agent::take_over(cfg, &g),
         Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
         Intent::Chat(t) => crate::agent::ask(cfg, &t),
     }
@@ -509,14 +593,24 @@ pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
 
 const AI_OFF: &str = "I only know search, open, play and message. The AI is off in Settings.";
 const DRIVE_OFF: &str = "Take-over is off. Turn on \"Let the buddy take over\" in Settings, Voice.";
+
+/// The Settings switches a take-over needs, checked before anyone is asked: take-over is on and the AI is on.
+pub fn drive_switches(cfg: &Config) -> Result<(), String> {
+    if !crate::drive::enabled(cfg) { return Err(DRIVE_OFF.into()); }
+    if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) { return Err(AI_OFF.into()); }
+    Ok(())
+}
 const SCREEN_OFF: &str = "Screen help is off. Turn on \"Let the buddy see my screen\" in Settings, Voice.";
 
 /// Settings, Voice, "Let the buddy see my screen". Off unless turned on: the pictures leave this PC.
 fn screen_on(cfg: &Config) -> bool { cfg.get("buddies.screen").as_bool().unwrap_or(false) }
 
-/// The model that answers screen questions: the one picked for screen help, else the sidebar's AI model.
+/// The model that answers screen questions: the first of the one picked for screen help, the sidebar's AI model and a default
+/// that can be sent pictures (`bridge::model_can_see`). When none can, the first one is kept, and the chat says so.
 pub fn screen_model(cfg: &Config) -> String {
-    [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter().find(|m| !m.is_empty()).unwrap_or_default().to_string()
+    let candidates: Vec<String> = [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter()
+        .filter(|m| !m.is_empty()).map(|m| crate::bridge::current_model_id(m)).collect();
+    candidates.iter().find(|m| crate::bridge::model_can_see(m)).or(candidates.first()).cloned().unwrap_or_default()
 }
 
 /// A screen question from the agent. Nothing is captured while screen help or the AI is switched off.
@@ -541,15 +635,23 @@ pub struct Turn {
     pub text: String,
     pub calls: Vec<Value>,
     pub bad: Vec<Value>,
+    /// The tokens the provider reported for this reply, when it reported any (`provider::usage_event`).
+    pub usage: Option<provider::Usage>,
 }
 
-/// Puts the streamed events of one reply together: text deltas join in order, tool calls and their failures are kept.
+/// Puts the streamed events of one reply together: text deltas join in order, tool calls and their failures are kept, and the
+/// provider's running token counts are taken from the last event that gave each one.
 pub fn fold_turn(events: &[Value]) -> Turn {
     let mut t = Turn::default();
     for e in events {
         if let Some(d) = e["delta"].as_str() { t.text.push_str(d); }
         if e["tool_use"].is_object() { t.calls.push(e["tool_use"].clone()); }
         if e["tool_error"].is_object() { t.bad.push(e["tool_error"].clone()); }
+        if e["usage"].is_object() {
+            let u = t.usage.get_or_insert_with(provider::Usage::default);
+            if let Some(i) = e["usage"]["input"].as_u64() { u.input = i; }
+            if let Some(o) = e["usage"]["output"].as_u64() { u.output = o; }
+        }
     }
     t
 }
@@ -557,11 +659,21 @@ pub fn fold_turn(events: &[Value]) -> Turn {
 /// Runs one `ai-chat` conversation and returns its reply with any tool calls. A stream error fails the whole reply.
 /// Gives up when nothing arrives for `wait_secs`.
 pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
+    let turn = stream_turn_raw(cfg, convo, wait_secs)?;
+    if let Some(u) = turn.usage {
+        crate::log::line(&format!("buddy usage: {} in, {} out", u.input, u.output));
+        provider::add(u);
+    }
+    Ok(turn)
+}
+
+/// `stream_turn` without the token count: the caller adds `Turn::usage` itself (`agent::delegate` does).
+pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
     stream_turn_live(cfg, convo, wait_secs, |_| {})
 }
 
-/// `stream_turn`, and `live` gets the text so far after each delta.
-pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, mut live: impl FnMut(&str)) -> Result<Turn, String> {
+/// `stream_turn_raw`, and `live` gets the text so far after each delta.
+pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, live: impl FnMut(&str)) -> Result<Turn, String> {
     let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
@@ -569,15 +681,25 @@ pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, mut live: imp
         if v.is_object() { let _ = tx2.send(Some(v)); }
     }, move || { let _ = tx3.send(None); });
     if stream.is_none() { return Err("I can't reach my brain.".into()); }
+    Ok(fold_turn(&collect_events(&rx, std::time::Duration::from_secs(wait_secs), live)?))
+}
+
+/// Reads stream events until the end (a None, or the sender dropped). A stream that goes quiet for `wait` is an error, not a
+/// short reply, and so is an error event. Split out so the timeout can be tested with a plain channel.
+fn collect_events(rx: &mpsc::Receiver<Option<Value>>, wait: std::time::Duration, mut live: impl FnMut(&str)) -> Result<Vec<Value>, String> {
     let mut events = vec![];
     let mut acc = String::new();
-    // None is the end of the stream; stop on it, on an error, or when nothing comes for `wait_secs`
-    while let Ok(Some(v)) = rx.recv_timeout(std::time::Duration::from_secs(wait_secs)) {
-        if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
-        if let Some(d) = v["delta"].as_str() { acc.push_str(d); live(&acc); }
-        events.push(v);
+    loop {
+        match rx.recv_timeout(wait) {
+            Ok(Some(v)) => {
+                if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
+                if let Some(d) = v["delta"].as_str() { acc.push_str(d); live(&acc); }
+                events.push(v);
+            }
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(events),
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(format!("The AI went quiet for {} seconds, so I stopped.", wait.as_secs())),
+        }
     }
-    Ok(fold_turn(&events))
 }
 
 /// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.
@@ -617,16 +739,19 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     Ok(said)
 }
 
-/// Runs `said` on a worker thread and shows the result in the primary buddy's bubble.
+/// Runs `said` on a worker thread and shows the result in the primary buddy's bubble. A request that comes while another
+/// runs is refused at once, so two never share the cancel flag and the token total.
 pub fn ask(cfg: &Config, said: &str) {
+    let Some(busy) = try_busy() else { say_later("I'm still working on the last request.", 3.0); return; };
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
+        let _busy = busy; // held until this request ends, also when it panics
         if is_replay(&said) { let a = last_answer(); say_later(&a, say_secs(&a)); return; }
         say_later("On it…", 3.0);
         // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
         let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
         let r = match run(parse(&said), &cfg) {
-            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask(&cfg, &retry_text(&said, &e)),
+            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask_with_note(&cfg, said.trim(), &fallback_note(&e)),
             r => r,
         };
         report(r);
@@ -639,9 +764,10 @@ pub fn falls_back(intent: &Intent, err: &str, ai_on: bool) -> bool {
     ai_on && matches!(intent, Intent::Open(_) | Intent::Play { .. } | Intent::Search(_)) && !err.contains("turned off")
 }
 
-/// The sentence the AI gets after a fixed command failed: what was said, and why the fixed command could not do it.
-pub fn retry_text(said: &str, err: &str) -> String {
-    format!("{}\n(I first tried it as a fixed command and it failed: {err} Find another way.)", said.trim())
+/// The note the AI gets with the request after a fixed command failed: why the fixed command could not do it. It goes to the AI
+/// only; the request itself is saved as the user said it.
+pub fn fallback_note(err: &str) -> String {
+    format!("(I first tried it as a fixed command and it failed: {err} Find another way.)")
 }
 
 /// Bridge arguments for the speech model folder and microphone name; empty ones are left out.
@@ -700,6 +826,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_second_request_is_refused_while_one_runs_and_the_flag_frees_on_drop() {
+        let first = try_busy().expect("the first request gets the flag");
+        assert!(try_busy().is_none(), "a request during the first is refused");
+        drop(first);
+        assert!(try_busy().is_some(), "the flag is free once the first ends");
+    }
+
+    #[test]
+    fn a_turkish_capital_i_does_not_break_the_intent_offsets() {
+        match parse("message İrem saying çok güzel") {
+            Intent::Message { to, text, .. } => assert_eq!((to.as_str(), text.as_str()), ("İrem", "çok güzel")),
+            other => panic!("not a message: {other:?}"),
+        }
+        match parse("play İstanbul on spotify") {
+            Intent::Play { query, service } => assert_eq!((query.as_str(), service.as_str()), ("İstanbul", "spotify")),
+            other => panic!("not a play: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stream_that_goes_quiet_is_an_error_and_a_finished_one_is_not() {
+        use std::time::Duration;
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        tx.send(Some(json!({ "text": "half" }))).unwrap();
+        assert!(collect_events(&rx, Duration::from_millis(20), |_| {}).is_err(), "no end marker before the wait: a timeout, not a short reply");
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        tx.send(Some(json!({ "text": "whole" }))).unwrap();
+        tx.send(None).unwrap();
+        assert_eq!(collect_events(&rx, Duration::from_millis(20), |_| {}).unwrap().len(), 1, "the end marker ends it normally");
+        let (tx, rx) = mpsc::channel::<Option<Value>>();
+        drop(tx);
+        assert_eq!(collect_events(&rx, Duration::from_millis(20), |_| {}).unwrap().len(), 0, "a dropped sender is a normal end");
+    }
+
+    #[test]
     fn repeat_requests_are_recognised_and_return_the_last_answer() {
         assert!(is_replay("Say that again, please"));
         assert!(is_replay("repeat that"));
@@ -711,6 +872,19 @@ mod tests {
     }
 
     fn items(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
+
+    #[test]
+    fn app_paths_keys_become_names_and_skip_empty_paths() {
+        let keys = items(&[("notepad.exe", r"C:\Windows\system32\notepad.exe"), ("Calc.EXE", r#""C:\Windows\system32\calc.exe""#), ("empty.exe", ""), ("blank.exe", "  ")]);
+        assert_eq!(app_path_items(&keys), items(&[("notepad", r"C:\Windows\system32\notepad.exe"), ("calc", r"C:\Windows\system32\calc.exe")]));
+    }
+
+    #[test]
+    fn notepad_matches_an_app_paths_entry() {
+        let all = app_path_items(&items(&[("notepad.exe", r"C:\Windows\system32\notepad.exe"), ("wordpad.exe", r"C:\x\wordpad.exe")]));
+        assert_eq!(best_match("notepad", &all).map(|(n, t)| (n.as_str(), t.as_str())), Some(("notepad", r"C:\Windows\system32\notepad.exe")));
+        assert_eq!(best_match("note", &all).map(|(n, _)| n.as_str()), Some("notepad"), "a prefix still finds it");
+    }
 
     #[test]
     fn parses_what_you_say() {
@@ -739,6 +913,13 @@ mod tests {
         assert_eq!(parse("search"), Intent::Chat("search".into()));
         assert_eq!(parse("okay okay please open notepad"), Intent::Open("notepad".into()));
         assert_eq!(parse("tell me a joke"), Intent::Chat("tell me a joke".into()));
+    }
+
+    #[test]
+    fn a_list_of_apps_is_split_into_one_name_each() {
+        assert_eq!(split_apps("discord and valorant"), ["discord", "valorant"]);
+        assert_eq!(split_apps("the chrome, spotify and steam app"), ["chrome", "spotify", "steam"]);
+        assert_eq!(split_apps("notepad"), ["notepad"], "one name stays one name");
     }
 
     #[test]
@@ -939,9 +1120,8 @@ mod tests {
         assert!(!falls_back(&Intent::Chat("hi".into()), err, true));
         assert!(!falls_back(&Intent::Drive("click save".into()), err, true));
         assert!(!falls_back(&Intent::Screen("what's on my screen".into()), err, true));
-        let text = retry_text("  start a timer ", err);
-        assert!(text.starts_with("start a timer\n"), "{text}");
-        assert!(text.contains(err), "{text}");
+        let note = fallback_note(err);
+        assert!(note.starts_with("(I first tried") && note.contains(err), "{note}");
         assert_eq!(parse("start a timer"), Intent::Open("a timer".into()), "the misfire the fallback catches");
     }
 
@@ -1023,6 +1203,31 @@ mod tests {
         assert_eq!(t.calls, vec![json!({ "id": "toolu_1", "name": "open", "input": { "arg": "Spotify" } })]);
         assert_eq!(t.bad, vec![json!({ "id": "toolu_2", "name": "play", "message": "tool input is not JSON" })]);
         assert_eq!(fold_turn(&[]), Turn::default());
+    }
+
+    #[test]
+    fn screen_questions_use_a_model_that_can_see_pictures() {
+        // a picked model that can't see (Antigravity, a subscription command line) is passed over for one that can
+        let cfg = Config::parse(r#"{"buddies":{"screenModel":"antigravity-cli:default"},"ai":{"model":"codex-cli:default"}}"#);
+        assert_eq!(screen_model(&cfg), "gemini-2.5-flash");
+        // a saved id from before the rename is mapped first, so it is passed over the same way
+        let old = Config::parse(r#"{"buddies":{"screenModel":"gemini-cli:default"},"ai":{"model":"claude-haiku-5-5"}}"#);
+        assert_eq!(screen_model(&old), "claude-haiku-5-5", "the mapped id can't see, so the next one is used");
+        // the picked model is used when it can see
+        let picked = Config::parse(r#"{"buddies":{"screenModel":"gpt-4o-mini"},"ai":{"model":"claude-haiku-5-5"}}"#);
+        assert_eq!(screen_model(&picked), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn the_last_token_counts_win_and_a_reply_without_them_has_none() {
+        let events = vec![
+            json!({ "usage": { "input": 12, "output": null } }),
+            json!({ "delta": "hi" }),
+            json!({ "usage": { "input": null, "output": 40 } }),
+        ];
+        let t = fold_turn(&events);
+        assert_eq!(t.usage, Some(crate::agent::provider::Usage { input: 12, output: 40 }));
+        assert_eq!(fold_turn(&[json!({ "delta": "hi" })]).usage, None, "the provider said nothing");
     }
 
     #[test]

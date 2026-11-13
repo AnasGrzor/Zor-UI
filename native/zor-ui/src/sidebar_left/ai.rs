@@ -94,7 +94,8 @@ impl Ai {
         if sync() { return; }
         let keep = self.history.len().saturating_sub(100);
         let v: Vec<Value> = self.history[keep..].iter().map(|m| json!({ "role": m.role, "content": m.content, "model": m.model, "error": m.error })).collect();
-        let _ = std::fs::write(file(), Value::from(v).to_string());
+        // through a temp file, so a crash mid-write never empties the saved history
+        crate::bridge::common::save_json(&file(), &Value::from(v));
     }
 
     fn info(&self) -> Model { self.models.iter().find(|m| m.id == self.model).cloned().unwrap_or(Model { id: self.model.clone(), name: self.model.clone(), provider: "?".into() }) }

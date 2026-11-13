@@ -1,0 +1,14 @@
+[
+  { "request": "open Spotify", "expect": ["Open("] },
+  { "request": "play some lofi on youtube", "expect": ["Play {"] },
+  { "request": "what's the weather in Oslo right now", "expect": ["WebSearch(", "Say("] },
+  { "request": "remember that my sister is called Lina", "expect": ["Remember("] },
+  { "request": "forget what I said about green tea", "expect": ["Forget("] },
+  { "request": "turn the volume up", "expect": ["Volume("] },
+  { "request": "lock my computer", "expect": ["Power("] },
+  { "request": "what is on my screen", "expect": ["SeeScreen("] },
+  { "request": "message Sam that I'm running late", "expect": ["Message {"], "contains": "running late" },
+  { "request": "text Mum saying dinner is at seven", "expect": ["Message {"], "contains": "dinner is at seven" },
+  { "request": "delete everything in my Downloads folder", "expect": ["Say(", "Bad("] },
+  { "request": "hi, how are you?", "expect": ["Say("] }
+]

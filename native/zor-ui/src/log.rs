@@ -6,7 +6,17 @@ use std::{io::Write, path::Path};
 const MAX: u64 = 1_000_000;
 
 /// Appends `msg` to zorui.log.
-pub fn line(msg: &str) { write_to(&crate::conf::data_dir().join("zorui.log"), msg); }
+pub fn line(msg: &str) { write_to(&path(), msg); }
+
+/// The real zorui.log in the data folder.
+fn real_path() -> std::path::PathBuf { crate::conf::data_dir().join("zorui.log") }
+
+#[cfg(not(test))]
+fn path() -> std::path::PathBuf { real_path() }
+
+/// Tests never write the real zorui.log: their lines go to a file of this process in the temp folder.
+#[cfg(test)]
+fn path() -> std::path::PathBuf { std::env::temp_dir().join(format!("zorui-test-{}.log", std::process::id())) }
 
 /// Routes every `tracing` event at INFO or above (libraries use it) into zorui.log, one line each.
 /// Call once at start; a second call is ignored.
@@ -39,6 +49,14 @@ mod tests {
     fn event_text_drops_the_newline_and_bad_bytes() {
         assert_eq!(event_text(b" INFO systray_util: Found 3 buttons\n"), " INFO systray_util: Found 3 buttons");
         assert_eq!(event_text(&[b'a', 0xFF, b'\n']), format!("a{}", char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
+    fn a_test_line_never_reaches_the_real_log() {
+        assert_ne!(path(), real_path(), "tests write to a temp file, not the real zorui.log");
+        assert!(path().starts_with(std::env::temp_dir()));
+        line("test marker for the redirect check");
+        assert!(std::fs::read_to_string(path()).unwrap().contains("test marker for the redirect check"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ struct Entry { v: Option<Arc<Lyrics>>, at: f64 }
 #[derive(Default)]
 struct Store { map: HashMap<String, Entry>, busy: HashSet<String>, failed: HashMap<String, f64>, loaded: bool }
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
+static FILE_IO: Mutex<()> = Mutex::new(());
 
 fn file() -> std::path::PathBuf { crate::conf::data_dir().join("lyrics.json") }
 
@@ -35,9 +36,12 @@ pub fn get(t: &Track) -> Lyr {
     if t.title.is_empty() { return Lyr::Missing; }
     let key = format!("{}|{}", t.artist, t.title);
     let now = crate::hub::now_ms();
+    // Paint calls this every frame: the disk read happens outside the STORE lock.
+    let unloaded = match STORE.lock() { Ok(g) => !g.as_ref().is_some_and(|s| s.loaded), Err(_) => return Lyr::Missing };
+    let disk = if unloaded { load() } else { HashMap::new() };
     let Ok(mut g) = STORE.lock() else { return Lyr::Missing };
     let st = g.get_or_insert_with(Store::default);
-    if !st.loaded { st.loaded = true; st.map = load(); }
+    if !st.loaded { st.loaded = true; st.map = disk; }
     if let Some(e) = st.map.get(&key) {
         match &e.v {
             Some(l) => return Lyr::Found(l.clone()),
@@ -51,18 +55,22 @@ pub fn get(t: &Track) -> Lyr {
     let (title, artist, album, dur) = (t.title.to_string(), t.artist.to_string(), t.album.to_string(), t.dur);
     std::thread::spawn(move || {
         let r = fetch(&title, &artist, &album, dur);
-        if let Ok(mut g) = STORE.lock() {
-            if let Some(st) = g.as_mut() {
+        // Encode under STORE, write after it is released; FILE_IO keeps writes in snapshot order.
+        let _io = FILE_IO.lock();
+        let text = match STORE.lock() {
+            Ok(mut g) => g.as_mut().and_then(|st| {
                 st.busy.remove(&key);
                 match r {
                     Some(found) => {
                         st.map.insert(key, Entry { v: found.map(Arc::new), at: crate::hub::now_ms() });
-                        save(&mut st.map);
+                        Some(encode(&mut st.map))
                     }
-                    None => { st.failed.insert(key, crate::hub::now_ms()); }
+                    None => { st.failed.insert(key, crate::hub::now_ms()); None }
                 }
-            }
-        }
+            }),
+            Err(_) => None,
+        };
+        if let Some(text) = text { write(&text); }
         crate::app::post(Box::new(|_| {}));
     });
     Lyr::Searching
@@ -78,7 +86,8 @@ fn from_json(v: &Value) -> Option<Lyrics> {
     v["plain"].as_array().map(|l| Lyrics::Plain(l.iter().map(|x| x.as_str().unwrap_or("").into()).collect()))
 }
 
-fn save(map: &mut HashMap<String, Entry>) {
+/// Keeps the 40 newest entries and returns the JSON text to store.
+fn encode(map: &mut HashMap<String, Entry>) -> String {
     let mut keys: Vec<(&String, f64)> = map.iter().map(|(k, e)| (k, e.at)).collect();
     keys.sort_by(|a, b| b.1.total_cmp(&a.1));
     let drop: Vec<String> = keys.iter().skip(40).map(|k| k.0.clone()).collect();
@@ -88,8 +97,12 @@ fn save(map: &mut HashMap<String, Entry>) {
         Some(Lyrics::Plain(l)) => json!({ "plain": l }),
         None => Value::Null,
     } }))).collect();
+    Value::Object(out).to_string()
+}
+
+fn write(text: &str) {
     let tmp = file().with_extension("tmp");
-    if std::fs::write(&tmp, Value::Object(out).to_string()).is_ok() { let _ = std::fs::rename(&tmp, file()); }
+    if std::fs::write(&tmp, text).is_ok() { let _ = std::fs::rename(&tmp, file()); }
 }
 
 /// lrclib sits behind Cloudflare, which answers 503 whenever it's busy; the same request usually works a second later.
@@ -206,16 +219,22 @@ fn split_title(s: &str) -> Vec<String> {
     parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && !is_noise(p)).collect()
 }
 
+/// The text after a "Video:"-style label, matched case-insensitively on the original string.
+/// Lowercasing can change the char count ("İ" becomes two chars), so no count is taken from a lowercase copy.
+fn after_label<'a>(s: &'a str, labels: &[&str]) -> Option<&'a str> {
+    let s = s.trim_start();
+    labels.iter().find_map(|p| {
+        let n = p.chars().count();
+        if !s.chars().take(n).flat_map(char::to_lowercase).eq(p.chars()) { return None; }
+        let rest = &s[s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)..];
+        rest.trim_start().strip_prefix(':')
+    })
+}
+
 /// lyricQueries(): free-text searches to try when the exact lookup finds nothing.
 pub fn queries(title: &str, artist: &str) -> Vec<String> {
     let mut t = strip_brackets(title);
-    let low = t.trim_start().to_lowercase();
-    for p in ["lyrical", "full video", "full song", "video", "audio"] {
-        if let Some(rest) = low.strip_prefix(p).map(str::trim_start).and_then(|r| r.strip_prefix(':')) {
-            t = t.chars().skip(t.chars().count() - rest.chars().count()).collect(); // same char count as the lowercase rest
-            break;
-        }
-    }
+    if let Some(rest) = after_label(&t, &["lyrical", "full video", "full song", "video", "audio"]).map(str::to_string) { t = rest; }
     let parts = split_title(&t);
     let who = {
         let a = artist.trim();
@@ -285,6 +304,9 @@ mod tests {
         assert_eq!(queries("Teriyaan - Asim Azhar & Aima Baig (Official Video)", "T-Series"), ["Teriyaan Asim Azhar & Aima Baig", "Teriyaan", "Asim Azhar & Aima Baig"]);
         assert_eq!(queries("Lyrical: Tum Hi Ho | Aashiqui 2 | Arijit Singh", "Arijit Singh - Topic"), ["Tum Hi Ho Aashiqui 2 Arijit Singh", "Tum Hi Ho Arijit Singh", "Aashiqui 2"]);
         assert_eq!(queries("Song Name", ""), ["Song Name"]);
+        // "İ" lowercases to two chars; the label must still be cut without underflow
+        assert_eq!(queries("Video: İİİİİİİ - Song", ""), ["İİİİİİİ Song", "İİİİİİİ", "Song"]);
+        assert_eq!(queries("Video: Song", ""), ["Song"]);
         assert!(is_noise("Full Video") && is_noise("Season 2") && !is_noise("Liver") && !is_noise("Alive"));
     }
 

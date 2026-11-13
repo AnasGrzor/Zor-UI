@@ -1,13 +1,17 @@
 //! Records the microphone for a voice reference. It starts the app's own record-audio bridge, which writes raw
 //! 48 kHz stereo f32 until it is killed. On stop, that file becomes a 16-bit WAV that reference::check accepts.
 
-use super::wav;
-use std::path::PathBuf;
+use super::{reference, wav};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
+/// The longest take the recorder keeps. reference::check rejects past 120 s, so this never cuts a take it accepts;
+/// it only ends a runaway recording.
+pub const CAP_SECS: u64 = crate::bridge::rec_audio::CAP_SECS;
 
 struct Recording { child: Child, pcm: PathBuf }
 
@@ -29,8 +33,25 @@ pub fn start() -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("could not start recording: {e}"))?;
+    let timer_pcm = pcm.clone();
+    std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(CAP_SECS)); cut(&timer_pcm); });
     *slot = Some(Recording { child, pcm });
     Ok(())
+}
+
+/// Kills the recording that writes `pcm`, if it still runs. A newer recording has another file and is left alone.
+fn cut(pcm: &Path) {
+    if let Ok(mut slot) = REC.lock() {
+        if let Some(r) = slot.as_mut().filter(|r| r.pcm.as_path() == pcm) { r.child.kill().ok(); }
+    }
+}
+
+/// Ends a recording still running when the app exits, and removes its file. Nothing is saved.
+pub fn shutdown() {
+    let Some(mut r) = REC.lock().ok().and_then(|mut s| s.take()) else { return };
+    r.child.kill().ok();
+    r.child.wait().ok();
+    std::fs::remove_file(&r.pcm).ok();
 }
 
 /// The program that runs the record-audio bridge: ZORUI_EXE when set (tests point it at the release build),
@@ -101,6 +122,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!((w.rate, w.channels), (RATE, CHANNELS));
         assert!(w.samples.len() > RATE as usize / 2, "about 2 s captured, got {} samples", w.samples.len());
+    }
+
+    #[test]
+    fn the_cap_is_longer_than_any_take_the_check_accepts() {
+        assert!(CAP_SECS as f32 > reference::MAX_SECS, "the cap must not cut a take that reference::check accepts");
     }
 
     #[test]

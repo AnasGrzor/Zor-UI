@@ -1,6 +1,7 @@
 //! Zor UI's own icon in the taskbar's notification area (the "hidden icons" overflow), so the running
 //! shell can be found, opened and quit from there.
 
+use std::sync::OnceLock;
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -42,17 +43,28 @@ fn data(hwnd: HWND) -> NOTIFYICONDATAW {
     d
 }
 
+/// The icon's handle (stored as isize: a raw pointer is not Sync). Made once and kept for the process:
+/// `add` runs every 30 s, and each new handle would leak.
+static ICON: OnceLock<isize> = OnceLock::new();
+
+/// The exe's own icon (resource 1, see build.rs); the drawn one only if it has none.
+fn icon() -> Option<HICON> {
+    if let Some(&h) = ICON.get() { return Some(HICON(h as _)); }
+    let and = vec![0u8; SIZE * SIZE / 8];
+    let made = unsafe {
+        GetModuleHandleW(None).ok().and_then(|m| LoadImageW(m, PCWSTR(1 as *const u16), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR).ok())
+            .map(|h| HICON(h.0))
+            .or_else(|| CreateIcon(None, SIZE as i32, SIZE as i32, 1, 32, and.as_ptr(), pixels().as_ptr()).ok())?
+    };
+    Some(HICON(*ICON.get_or_init(|| made.0 as isize) as _))
+}
+
 /// Adds the icon. Harmless to call again: Windows refuses a duplicate, and it brings the icon back after Explorer restarts.
 pub fn add(hwnd: HWND) {
-    unsafe {
-        let mut d = data(hwnd);
-        // the exe's own icon (resource 1, see build.rs); the drawn one only if it has none
-        let embedded = GetModuleHandleW(None).ok().and_then(|m| LoadImageW(m, PCWSTR(1 as *const u16), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR).ok());
-        let and = vec![0u8; SIZE * SIZE / 8];
-        let Some(icon) = embedded.map(|h| HICON(h.0)).or_else(|| CreateIcon(None, SIZE as i32, SIZE as i32, 1, 32, and.as_ptr(), pixels().as_ptr()).ok()) else { return };
-        d.hIcon = icon;
-        let _ = Shell_NotifyIconW(NIM_ADD, &d);
-    }
+    let Some(icon) = icon() else { return };
+    let mut d = data(hwnd);
+    d.hIcon = icon;
+    unsafe { let _ = Shell_NotifyIconW(NIM_ADD, &d); }
 }
 
 pub fn remove(hwnd: HWND) {
@@ -61,6 +73,13 @@ pub fn remove(hwnd: HWND) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn icon_is_made_once() {
+        let (a, b) = (super::icon().map(|h| h.0), super::icon().map(|h| h.0));
+        assert!(a.is_some());
+        assert_eq!(a, b);
+    }
+
     #[test]
     fn picture_is_round_with_a_white_dot() {
         let p = super::pixels();

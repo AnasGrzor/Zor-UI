@@ -142,7 +142,10 @@ fn run_turn(s: &mut Session, line: &str, out: &Sink) -> Turn {
     loop {
         if out.stopped() { return Turn::Stopped; }
         match s.lines.recv_timeout(Duration::from_millis(200)) {
-            Ok(l) => match read_line(&l) {
+            Ok(l) => {
+                // the final result line carries the token counts (agent::provider)
+                if let Some(u) = serde_json::from_str::<Value>(&l).ok().and_then(|v| crate::agent::provider::usage_event("claude-cli", &v)) { out.emit(&u); }
+                match read_line(&l) {
                 Some(Ev::Delta(t)) => { out.emit(&json!({ "delta": t })); text.push_str(&t); }
                 Some(Ev::Error(e)) => return Turn::Failed(e),
                 Some(Ev::Done(t)) => {
@@ -150,7 +153,8 @@ fn run_turn(s: &mut Session, line: &str, out: &Sink) -> Turn {
                     return Turn::Text(text);
                 }
                 None => {}
-            },
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Turn::Dead,
         }
@@ -234,6 +238,23 @@ mod tests {
     use super::*;
 
     fn delta(t: &str) -> String { json!({ "type": "stream_event", "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": t } } }).to_string() }
+
+    /// What Rust's std does with a .cmd shim (npm installs `claude.cmd`): a newline argument is refused, a 7,000-char
+    /// argument runs, and an 8,500-char one fails at cmd.exe's line limit (8,191). Pins why the prompt can't be an argument.
+    #[test]
+    fn batch_shims_refuse_newline_arguments() {
+        let dir = std::env::temp_dir().join(format!("zorui-cmdshim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bat = dir.join("echo.cmd");
+        std::fs::write(&bat, "@echo off\r\necho %~1\r\n").unwrap();
+        let run = |arg: String| std::process::Command::new(&bat).arg(arg).output().map(|o| o.status.success()).ok();
+        let nl = std::process::Command::new(&bat).arg("line one\nline two").output();
+        let (short, long) = (run("x".repeat(7000)), run("x".repeat(8500)));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(nl.is_err(), "std accepted a newline argument: {nl:?}");
+        assert_eq!(short, Some(true));
+        assert_eq!(long, Some(false));
+    }
 
     #[test]
     fn model_ids_map_to_aliases() {

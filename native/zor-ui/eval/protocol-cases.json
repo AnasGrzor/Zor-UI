@@ -1,0 +1,18 @@
+[
+  { "reply": "{\"do\":\"open\",\"arg\":\"Spotify\"}", "expect": "Open(" },
+  { "reply": "{\"do\":\"web_search\",\"arg\":\"weather in Oslo\"}", "expect": "WebSearch(" },
+  { "reply": "{\"do\":\"read_url\",\"arg\":\"https://example.com\"}", "expect": "ReadUrl(" },
+  { "reply": "{\"do\":\"media\",\"arg\":\"next\"}", "expect": "Media(" },
+  { "reply": "{\"do\":\"volume\",\"arg\":\"up\"}", "expect": "Volume(" },
+  { "reply": "{\"do\":\"play\",\"query\":\"lofi\",\"service\":\"youtube\"}", "expect": "Play {" },
+  { "reply": "{\"do\":\"message\",\"to\":\"Sam\",\"text\":\"running late\"}", "expect": "Message {" },
+  { "reply": "{\"do\":\"power\",\"arg\":\"lock\"}", "expect": "Power(" },
+  { "reply": "{\"do\":\"see_screen\",\"arg\":\"what is on my screen\"}", "expect": "SeeScreen(" },
+  { "reply": "{\"do\":\"take_over\",\"arg\":\"fill the form\"}", "expect": "TakeOver(" },
+  { "reply": "{\"do\":\"remember\",\"arg\":\"My sister is called Lina\"}", "expect": "Remember(" },
+  { "reply": "{\"do\":\"forget\",\"arg\":\"green tea\"}", "expect": "Forget(" },
+  { "reply": "{\"say\":\"Hi there!\"}", "expect": "Say(" },
+  { "reply": "It is sunny in Oslo today.", "expect": "Say(" },
+  { "reply": "{\"do\":\"open\",\"arg\":\"\"}", "expect": "Bad(" },
+  { "reply": "{\"do\":\"delete_everything\",\"arg\":\"x\"}", "expect": "Bad(" }
+]

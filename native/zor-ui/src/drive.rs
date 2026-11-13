@@ -7,6 +7,7 @@
 //! the tests drive it with a fake model and fake hands. `Live` is the real `Host`.
 
 use crate::{assist, conf::Config, screen};
+use crate::agent::state::TaskStatus;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::{
@@ -434,6 +435,8 @@ pub trait Host {
     /// Shows where the next click goes.
     fn point(&mut self, at: (i32, i32), label: &str);
     fn confirm(&mut self, question: &str) -> bool;
+    /// What the take-over says when a step it asked about was not allowed. The reason is the island's, not a guess.
+    fn refusal(&self) -> &'static str { "You said no, so I stopped." }
     /// Like `confirm`, but you may answer with words instead of yes or no.
     fn ask(&mut self, question: &str) -> Answer { if self.confirm(question) { Answer::Yes } else { Answer::No } }
     fn password_focused(&self) -> bool;
@@ -532,7 +535,7 @@ fn rounds<H: Host>(g: &mut Guard<H>, goal: &str, max: u32) -> Stop {
 fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action, approved: &mut bool, replied: &mut bool) -> Result<String, Stop> {
     if let Act::Ask(q) = &a.act {
         let ans = g.h.ask(q);
-        if ans == Answer::No { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+        if ans == Answer::No { return Err(Stop::Refused(g.h.refusal().into())); }
         g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
         if let Answer::Said(t) = ans {
             // words are instructions, not a yes: the model plans again from a fresh picture, and a risky click asks again
@@ -550,7 +553,7 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
         let arg = if *tool == Tool::Open { open_target(arg).map_err(Stop::Error)? } else { arg.clone() };
         if tool.asks() {
             let q = if *tool == Tool::Open { format!("The buddy wants to open {}. Allow it?", assist::short(&arg, 200)) } else { format!("The buddy wants to start the app \"{}\". Allow it?", assist::short(&arg, 80)) };
-            if !g.h.confirm(&q) { return Err(Stop::Refused("You said no, so I stopped.".into())); }
+            if !g.h.confirm(&q) { return Err(Stop::Refused(g.h.refusal().into())); }
             g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
         }
         let out = g.h.tool(*tool, &arg).map_err(Stop::Error)?;
@@ -561,7 +564,7 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
     // a drag lets go on the same screen the picture names
     let to = match a.act { Act::Drag(x, y) => resolve(caps, &Action { act: Act::Move, pos: Some((x, y)), el: None, ..a.clone() }).map_err(Stop::Error)?, _ => None };
     if matches!(a.act, Act::Click(..) | Act::Drag(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
-        return Err(Stop::Refused("You said no, so I stopped.".into()));
+        return Err(Stop::Refused(g.h.refusal().into()));
     }
     if matches!(a.act, Act::Type(_) | Act::Hold(..)) && g.h.password_focused() {
         return Err(Stop::Refused("That's a password field, so type that one yourself.".into()));
@@ -637,11 +640,11 @@ pub fn request_stop() { if active() { VOICE.store(true, Ordering::Relaxed); } }
 /// The question waiting for your answer, for the island to show.
 pub fn pending() -> Option<String> { ASK.lock().ok().and_then(|a| a.as_ref().filter(|a| a.1.is_none()).map(|a| a.0.clone())) }
 /// Your answer from the island's Allow or Deny.
-pub fn answer(yes: bool) { give(if yes { Answer::Yes } else { Answer::No }) }
+pub fn answer(yes: bool) { give(if yes { Answer::Yes } else { Answer::No }, "island button") }
 /// Your typed reply from the island. Blank text is no answer at all.
 pub fn reply(text: &str) {
     let t: String = text.trim().chars().take(MAX_SAID).collect();
-    if !t.is_empty() { give(Answer::Said(t)); }
+    if !t.is_empty() { give(Answer::Said(t), "typed reply"); }
 }
 /// A question is waiting for you (the voice hotkey then answers it instead of stopping the take-over).
 pub fn waiting() -> bool { pending().is_some() }
@@ -659,10 +662,29 @@ pub fn spoken_answer(said: &str) -> Option<Answer> {
 
 /// Answers the waiting question with what you said out loud. False when nothing is waiting or nothing was heard.
 pub fn reply_spoken(said: &str) -> bool {
-    match (waiting(), spoken_answer(said)) { (true, Some(a)) => { give(a); true } _ => false }
+    match (waiting(), spoken_answer(said)) { (true, Some(a)) => { give(a, "spoken reply"); true } _ => false }
 }
 
-fn give(ans: Answer) { if let Ok(mut a) = ASK.lock() { if let Some(a) = a.as_mut() { a.1 = Some(ans); } } }
+/// Stores the answer and how it came (the island button, a typed or spoken reply), for `ask_island`'s log line.
+fn give(ans: Answer, how: &'static str) {
+    if let Ok(mut a) = ASK.lock() { if let Some(a) = a.as_mut() { a.1 = Some(ans); } }
+    if let Ok(mut b) = ANSWERED_BY.lock() { *b = how; }
+}
+
+/// How the waiting question was answered: the island button, a typed reply or a spoken one.
+static ANSWERED_BY: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+/// Why the last island question did not get a yes: 0 you said no, 1 no answer in time, 2 you stopped it (Esc or voice).
+static LAST_NO: AtomicU32 = AtomicU32::new(0);
+
+/// What a take-over says when a step it asked about was not allowed, by the reason `LAST_NO` holds.
+pub fn refusal_text(code: u32) -> &'static str {
+    match code {
+        1 => "I got no answer in time, so I stopped.",
+        2 => "You stopped me, so I stopped.",
+        _ => "You said no, so I stopped.",
+    }
+}
 
 fn island_open() -> bool {
     unsafe { FindWindowW(None, w!("Zor UI / island-panel")).is_ok_and(|h| IsWindowVisible(h).as_bool()) }
@@ -674,12 +696,19 @@ pub fn ask_island(q: &str) -> Answer {
     // opening a panel that is already open would close it
     if !island_open() { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::open("island-panel")))); }
     let start = std::time::Instant::now();
-    let yes = loop {
+    // how it ended is logged: an answer (which kind), or the reason no answer came
+    let (yes, how) = loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let a = ASK.lock().ok().and_then(|a| a.as_ref().and_then(|a| a.1.clone()));
-        if let Some(y) = a { break y; }
-        if ESC.load(Ordering::Relaxed) || VOICE.load(Ordering::Relaxed) || start.elapsed().as_secs() >= 90 { break Answer::No; }
+        if let Some(y) = a { break (y, ANSWERED_BY.lock().map(|b| *b).unwrap_or("")); }
+        if ESC.load(Ordering::Relaxed) { break (Answer::No, "no answer: Esc pressed"); }
+        if VOICE.load(Ordering::Relaxed) { break (Answer::No, "no answer: voice started"); }
+        if start.elapsed().as_secs() >= 90 { break (Answer::No, "no answer: timed out after 90 s"); }
     };
+    crate::log::line(&format!("island question \"{}\": {} ({how}) after {:.1} s",
+        assist::short(q, 60), if yes == Answer::Yes { "allowed" } else { "refused" }, start.elapsed().as_secs_f32()));
+    let code = if yes == Answer::Yes { 0 } else if how.contains("timed out") { 1 } else if how.starts_with("no answer") { 2 } else { 0 };
+    LAST_NO.store(code, Ordering::Relaxed);
     if let Ok(mut a) = ASK.lock() { *a = None; }
     if yes != Answer::Yes { crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::Close("island-panel".into())))); }
     yes
@@ -832,6 +861,14 @@ fn top_windows() -> Vec<(HWND, String)> {
     v
 }
 
+/// The program of the window in front, by its file name (like "notepad.exe"), or nothing when there is none.
+pub fn front_app() -> Option<String> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    if pid == 0 { return None; }
+    crate::playsong::exe_name(pid)
+}
+
 /// The title of the window in front, or nothing when there is none.
 pub fn front_title() -> String {
     let mut buf = [0u16; 256];
@@ -876,7 +913,9 @@ fn focused_is_password() -> bool {
 }
 
 struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, /// The left button is down because of a drag.
-    button: bool, t0: std::time::Instant, limit_ms: u64 }
+    button: bool, t0: std::time::Instant, limit_ms: u64,
+    /// The chat that started this take-over, if any: its questions go there, not to the island (`agent::Chat`).
+    chat: Option<crate::agent::Chat> }
 
 impl Host for Live<'_> {
     fn capture(&mut self) -> Result<Vec<screen::Cap>, String> {
@@ -960,8 +999,13 @@ The screens now are attached. Answer with the JSON."), caps);
     }
     fn say(&mut self, line: &str) { assist::say_later(line, 6.0); }
     fn point(&mut self, at: (i32, i32), label: &str) { if crate::buddy::on() { assist::point_later(at.0, at.1, label); } }
-    fn confirm(&mut self, q: &str) -> bool { ask_island(q) == Answer::Yes } // words are not a yes
-    fn ask(&mut self, q: &str) -> Answer { ask_island(q) }
+    fn confirm(&mut self, q: &str) -> bool { // words are not a yes
+        match &self.chat { Some(c) => (c.ask)(q), None => ask_island(q) == Answer::Yes }
+    }
+    fn refusal(&self) -> &'static str { refusal_text(LAST_NO.load(Ordering::Relaxed)) }
+    fn ask(&mut self, q: &str) -> Answer {
+        match &self.chat { Some(c) => if (c.ask)(q) { Answer::Yes } else { Answer::No }, None => ask_island(q) }
+    }
     fn password_focused(&self) -> bool { focused_is_password() }
     fn tool(&mut self, tool: Tool, arg: &str) -> Result<String, String> {
         crate::log::line(&format!("drive tool: {tool:?} {}", assist::short(arg, 80)));
@@ -994,24 +1038,56 @@ The screens now are attached. Answer with the JSON."), caps);
     }
 }
 
-/// Starts a take-over for `goal` on a worker thread after asking you. Returns what the buddy says right now.
-pub fn start(cfg: &Config, goal: &str) -> Result<String, String> { start_with(cfg, goal, None, None) }
+/// The island's question before a take-over of `goal`.
+pub fn question(goal: &str) -> String {
+    format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(goal, 140))
+}
 
-/// `start`, with the words the island card shows instead of the goal, and a step that runs once you said yes (opening the app the
-/// task needs, say) before the take-over begins. `Err` when it can't start.
-pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>) -> Result<String, String> {
-    let model = assist::screen_model(cfg);
-    if !crate::bridge::model_can_see(&model) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
+/// What can refuse a take-over before anyone is asked: the model can't see images, or a take-over is already running.
+pub fn check_ready(cfg: &Config) -> Result<(), String> {
+    if !crate::bridge::model_can_see(&assist::screen_model(cfg)) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
+    if ACTIVE.load(Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
+    Ok(())
+}
+
+/// Called once with how a take-over ended, to record it as a task.
+pub type OnDone = Box<dyn FnOnce(TaskStatus) + Send>;
+
+/// The task state a finished take-over gets. The user stopping it (Esc, voice, taking the mouse) is a cancel. A stop for a
+/// failure (out of steps or time, stuck, refused, an error) is a failure. Finishing on its own is Unverified: nothing checks
+/// the screen afterwards.
+pub fn end_status(stop: &Stop) -> TaskStatus {
+    if matches!(stop, Stop::Esc | Stop::Voice | Stop::UserMouse) { TaskStatus::Cancelled }
+    else if stop.failed() { TaskStatus::Failed }
+    else { TaskStatus::Unverified }
+}
+
+/// Starts a take-over the caller already got your yes for (`agent::take_over` or `agent::approve`), so the island isn't asked again.
+pub fn start_approved(cfg: &Config, goal: &str, on_done: Option<OnDone>) -> Result<String, String> { start_with(cfg, goal, None, None, true, on_done) }
+
+/// `start_approved` for a take-over that still has to ask: the island asks on its worker thread, and a no ends the task as
+/// Declined. `shown` is the words the island card shows instead of the goal; `prep` is a step that runs once you said yes (opening
+/// the app the task needs, say) before the take-over begins. `Err` when it can't start.
+pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>) -> Result<String, String> {
+    start_with_chat(cfg, goal, shown, prep, approved, on_done, None)
+}
+
+/// `start_with` for a take-over that a chat started: its questions go to the chat, and its final line is sent there too (the PC
+/// still gets its bubble). With no chat it is the same as `start_with`.
+pub fn start_with_chat(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>, chat: Option<crate::agent::Chat>) -> Result<String, String> {
+    check_ready(cfg)?;
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
         let lim = limits(&cfg);
-        let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms };
+        let model = assist::screen_model(&cfg);
+        let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms, chat: chat.clone() };
         ESC.store(false, Ordering::Relaxed);
         VOICE.store(false, Ordering::Relaxed);
-        let q = format!("Take over your mouse and keyboard to: {}. Pictures of your screens go to the AI. Esc stops it.", assist::short(shown.as_deref().unwrap_or(&goal), 140));
+        let q = question(shown.as_deref().unwrap_or(&goal));
         let mut failed = false;
-        let line = if !live.confirm(&q) { "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
+        let mut status = TaskStatus::Failed;
+        let line = if !approved && !live.confirm(&q) { status = TaskStatus::Declined; "Okay, I won't.".to_string() } else if let Some(hook) = EscHook::install() {
             if let Some(p) = prep { p(); std::thread::sleep(std::time::Duration::from_secs(3)); } // the app needs a moment to appear
             live.t0 = std::time::Instant::now();
             pass_through(true);
@@ -1022,18 +1098,35 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
             exclude_own_windows(false);
             drop(hook);
             crate::log::line(&format!("drive ended: {stop:?}"));
+            status = end_status(&stop);
             failed = stop.failed();
             stop.message()
         } else { failed = true; "I can't watch the Esc key, so I won't drive.".to_string() };
         ACTIVE.store(false, Ordering::Relaxed);
+        if let Some(done) = on_done { done(status); }
+        if let Some(c) = &chat { (c.tell)(&line); }
         if failed { assist::fail_later(&line) } else { assist::say_later(&line, 8.0) }
     });
-    Ok("Checking with you first.".into())
+    Ok(if approved { "Taking over now.".into() } else { "Checking with you first.".into() })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_take_over_from_a_chat_asks_the_chat_for_each_risky_click_and_not_the_island() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let chat = crate::agent::Chat {
+            ask: std::sync::Arc::new(move |q: &str| { seen.lock().unwrap().push(q.to_string()); false }),
+            tell: std::sync::Arc::new(|_: &str| {}),
+        };
+        let cfg = Config::parse("{}");
+        let mut live = Live { cfg: &cfg, model: String::new(), held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: 1000, chat: Some(chat) };
+        assert!(!live.confirm("The buddy wants to send the form. Allow it?"), "the chat's no is the answer");
+        assert_eq!(asked.lock().unwrap().as_slice(), ["The buddy wants to send the form. Allow it?"], "the chat was asked once");
+    }
 
     /// The tests that touch the shared `ASK` take turns.
     static ASK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1180,6 +1273,36 @@ mod tests {
         assert!(!w.took((500, 500), 0));
         w.expect((500, 500));
         assert!(!w.took((500, 500), 1000), "the drive put it there itself");
+    }
+
+    #[test]
+    fn a_refused_step_says_whether_you_said_no_or_nobody_answered() {
+        assert_eq!(refusal_text(0), "You said no, so I stopped.", "a button or a typed no");
+        assert_eq!(refusal_text(1), "I got no answer in time, so I stopped.", "the 90 s timeout");
+        assert_eq!(refusal_text(2), "You stopped me, so I stopped.", "Esc or voice");
+    }
+
+    #[test]
+    fn a_finished_take_over_ends_with_the_state_that_fits_how_it_stopped() {
+        assert_eq!(end_status(&Stop::Done), TaskStatus::Unverified, "it finished; nothing checked the screen");
+        assert_eq!(end_status(&Stop::Esc), TaskStatus::Cancelled);
+        assert_eq!(end_status(&Stop::Voice), TaskStatus::Cancelled);
+        assert_eq!(end_status(&Stop::UserMouse), TaskStatus::Cancelled, "the user took the mouse");
+        for s in [Stop::Rounds, Stop::Time, Stop::Stuck, Stop::Refused("No.".into()), Stop::Error("Broke.".into())] {
+            assert_eq!(end_status(&s), TaskStatus::Failed, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_remembers_how_it_came() {
+        let _one = ASK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        *ASK.lock().unwrap() = Some(("Send it?".into(), None));
+        answer(false);
+        assert_eq!(*ANSWERED_BY.lock().unwrap(), "island button");
+        *ASK.lock().unwrap() = Some(("Which Jimmy?".into(), None));
+        reply("the second one");
+        assert_eq!(*ANSWERED_BY.lock().unwrap(), "typed reply");
+        *ASK.lock().unwrap() = None;
     }
 
     #[test]

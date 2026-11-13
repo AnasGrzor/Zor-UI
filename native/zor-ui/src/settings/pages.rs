@@ -134,6 +134,8 @@ const IMAGE_SHAPES: [(&str, &str); 7] = [("cookie", "Cookie"), ("flower", "Flowe
 /// Grid sizes ("<rows>x<cols>") for `desktop.sizes.<id>`; "" is the card's own size.
 const CARD_SIZES: [(&str, &str); 9] = [("", "Default"), ("1x1", "1 × 1"), ("1x2", "1 × 2"), ("1x3", "1 × 3"), ("2x1", "2 × 1"), ("2x2", "2 × 2"),
     ("2x3", "2 × 3"), ("3x2", "3 × 2"), ("3x3", "3 × 3")];
+/// The most remembered facts the Settings list shows; the rest are kept, just not listed.
+const MEMORY_ROWS: usize = 30;
 const KEY_PROVIDERS: [(&str, &str); 8] = [("gemini", "Google Gemini"), ("anthropic", "Anthropic (Claude)"), ("openai", "OpenAI"), ("mistral", "Mistral"),
     ("openrouter", "OpenRouter"), ("elevenlabs", "ElevenLabs (voices)"), ("endpoint", "Custom voice endpoint"), ("wallhaven", "Wallhaven (for NSFW search)")];
 const ISLAND_ACTIONS: [(&str, &str); 6] = [("panel", "Expand the island"), ("sidebar-left", "Left sidebar"), ("sidebar-right", "Right sidebar"),
@@ -221,6 +223,39 @@ impl Settings {
     }
 
     /// Add or remove agents beyond Claude Code, Codex and Gemini CLI: any tool whose hooks live in a Claude-style JSON file.
+    /// The newest requests and how each ended: state, verdict and tool calls. Read through a cache, like the memory list.
+    fn task_list(&mut self, p: &mut Pen) {
+        let tasks = crate::agent::tasks::listing();
+        if tasks.is_empty() { return; }
+        p.note(&crate::agent::tasks::summary_line(&tasks), 12.0);
+        for t in &tasks {
+            let Some(r) = p.row(44.0) else { continue };
+            let sub = format!("{} · {} · {} tool call(s)", t.status, if t.verdict.is_empty() { "—" } else { &t.verdict }, t.tool_calls);
+            p.left(r, "history", &t.request, &sub, 40.0);
+            // only a request that is still going can be cancelled
+            if matches!(t.status.as_str(), "Planning" | "Running" | "WaitingApproval" | "Verifying") {
+                let id = p.act(Act::Do("cancel-task", String::new()));
+                ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "stop", IconKind::Plain, 20.0, false);
+            }
+        }
+    }
+
+    /// The facts the buddy keeps, newest first, each with a button to forget it. Read through a cache, so a repaint never opens the database.
+    fn memory_list(&mut self, p: &mut Pen) {
+        let facts = crate::agent::memory::listing();
+        if facts.is_empty() {
+            p.note("Nothing kept yet. Ask the buddy to remember something, like \"remember that my sister is called Lina\".", 12.0);
+            return;
+        }
+        p.note(&format!("{} remembered. Delete any you don't want kept.", facts.len()), 12.0);
+        for m in facts.iter().rev().take(MEMORY_ROWS) {
+            let Some(r) = p.row(44.0) else { continue };
+            p.left(r, "psychology", &m.text, "", 40.0);
+            let id = p.act(Act::Do("forget-memory", m.id.to_string()));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "delete", IconKind::Plain, 20.0, false);
+        }
+    }
+
     fn custom_agents(&mut self, p: &mut Pen) {
         p.note("Your own agents. Give a name, its config folder under your user folder (like .myagent) and the hook file in it (like hooks.json). Zor UI adds its hooks there once the folder exists.", 12.0);
         for (key, ic, label, sub, ph) in [("agent-name", "badge", "Name", "Shown in the island", "My Agent"), ("agent-dir", "folder", "Config folder", "Under your user folder", ".myagent"), ("agent-file", "description", "Hook file", "Inside that folder", "hooks.json")] {
@@ -1384,9 +1419,15 @@ impl Settings {
         p.card(|p| {
             self.sw(p, "ai.claudeCli", "Use my Claude subscription", "Adds Claude Haiku, Sonnet and Opus through Claude Code, no API key. Needs the claude command, signed in. Counts against your plan", "workspace_premium");
             self.sw(p, "ai.memory", "Remember things", "Buddy keeps the facts you ask it to remember, on this PC only, and recalls them when they fit. Passwords and account numbers are never kept", "psychology");
+            if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) { self.memory_list(p); }
+            self.task_list(p);
             self.sw(p, "ai.nativeTools","Native tool calling (Claude)", "Claude picks the buddy's tools through the API, and sees their results. Only with a Claude model and the browser off. Off keeps the JSON protocol", "build");
+            let strong: Vec<(Value, String)> = std::iter::once((json!(""), "Off".to_string())).chain(models.iter().cloned()).collect();
             self.pick(p, "ai.model", models, "Default model", "Used by the sidebar and the buddies. Ollama models appear when Ollama is running", "model_training", 260.0);
             self.slider(p, "ai.temperature", "Temperature", Sl { min: 0.0, max: 2.0, step: 0.1, fmt: Fmt::Fixed1 }, "thermostat");
+            self.pick(p, "ai.fallback1", strong.clone(), "First fallback model", "Tried if the model above fails before any tool runs. Off: none", "swap_horiz", 260.0);
+            self.pick(p, "ai.fallback2", strong.clone(), "Second fallback model", "Tried if the first fallback fails the same way. Off: none", "swap_horiz", 260.0);
+            self.pick(p, "ai.strongModel", strong,"Model for multi-step requests", "Used when a request has several steps, like compare and then. Off uses the default model", "model_training", 260.0);
             if let Some(r) = p.row(80.0) {
                 p.left(R::new(r.x, r.y, r.w, 40.0), "description", "System prompt", "Leave empty for the default", 300.0);
                 let init = self.gs(p.cx, "ai.systemPrompt");
@@ -1415,6 +1456,51 @@ impl Settings {
                 self.field_ui(p, &format!("key-{id}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), ph, 17.0, false);
             }
         });
+        // the Discord bot, only in the build that has it. Its token goes in the same secret store as the keys above, through the same
+        // save-key and clear-key actions. The switch and the token are not looks, so this card has no preview.
+        #[cfg(feature = "discord")]
+        {
+            use crate::messaging::discord::TOKEN_SECRET;
+            p.h2("forum", "Discord", "");
+            p.card(|p| {
+                self.sw(p, "remote.discord.enabled", "Chat with the buddy on Discord", "Direct messages from a paired account reach the buddy, and its answers come back there", "forum");
+                let status = crate::messaging::discord::status();
+                if let Some(r) = p.row_sub(44.0, "info", &status, 0.0) { p.left(r, "info", "Bot status", &status, 0.0); }
+                if let Some(r) = p.row(40.0) {
+                    // the token row, laid out as the key rows above
+                    let wsave = chip_w(p.c, "Save", false);
+                    p.left(r, "key", "Bot token", "", 240.0 + 12.0 + wsave + 48.0);
+                    let mut right = r.x + r.w;
+                    let a = p.act(Act::Do("clear-key", TOKEN_SECRET.into()));
+                    ui::icon_btn(p.c, p.cx, R::new(right - 36.0, r.y + 2.0, 36.0, 36.0), a, "delete", IconKind::Plain, 20.0, false);
+                    right -= 48.0;
+                    let a = p.act(Act::Do("save-key", TOKEN_SECRET.into()));
+                    ui::chip(p.c, p.cx, right - wsave, r.y + 4.0, a, None, "Save", false);
+                    self.field_ui(p, &format!("key-{TOKEN_SECRET}"), None, super::Kind::Secret, R::new(right - wsave - 12.0 - 240.0, r.y, 240.0, 40.0), "Paste bot token", 17.0, false);
+                }
+                // pairing: a code to send from the account, then the paired accounts, each one revocable
+                use crate::messaging::{pairing, DISCORD};
+                let sub = match pairing::active_code(std::time::Instant::now()) {
+                    Some((code, secs)) => format!("Send {code} to the bot in a direct message. It expires in {} min", secs.div_ceil(60)),
+                    None => "Make a code, then send it to the bot in a direct message".to_string(),
+                };
+                let w = chip_w(p.c, "New code", true) + 12.0;
+                if let Some(r) = p.row_sub(44.0, "link", &sub, w) {
+                    p.left(r, "link", "Pair an account", &sub, w);
+                    p.chip_right(r, Some("add"), "New code", Act::Do("discord-pair", String::new()));
+                }
+                let paired = pairing::paired(DISCORD);
+                if paired.is_empty() { p.note("No account is paired. Only paired accounts reach the buddy", 12.0); }
+                for id in paired {
+                    let ids = id.to_string();
+                    let w = chip_w(p.c, "Revoke", true) + 12.0;
+                    if let Some(r) = p.row_sub(44.0, "person", "", w) {
+                        p.left(r, "person", "Paired account", &ids, w);
+                        p.chip_right(r, Some("link_off"), "Revoke", Act::Do("discord-revoke", ids));
+                    }
+                }
+            });
+        }
         // saved Claude Code logins; Idle means Claude Code isn't installed. No look setting here, so no preview.
         if !matches!(self.claude, Load::Idle) {
             let rows = match &self.claude { Load::Ready(v) => v["accounts"].as_array().cloned().unwrap_or_default(), _ => vec![] };

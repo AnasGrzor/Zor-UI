@@ -21,19 +21,19 @@ Discord must act as another interface to the existing Buddy, not as a separate A
 
 ## 1. Audit the Existing Codebase
 
-Read [`CLAUDE.md`](http://CLAUDE.md) before making changes.
+Read CLAUDE.md before making changes.
 
 Inspect:
 
-- `native/zor-ui/src/[agent.rs](http://agent.rs)`
-- `native/zor-ui/src/[assist.rs](http://assist.rs)`
-- `native/zor-ui/src/agent/[memory.rs](http://memory.rs)`
-- `native/zor-ui/src/agent/[history.rs](http://history.rs)`
-- `native/zor-ui/src/agent/[tasks.rs](http://tasks.rs)`
-- `native/zor-ui/src/agent/[policy.rs](http://policy.rs)`
-- `native/zor-ui/src/agent/[routing.rs](http://routing.rs)`
-- `native/zor-ui/src/[settings.rs](http://settings.rs)`
-- `native/zor-ui/src/[main.rs](http://main.rs)`
+- `native/zor-ui/src/agent.rs`
+- `native/zor-ui/src/assist.rs`
+- `native/zor-ui/src/agent/memory.rs`
+- `native/zor-ui/src/agent/history.rs`
+- `native/zor-ui/src/agent/tasks.rs`
+- `native/zor-ui/src/agent/policy.rs`
+- `native/zor-ui/src/agent/routing.rs`
+- `native/zor-ui/src/settings.rs`
+- `native/zor-ui/src/main.rs`
 - `native/zor-ui/Cargo.toml`
 
 Identify existing execution entry points, Tokio runtime ownership, shared state, cancellation mechanisms, and notification infrastructure.
@@ -158,7 +158,7 @@ Do not directly call desktop UI functions from Discord event handlers.
 
 ## 5. Remote Security and Permissions
 
-Extend `agent/[policy.rs](http://policy.rs)` with channel-aware authorization.
+Extend `agent/policy.rs` with channel-aware authorization.
 
 Discord must never bypass existing Buddy safety restrictions.
 
@@ -383,7 +383,7 @@ Do not perform a large-scale rewrite of Zor UI.
 
 Prefer small, reviewable changes that reuse existing architecture.
 
-Follow [`CLAUDE.md`](http://CLAUDE.md), preserve the native UI design system, and keep performance overhead minimal.
+Follow CLAUDE.md, preserve the native UI design system, and keep performance overhead minimal.
 
 Verify the actual Serenity APIs and dependency compatibility before implementation.
 

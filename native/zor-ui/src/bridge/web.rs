@@ -1,6 +1,9 @@
 //! Rust port of end4_bridge.py's web-facing commands: secrets (DPAPI), translate, booru, wallpaper
 //! download, the AI chat/models and the preset gallery. HTTP goes through curl.exe (no TLS stack here).
 
+mod adapters;
+pub(crate) use adapters::MAX_REPLY_TOKENS;
+
 use super::common::*;
 use super::*;
 use serde_json::json;
@@ -132,6 +135,13 @@ fn curl_get(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Result<Vec<u
 
 fn get_json_e(url: &str, headers: &[(&str, &str)], timeout_s: u32) -> Result<Value, String> {
     serde_json::from_slice(&curl_get(url, headers, timeout_s)?).map_err(|e| e.to_string())
+}
+
+/// Ollama's /api/show for one model (its `model_info` holds the context length). None when Ollama is not running or does not know the name.
+pub(crate) fn ollama_show(model: &str) -> Option<Value> {
+    let body = json!({ "model": model }).to_string();
+    let o = hidden("curl.exe").args(["-sSf", "--max-time", "2", "-H", "Content-Type: application/json", "-d", &body, "http://localhost:11434/api/show"]).output().ok()?;
+    o.status.success().then(|| serde_json::from_slice(&o.stdout).ok()).flatten()
 }
 
 // ------------------------------------------------------------------ secrets (Windows DPAPI)
@@ -411,7 +421,8 @@ fn ollama_models() -> Vec<Value> {
 /// Settings, Services, "Use my Claude subscription" (on unless turned off).
 fn claude_cli_on() -> bool { raw_config()["ai"]["claudeCli"].as_bool().unwrap_or(true) }
 
-fn all_models() -> Vec<Value> {
+/// Every model the buddy can use now: Claude subscription, the CLIs, the built-in list, custom ones, and Ollama's.
+pub(crate) fn all_models() -> Vec<Value> {
     let mut v = if claude_cli_on() && super::claude_cli::find().is_some() { super::claude_cli::models() } else { vec![] };
     v.extend(super::sub_cli::models());
     v.extend(default_models());
@@ -481,52 +492,20 @@ fn blocks_of(m: &Value, openai: bool) -> Value {
     Value::Array(b)
 }
 
-/// What to send for a chat turn: URL, headers and JSON body for `provider`.
+/// What to send for a chat turn: URL, headers and JSON body for `provider`. The chat path calls the adapter directly; this
+/// wrapper is for the request tests.
+#[cfg(test)]
 fn chat_request(provider: &str, model: &Value, key: &str, msgs: &[Value], system: &str, temp: f64) -> (String, Vec<(String, String)>, Value) {
-    let id = model["id"].as_str().unwrap_or("");
-    let role = |m: &Value| m["role"].as_str().unwrap_or("user").to_string();
-    let h = |k: &str, v: &str| (k.to_string(), v.to_string());
-    let mut headers = vec![h("User-Agent", UA), h("Content-Type", "application/json"), h("Accept", "text/event-stream")];
-    match provider {
-        "gemini" => {
-            headers.push(h("x-goog-api-key", key));
-            let contents: Vec<Value> = msgs.iter().map(|m| json!({ "role": if role(m) == "assistant" { "model" } else { "user" }, "parts": gemini_parts(m) })).collect();
-            (format!("https://generativelanguage.googleapis.com/v1beta/models/{id}:streamGenerateContent?alt=sse"), headers,
-             json!({ "contents": contents, "systemInstruction": { "parts": [{ "text": system }] }, "generationConfig": { "temperature": temp } }))
-        }
-        "anthropic" => {
-            headers.push(h("x-api-key", key));
-            headers.push(h("anthropic-version", "2023-06-01"));
-            let messages: Vec<Value> = msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, false) })).collect();
-            ("https://api.anthropic.com/v1/messages".into(), headers,
-             json!({ "model": id, "max_tokens": 4096, "system": system, "temperature": temp, "stream": true, "messages": messages }))
-        }
-        _ => {
-            if !key.is_empty() { headers.push(h("Authorization", &format!("Bearer {key}"))); }
-            if provider == "openrouter" {
-                headers.push(h("HTTP-Referer", "https://github.com/pctrade/end4-pC"));
-                headers.push(h("X-Title", "Zor UI"));
-            }
-            let url = model["endpoint"].as_str().filter(|e| !e.is_empty()).unwrap_or(openai_like(provider)).to_string();
-            let mut messages = vec![json!({ "role": "system", "content": system })];
-            messages.extend(msgs.iter().map(|m| json!({ "role": role(m), "content": blocks_of(m, true) })));
-            (url, headers, json!({ "model": id, "stream": true, "temperature": temp, "messages": messages }))
-        }
-    }
+    adapters::for_provider(provider).request(model, key, msgs, system, temp)
 }
 
 /// The lines to emit for one parsed SSE event of `provider`.
 fn sse_events(provider: &str, ev: &Value) -> Vec<Value> {
-    let delta = |t: &Value| t.as_str().filter(|t| !t.is_empty()).map(|t| json!({ "delta": t }));
-    match provider {
-        "gemini" => ev["candidates"][0]["content"]["parts"].as_array().map(|p| p.iter().filter_map(|x| delta(&x["text"])).collect()).unwrap_or_default(),
-        "anthropic" => match ev["type"].as_str() {
-            Some("content_block_delta") => delta(&ev["delta"]["text"]).into_iter().collect(),
-            Some("error") => vec![json!({ "error": ev["error"]["message"].as_str().unwrap_or("error") })],
-            _ => vec![],
-        },
-        _ => delta(&ev["choices"][0]["delta"]["content"]).into_iter().collect(),
-    }
+    let adapter = adapters::for_provider(provider);
+    let mut out = adapter.events(ev);
+    // token counts, when this event carries them (agent::provider)
+    out.extend(crate::agent::provider::usage_event(adapter.name(), ev));
+    out
 }
 
 /// A value as a curl --config quoted string.
@@ -545,7 +524,9 @@ fn ai_chat(stdin: &str, out: &Sink) {
         out.emit(&json!({ "error": "bad request" }));
         return;
     };
-    let model = all_models().into_iter().find(|m| m["id"] == req["model"]).unwrap_or_else(|| json!({ "id": req["model"], "provider": "openai" }));
+    // a model id saved before a rename is mapped to its current one (sub_cli::current_id)
+    let model_id = super::sub_cli::current_id(req["model"].as_str().unwrap_or("")).to_string();
+    let model = all_models().into_iter().find(|m| m["id"].as_str() == Some(model_id.as_str())).unwrap_or_else(|| json!({ "id": model_id, "provider": "openai" }));
     let provider = model["provider"].as_str().unwrap_or("openai").to_string();
     let msgs: Vec<Value> = req["messages"].as_array().map(|a| a.iter().filter(|m| truthy(&m["content"]) || !images_of(m).is_empty()).cloned().collect()).unwrap_or_default();
     if !can_see(&provider) && msgs.iter().any(|m| !images_of(m).is_empty()) {
@@ -568,8 +549,10 @@ fn ai_chat(stdin: &str, out: &Sink) {
         out.emit(&json!({ "error": format!("No API key for {provider}. Type /key {provider} YOUR_KEY") }));
         return;
     }
-    let (url, headers, mut body) = chat_request(&provider, &model, &key, &msgs, system, temp);
-    if provider == "anthropic" { super::native_tools::add_to_body(&mut body, &req["tools"]); }
+    let adapter = adapters::for_provider(&provider);
+    let (url, headers, mut body) = adapter.request(&model, &key, &msgs, system, temp);
+    // the tool list, for the providers that take one (the adapter decides)
+    adapter.add_tools(&mut body, &req["tools"]);
     // The key and body go through curl's config on stdin, so they never show up in the process list.
     let mut conf = format!("url = {}\n", cfg_quote(&url));
     for (k, v) in &headers { conf.push_str(&format!("header = {}\n", cfg_quote(&format!("{k}: {v}")))); }
@@ -593,7 +576,8 @@ fn ai_chat(stdin: &str, out: &Sink) {
         }
     });
     let (mut status, mut other, mut finished) = (0u32, String::new(), false);
-    let mut tools = super::native_tools::ToolParser::default();
+    // the tool-call reader for this provider, when it has one (None: the provider takes no native tools)
+    let mut tools = adapter.new_tools();
     loop {
         if out.stopped() { let _ = child.kill(); let _ = child.wait(); return; }
         let line = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -609,7 +593,7 @@ fn ai_chat(stdin: &str, out: &Sink) {
             if data == "[DONE]" { finished = true; break; }
             if let Ok(ev) = serde_json::from_str::<Value>(data) {
                 for e in sse_events(&provider, &ev) { out.emit(&e); }
-                if provider == "anthropic" {
+                if let Some(tools) = tools.as_mut() {
                     match tools.feed(&ev) {
                         Some(Ok(t)) => { out.emit(&json!({ "tool_use": { "id": t.id, "name": t.name, "input": t.input } })); }
                         Some(Err(f)) => { out.emit(&json!({ "tool_error": { "id": f.id, "name": f.name, "message": f.message } })); }

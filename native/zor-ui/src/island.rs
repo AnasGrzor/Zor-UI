@@ -202,7 +202,7 @@ impl Island {
         if dp(cx, "timer") && (done || t["running"].as_bool() == Some(true) || t["sw"]["running"].as_bool() == Some(true)) { v.push((Sec::Timer, 16.0 + 10.0 + 44.0)); }
         if dp(cx, "clock") && v.is_empty() { v.push((Sec::Idle, 72.0)); }
         if dp(cx, "agents") {
-            let list = hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default();
+            let list = cx.agents.clone();
             if !list.is_empty() {
                 let h = 16.0 + list.iter().map(|a| 10.0 + 18.0 + if a["state"] == "waiting" { 6.0 + lh(12.5) } else { 0.0 }
                     + a["usage"].as_object().map_or(0.0, |u| u.len() as f32 * (6.0 + lh(12.0)))).sum::<f32>();

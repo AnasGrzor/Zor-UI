@@ -314,11 +314,19 @@ impl Win {
         if !force && now == self.last { return; }
         self.last = now;
         unsafe {
-            if px != self.px {
+            if px != self.px || self.bits.is_null() {
                 if !self.dib.is_invalid() { SelectObject(self.dc, self.old); let _ = DeleteObject(HGDIOBJ::from(self.dib)); }
                 let bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: px.0.max(1), biHeight: -px.1.max(1), biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
                 let mut bits = std::ptr::null_mut();
-                let Ok(dib) = CreateDIBSection(self.dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0) else { return };
+                let Ok(dib) = CreateDIBSection(self.dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+                    // the old DIB is already deleted: forget it, so the next paint allocates again
+                    self.dib = HBITMAP::default();
+                    self.old = HGDIOBJ::default();
+                    self.bits = std::ptr::null_mut();
+                    self.px = (0, 0);
+                    self.last = (u64::MAX, String::new(), 0, (0, 0));
+                    return;
+                };
                 self.dib = dib;
                 self.old = SelectObject(self.dc, HGDIOBJ::from(dib));
                 self.bits = bits as *mut u8;

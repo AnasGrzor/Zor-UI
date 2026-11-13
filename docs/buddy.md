@@ -1,0 +1,239 @@
+# Buddy: how it works
+
+The buddy is the voice and chat assistant in Zor UI. This page covers what is built, how the parts fit together, the settings
+that control them, and how to measure them. The longer plan is in `BuddyIntelPlan.md`.
+
+## Requests
+
+A request comes in by voice or text. `assist::parse` handles plain commands ("open Chrome", "turn up the volume") directly,
+without the model. Anything else goes to `agent::ask`, which runs one of two loops:
+
+- **JSON protocol** (default, works with every provider and with the Claude subscription). The model replies with one JSON
+  object per turn: `{"do": "tool", ...}` to act, or `{"say": "..."}` to answer. `parse_step` validates each reply.
+  Up to 12 steps and 90 seconds.
+- **Native tool calling** (Claude API only). The model gets the tools as API tool definitions and replies with `tool_use`
+  blocks. Each result goes back as a `tool_result` block with its id. A plain text reply ends the request. Turned on by
+  `ai.nativeTools`, and only when the model is served by Anthropic and the browser is off.
+
+Both loops run the same tools through `exec`, so the same confirmations and switches apply to each.
+
+## Tools
+
+21 tools, the same in both loops: `search`, `web_search`, `read_url`, `open`, `find_app`, `open_url`, `play`, `media`,
+`message`, `volume`, `brightness`, `radio`, `power`, `clipboard`, `find_file`, `open_file`, `wallpaper`, `see_screen`,
+`take_over`, `remember`, `forget`. The browser tools are only in the JSON loop.
+
+Risk levels (`agent/policy.rs`, one `match` over every tool): read-only (search, find, see the screen), reversible (open,
+volume, play, remember, forget, message), consequential (take over, browser), destructive (sleep, restart, shut down, sign
+out). Only consequential and destructive calls need approval. The log records each call's level, not its arguments.
+
+Approval (M2): every risky call is asked in one place, `agent::approve`, which reads the question from
+`policy::approval_for`. Nothing else asks. The steps:
+- A call is risky when its level needs approval. A risky call with no question is refused, so it fails closed.
+- `power` (sleep, restart, shut down, sign out) asks in the island. Lock doesn't ask.
+- `take_over` checks its Settings switches and that the model can see images first, then asks. The island is asked on
+  the request's own thread, so the answer comes back to the verifier. No second question is asked.
+- The browser asks once per request, before its first step. Settings' "Bypass permissions" skips that question. Each
+  risky click or typing step inside the browser still asks on its own (`browse::gate`).
+- A "no" comes back as "You didn't allow it, so I did nothing." and the request is recorded as Declined.
+- Every island question logs one line when it ends: `island question "<question>": allowed|refused (<how>) after N s`.
+  `<how>` is `island button` (Allow or Deny was pressed), `typed reply`, `spoken reply`, `no answer: Esc pressed`,
+  `no answer: voice started`, or `no answer: timed out after 90 s`.
+
+Safety:
+- `message` opens a chat with the text ready. The user presses Enter to send.
+- `message` text is the user's own words. The prompt says so, and the live eval checks it.
+- `remember` and `forget` do nothing while `ai.memory` is off.
+
+## Play a song
+
+`playsong::play_song` tries routes in order and reports the first that starts a new track:
+1. the Spotify app, when installed or running;
+2. a Spotify web tab: an open one (your login is in it), or a new one opened to the Spotify search page;
+3. a YouTube tab that is already open;
+4. a new YouTube search.
+
+"Started" means the Windows media session shows a new track playing within 10 seconds. The play button's label is not trusted.
+A failed route falls through to the next one, and the answer lists what was tried.
+
+## Memory
+
+Facts the user asks Buddy to keep, in `%LOCALAPPDATA%\zor-ui\buddy.db` (SQLite, FTS5 full-text search).
+- `remember` saves a fact. A fact with at least 60% of its words in common with a stored one replaces it.
+- Text that looks like a password, key, PIN, card or account number is refused, and so is a run of 12 or more digits.
+- `forget` deletes the stored fact that best matches the request.
+- Recall adds up to five matching facts to the user's turn. Common words ("the", "what") don't count.
+- Settings > AI lists the 30 newest facts with a delete button. The list reads a cache; every write clears it.
+- A JSON store from the earlier build is imported once, then renamed `buddy-memory.json.migrated`.
+
+## Verifier
+
+A tool's "ok" is not proof that the request worked. `agent/verifier.rs` checks each tool result against what the tool
+reports:
+- **Verified:** a play that `playsong` confirmed ("Playing ..."), a saved or forgotten fact, a search with results, a file
+  found, an app found, a screen answer, a radio or brightness level read back after the change.
+- **Unverified:** the device or app did something, but nothing reports what it did (volume, opening an app, take-over).
+- **Failed:** the tool errored, found nothing, or a brightness change did not read back as the level asked for.
+- **Declined:** the user said no in the island. Not a failure of the tool.
+
+A tool that failed and a later step that worked do not make the request partial: only the last outcome decides, so
+"open Spotify failed, then the browser play worked" is unverified, not partial. A request where something was declined and
+something else ran is partial.
+
+The checks give one verdict for the request: completed, unverified, partial, failed, or declined. The verdict is logged as
+`buddy verdict`. A partial or failed request also gets a short note added to the answer ("Only part of that was confirmed.").
+Unverified actions are not called out, so a volume change doesn't come with a complaint.
+
+The verdict decides the saved state. A model's "Done." after its tools failed is saved as Failed. An acting call that
+failed in this request is not run again (the model is told so). Lookups may still be retried.
+
+## Tasks and states
+
+Each request is a task, saved in the `tasks` table with its request text, state, verdict and tool-call count. A request
+that looks like a secret is saved as "[private request]". The task moves through the states in `agent/state.rs`: Planning,
+Running, WaitingApproval (while the island asks), Verifying, then one of the final states: Completed, Unverified, Partial,
+Failed, Declined or Cancelled. A request that ends on its own goes through Verifying and ends in its verdict. A cancel skips
+Verifying. A move that skips a state is refused and logged. A task still open when the app closed is marked Interrupted on the next start. The Settings > AI
+page lists the 10 newest requests with their state, verdict and tool calls.
+
+## Steps and interrupted tasks
+
+Each tool step of a task is saved in the `steps` column of its `tasks` row as it runs (`agent/plan.rs`). A step is one JSON
+entry: the call, whether it changes something (`side`), its outcome (running, done, failed, declined or blocked) and a short
+detail. The plan calls for a `task_steps` table; this build keeps the steps in the task row, so the schema stays one table.
+
+A step that changes something outside the buddy (a message, a key press, a power action, a file opened, a browser action) is
+refused when one of the five newest interrupted tasks already started or finished the same call. The refusal goes back to the
+model as a failed step, and the user is told to ask again if they want it done. Reads (web search, page read, app and file
+lookup, screen answer, remembering and forgetting facts) may repeat. An unknown tool counts as a change. A step the user
+declined is never treated as done. The `steps` column is added to databases from before this change; existing rows are kept.
+
+### Not built yet for interrupted tasks
+
+- **Resuming.** An interrupted task is marked and its changing steps are blocked. It is not continued; the user asks again.
+- **Declared plans.** The model still plans one tool at a time. Steps are recorded from what it did, not from a plan it wrote.
+- **Recovery per start.** It runs once per app start and assumes requests do not overlap.
+
+## Developer tools (M9a, read-only)
+
+The buddy can read a project folder when you ask about the code. Set the folder in the config key
+`buddies.developerWorkspace` (a Settings field comes later). With no folder set, the tools say so and do nothing.
+
+- `list_tree`: the names of files and folders, two levels down at most, capped at 200 entries.
+- `read_file`: the text of one file, cut at 20,000 bytes. Binary files are refused.
+- `search_code`: lines that contain the words, capped at 50 hits.
+- `git_status`: `git status --short` and `git diff --stat` for the workspace, with external diff tools and textconv off.
+
+Every path is resolved to its real location before it is used, so a junction or symlink inside the workspace cannot reach
+outside it. `.env`, key and certificate files, and anything under `.git` are never read. Key-like text is redacted from
+results. Build output, dependencies and dot-folders are skipped. Nothing here writes a file or runs a project.
+
+## Retries and fallbacks
+
+- **Provider adapters (M7).** Each provider's request shape and stream events live in one `Adapter` (`bridge/web/adapters.rs`).
+  Gemini, Anthropic and an OpenAI-style adapter (used by Mistral, OpenRouter, Ollama, custom endpoints and unknown names) exist.
+  Adding a provider means one impl and one arm in `for_provider`. Only the Anthropic adapter takes a tool list and reads
+  native tool calls; the others leave both alone.
+- **Renamed models (M7).** A model id saved before a rename is mapped when the chat reads it: `gemini-cli:default` becomes
+  `antigravity-cli:default` (`sub_cli::current_id`). Saved settings are not rewritten. Screen questions use the first
+  configured model that can be sent pictures, so a subscription command line is passed over.
+- **Usable models (M7).** A model whose provider needs a key (Gemini, OpenAI, Anthropic, Mistral, OpenRouter) is skipped as a
+  strong or fallback model when that key is not saved. The model the user chose is always tried. Ollama and the subscription
+  command lines need no saved key. Each reply's token counts are logged as `buddy usage: N in, M out` when the provider reports
+  them (`agent/provider.rs`). Each task's total over all its model calls is saved on its row as `tokens_in` and `tokens_out`
+  (0 when the provider reported none). Databases from before this change get the columns; rows are kept.
+  "In" counts every prompt token, cached or not: Anthropic reports cache reads and writes apart from `input_tokens`, and the
+  counts add them back in. The Claude subscription reports the same counts in its final result line.
+- **Retries.** A read-only tool that fails (a search, a page read) is tried once more after 400 ms. Anything that acts is
+  never repeated (`policy::may_retry`).
+- **Replanning.** A failed tool's error goes back to the model, which picks another route. The loop itself does not plan.
+- **Failure hints (M6).** The error also gets one hint for the model: turned off in Settings (do not retry), nothing matched
+  (try find_app or find_file), the PC did not answer (one more try), or a wrong argument (use a listed value). The hint
+  comes from `agent/diagnose.rs`, matched on the tools' current wording. The user never sees it.
+- **Model fallback.** If the model fails before any tool has run, the next model in the fallback list (`ai.fallback1`, `ai.fallback2`) tries the same
+  request. After a tool has run, the request is never retried on another model.
+- **Routing.** A request with words like "then", "compare" or "research" goes to `ai.strongModel` when that is set.
+
+## Context and skills
+
+`AgentContext` (in `agent.rs`) holds what a request needs: the clock, the window in front, the player, matching facts, the
+previous request, and the names of recently opened files. Each part is filled only when the request asks for it.
+
+- **Previous request.** When the words point back ("this", "continue", "again", "last", "before"), the newest saved request
+  and how it ended go in. "it" is not a reference word yet, because it shows up in too many plain questions.
+- **Recent files.** When the words ask about files ("recent", "file", "document"), the names of the five newest shortcuts in
+  the Windows Recent folder go in, labelled as names only and never instructions. Only names are sent, and only on request.
+- **Vague requests.** A request that points back, with no earlier request and no earlier turn, gets one instruction: ask one
+  short question about what it means.
+- **Investigate before asking (M6).** An unclear request ("fix this") takes the first object it can find, in this order: the
+  active project, then the window in front (its title is read, nothing is acted on), then the last request or conversation.
+  The buddy states the assumption and goes ahead. It asks one question only when none of these exist. Each question is logged
+  as `buddy asks one question for "<request>": <question>`, so the question rate can be counted from the log.
+- **Budget.** The whole context is cut to 700 characters. `skills.rs` has three skills with their tools and short guidance:
+research (search, read pages), desktop (apps, volume, brightness, media, screen, take-over) and personal (remember, forget,
+files, messages, music). A skill's guidance goes into the request only when its words appear, so most requests carry none.
+
+## Conversation turns
+
+The last six answered turns are saved to the `turns` table and restored on the first request after a restart. Turns older
+than ten minutes are dropped, and turns that look like secrets are never saved.
+
+## Prompt layout and caching
+
+The system text is fixed: the base rules, the user's own instructions (`ai.systemPrompt`), and the browser rules when the
+browser is on. Providers can reuse a cached copy of it between requests.
+
+Per-request parts go in the user turn (`request_text`):
+- the clock, the front window and the player, each only when the request's words ask for it (`wants_clock`, `wants_window`,
+  `wants_media`). A plain request like "turn the volume up" gets none of them;
+- the recalled facts, only when they match the request.
+
+Measured on haiku: when the system text stayed the same, the second call read 1,590 tokens from the cache. When the time was
+in the system text, nothing was read.
+
+## Settings
+
+| Key | Default | What it does |
+|---|---|---|
+| `ai.model` | `gemini-2.5-flash` | model for chat and tools |
+| `ai.temperature` | 0.5 | sampling temperature for the agent loop and screen questions (take-over stays at 0.2) |
+| `ai.systemPrompt` | empty | your own instructions; they never override the reply format |
+| `ai.nativeTools` | false | native tool calling, Claude API only |
+| `ai.memory` | true | remember and recall facts, on this PC only |
+| `ai.strongModel` | empty (Off) | model for multi-step requests; picked in Settings > AI |
+| `ai.fallback1`, `ai.fallback2` | Off | two fallback models, from dropdowns in Settings > AI; tried in order when the chosen model fails before any tool runs |
+| `ai.fallbackModels` | empty | optional extra list in `config.json` only, tried after the two above |
+
+## Logs
+
+Each request logs `buddy request`, `buddy native turn` or `buddy AI reply`, each tool call, `buddy timing: ... total, ... in the
+model, ... in N tool call(s)`, `buddy answer` or `buddy failed`, and `buddy status` (the final state: Completed, Unverified, Partial, Failed, Declined or Cancelled). The log
+is `%LOCALAPPDATA%\zor-ui\zorui.log`.
+
+## Evals
+
+- **Protocol cases** (`eval/protocol-cases.json`), run with `cargo test`. Replies the parser must read correctly. Offline.
+- **Live cases** (`eval/live-cases.json`). Real requests sent through your Claude subscription, no API key:
+  `cargo test live_protocol_eval -- --ignored --nocapture`. Set `ZORUI_EVAL_MODEL` to choose the model (default haiku).
+  A case can require a word in the step with `contains`.
+- **Cache check.** `cargo test live_cache_layout_eval -- --ignored --nocapture` sends five requests in the old and new layouts
+  and prints the cached tokens for each call.
+
+Live evals spend subscription usage, so they are ignored by default.
+
+## Subscription and API keys
+
+The subscription path runs the `claude` command with no tools, so it gives text replies only. It works with the JSON
+protocol. Native tool calling needs an API key, because the tool definitions go through the API.
+
+## Not built yet
+
+- **A separate planner.** The model plans each step itself, one tool at a time, and the loop carries it out. A second planning
+  call would cost a model round trip on every request, so it is not built until the eval shows the loop losing track.
+- **Developer skill.** It needs code tools (read a project, run tests). The buddy has none yet.
+- **Semantic memory.** The `Recall` trait is in place, but an embedding model would have to be downloaded, and the privacy
+  rule keeps facts off providers, so it needs your decision on a local model first.
+- **Browser tools and other providers in native mode.** Native mode is Claude-only with the browser off.
+- **Metrics beyond the logs and the tasks table.** The eval scripts are the benchmarks; no dashboard.
+- **Manage tasks by voice.** The Settings list shows them and can cancel one. A cancel stops the request between model calls;
+  a tool that is already running finishes first.

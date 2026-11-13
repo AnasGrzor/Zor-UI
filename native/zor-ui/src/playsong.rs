@@ -26,12 +26,13 @@ pub enum Route { SpotifyApp, SpotifyTab, YoutubeTab, YoutubeNew }
 
 /// The routes to try, in order. `spotify_app`: installed or running. Asking for YouTube (or YouTube Music) skips Spotify;
 /// naming Spotify, or no service, tries it first.
-pub fn routes(service: &str, spotify_app: bool, spotify_tab: bool, youtube_tab: bool) -> Vec<Route> {
+pub fn routes(service: &str, spotify_app: bool, youtube_tab: bool) -> Vec<Route> {
     let s = service.to_lowercase();
     let spotify = s.trim().is_empty() || s.contains("spotify");
     let mut v = vec![];
     if spotify && spotify_app { v.push(Route::SpotifyApp); }
-    if spotify && spotify_tab { v.push(Route::SpotifyTab); }
+    // always tried for Spotify: an open Spotify tab is used (your login is in it), otherwise a new one opens
+    if spotify { v.push(Route::SpotifyTab); }
     if youtube_tab { v.push(Route::YoutubeTab); }
     v.push(Route::YoutubeNew);
     v
@@ -209,7 +210,7 @@ fn press_until_playing(window: HWND) -> Result<String, String> {
     Err("I pressed Play but the player didn't start".into())
 }
 
-fn exe_name(pid: u32) -> Option<String> {
+pub(crate) fn exe_name(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 520];
@@ -250,15 +251,26 @@ fn spotify_app_route(query: &str) -> Result<String, String> {
     press_until_playing(window).map(|t| format!("Playing {t} on Spotify."))
 }
 
+fn window_title(h: HWND) -> String {
+    let mut b = [0u16; 512];
+    let n = unsafe { GetWindowTextW(h, &mut b) }.max(0) as usize;
+    String::from_utf16_lossy(&b[..n])
+}
+
 fn browser_route(url: &str, host: &str, pick: impl Fn(&[(String, bool)]) -> Option<usize>, press: bool, before: &[Media]) -> Result<String, String> {
-    match webchat::open_in_tab(url, host, pick, |_| {}) {
-        webchat::Opened::LiveTab => {}
-        webchat::Opened::NewTab => return Err("the tab is gone".into()),
+    // no open tab for the site: the link opens in a new one (the browser's own tab), and the page is then checked
+    match webchat::open_in_tab(url, host, pick, |u| { crate::bridge::sys::shell_open(u); }) {
+        webchat::Opened::LiveTab | webchat::Opened::NewTab => {}
         webchat::Opened::Failed(why) => return Err(why),
     }
     if press {
         webchat::pause(2500); // the page has to load before its player takes a press
-        return press_until_playing(unsafe { GetForegroundWindow() }).map(|t| format!("Playing {t} on Spotify."));
+        let window = unsafe { GetForegroundWindow() };
+        crate::log::line(&format!("spotify window title: {:?}", window_title(window)));
+        press_until_playing(window)?;
+        // success is a new track in the media session, not the button's label (the label can be stale)
+        return verify(before, 10).map(|m| format!("Playing {} on Spotify.", now_playing(&m)))
+            .ok_or_else(|| "Spotify didn't start a new track (not signed in, or nothing to play)".into());
     }
     verify(before, 10).map(|m| format!("Playing {}.", now_playing(&m))).ok_or_else(|| "nothing started playing".into())
 }
@@ -279,9 +291,8 @@ pub fn play_song(query: &str, service: &str) -> Result<String, String> {
     let tabs = webchat::tab_titles();
     let session_titles: Vec<String> = before.iter().filter(|m| m.browser()).map(|m| m.title.clone()).collect();
     let spotify_app = assist::protocol_handled("spotify") || spotify_running();
-    let spotify_tab = pick_spotify_tab(&tabs, &session_titles).is_some();
     let youtube_tab = pick_youtube_tab(&tabs).is_some();
-    let plan = routes(service, spotify_app, spotify_tab, youtube_tab);
+    let plan = routes(service, spotify_app, youtube_tab);
     let mut watch: Option<Option<String>> = None; // looked up at most once
     let mut watch_url = |q: &str| -> String {
         let id = watch.get_or_insert_with(|| youtube_lookup(q)).clone();
@@ -319,12 +330,11 @@ mod tests {
     #[test]
     fn routes_follow_what_is_live() {
         use Route::*;
-        assert_eq!(routes("", true, true, true), [SpotifyApp, SpotifyTab, YoutubeTab, YoutubeNew], "the app first, then the web");
-        assert_eq!(routes("Spotify", false, true, false), [SpotifyTab, YoutubeNew]);
-        assert_eq!(routes("spotify", false, false, false), [YoutubeNew], "nothing live: YouTube");
-        assert_eq!(routes("youtube", true, true, true), [YoutubeTab, YoutubeNew], "asking for YouTube skips Spotify");
-        assert_eq!(routes("YouTube Music", true, false, false), [YoutubeNew]);
-        assert_eq!(routes("", false, false, true), [YoutubeTab, YoutubeNew]);
+        assert_eq!(routes("", true, true), [SpotifyApp, SpotifyTab, YoutubeTab, YoutubeNew], "the app first, then the web");
+        assert_eq!(routes("Spotify", false, false), [SpotifyTab, YoutubeNew], "nothing open: Spotify still opens its page before YouTube");
+        assert_eq!(routes("youtube", true, true), [YoutubeTab, YoutubeNew], "asking for YouTube skips Spotify");
+        assert_eq!(routes("YouTube Music", true, false), [YoutubeNew]);
+        assert_eq!(routes("", false, true), [SpotifyTab, YoutubeTab, YoutubeNew], "no service tries Spotify first");
     }
 
     #[test]

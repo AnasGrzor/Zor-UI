@@ -51,6 +51,8 @@ pub struct Ctx {
     pub tray: Vec<tray::Icon>,
     pub notif: Option<Notif>,
     pub osd: Option<Osd>,
+    /// The agents (`zor-ui.agents`), read by the island and bar drawing. Passed in, so tests don't read the real data file.
+    pub agents: Vec<serde_json::Value>,
     /// The apps holding the microphone and camera (polled every tick while the island shows it).
     pub privacy: crate::privacy::Privacy,
     /// Bumped on each clipboard change, so an open island panel refetches its history.
@@ -91,7 +93,7 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, privacy: Default::default(), clip_seq: 0, ver: 0, all, actions: vec![],
+            notif: None, osd: None, agents: vec![], privacy: Default::default(), clip_seq: 0, ver: 0, all, actions: vec![],
         }
     }
 
@@ -241,7 +243,7 @@ impl App {
         MSG_HWND.store(msg.0 as isize, Ordering::Relaxed);
         let mut app = App {
             g,
-            cx: Ctx::new(all),
+            cx: Ctx { agents: hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default(), ..Ctx::new(all) },
             wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
             ws_main: None,
@@ -251,6 +253,10 @@ impl App {
         app.reload();
         desk::sync(&mut app);
         buddy::sync(&mut app);
+        // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
+        crate::agent::resume_on_start();
+        // the chat bots (Discord, when built with the feature and enabled in Settings), on their own threads
+        crate::messaging::sync();
         dock::sync(&mut app);
         frame::sync(&mut app);
         guides::sync(&mut app);
@@ -293,7 +299,11 @@ impl App {
         if self.cx.island_shown() {
             self._streams.extend(proc::stream(cfg, "agents-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
-                if let Some(a) = v.get("agents") { hub::set("zor-ui.agents", Some(a.to_string())); post(Box::new(|_| {})); }
+                if let Some(a) = v.get("agents") {
+                    hub::set("zor-ui.agents", Some(a.to_string()));
+                    let list = a.as_array().cloned().unwrap_or_default();
+                    post(Box::new(move |cx| cx.agents = list));
+                }
             }));
             self._streams.extend(proc::stream(cfg, "notifications-watch", &[], |line| {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
@@ -358,14 +368,22 @@ impl App {
     fn reload(&mut self) -> bool {
         let mut changed = false;
         if let Some(t) = self.cfg_file.changed() {
-            self.cx.cfg = Config::parse(&t);
-            self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
-                self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
-            let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
-            if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
-            self.ws_main = Some(m);
-            if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
-            changed = true;
+            // A broken config.json keeps the last good settings: parse would give defaults, and the default
+            // workspacesMain would rebind GlazeWM and reset keybinds.
+            if Config::is_broken(&t) {
+                crate::log::line("config.json isn't valid JSON; keeping the last good settings");
+            } else {
+                self.cx.cfg = Config::parse(&t);
+                // a switch in Settings turns a chat bot on or off here, without a restart
+                crate::messaging::sync();
+                self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
+                    self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
+                let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
+                if self.ws_main.is_some_and(|p| p != m) && self.cx.cfg.get("workspacesRebind").as_bool().unwrap_or(true) { glaze::apply_split(m); }
+                self.ws_main = Some(m);
+                if !cfg!(test) { crate::keymap::apply(&self.cx.cfg); }
+                changed = true;
+            }
         }
         if let Some(t) = self.theme_file.changed() {
             let mut theme = Theme::parse(&t);
@@ -803,7 +821,7 @@ impl App {
                             menu::Item::new("settings", "Settings", |cx| cx.actions.push(Action::open("settings"))),
                             menu::Item::new("visibility", "Recover hidden windows", |_| { std::thread::spawn(|| { crate::log::line(&format!("rescue: uncloaked {} windows", crate::rescue::uncloak_all())); }); }),
                             menu::Item::new("restart_alt", "Restart", |_| restart()),
-                            menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); std::process::exit(0); }),
+                            menu::Item::new("close", "Quit", move |_| { crate::appicon::remove(hwnd); crate::voice::shutdown(); std::process::exit(0); }),
                         ], (p.x, p.y));
                     }
                     _ => {}
@@ -923,6 +941,7 @@ fn restart() {
         .creation_flags(0x0800_0000).spawn();
     if spawned.is_ok() {
         crate::appicon::remove(HWND(MSG_HWND.load(Ordering::Relaxed) as *mut _));
+        crate::voice::shutdown();
         // not process::exit: its cleanup drops the windows, whose handlers panic on the already destroyed thread-locals (a crash report each restart)
         unsafe { let _ = windows::Win32::System::Threading::TerminateProcess(windows::Win32::System::Threading::GetCurrentProcess(), 0); }
         std::process::exit(0);

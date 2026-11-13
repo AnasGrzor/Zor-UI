@@ -1,6 +1,6 @@
 [package]
 name = "zor-ui"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
 

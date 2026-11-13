@@ -62,6 +62,7 @@ pub enum Act {
     Hold(Vec<u16>, u64),
 }
 
+
 /// Things the buddy can do without driving the screen. `Open` and `Launch` ask you each time and show the exact target.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Tool { Open, Launch, Focus, Windows }
@@ -69,6 +70,7 @@ pub enum Tool { Open, Launch, Focus, Windows }
 impl Tool {
     pub fn asks(self) -> bool { matches!(self, Tool::Open | Tool::Launch) }
 }
+
 
 /// One action as the model sent it. `pos` is in the picture's pixels on screen `screen` (default: screen 1).
 #[derive(Debug, PartialEq, Clone)]
@@ -1352,6 +1354,30 @@ mod tests {
         assert_eq!(a.act, Act::Ask("x".repeat(500)), "not cut at 200");
         let a = parse_action(&json!({ "type": "ask", "question": "y".repeat(MAX_ASK + 50) })).unwrap();
         assert_eq!(a.act, Act::Ask("y".repeat(MAX_ASK)));
+    }
+
+    #[test]
+    fn a_window_is_hidden_from_screenshots_only_while_asked() {
+        unsafe {
+            let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("capture test"), WS_POPUP, 0, 0, 10, 10, None, None, None, None).unwrap();
+            let affinity = || { let mut a = 0u32; GetWindowDisplayAffinity(h, &mut a).unwrap(); a };
+            assert_eq!(affinity(), 0, "a new window shows up in screenshots");
+            assert!(exclude_window(h, true) && affinity() == WDA_EXCLUDEFROMCAPTURE.0);
+            assert!(!exclude_window(h, true), "already hidden: nothing changed");
+            assert!(exclude_own_windows(false) >= 1 && affinity() == 0, "the end of a drive shows every window again");
+            assert!(exclude_own_windows(true) >= 1 && affinity() == WDA_EXCLUDEFROMCAPTURE.0, "the sweep finds this process's windows");
+            exclude_own_windows(false);
+            let _ = DestroyWindow(h);
+        }
+    }
+
+    #[test]
+    fn the_border_shows_only_between_the_yes_and_the_end() {
+        assert!(!driving(), "idle at start");
+        set_driving(true);
+        assert!(driving());
+        set_driving(false);
+        assert!(!driving());
     }
 
     #[test]

@@ -219,6 +219,7 @@ pub fn colour(cx: &Ctx, c: Col) -> u32 { cx.theme.c(match c { Col::Fg => "onSurf
 
 /// Draws `l` with its top-left at (ox, oy). Ops outside `view` (y range) are skipped but still numbered.
 /// `copied`: the copy-button id that shows a check.
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 pub fn draw(c: &mut Canvas, cx: &Ctx, l: &Laid, ox: f32, oy: f32, sink: &mut Sink, view: (f32, f32), copied: Option<u32>) {
     let lbase = sink.links.len() as u32;
     sink.links.extend(l.links.iter().cloned());

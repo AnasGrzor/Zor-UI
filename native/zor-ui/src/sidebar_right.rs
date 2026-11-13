@@ -195,7 +195,7 @@ impl SidebarRight {
                     let r = proc::bridge(cfg, "record", &["start"]);
                     if r["recording"].as_bool() == Some(true) {
                         hub::set("zor-ui.rec", Some(((r["started"].as_f64().unwrap_or(0.0) * 1000.0).round() as i64).to_string()));
-                        crate::app::post(Box::new(|cx| Self::close(cx)));
+                        crate::app::post(Box::new(Self::close));
                     }
                 });
             }
@@ -351,6 +351,7 @@ impl SidebarRight {
     }
 
     /// Slider of `value` 0-100 at `r`; remembers the rect for Drag, shows the drag value while held.
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     fn slider(&mut self, c: &mut Canvas, cx: &Ctx, r: R, id: u32, icon: Option<&str>, value: f32, name: Option<&str>) {
         let v = match self.dragv { Some((i, d)) if i == id => d, _ => value };
         self.rects.push((id, r));

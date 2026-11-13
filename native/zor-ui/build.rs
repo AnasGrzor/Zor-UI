@@ -60,10 +60,8 @@ fn icon_object(ico: &[u8]) -> Vec<u8> {
     for (k, &t) in types.iter().enumerate() {
         ent(&mut sec, 16 + 8 * k, t, type_dir[k], true);
         dir(&mut sec, type_dir[k], count(t));
-        let mut j = 0;
-        for (i, r) in res.iter().enumerate().filter(|(_, r)| r.0 == t) {
+        for (j, (i, r)) in res.iter().enumerate().filter(|(_, r)| r.0 == t).enumerate() {
             ent(&mut sec, type_dir[k] + 16 + 8 * j, r.1, lang_dir[i], true);
-            j += 1;
             dir(&mut sec, lang_dir[i], 1);
             ent(&mut sec, lang_dir[i] + 16, 0x409, entry[i], false);
         }

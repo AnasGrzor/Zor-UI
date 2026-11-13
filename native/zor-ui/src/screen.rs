@@ -83,8 +83,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, sw: i32, sh: i32) -> Option<Vec<u8>> {
     unsafe {
         let screen = GetDC(None);
         let dc = CreateCompatibleDC(screen);
-        let mut bi = BITMAPINFO::default();
-        bi.bmiHeader = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: sw, biHeight: -sh, biPlanes: 1, biBitCount: 32, ..Default::default() };
+        let bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: sw, biHeight: -sh, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
         let mut bits = std::ptr::null_mut();
         let Ok(bmp) = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0) else { ReleaseDC(None, screen); let _ = DeleteDC(dc); return None };
         let old = SelectObject(dc, bmp);
@@ -93,7 +92,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, sw: i32, sh: i32) -> Option<Vec<u8>> {
         let ok = StretchBlt(dc, 0, 0, sw, sh, screen, x, y, w, h, SRCCOPY).as_bool();
         let px = ok.then(|| {
             let mut v = std::slice::from_raw_parts(bits as *const u8, (sw * sh * 4) as usize).to_vec();
-            v.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+            v.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
             v
         });
         SelectObject(dc, old);

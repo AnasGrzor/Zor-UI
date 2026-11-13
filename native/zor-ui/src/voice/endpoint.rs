@@ -69,7 +69,7 @@ impl TtsProvider for EndpointTts {
     fn synthesize(&self, req: &SynthesisRequest, cancel: &Cancel) -> Result<SynthesisResult, ProviderError> {
         let c = self.configured()?;
         valid_url(&c.url).map_err(ProviderError::Other)?;
-        if !c.voices.iter().any(|v| *v == req.voice_id) {
+        if !c.voices.contains(&req.voice_id) {
             return Err(ProviderError::Other(format!("the endpoint has no voice called '{}'", req.voice_id)));
         }
         let model = req.model_id.clone().unwrap_or(c.model.clone());

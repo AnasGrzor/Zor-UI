@@ -130,7 +130,7 @@ impl Dock {
 
     fn icon(&mut self, g: &Gfx, name: &str, px: u32) -> Option<Pixmap> {
         let stamp = self.sh.lock().map_or(0, |s| s.stamp);
-        if self.icons.get(name).map_or(true, |e| e.0 != stamp || e.1 != px) {
+        if self.icons.get(name).is_none_or(|e| e.0 != stamp || e.1 != px) {
             let file = conf::pack_dir().join("icons").join(format!("{name}.png"));
             self.icons.insert(name.to_string(), (stamp, px, g.load_image(&file, px, px)));
         }

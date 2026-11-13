@@ -200,7 +200,8 @@ fn session(on: &impl Fn(Wm)) -> Result<(), ()> {
     s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:6123\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ZW5kNC1wQy1uYXRpdmUhIQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").map_err(|_| ())?;
     let mut r = BufReader::new(s.try_clone().map_err(|_| ())?);
     let mut line = String::new();
-    loop { line.clear(); if r.read_line(&mut line).map_err(|_| ())? == 0 { return Err(()); } if line == "\r\n" { break; } }
+    loop { line.clear(); if r.read_line(&mut line).map_err(|_| ())? == 0 { return Err(()); }
+        if line == "\r\n" { break; } }
     *OUT.get().ok_or(())?.lock().map_err(|_| ())? = s.try_clone().ok();
     send(&mut s, "sub --events all").map_err(|_| ())?;
     for q in QUERIES { send(&mut s, q).map_err(|_| ())?; }

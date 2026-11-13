@@ -252,11 +252,11 @@ impl Lib {
         use windows::{core::{w, PCSTR}, Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW}};
         unsafe {
             let h = LoadLibraryW(w!("winsqlite3.dll")).ok()?;
-            macro_rules! f { ($n:literal) => { std::mem::transmute(GetProcAddress(h, PCSTR(concat!($n, "\0").as_ptr()))?) }; }
+            macro_rules! f { ($n:literal, $t:ty) => { std::mem::transmute::<unsafe extern "system" fn() -> isize, $t>(GetProcAddress(h, PCSTR(concat!($n, "\0").as_ptr()))?) }; }
             Some(Lib {
-                open: f!("sqlite3_open_v2"), close: f!("sqlite3_close"), prepare: f!("sqlite3_prepare_v2"), step: f!("sqlite3_step"),
-                finalize: f!("sqlite3_finalize"), ctype: f!("sqlite3_column_type"), int64: f!("sqlite3_column_int64"),
-                blob: f!("sqlite3_column_blob"), bytes: f!("sqlite3_column_bytes"), errmsg: f!("sqlite3_errmsg"),
+                open: f!("sqlite3_open_v2", unsafe extern "system" fn(*const c_char, *mut P, i32, *const c_char) -> i32), close: f!("sqlite3_close", unsafe extern "system" fn(P) -> i32), prepare: f!("sqlite3_prepare_v2", unsafe extern "system" fn(P, *const c_char, i32, *mut P, *mut *const c_char) -> i32), step: f!("sqlite3_step", unsafe extern "system" fn(P) -> i32),
+                finalize: f!("sqlite3_finalize", unsafe extern "system" fn(P) -> i32), ctype: f!("sqlite3_column_type", unsafe extern "system" fn(P, i32) -> i32), int64: f!("sqlite3_column_int64", unsafe extern "system" fn(P, i32) -> i64),
+                blob: f!("sqlite3_column_blob", unsafe extern "system" fn(P, i32) -> *const u8), bytes: f!("sqlite3_column_bytes", unsafe extern "system" fn(P, i32) -> i32), errmsg: f!("sqlite3_errmsg", unsafe extern "system" fn(P) -> *const c_char),
             })
         }
     }

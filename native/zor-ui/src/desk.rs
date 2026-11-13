@@ -76,7 +76,7 @@ pub fn default_slot(widgets: &[String], id: &str, screen_h: f32) -> (f32, f32) {
 /// 0 when nothing is within `thr`.
 pub fn snap_axis(mine: (i32, i32), others: &[(i32, i32)], gap: i32, thr: i32) -> i32 {
     let mut best: Option<i32> = None;
-    let mut consider = |d: i32| if d.abs() <= thr && best.map_or(true, |b| d.abs() < b.abs()) { best = Some(d); };
+    let mut consider = |d: i32| if d.abs() <= thr && best.is_none_or(|b| d.abs() < b.abs()) { best = Some(d); };
     let mid = |a: i32, b: i32| (a + b) / 2;
     for &(os, oe) in others {
         for t in [os, mid(os, oe), oe] {
@@ -127,7 +127,7 @@ pub fn sync(app: &mut App) {
     let want: Vec<String> = if app.cx.native("desktop") && cfg.get("desktopWidgets").as_bool() != Some(false) {
         cfg.strs("desktop.widgets").into_iter().filter(|w| PORTED.contains(&w.as_str())).collect()
     } else { vec![] };
-    app.wins.retain(|w| w.drag_key.as_ref().map_or(true, |k| want.contains(k)));
+    app.wins.retain(|w| w.drag_key.as_ref().is_none_or(|k| want.contains(k)));
     let (mons, work) = util::monitors();
     let scale = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
     app.cx.state.reload(); // a preset apply writes the positions from another thread
@@ -192,7 +192,7 @@ pub fn month_cells(now: &windows::Win32::Foundation::SYSTEMTIME) -> Vec<(u16, bo
     let mut cells: Vec<(u16, bool, bool)> = (0..offset).map(|i| (prev - offset + 1 + i, true, false)).collect();
     cells.extend((1..=days).map(|d| (d, false, d == now.wDay)));
     let mut n = 1;
-    while cells.len() % 7 != 0 { cells.push((n, true, false)); n += 1; }
+    while !cells.len().is_multiple_of(7) { cells.push((n, true, false)); n += 1; }
     cells
 }
 
@@ -807,7 +807,7 @@ fn clock(c: &mut Canvas, cx: &Ctx, st: &windows::Win32::Foundation::SYSTEMTIME, 
             });
         }
         "pixel" => {
-            let hh = if h24 { st.wHour } else if st.wHour % 12 == 0 { 12 } else { st.wHour % 12 };
+            let hh = if h24 { st.wHour } else if st.wHour.is_multiple_of(12) { 12 } else { st.wHour % 12 };
             let glyphs: Vec<char> = format!("{hh:02}:{:02}", st.wMinute).chars().collect();
             let cell = 15.0;
             let cols: f32 = glyphs.iter().map(|&g| if g == ':' { 2.0 } else { 4.0 }).sum::<f32>() - 1.0;

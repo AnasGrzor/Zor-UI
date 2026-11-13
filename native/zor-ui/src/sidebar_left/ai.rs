@@ -379,7 +379,7 @@ impl Tab for Ai {
                 if groups.is_empty() { c.text("Loading models\u{2026}", R::new(inner.x + 12.0, top, inner.w, 40.0), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left); }
                 let mut y = top;
                 for (p, idxs) in &groups {
-                    let head = format!("{}", capitalize(p));
+                    let head = capitalize(p).to_string();
                     c.text(&head, R::new(inner.x + 12.0, y + 10.0, 200.0, 16.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
                     if p != "ollama" {
                         let ok = keys[p.as_str()].as_bool().unwrap_or(false);

@@ -412,6 +412,7 @@ impl Football {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     fn table_line(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, w: f32, g: usize, ri: usize) {
         let t = &cx.theme;
         let Some(row) = self.table.as_ref().and_then(|t| t.1.get(g)).and_then(|g| g.1.get(ri)) else { return };

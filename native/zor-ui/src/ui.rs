@@ -46,6 +46,7 @@ pub fn card(c: &mut Canvas, cx: &Ctx, r: R, radius: f32) { c.rect(r, radius, cx.
 fn hover_bg(c: &mut Canvas, cx: &Ctx, r: R, radius: f32, over: bool) { if over { c.rect(r, radius, alpha(cx.theme.c("onSurface"), tk::HOVER_A)); } }
 
 /// `.chip` (height 32, 13 px text, optional icon); `sel` is `.chips .chip.sel`. Returns its rect (x, y is the top-left).
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 pub fn chip(c: &mut Canvas, cx: &Ctx, x: f32, y: f32, id: u32, icon: Option<&str>, label: &str, sel: bool) -> R {
     let t = &cx.theme;
     let iw = if icon.is_some() { tk::CHIP_ICON + tk::CHIP_ICON_GAP } else { 0.0 };
@@ -65,6 +66,7 @@ pub enum IconKind { Plain, Tonal, Filled }
 
 /// `.icon-btn` (36 px circle by default; `r` sets the size): hover tint, or `.tonal` / `.filled` fill.
 /// Returns true while hovered.
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 pub fn icon_btn(c: &mut Canvas, cx: &Ctx, r: R, id: u32, icon: &str, kind: IconKind, isize: f32, fill: bool) -> bool {
     let t = &cx.theme;
     let (bg, fg) = match kind {
@@ -182,7 +184,7 @@ pub fn tabs(c: &mut Canvas, cx: &Ctx, r: R, id0: u32, items: &[(&str, &str)], se
 }
 
 /// A caret that blinks (visible for 500 ms, hidden for 500 ms). Views using it need `frame_ms` 500.
-pub fn blink() -> bool { (hub::now_ms() / 500.0) as u64 % 2 == 0 }
+pub fn blink() -> bool { ((hub::now_ms() / 500.0) as u64).is_multiple_of(2) }
 
 // ------------------------------------------------------------------ scrolling
 

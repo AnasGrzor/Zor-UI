@@ -46,7 +46,7 @@ pub(super) fn contrast(a: Rgb, b: Rgb) -> f64 {
 /// Quantization considers population; ranking limits chroma and rejects nearly black/white seeds.
 fn candidates(px: &[u8], fallback: Rgb) -> Vec<String> {
     let pixels: Vec<_> = px
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|p| Rgb::new(p[0], p[1], p[2]))
         .collect();
     let q = QuantizerCelebi::quantize(&pixels, 48);

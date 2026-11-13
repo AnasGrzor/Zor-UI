@@ -214,7 +214,7 @@ fn split_title(s: &str) -> Vec<String> {
     let cs: Vec<char> = s.chars().collect();
     for (i, &c) in cs.iter().enumerate() {
         let dash = matches!(c, '-' | '–' | '—') && i > 0 && cs[i - 1].is_whitespace() && cs.get(i + 1).is_some_and(|n| n.is_whitespace());
-        if matches!(c, '|' | '｜' | '•') || dash { parts.push(String::new()); } else { parts.last_mut().map(|p| p.push(c)); }
+        if matches!(c, '|' | '｜' | '•') || dash { parts.push(String::new()); } else { if let Some(p) = parts.last_mut() { p.push(c) } }
     }
     parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && !is_noise(p)).collect()
 }

@@ -649,6 +649,7 @@ impl<'a> Canvas<'a> {
     /// A picture decoded at its drawn size, standing with its bottom centre on (x, y): mirrored when `dir` is
     /// negative, tilted `rot` radians around that point, and stretched by (`sx`, `sy`) around it, so a still picture
     /// can breathe or squash.
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     pub fn sprite_scaled(&mut self, img: &Pixmap, x: f32, y: f32, dir: f32, rot: f32, sx: f32, sy: f32) {
         let (w, h) = (img.width() as f32, img.height() as f32);
         let t = Transform::from_translate(x * self.scale, (y + self.dy) * self.scale).pre_rotate(rot.to_degrees()).pre_scale(dir.signum() * sx, sy).pre_translate(-w / 2.0, -h);

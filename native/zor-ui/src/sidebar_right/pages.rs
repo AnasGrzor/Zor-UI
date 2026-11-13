@@ -392,7 +392,7 @@ impl SidebarRight {
                 let cy = top + 32.0 + 12.0 + 4.0 + 100.0;
                 c.arc(mid, cy, 95.0, 1.0, 10.0, t.c("surfaceContainerHigh"));
                 c.arc(mid, cy, 95.0, frac, 10.0, t.c("primary"));
-                c.text(&hub::clock(left as f64), R::new(mid - 90.0, cy - 33.0, 180.0, 50.0), txt(40.0, 500), t.c("onSurface"), Align::Center);
+                c.text(&hub::clock(left), R::new(mid - 90.0, cy - 33.0, 180.0, 50.0), txt(40.0, 500), t.c("onSurface"), Align::Center);
                 c.text(&label, R::new(mid - 90.0, cy + 17.0, 180.0, 16.3), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center);
                 ctl(c, cy + 100.0 + 12.0, st["running"].as_bool() == Some(true), true);
             });

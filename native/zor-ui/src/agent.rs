@@ -55,7 +55,7 @@ pub fn remember(turns: &mut VecDeque<Turn>, said: &str, answer: &str, now: Insta
 
 /// The remembered turns as chat messages, oldest first. Empty when the newest is older than `TURN_SECS`.
 pub fn recent(turns: &VecDeque<Turn>, now: Instant) -> Vec<Value> {
-    if turns.back().map_or(true, |t| now.saturating_duration_since(t.2).as_secs() > TURN_SECS) { return vec![]; }
+    if turns.back().is_none_or(|t| now.saturating_duration_since(t.2).as_secs() > TURN_SECS) { return vec![]; }
     // the answer goes back in the JSON shape the system prompt asks for, so the AI keeps using it
     turns.iter().flat_map(|(said, answer, _)| [json!({ "role": "user", "content": said }), json!({ "role": "assistant", "content": json!({ "say": answer }).to_string() })]).collect()
 }
@@ -111,7 +111,7 @@ pub fn recent_in(dir: &Path) -> Vec<String> {
         .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")))
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path().file_stem()?.to_string_lossy().into_owned())))
         .collect();
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|a| std::cmp::Reverse(a.0));
     v.into_iter().take(5).map(|(_, n)| assist::short(&n, 60)).collect()
 }
 
@@ -498,7 +498,7 @@ pub fn find_files(roots: &[PathBuf], query: &str, depth: u32, cap: usize) -> Vec
     if words.is_empty() { return vec![]; }
     let (mut seen, mut hits) = (0, vec![]);
     for r in roots { walk(r, depth, &words, &mut seen, cap, &mut hits); }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.sort_by_key(|a| std::cmp::Reverse(a.0));
     hits.into_iter().take(5).map(|h| h.1).collect()
 }
 
@@ -716,6 +716,7 @@ pub fn budget_for(cfg: &Config, model: &str, system: &str) -> usize {
 
 /// Answers `said`: asks the AI, runs the tool it picks, feeds the result back, and repeats until it says it is done. `ask` runs one
 /// AI conversation (the JSON `assist::chat` takes) and `run` one tool, so a test can script both.
+#[cfg(test)]
 pub fn run_loop(model: &str, said: &str, max_steps: usize, limit: Duration, ask: impl FnMut(&str) -> Result<String, String>, run: impl FnMut(&Call) -> Result<String, String>) -> Result<String, String> {
     run_loop_with(model, SYSTEM, 0.3, &[], said, max_steps, limit, usize::MAX, ask, run, |_, _| None)
 }
@@ -973,7 +974,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     let record = std::cell::RefCell::new(record0);
     let progress = std::cell::RefCell::new(plan::Progress::new(plan0, next0, resumed));
     // a model is usable when its provider needs no saved key or has one (provider.rs); routing never picks an unusable strong or fallback model
-    let usable = |id: &str| crate::bridge::web::provider_of(id).map_or(true, |p| provider::usable(&p, |k| !crate::bridge::web::secret_get(k).is_empty()));
+    let usable = |id: &str| crate::bridge::web::provider_of(id).is_none_or(|p| provider::usable(&p, |k| !crate::bridge::web::secret_get(k).is_empty()));
     // the model: the routed one, then the fallbacks, each tried only if the one before failed before any tool ran
     let chain = routing::fallback_chain(cfg, &routing::route_model(cfg, said, model, &usable), &usable);
     // a new multi-step request gets its plan before its first tool step; that planning reply is the only extra model call
@@ -1001,7 +1002,7 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     };
     let halt = || progress.borrow().halt();
     // a summary call is a model call: Stop and Cancel skip it, and the capped result goes to the model instead
-    let halt_or_stop = || stop_check().or_else(|| halt());
+    let halt_or_stop = || stop_check().or_else(halt);
     // the one re-plan: a planning call with the request, the plan so far, the steps done and the failure. Its text goes to the model.
     let replan = |why: &str| -> String {
         let (old, done) = { let p = progress.borrow(); (p.plan().cloned(), p.next()) };
@@ -1070,14 +1071,14 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
             let system = system_for(NATIVE_SYSTEM, cfg);
             let budget = budget_for(cfg, model, &system);
             native::run_native_loop(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
-                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
+                |convo| timing.model(|| if let Some(e) = stop_check().or_else(halt) { Err(e) } else { assist::stream_turn(cfg, &convo.to_string(), 30) }),
                 |c| run_tool(c),
                 |task, text| timing.model(|| if halt_or_stop().is_some() { None } else { delegate::summarize(model, task, text, cfg) }))
         } else {
             let system = build_system_prompt(cfg);
             let budget = budget_for(cfg, model, &system);
             run_loop_with(model, &system, temperature(cfg), history, &framed, steps, Duration::from_secs(secs), budget,
-                |convo| timing.model(|| if let Some(e) = stop_check().or_else(|| halt()) { Err(e) } else { chat(cfg, convo) }),
+                |convo| timing.model(|| if let Some(e) = stop_check().or_else(halt) { Err(e) } else { chat(cfg, convo) }),
                 |c| run_tool(c),
                 |task, text| timing.model(|| if halt_or_stop().is_some() { None } else { delegate::summarize(model, task, text, cfg) }))
         };
@@ -1303,22 +1304,22 @@ mod tests {
         std::fs::write(root.join("My CV final.pdf"), "x").unwrap();
         std::fs::write(deep.join("cv draft.docx"), "x").unwrap();
         std::fs::write(deep.join("notes.txt"), "x").unwrap();
-        let names = |q: &str, depth| { let mut v: Vec<String> = find_files(&[root.clone()], q, depth, 100).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect(); v.sort(); v };
+        let names = |q: &str, depth| { let mut v: Vec<String> = find_files(std::slice::from_ref(&root), q, depth, 100).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect(); v.sort(); v };
         assert_eq!(names("cv", 4), ["My CV final.pdf", "cv draft.docx"]);
         assert_eq!(names("CV final", 4), ["My CV final.pdf"], "every word, any case");
         assert_eq!(names("cv", 1), ["My CV final.pdf"], "the depth limit");
-        assert!(names("", 4).is_empty() && find_files(&[root.clone()], "cv", 4, 1).len() <= 1, "no words, and the look-at cap");
+        assert!(names("", 4).is_empty() && find_files(std::slice::from_ref(&root), "cv", 4, 1).len() <= 1, "no words, and the look-at cap");
         let r = root.to_string_lossy().into_owned();
-        assert!(inside(&format!("{r}\\My CV final.pdf"), &[root.clone()]));
-        assert!(inside(&format!("{}\\A\\B", r.to_uppercase()), &[root.clone()]), "case does not matter");
-        assert!(!inside(&format!("{r}\\..\\secret.txt"), &[root.clone()]), "no climbing out");
-        assert!(!inside(&format!("{r}x\\a.txt"), &[root.clone()]), "a folder that only starts with the same letters");
-        assert!(!inside("C:\\Windows\\notepad.txt", &[root.clone()]));
+        assert!(inside(&format!("{r}\\My CV final.pdf"), std::slice::from_ref(&root)));
+        assert!(inside(&format!("{}\\A\\B", r.to_uppercase()), std::slice::from_ref(&root)), "case does not matter");
+        assert!(!inside(&format!("{r}\\..\\secret.txt"), std::slice::from_ref(&root)), "no climbing out");
+        assert!(!inside(&format!("{r}x\\a.txt"), std::slice::from_ref(&root)), "a folder that only starts with the same letters");
+        assert!(!inside("C:\\Windows\\notepad.txt", std::slice::from_ref(&root)));
         let cfg = Config(json!({}));
-        assert!(open_file(&cfg, &format!("{r}\\cv.exe"), &[root.clone()]).is_err(), "programs are refused");
-        assert!(open_file(&cfg, "C:\\Windows\\win.ini", &[root.clone()]).unwrap_err().contains("Desktop"));
-        assert!(open_file(&cfg, &format!("{r}\\gone.pdf"), &[root.clone()]).unwrap_err().contains("isn't there"));
-        assert!(open_file(&Config(json!({ "buddies": { "allow": { "open": false } } })), &format!("{r}\\My CV final.pdf"), &[root.clone()]).unwrap_err().contains("turned off"));
+        assert!(open_file(&cfg, &format!("{r}\\cv.exe"), std::slice::from_ref(&root)).is_err(), "programs are refused");
+        assert!(open_file(&cfg, "C:\\Windows\\win.ini", std::slice::from_ref(&root)).unwrap_err().contains("Desktop"));
+        assert!(open_file(&cfg, &format!("{r}\\gone.pdf"), std::slice::from_ref(&root)).unwrap_err().contains("isn't there"));
+        assert!(open_file(&Config(json!({ "buddies": { "allow": { "open": false } } })), &format!("{r}\\My CV final.pdf"), std::slice::from_ref(&root)).unwrap_err().contains("turned off"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

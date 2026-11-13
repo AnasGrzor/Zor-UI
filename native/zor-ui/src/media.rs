@@ -1,6 +1,7 @@
 //! Now playing: Windows' media sessions and the
 //! default audio devices' volume. Each runs on its own COM thread and reports through `on`.
-
+// Win32 COM names (GetMixFormat, SetDefaultEndpoint, ...) mirror the Windows API; renaming them would break the mapping
+#![allow(non_snake_case)]
 use std::{
     collections::{HashMap, HashSet},
     sync::{mpsc, Arc, Mutex, OnceLock},
@@ -222,7 +223,7 @@ fn ping<A, B>(tx: &mpsc::Sender<Msg>) -> impl Fn(&Option<A>, &Option<B>) -> wind
 }
 
 fn by_id<'a>(all: &'a [Session], id: &str) -> Option<&'a Session> {
-    all.iter().find(|s| s.SourceAppUserModelId().is_ok_and(|x| x.to_string() == id))
+    all.iter().find(|s| s.SourceAppUserModelId().is_ok_and(|x| x == id))
 }
 
 /// `on` gets (the current session, every session) after each change.

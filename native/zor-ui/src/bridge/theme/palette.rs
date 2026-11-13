@@ -101,7 +101,7 @@ pub fn source_from_rgb(rgb: &[u8], w: usize, h: usize, size: usize) -> Rgb {
         data = pil_resize(&data, (w, h), (nw, nh));
         (w, h) = (nw, nh);
     }
-    let px: Vec<Rgb> = data.chunks_exact(3).take(w * h).map(|p| Rgb::new(p[0], p[1], p[2])).collect();
+    let px: Vec<Rgb> = data.as_chunks::<3>().0.iter().take(w * h).map(|p| Rgb::new(p[0], p[1], p[2])).collect();
     material_colors::image::extract_color(&px)
 }
 

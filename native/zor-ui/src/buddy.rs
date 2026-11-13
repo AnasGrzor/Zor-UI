@@ -474,15 +474,14 @@ impl Gojo {
 
     fn slot(slot: usize) -> Gojo {
         let seed = unsafe { GetTickCount() } as u64 | 1;
-        let g = Gojo {
+        Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             move_t: None, playing: Move::None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
             chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
             mon: RECT::default(), scale: 1.0,
             slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), pack: None, sprites: Sprites::default(), sprite_h: pack::DEFAULT_H, fy: FY, body: (11.0, 48.0), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
-            work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true, job: None, fly_v: 0.0, trail: vec![],        };
-        g
+            work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true, job: None, fly_v: 0.0, trail: vec![],        }
     }
 
     /// Reads this buddy's settings from config (once a second, so Settings changes show at once).
@@ -626,7 +625,7 @@ impl Gojo {
     /// there; when the game ends he walks back to where he was.
     fn follow_game(&mut self, cx: &Ctx) {
         let fs = fullscreen_monitor();
-        let game = fs.is_some() && cx.wm.window.as_ref().map_or(true, |(t, p)| focus_kind(t, p) != "video");
+        let game = fs.is_some() && cx.wm.window.as_ref().is_none_or(|(t, p)| focus_kind(t, p) != "video");
         if self.mode == Mode::Held { return; }
         if game && self.away_from.is_none() {
             let Some(fs) = fs.filter(|f| *f == self.mon) else { return };
@@ -1102,6 +1101,7 @@ pub fn appearance(character: &str, custom_on: bool, custom: &serde_json::Value, 
 /// Draws the body: the picture when there is one (`animated`: it has frames of its own for this moment, so it doesn't breathe),
 /// else the drawn figure, with its soft shadow when `shadow` (the preview leaves it out: it needs a window-sized mask).
 /// Returns half the width and the height (CSS px) of what you can grab. The bar and the Settings preview both draw through this.
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 fn draw_body(c: &mut Canvas, look: &Look<'_>, pose: Pose, sprite: Option<(&tiny_skia::Pixmap, bool)>, sway: f32, talking: bool, t: f32, shadow: bool) -> (f32, f32) {
     match sprite {
         // a picture stands where the figure's feet would be and sits a little lower on a ledge; one with no animation of its
@@ -1121,6 +1121,7 @@ fn draw_body(c: &mut Canvas, look: &Look<'_>, pose: Pose, sprite: Option<(&tiny_
 
 /// One buddy for the Settings preview with his feet at (`x`, `y`) CSS px, `stance` "stand", "walk" or "sit", `t` seconds in; a
 /// picture is at most `max_h` tall. The same drawing as on the bar.
+#[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
 pub fn draw_preview(c: &mut Canvas, ap: &Appearance, sprites: &mut Sprites, x: f32, y: f32, stance: &str, t: f32, max_h: f32) {
     let (walk, sit) = match stance { "walk" => (Some(t * 6.0), 0.0), "sit" => (None, 1.0), _ => (None, 0.0) };
     let drawn = ap.pack.as_ref().and_then(|p| sprites.pick(c.g, c.scale, p, stance, t, p.height.min(max_h)));
@@ -1818,7 +1819,7 @@ mod tests {
         assert_eq!(l, Label { x: 220.0, dy: -8.0, w: 68.0, left: true, wrap: false }, "he is left of the spot, so the name is to its right");
         let l = label_box(136.0, 1.0, 600.0, 60.0);
         assert_eq!(l, Label { x: 52.0, dy: -8.0, w: 68.0, left: false, wrap: false }, "he is right of the spot, so the name ends before the ring");
-        assert!(label_box(204.0, -1.0, 84.0, 60.0).wrap == false, "exactly enough room still fits beside the ring");
+        assert!(!label_box(204.0, -1.0, 84.0, 60.0).wrap, "exactly enough room still fits beside the ring");
         assert!(label_box(204.0, -1.0, 83.9, 60.0).wrap, "a hair less does not");
     }
 

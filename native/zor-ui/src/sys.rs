@@ -191,7 +191,7 @@ pub fn luxon(fmt: &str, st: &SYSTEMTIME) -> String {
         }
         if !c.is_ascii_alphabetic() { out.push(c); i += 1; continue; }
         let n = chars[i..].iter().take_while(|&&x| x == c).count();
-        let h12 = if st.wHour % 12 == 0 { 12 } else { st.wHour % 12 };
+        let h12 = if st.wHour.is_multiple_of(12) { 12 } else { st.wHour % 12 };
         out += &match (c, n) {
             ('E' | 'c', 3) => date_fmt(st, "ddd"),
             ('E' | 'c', _) if n >= 4 => date_fmt(st, "dddd"),

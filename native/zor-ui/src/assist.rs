@@ -175,7 +175,7 @@ pub fn best_match<'a>(query: &str, items: &'a [(String, String)]) -> Option<&'a 
 /// Value of `"key"  "value"` on one line of a Valve text file (acf / vdf).
 fn vdf_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let rest = line.trim().strip_prefix('"')?.strip_prefix(key)?.strip_prefix('"')?;
-    Some(rest.trim().strip_prefix('"')?.strip_suffix('"')?)
+    rest.trim().strip_prefix('"')?.strip_suffix('"')
 }
 
 /// Installed Steam games under one `steamapps` folder: (name, steam://rungameid/ID).
@@ -598,7 +598,7 @@ fn screen_on(cfg: &Config) -> bool { cfg.get("buddies.screen").as_bool().unwrap_
 /// that can be sent pictures (`bridge::model_can_see`). When none can, the first one is kept, and the chat says so.
 pub fn screen_model(cfg: &Config) -> String {
     let candidates: Vec<String> = [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter()
-        .filter(|m| !m.is_empty()).map(|m| crate::bridge::current_model_id(m)).collect();
+        .filter(|m| !m.is_empty()).map(crate::bridge::current_model_id).collect();
     candidates.iter().find(|m| crate::bridge::model_can_see(m)).or(candidates.first()).cloned().unwrap_or_default()
 }
 

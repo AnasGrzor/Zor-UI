@@ -737,7 +737,7 @@ impl EscHook {
     fn install() -> Option<EscHook> {
         let (tx, rx) = std::sync::mpsc::channel();
         let th = std::thread::spawn(move || unsafe {
-            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_hook), GetModuleHandleW(None).map(|m| m).unwrap_or(HMODULE::default()), 0);
+            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_hook), GetModuleHandleW(None).unwrap_or(HMODULE::default()), 0);
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE); // creates this thread's queue before the id is shared
             let _ = tx.send(hook.is_ok().then(|| GetCurrentThreadId()));

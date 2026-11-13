@@ -107,7 +107,7 @@ mod tests {
         assert!((first.0 - 5.0).abs() < 1e-3 && (first.1 - 25.0).abs() < 1e-3 && (last.0 - 25.0).abs() < 1e-3 && (last.1 - 5.0).abs() < 1e-3);
         for (i, pts) in c.iter().enumerate() {
             assert_eq!(pts.len(), 14, "corner {i}");
-            for &(x, y) in pts { assert!(x >= 5.0 - 1e-3 && x <= 1915.0 + 1e-3 && y >= 5.0 - 1e-3 && y <= 1075.0 + 1e-3); }
+            for &(x, y) in pts { assert!((5.0 - 1e-3..=1915.0 + 1e-3).contains(&x) && (5.0 - 1e-3..=1075.0 + 1e-3).contains(&y)); }
         }
         // a huge radius is limited to half the shorter side
         assert!(corners(R::new(0.0, 0.0, 100.0, 40.0), 500.0, 4)[0][1].1 <= 20.0 + 1e-3);

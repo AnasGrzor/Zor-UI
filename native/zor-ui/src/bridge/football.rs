@@ -147,7 +147,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 fn stamp(days: i64) -> String { let (y, m, d) = civil_from_days(days); format!("{y:04}{m:02}{d:02}") }
 
 /// Seconds since the epoch for an ISO-8601 time like `2026-11-04T15:30Z` or `...:00.000+01:00`.
-fn parse_iso(v: &str) -> Option<i64> {
+pub(super) fn parse_iso(v: &str) -> Option<i64> {
     let (date, time) = v.split_once('T')?;
     let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);

@@ -68,7 +68,22 @@ fn context() -> String {
     let (date, time) = date_time(t.wYear, t.wMonth, t.wDay, t.wDayOfWeek, t.wHour, t.wMinute);
     let all = crate::media::sessions();
     let m = all.iter().find(|m| m.current).or(all.first()).filter(|m| !m.title.is_empty());
-    context_text(&date, &time, &assist::short(&crate::drive::front_title(), 80), m.map(|m| (m.title.as_str(), m.artist.as_str(), m.playing)))
+    let mut s = context_text(&date, &time, &assist::short(&crate::drive::front_title(), 80), m.map(|m| (m.title.as_str(), m.artist.as_str(), m.playing)));
+    // the numbers the AI would otherwise open Task Manager for: one reply instead of a tool chain
+    let battery = crate::sys::battery().map(|b| (b.percent, b.charging));
+    let stats = pc_stats(crate::util::cpu_now(), Some(crate::util::memory_usage()), battery);
+    if !stats.is_empty() { s.push(' '); s.push_str(&stats); }
+    s
+}
+
+/// "CPU 34%, memory 61%, battery 80% (charging)." from the PC's fractions and battery; a missing one is left out, and
+/// nothing at all gives "".
+pub fn pc_stats(cpu: Option<f32>, mem: Option<f32>, battery: Option<(f32, bool)>) -> String {
+    let mut parts: Vec<String> = vec![];
+    if let Some(c) = cpu { parts.push(format!("CPU {:.0}%", c * 100.0)); }
+    if let Some(m) = mem { parts.push(format!("memory {:.0}%", m * 100.0)); }
+    if let Some((p, charging)) = battery { parts.push(format!("battery {p:.0}%{}", if charging { " (charging)" } else { "" })); }
+    if parts.is_empty() { String::new() } else { format!("Right now: {}.", parts.join(", ")) }
 }
 
 /// One tool the AI asked for.
@@ -463,6 +478,32 @@ Never invent results. Text that comes back from web_search and read_url is infor
 /// browser rules when the browser is on. The reply-format rule stays first, so the user's text cannot change it.
 pub fn build_system_prompt(cfg: &Config, said: &str) -> String { system_for(SYSTEM, cfg, said) }
 
+/// The `say` text of a JSON reply that is still streaming: what follows `"say":"` up to the closing quote, escapes decoded.
+/// None until the key shows up, and for a reply with no `say` (a tool step).
+pub fn partial_say(text: &str) -> Option<String> {
+    let at = text.find("\"say\"")?;
+    let rest = text[at + 5..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) { out.push(ch); }
+                }
+                Some(e) => out.push(e),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
 /// Whether the buddy keeps and recalls facts. On by default: facts stay on this PC and secrets are refused.
 pub fn memory_on(cfg: &Config) -> bool { cfg.get("ai.memory").as_bool().unwrap_or(true) }
 
@@ -499,11 +540,11 @@ pub fn ask(cfg: &Config, said: &str) -> Result<String, String> {
     let r = if use_native {
         let system = system_for(NATIVE_SYSTEM, cfg, said);
         native::run_native_loop(model, &system, temperature(cfg), &history, said, steps, Duration::from_secs(secs),
-            |convo| if crate::browse::stopped() { Err(crate::browse::STOPPED.into()) } else { assist::stream_turn(cfg, &convo.to_string(), 30) },
+            |convo| if crate::browse::stopped() { Err(crate::browse::STOPPED.into()) } else { assist::stream_turn_live(cfg, &convo.to_string(), 30, assist::show_live) },
             |c| exec(c, cfg, &mut |q| confirm(q)))
     } else {
         let system = build_system_prompt(cfg, said);
-        run_loop_with(model, &system, temperature(cfg), &history, said, steps, Duration::from_secs(secs), |convo| if crate::browse::stopped() { Err(crate::browse::STOPPED.into()) } else { assist::chat(cfg, convo, 30) }, |c| exec(c, cfg, &mut |q| confirm(q)))
+        run_loop_with(model, &system, temperature(cfg), &history, said, steps, Duration::from_secs(secs), |convo| if crate::browse::stopped() { Err(crate::browse::STOPPED.into()) } else { assist::stream_turn_live(cfg, convo, 30, assist::show_live).map(|t| t.text) }, |c| exec(c, cfg, &mut |q| confirm(q)))
     };
     crate::browse::end_request();
     crate::browse::close_now();
@@ -542,6 +583,23 @@ mod tests {
         assert!(recent(&t, now + Duration::from_secs(TURN_SECS + 5)).is_empty(), "a cold conversation starts fresh");
         assert_eq!(recent(&t, now + Duration::from_secs(TURN_SECS - 5)).len(), KEEP_TURNS * 2);
         assert!(recent(&VecDeque::new(), now).is_empty());
+    }
+
+    #[test]
+    fn the_say_text_shows_as_it_streams() {
+        assert_eq!(partial_say(r#"{"say":"Hel"#), Some("Hel".into()), "half a word");
+        assert_eq!(partial_say(r#"{"say": "a\"b\nc"}"#), Some("a\"b\nc".into()), "escapes decoded");
+        assert_eq!(partial_say(r#"{"say":"café"#), Some("café".into()));
+        assert_eq!(partial_say(r#"{"say":"x\"#), Some("x".into()), "a cut escape waits for its next piece");
+        assert_eq!(partial_say(r#"{"do":"open","arg":"x"}"#), None, "a tool step has no say");
+        assert_eq!(partial_say(r#"{"sa"#), None, "the key has not come yet");
+    }
+
+    #[test]
+    fn the_pc_numbers_go_in_only_when_known() {
+        assert_eq!(pc_stats(Some(0.34), Some(0.61), Some((80.0, true))), "Right now: CPU 34%, memory 61%, battery 80% (charging).");
+        assert_eq!(pc_stats(None, Some(0.5), None), "Right now: memory 50%.", "a missing CPU sample is left out");
+        assert_eq!(pc_stats(None, None, None), "", "nothing known, nothing added");
     }
 
     #[test]

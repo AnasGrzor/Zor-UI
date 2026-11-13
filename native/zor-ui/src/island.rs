@@ -47,9 +47,17 @@ const ASK_SEND: u32 = 15;
 const ASK_MIC: u32 = 16;
 const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
+/// Clipboard rows are CLIP + position. Matched before the notification catch-all (`i >= NOTIF`).
+const CLIP: u32 = 150;
+const CLIP_MAX: usize = 30;
+/// Thumbnail box, and the space inside a history row (card rule: at least 12 px).
+const CLIP_THUMB: f32 = 36.0;
+const CLIP_ROW_PAD: f32 = 12.0;
+/// Most characters a history row shows: two lines at panel width.
+const CLIP_CHARS: usize = 80;
 
 /// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
-enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value) }
+enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value), Clips(Vec<Value>, String) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -75,6 +83,10 @@ pub struct Island {
     notif_open: Option<Value>,
     body_scroll: ui::Scroll,
     body_full: f32,
+    /// The clipboard history (None until loaded), the clip_seq it was loaded at, and decoded thumbnails by path.
+    clips: Arc<Mutex<Option<Value>>>,
+    clip_seen: Option<u32>,
+    thumbs: Vec<(String, Option<Pixmap>)>,
 }
 
 impl Island {
@@ -83,7 +95,7 @@ impl Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
             seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
             reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
-            notif_open: None, body_scroll: Default::default(), body_full: 0.0 }
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0, clips: Default::default(), clip_seen: None, thumbs: vec![] }
     }
 }
 
@@ -92,6 +104,25 @@ fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
 
 /// Height of the whole ask section for a question that wraps to `full` px.
 fn ask_section_h(full: f32) -> f32 { 16.0 + 10.0 + ask_h(full) + 12.0 + ASK_BOX_H + 10.0 + 32.0 }
+
+/// The first line of a copied text, its spaces collapsed, cut to 48 characters: what the island's peek shows. "" when blank.
+pub fn peek_text(s: &str) -> String {
+    let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    clip_cut(&line.split_whitespace().collect::<Vec<_>>().join(" "), 48)
+}
+
+/// A history row's text: all of it with spaces collapsed, cut to `CLIP_CHARS`.
+fn clip_text(s: &str) -> String { clip_cut(&s.split_whitespace().collect::<Vec<_>>().join(" "), CLIP_CHARS) }
+
+fn clip_cut(s: &str, n: usize) -> String {
+    if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
+}
+
+/// Height of one history row: a thumbnail, or two lines of text, with the row padding on both sides.
+fn clip_row_h(image: bool) -> f32 { 2.0 * CLIP_ROW_PAD + if image { CLIP_THUMB } else { clip_text_h() } }
+
+/// Two lines of history text, plus 4 px so the box is never tighter than its lines.
+fn clip_text_h() -> f32 { lh(13.0) * 2.0 + 4.0 }
 
 /// island-panel.js `ago`: "now", "5m", "3h", "2d".
 pub fn ago(now: f64, t: f64) -> String {
@@ -193,6 +224,24 @@ impl Island {
                 };
                 v.push((Sec::Notifs(n), h));
             }
+        }
+        if dp(cx, "clipboard") {
+            let count = cx.cfg.get("island.panel.clipCount").as_u64().unwrap_or(3) as usize;
+            let (items, note) = match self.clips.lock().ok().and_then(|c| c.clone()) {
+                None => (vec![], "Loading…".to_string()),
+                Some(v) => match v["error"].as_str() {
+                    Some(e) => (vec![], e.to_string()),
+                    None => {
+                        let items: Vec<Value> = v["items"].as_array().map(|a| a.iter().take(count).cloned().collect()).unwrap_or_default();
+                        let note = if items.is_empty() { "Clipboard history is empty".to_string() } else { String::new() };
+                        (items, note)
+                    }
+                },
+            };
+            let h = if items.is_empty() { 16.0 + 10.0 + g.measure_wrapped(&note, txt(12.5, 400), W - 2.0 * PAD) } else {
+                22.0 + items.iter().map(|x| 10.0 + clip_row_h(x["image"].as_bool() == Some(true))).sum::<f32>()
+            };
+            v.push((Sec::Clips(items, note), h));
         }
         v
     }
@@ -505,6 +554,66 @@ impl Island {
         if let Ok(n) = serde_json::from_str::<Value>(&t) { self.notif_open = Some(n); self.body_scroll = Default::default(); }
     }
 
+    /// The clipboard history: Win+V items as rows (text, or a thumbnail for an image), a click copies one back.
+    fn clips_sec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], note: &str) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let hh = if list.is_empty() { 16.0 } else { 22.0 };
+        c.icon("content_paste", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
+        c.text("Clipboard", R::new(x + 22.0, y, w - 22.0, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        let mut y = y + hh + 10.0;
+        if list.is_empty() {
+            let nh = c.g.measure_wrapped(note, txt(12.5, 400), w);
+            return c.para(note, R::new(x, y, w, nh), txt(12.5, 400), t.c("onSurfaceVariant"), Align::Left);
+        }
+        let now = hub::now_ms() / 1000.0;
+        for (i, it) in list.iter().enumerate() {
+            let image = it["image"].as_bool() == Some(true);
+            let h = clip_row_h(image);
+            let r = R::new(x, y, w, h);
+            let over = c.hit(r, CLIP + i as u32);
+            c.rect(r, 14.0, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
+            let ago = ago(now, it["time"].as_f64().unwrap_or(now));
+            let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
+            c.text(&ago, R::new(r.x + w - CLIP_ROW_PAD - aw - 2.0, r.y + CLIP_ROW_PAD, aw + 4.0, lh(11.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+            let bx = R::new(r.x + CLIP_ROW_PAD, r.y + CLIP_ROW_PAD, CLIP_THUMB, CLIP_THUMB);
+            let tx = bx.x + CLIP_THUMB + 10.0;
+            let tw = (r.x + w - CLIP_ROW_PAD - aw - 10.0 - tx).max(10.0);
+            if image {
+                let thumb = it["thumb"].as_str().and_then(|p| self.thumb(c.g, p, (CLIP_THUMB * c.scale).round() as u32));
+                match thumb {
+                    Some(p) => c.clip_round(bx, 8.0, |c| c.image(&p, bx, 1.0)),
+                    None => c.icon("image", bx, ico(24.0, false), t.c("onSurfaceVariant")),
+                }
+                c.text("Image", R::new(tx, r.y + CLIP_ROW_PAD, tw, lh(13.0)), txt(13.0, 500), t.c("onSurface"), Align::Left);
+            } else {
+                c.icon("notes", bx, ico(24.0, false), t.c("onSurfaceVariant"));
+                c.para(&clip_text(&s(it, "text")), R::new(tx, r.y + CLIP_ROW_PAD, tw, clip_text_h()), txt(13.0, 400), t.c("onSurface"), Align::Left);
+            }
+            y += h + 10.0;
+        }
+    }
+
+    /// A thumbnail file's decoded image, cached by path (cleared once the cache is full).
+    fn thumb(&mut self, g: &Gfx, path: &str, px: u32) -> Option<Pixmap> {
+        if let Some((_, p)) = self.thumbs.iter().find(|(k, _)| k == path) { return p.clone(); }
+        if self.thumbs.len() >= CLIP_MAX { self.thumbs.clear(); }
+        let p = g.load_image(std::path::Path::new(path), px, px);
+        self.thumbs.push((path.to_string(), p.clone()));
+        p
+    }
+
+    /// Loads the history again after each copy; only while the section is on.
+    fn fetch_clips(&mut self, cx: &Ctx) {
+        if self.clip_seen == Some(cx.clip_seq) || !dp(cx, "clipboard") { return; }
+        self.clip_seen = Some(cx.clip_seq);
+        let (cfg, slot) = (Config(cx.cfg.0.clone()), self.clips.clone());
+        std::thread::spawn(move || {
+            let r = crate::proc::run(&cfg, "toggles", &["-Action", "clipboard"]);
+            if let Ok(mut c) = slot.lock() { *c = Some(if r.is_null() { json!({ "error": "Could not read the clipboard history" }) } else { r }); }
+            app::post(Box::new(|_| {})); // repaint
+        });
+    }
+
     fn fetch_notifs(&mut self, cx: &Ctx) {
         if self.asked || !dp(cx, "notifications") { return; }
         self.asked = true;
@@ -529,6 +638,7 @@ impl View for Island {
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.take_banner_notif();
         self.fetch_notifs(cx);
+        self.fetch_clips(cx);
         let plan = self.plan(c.g, cx);
         let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
         ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
@@ -555,6 +665,7 @@ impl View for Island {
                 Sec::Agents(l) => self.agents(c, cx, x, y, l),
                 Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
                 Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
+                Sec::Clips(l, note) => self.clips_sec(c, cx, x, y, l, note),
             }
             y += sh + SEP;
         }
@@ -609,6 +720,11 @@ impl View for Island {
                         std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &[id.as_str()]); });
                     }
                 }
+                i if (CLIP..CLIP + CLIP_MAX as u32).contains(&i) => {
+                    let pos = (i - CLIP).to_string();
+                    let cfg = Config(cx.cfg.0.clone());
+                    std::thread::spawn(move || { crate::proc::run(&cfg, "toggles", &["-Action", "clipboard-set", "-Value", &pos]); });
+                }
                 i if i >= NOTIF => {
                     self.notif_open = self.notifs.lock().ok().and_then(|n| n.get((i - NOTIF) as usize).cloned());
                     self.body_scroll = Default::default();
@@ -651,6 +767,25 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peek_is_the_first_line_collapsed_and_cut() {
+        assert_eq!(peek_text("\n  hello   world \nsecond line"), "hello world");
+        assert_eq!(peek_text(&"a".repeat(60)), format!("{}…", "a".repeat(48)));
+        assert_eq!(peek_text("  \n\t "), "");
+    }
+
+    #[test]
+    fn history_text_collapses_spaces_and_cuts_at_two_lines() {
+        assert_eq!(clip_text("a\n\n  b\tc"), "a b c");
+        assert_eq!(clip_text(&"x ".repeat(100)).chars().count(), CLIP_CHARS + 1);
+    }
+
+    #[test]
+    fn history_rows_keep_their_padding_and_fit_two_lines() {
+        assert!(clip_row_h(true) >= CLIP_THUMB + 2.0 * CLIP_ROW_PAD);
+        assert!(clip_row_h(false) >= 2.0 * CLIP_ROW_PAD + 2.0 * lh(13.0) + 4.0);
+    }
 
     #[test]
     fn lyrics_area_shrinks_to_the_note_when_there_are_no_lyrics() {

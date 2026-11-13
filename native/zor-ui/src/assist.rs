@@ -35,6 +35,17 @@ static LISTENER: Mutex<Option<proc::Stream>> = Mutex::new(None);
 
 /// Where the primary buddy should point next: (x, y in screen pixels, label).
 static POINT: Mutex<Option<(i32, i32, String)>> = Mutex::new(None);
+/// The answer as it is typed out so far (the buddy's bubble shows it; it is not spoken until the final line).
+static LIVE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The newest partial answer, once, for the buddy's bubble.
+pub fn take_live() -> Option<String> { LIVE.lock().ok().and_then(|mut l| l.take()) }
+
+/// Shows the reply so far: the `say` text of a JSON reply (a tool step shows nothing), or the plain text.
+pub fn show_live(acc: &str) {
+    let shown = if acc.trim_start().starts_with('{') { crate::agent::partial_say(acc) } else { Some(acc.to_string()) };
+    if let Some(s) = shown.filter(|s| !s.trim().is_empty()) { if let Ok(mut l) = LIVE.lock() { *l = Some(s); } }
+}
 
 pub fn say_later(s: &str, secs: f32) { if let Ok(mut l) = LINES.lock() { l.push((s.to_string(), secs)); } }
 /// Asks the buddy to fly to a spot on the screen (a newer request replaces one he hasn't started).
@@ -546,6 +557,11 @@ pub fn fold_turn(events: &[Value]) -> Turn {
 /// Runs one `ai-chat` conversation and returns its reply with any tool calls. A stream error fails the whole reply.
 /// Gives up when nothing arrives for `wait_secs`.
 pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
+    stream_turn_live(cfg, convo, wait_secs, |_| {})
+}
+
+/// `stream_turn`, and `live` gets the text so far after each delta.
+pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, mut live: impl FnMut(&str)) -> Result<Turn, String> {
     let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
@@ -554,9 +570,11 @@ pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, St
     }, move || { let _ = tx3.send(None); });
     if stream.is_none() { return Err("I can't reach my brain.".into()); }
     let mut events = vec![];
+    let mut acc = String::new();
     // None is the end of the stream; stop on it, on an error, or when nothing comes for `wait_secs`
     while let Ok(Some(v)) = rx.recv_timeout(std::time::Duration::from_secs(wait_secs)) {
         if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
+        if let Some(d) = v["delta"].as_str() { acc.push_str(d); live(&acc); }
         events.push(v);
     }
     Ok(fold_turn(&events))

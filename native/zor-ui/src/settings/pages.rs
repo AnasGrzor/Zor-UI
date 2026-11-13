@@ -313,6 +313,7 @@ impl Settings {
             self.sw(p, "island.mic", "Microphone mute", "When the mic is muted or turned back on", "mic");
             self.num(p, "island.osdSeconds", "Volume and mic seconds", 1, 10, "timer");
             self.sw(p, "island.privacy", "Mic and camera in use", "An orange or green dot while an app listens or films, and a note when one starts", "videocam");
+            self.sw(p, "island.clipboardPeek", "Clipboard peek", "A short note in the island when you copy something; passwords are skipped", "content_copy");
             self.sw(p, "island.agents", "AI agents that need you", "A permission prompt or a question from Claude, Codex or any agent reporting to Zor UI", "smart_toy");
             self.sw(p, "autoTrackAgents", "Track coding agents automatically", "Adds hooks to Claude Code, Codex and Gemini CLI when found on this PC, and checks every 5 minutes", "radar");
             self.sw(p, "island.agentWorking", "AI agents at work", "The agent and its 5-hour usage, when nothing else is showing", "pending");
@@ -357,6 +358,8 @@ impl Settings {
             self.sw(p, "island.panel.agents", "AI agents", "What each needs, and its usage limits", "smart_toy");
             self.sw(p, "island.panel.notifications", "Notifications", "The latest ones, with Clear all", "notifications");
             self.num(p, "island.panel.notifCount", "Notifications shown", 1, 10, "format_list_numbered");
+            self.sw(p, "island.panel.clipboard", "Clipboard history", "Recent copies from Win+V; click one to copy it again", "content_paste");
+            self.num(p, "island.panel.clipCount", "Clipboard items shown", 1, 10, "format_list_numbered");
         });
     }
 

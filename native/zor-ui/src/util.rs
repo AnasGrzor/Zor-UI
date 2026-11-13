@@ -146,6 +146,36 @@ pub fn clipboard_set(s: &str) {
     }
 }
 
+pub const CF_DIB: u32 = 8;
+
+pub fn clipboard_has(format: u32) -> bool {
+    unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(format).is_ok() }
+}
+
+/// True when the copy asks not to be shown or kept: password managers set these formats.
+pub fn clipboard_private() -> bool {
+    use windows::Win32::System::{DataExchange::*, Memory::*};
+    use windows::core::w;
+    unsafe {
+        let marked = [w!("ExcludeClipboardContentFromMonitorProcessing"), w!("Clipboard Viewer Ignore")]
+            .iter().any(|n| { let f = RegisterClipboardFormatW(*n); f != 0 && IsClipboardFormatAvailable(f).is_ok() });
+        if marked { return true; }
+        // CanIncludeInClipboardHistory holds a DWORD; 0 means keep it out of history
+        let f = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
+        if f == 0 || IsClipboardFormatAvailable(f).is_err() || OpenClipboard(None).is_err() { return false; }
+        let v = (|| {
+            let h = GetClipboardData(f).ok()?;
+            let p = GlobalLock(HGLOBAL(h.0)) as *const u32;
+            if p.is_null() { return None; }
+            let v = *p;
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Some(v)
+        })();
+        let _ = CloseClipboard();
+        v == Some(0)
+    }
+}
+
 pub fn hostname() -> String {
     let mut buf = [0u16; 256];
     let mut n = buf.len() as u32;
@@ -225,6 +255,17 @@ pub fn memory_usage() -> f32 {
     let mut m = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
     unsafe { let _ = GlobalMemoryStatusEx(&mut m); }
     m.dwMemoryLoad as f32 / 100.0
+}
+
+/// The last CPU busy fraction the bar sampled (f32 bits; NaN until the first sample). Only a shown bar samples it, so
+/// the AI's context can be a sample old, or missing before any bar is up.
+static CPU_NOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7FC0_0000);
+
+pub fn set_cpu(v: f32) { CPU_NOW.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed); }
+
+pub fn cpu_now() -> Option<f32> {
+    let v = f32::from_bits(CPU_NOW.load(std::sync::atomic::Ordering::Relaxed));
+    (!v.is_nan()).then_some(v)
 }
 
 /// Used fraction of drive C:.

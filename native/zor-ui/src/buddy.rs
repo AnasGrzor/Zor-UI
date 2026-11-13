@@ -66,6 +66,14 @@ fn feet_line(edge: Edge, top: i32, bottom: i32, scale: f32) -> f32 {
     match edge { Edge::Top => top as f32 + bar, Edge::Bottom => bottom as f32 - bar, Edge::Left | Edge::Right => bottom as f32 }
 }
 const SPEED: f32 = 28.0;
+/// How close the pointer must come (screen px, past his body) before he switches to 16 ms frames: a fast pointer covers
+/// this in one 100 ms idle frame, so the switch lands before it reaches him.
+const NEAR: f32 = 160.0;
+
+/// True when the pointer `cur` is within `margin` px of the box `body` (left, top, right, bottom), all in screen px.
+fn near(body: (f32, f32, f32, f32), cur: (f32, f32), margin: f32) -> bool {
+    cur.0 >= body.0 - margin && cur.0 < body.2 + margin && cur.1 >= body.1 - margin && cur.1 < body.3 + margin
+}
 
 /// One look at the desktop around him: the bar's data sources, reduced to what he comments on.
 #[derive(Clone, Default, PartialEq)]
@@ -389,6 +397,8 @@ pub struct Gojo {
     rng: u64,
     peek: f32,
     hovered: bool,
+    /// The pointer is within `NEAR` px of him: he draws at the screen's refresh so hover and drag don't lag.
+    near: bool,
     peek_said: f32,
     bubble: Option<(String, f32)>,
     infinity: f32,
@@ -478,7 +488,7 @@ impl Gojo {
             x: f32::NAN, y: f32::NAN, vy: 0.0, mode: Mode::Stand, to: 0.0, wait: 4.0, dir: -1.0, t: 0.0, last: Instant::now(),
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peek: 0.0, hovered: false, peek_said: -99.0, bubble: None, infinity: 0.0,
             move_t: None, playing: Move::None, poof: Some(0.0), hop: None, press: None, grab: (0.0, 0.0), dragged: false, last_click: -9.0, was_down: false,
-            chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
+            near: false, chat_at: 200.0, around: Around::default(), primed: false, quiet: 0.0, queued: None, hidden: false, check_at: 0.0, perch: None, sit_after: false, sit_k: 0.0, k_t: 0.0,
             mon: RECT::default(), scale: 1.0,
             slot, cast: cast::CASTS[slot.min(cast::CASTS.len() - 1)].clone(), style: Hair::default(), trim: Trim::default(), pack: None, sprites: Sprites::default(), sprite_h: pack::DEFAULT_H, fy: FY, body: (11.0, 48.0), name: String::new(), walk: true, chatty: 1.0, pair: false, banter_at: clock() + 30.0, greeted: false,
             work: 0.0, break_mins: 50.0, breaks: true, focus: "", focus_since: 0.0, away_from: None, ground_at: 0.0, focus_said: ("", -9999.0), watch: true, job: None, fly_v: 0.0, trail: vec![],        };
@@ -704,6 +714,7 @@ impl Gojo {
         // his body, screen px
         let (bl, br, bt, bb) = (self.x - self.body.0 * s, self.x + self.body.0 * s, self.y - self.body.1 * s, self.y + if self.sitting() { 11.0 } else { 1.0 } * s);
         self.hovered = !self.hidden && cx >= bl && cx < br && cy >= bt && cy < bb;
+        self.near = !self.hidden && near((bl, bt, br, bb), (cx, cy), NEAR * s);
 
         // left button: press over him, then a drag past 6 px picks him up
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 != 0;
@@ -731,6 +742,8 @@ impl Gojo {
         self.watch_break(idle_s, dt);
         // what you asked the primary buddy to do (assist.rs) answers in his bubble
         if self.leads() {
+            // the answer as it is typed out shows in the bubble; the final line after it is the one that is spoken
+            if let Some(l) = assist::take_live() { self.bubble = Some((l, self.t + 30.0)); self.hold_bubble(); }
             if let Some((l, secs)) = assist::next_line() {
                 if self.mode == Mode::Sleep { self.mode = Mode::Stand; self.wait = 3.0; }
                 self.say(&l, secs);
@@ -1137,6 +1150,7 @@ impl View for Gojo {
 
     fn frame_ms(&self) -> u32 {
         if self.hidden { return 500; }
+        if self.near { return 16; }
         if matches!(self.mode, Mode::Held | Mode::Fall | Mode::Point) || self.move_t.is_some() || self.infinity > self.t { 16 }
         else if self.mode == Mode::Walk || self.hop.is_some() || (self.peek > 0.0 && self.peek < 1.0) || self.poof.is_some() { 33 }
         else { 100 }
@@ -1442,6 +1456,16 @@ mod tests {
 
     /// `notice` in Gojo's words, which these tests were written against.
     fn notice(old: &Around, new: &Around) -> Option<String> { super::notice(old, new, &cast::GOJO_SAY) }
+
+    #[test]
+    fn the_pointer_counts_as_near_within_the_margin_only() {
+        let body = (100.0, 50.0, 200.0, 150.0);
+        assert!(near(body, (150.0, 100.0), 160.0), "inside");
+        assert!(near(body, (-50.0, 100.0), 160.0), "160 px left of the body is still near");
+        assert!(!near(body, (-61.0, 100.0), 160.0), "just past the margin is far");
+        assert!(!near(body, (150.0, 311.0), 160.0), "below the margin is far");
+        assert!(near(body, (100.0, 50.0), 0.0), "the top-left corner is inside, even with no margin");
+    }
 
     #[test]
     fn a_pack_speaks_in_its_own_words_and_can_be_silenced() {

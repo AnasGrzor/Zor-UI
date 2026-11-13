@@ -25,7 +25,7 @@ fn spec(provider: &str) -> Option<&'static (&'static str, &'static str, &'static
 }
 
 /// Path of the command: on PATH, else npm's global folder; None when it isn't installed.
-fn find(cmd: &str) -> Option<PathBuf> {
+pub(super) fn find(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let npm = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("npm"));
     std::env::split_paths(&path).chain(npm).find_map(|d| ["exe", "cmd"].iter().map(|e| d.join(format!("{cmd}.{e}"))).find(|p| p.is_file()))

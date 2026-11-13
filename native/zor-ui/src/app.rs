@@ -53,6 +53,8 @@ pub struct Ctx {
     pub osd: Option<Osd>,
     /// The apps holding the microphone and camera (polled every tick while the island shows it).
     pub privacy: crate::privacy::Privacy,
+    /// Bumped on each clipboard change, so an open island panel refetches its history.
+    pub clip_seq: u32,
     /// Bumps whenever any of the above changes; windows repaint on a new version.
     pub ver: u64,
     /// `--all`: run every ported part even if config.json "native" doesn't list it (side-by-side testing).
@@ -89,7 +91,7 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, privacy: Default::default(), ver: 0, all, actions: vec![],
+            notif: None, osd: None, privacy: Default::default(), clip_seq: 0, ver: 0, all, actions: vec![],
         }
     }
 
@@ -164,6 +166,61 @@ thread_local!(pub static APP: RefCell<Option<App>> = const { RefCell::new(None) 
 
 const TICK: usize = 1;
 const FRAME: usize = 2;
+
+/// Frame pacer for 16 ms views: while on, one thread posts FRAME once per DWM composition (DwmFlush), so frames
+/// land on the screen's refresh instead of on a 16 ms SetTimer, which fires every 15.6 or 31 ms.
+static PACE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+static PACE_THREAD: OnceLock<()> = OnceLock::new();
+
+fn pace_set(on: bool, msg: HWND) {
+    let (lock, cv) = &PACE;
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if *g == on { return; }
+    *g = on;
+    cv.notify_all();
+    drop(g);
+    if on {
+        let msg = msg.0 as isize;
+        PACE_THREAD.get_or_init(|| {
+            std::thread::spawn(move || loop {
+                {
+                    let mut g = lock_pace();
+                    while !*g { g = PACE.1.wait(g).unwrap_or_else(|e| e.into_inner()); }
+                }
+                let t = std::time::Instant::now();
+                unsafe {
+                    let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                    let _ = PostMessageW(HWND(msg as *mut _), WM_TIMER, WPARAM(FRAME), LPARAM(0));
+                }
+                // DwmFlush returns at once when composition is off: don't spin
+                if let Some(rest) = std::time::Duration::from_millis(1).checked_sub(t.elapsed()) { std::thread::sleep(rest); }
+            });
+        });
+    }
+}
+
+fn lock_pace() -> std::sync::MutexGuard<'static, bool> { PACE.0.lock().unwrap_or_else(|e| e.into_inner()) }
+
+// TEMP frametrace: per-second FRAME rate and handler time into zorui.log. Remove with the measurement.
+struct Trace { ticks: u32, busy_ns: u128, max_ns: u128, since: Option<std::time::Instant>, ms16: u32 }
+static TRACE: Mutex<Trace> = Mutex::new(Trace { ticks: 0, busy_ns: 0, max_ns: 0, since: None, ms16: 0 });
+
+fn trace_frame(busy: std::time::Duration, frame_ms: u32) {
+    let Ok(mut t) = TRACE.lock() else { return };
+    let now = std::time::Instant::now();
+    let since = *t.since.get_or_insert(now);
+    t.ticks += 1;
+    t.busy_ns += busy.as_nanos();
+    t.max_ns = t.max_ns.max(busy.as_nanos());
+    if frame_ms == 16 { t.ms16 += 1; }
+    let secs = now.duration_since(since).as_secs_f64();
+    if secs >= 1.0 {
+        let n = t.ticks as f64;
+        crate::log::line(&format!("[frametrace] {:.1} fps (16 ms views {}/{} ticks), handler avg {:.2} ms, max {:.2} ms over {:.2} s",
+            n / secs, t.ms16, t.ticks, t.busy_ns as f64 / n / 1e6, t.max_ns as f64 / 1e6, secs));
+        *t = Trace { ticks: 0, busy_ns: 0, max_ns: 0, since: None, ms16: 0 };
+    }
+}
 const HOVER: usize = 3;
 /// While the tray flyout is open: watches for a click outside it, the only thing that closes it.
 const OUTSIDE: usize = 4;
@@ -180,6 +237,7 @@ impl App {
         let msg = unsafe {
             CreateWindowExW(WINDOW_EX_STYLE(0), win::CLASS, windows::core::w!("zor-ui"), WINDOW_STYLE(0), 0, 0, 0, 0, HWND_MESSAGE, None, None, None)?
         };
+        unsafe { let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(msg); } // WM_CLIPBOARDUPDATE on every copy
         MSG_HWND.store(msg.0 as isize, Ordering::Relaxed);
         let mut app = App {
             g,
@@ -346,13 +404,16 @@ impl App {
     fn frames(&mut self) {
         if self.game.is_some() { return; }
         let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
-        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding);
+        // a 16 ms view counts as gliding too: its frames need the 1 ms timer resolution (the island spring never set gliding)
+        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
         if glide != self.hires {
             unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
             self.hires = glide;
         }
         if ms != self.frame {
-            unsafe { if ms > 0 { SetTimer(self.msg, FRAME, ms, None); } else { let _ = KillTimer(self.msg, FRAME); } }
+            let pace = ms == 16;
+            pace_set(pace, self.msg);
+            unsafe { if ms > 0 && !pace { SetTimer(self.msg, FRAME, ms, None); } else { let _ = KillTimer(self.msg, FRAME); } }
             self.frame = ms;
         }
     }
@@ -371,6 +432,24 @@ impl App {
         cx.ver += 1;
     }
 
+    /// A copy happened: the island peeks at it (unless a password manager marked it private) and an open panel refetches.
+    fn clip_changed(&mut self) {
+        let cx = &mut self.cx;
+        cx.clip_seq = cx.clip_seq.wrapping_add(1);
+        cx.ver += 1;
+        let on = cx.island_shown() && cx.cfg.get("island.clipboardPeek").as_bool() != Some(false);
+        if on && !util::clipboard_private() {
+            let text = match util::clipboard_get() {
+                Some(t) => crate::island::peek_text(&t),
+                None if util::clipboard_has(util::CF_DIB) => "Image copied".to_string(),
+                None => String::new(),
+            };
+            if !text.is_empty() {
+                cx.osd = Some(Osd { icon: "content_copy", value: None, text, until: hub::now_ms() + 2500.0 });
+            }
+        }
+    }
+
     /// Hides the shell while a game (any full-screen app) is in front, and restores it after.
     fn game_check(&mut self) {
         // With a second monitor only the bar on the covered one hides (bars_for_fullscreen); the other keeps working.
@@ -387,6 +466,7 @@ impl App {
         (self.menu, self.popup, self.pending, self.shown) = (None, None, None, None);
         let hid = self.bars.iter().chain(self.wins.iter()).filter(|w| w.visible()).map(|w| { w.hide(); w.hwnd }).collect();
         self.game = Some(hid);
+        pace_set(false, self.msg);
         unsafe { let _ = KillTimer(self.msg, FRAME); }
         self.frame = 0;
     }
@@ -446,6 +526,7 @@ impl App {
         let shows = |id: &str| self.wins.iter().any(|w| w.drag_key.as_deref() == Some(id));
         if n % 3 == 0 && (bars || shows("resources")) {
             self.cx.cpu = self.cpu.usage();
+            crate::util::set_cpu(self.cx.cpu);
             self.cx.mem = util::memory_usage();
             if shows("resources") || popups { self.cx.disk = util::disk_usage(); }
             self.cx.ver += 1;
@@ -690,8 +771,12 @@ impl App {
         if hwnd == self.msg {
             match (msg, wp.0) {
                 (WM_TIMER, TICK) => self.tick(),
-                (WM_TIMER, GUARD) => if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); },
+                (WM_TIMER, GUARD) => {
+                    if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); }
+                    if let Some(front) = tray::raise_taskbar() { crate::log::line(&format!("taskbar lost topmost; raised it (window in front: {front:?})")); }
+                }
                 (WM_TIMER, FRAME) => {
+                    let t0 = std::time::Instant::now(); // TEMP frametrace
                     if self.cx.theme.advance() { self.cx.ver += 1; }
                     // each view paints at its own rate: a tile that wants 33 ms frames must not drag the
                     // bar, the desk cards and the island down to 30 fps with it
@@ -703,9 +788,11 @@ impl App {
                     }
                     self.menu_check();
                     self.frames();
+                    trace_frame(t0.elapsed(), self.frame); // TEMP frametrace
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
                 (WM_TIMER, OUTSIDE) => self.outside_check(),
+                (WM_CLIPBOARDUPDATE, _) => self.clip_changed(),
                 (crate::appicon::CALLBACK, _) => match lp.0 as u32 & 0xFFFF {
                     WM_LBUTTONUP => self.open("settings", None, None),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
@@ -785,7 +872,9 @@ impl App {
                 }
                 if !click { self.popup_check(self.bars.len() + i); }
                 if self.wins[i].drag_key.is_some() { guides::refresh(self); }
-                self.wins[i].update(&self.g, &self.cx, false);
+                // a click repaints at once: the buddy's bubble and hop change no key the frame check reads
+                let up = matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_LBUTTONDBLCLK);
+                self.wins[i].update(&self.g, &self.cx, up);
                 self.frames(); // a wheel may have started a scroll glide
             }
         }
@@ -867,7 +956,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
     }
     const MOUSE: [u32; 10] = [WM_MOUSEMOVE, win::WM_MOUSELEAVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_LBUTTONDBLCLK, WM_MOUSEWHEEL];
-    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
+    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | WM_CLIPBOARDUPDATE | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
     if ours(msg) || matches!(msg, WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SYSKEYDOWN | WM_ACTIVATE) {
         // try_borrow: a call made while handling a message (SetWindowPos, DestroyWindow) can re-enter here
         APP.with(|a| if let Ok(mut a) = a.try_borrow_mut() { if let Some(app) = a.as_mut() { app.on(hwnd, msg, wp, lp); } });

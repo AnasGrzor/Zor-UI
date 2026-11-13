@@ -122,9 +122,9 @@ pub fn start(cfg: Arc<Config>, sh: Sh, alive: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut n = 0u32;
         while alive.load(Ordering::Relaxed) {
-            if n % 10 == 0 { load_notifs(&cfg, &sh); repaint(); }
-            if n % 6 == 0 && lock(&sh).mixer_open { load_mixer(&cfg, &sh); repaint(); }
-            if n % 6 == 0 { let o = crate::media::output_name().unwrap_or_default(); if o != lock(&sh).out_name { lock(&sh).out_name = o; repaint(); } }
+            if n.is_multiple_of(10) { load_notifs(&cfg, &sh); repaint(); }
+            if n.is_multiple_of(6) && lock(&sh).mixer_open { load_mixer(&cfg, &sh); repaint(); }
+            if n.is_multiple_of(6) { let o = crate::media::output_name().unwrap_or_default(); if o != lock(&sh).out_name { lock(&sh).out_name = o; repaint(); } }
             std::thread::sleep(Duration::from_millis(500));
             n = n.wrapping_add(1);
         }
@@ -258,7 +258,7 @@ pub fn month_grid(y: i32, m: u32, today: (i32, u32, u32)) -> Vec<Cell> {
     let prev = if m == 1 { util::days_in_month((y - 1) as u16, 12) } else { util::days_in_month(y as u16, m as u16 - 1) } as u32;
     let mut cells: Vec<Cell> = (0..offset).rev().map(|i| Cell { d: prev - i, out: true, today: false }).collect();
     cells.extend((1..=days).map(|d| Cell { d, out: false, today: (y, m, d) == today }));
-    while cells.len() % 7 != 0 { let d = cells.len() as u32 - offset - days + 1; cells.push(Cell { d, out: true, today: false }); }
+    while !cells.len().is_multiple_of(7) { let d = cells.len() as u32 - offset - days + 1; cells.push(Cell { d, out: true, today: false }); }
     cells
 }
 

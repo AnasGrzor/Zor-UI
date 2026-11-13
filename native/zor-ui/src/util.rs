@@ -36,7 +36,7 @@ pub fn add_days(st: &SYSTEMTIME, days: i64) -> SYSTEMTIME {
 
 pub fn days_in_month(year: u16, month: u16) -> u16 {
     match month {
-        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) => 29,
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,
@@ -48,7 +48,7 @@ pub fn monday_index(st: &SYSTEMTIME) -> u16 { (st.wDayOfWeek + 6) % 7 }
 
 /// "HH:mm" or 12-hour "hh:mm" without AM/PM, like the cards' toLocaleTimeString call.
 pub fn clock(h: u16, m: u16, h24: bool) -> String {
-    let h = if h24 { h } else if h % 12 == 0 { 12 } else { h % 12 };
+    let h = if h24 { h } else if h.is_multiple_of(12) { 12 } else { h % 12 };
     format!("{h:02}:{m:02}")
 }
 
@@ -215,8 +215,7 @@ pub fn monitor_names() -> Vec<(Spot, String)> {
         paths.iter().filter_map(|p| {
             let src = modes.iter().find(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE && m.id == p.sourceInfo.id && m.adapterId.LowPart == p.sourceInfo.adapterId.LowPart && m.adapterId.HighPart == p.sourceInfo.adapterId.HighPart)?;
             let s = src.Anonymous.sourceMode;
-            let mut t = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
-            t.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: p.targetInfo.adapterId, id: p.targetInfo.id };
+            let mut t = DISPLAYCONFIG_TARGET_DEVICE_NAME { header: DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: p.targetInfo.adapterId, id: p.targetInfo.id }, ..Default::default() };
             if DisplayConfigGetDeviceInfo(&mut t.header) != 0 { return None; }
             let n = t.monitorFriendlyDeviceName;
             let name = String::from_utf16_lossy(&n[..n.iter().position(|c| *c == 0).unwrap_or(n.len())]).trim().to_string();

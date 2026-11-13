@@ -128,7 +128,7 @@ fn corner_alpha(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
 /// Premultiplied BGRA picture of `w` x `h` px (the layout Canvas::image wants), each pixel from `color(u, v)` with u, v in 0..1.
 fn bake(w: u32, h: u32, radius: f32, color: impl Fn(f32, f32) -> Color) -> Option<Pixmap> {
     let mut pm = Pixmap::new(w, h)?;
-    for (i, px) in pm.data_mut().chunks_exact_mut(4).enumerate() {
+    for (i, px) in pm.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (xi, yi) = ((i as u32 % w) as f32 + 0.5, (i as u32 / w) as f32 + 0.5);
         let (c, a) = (color(xi / w as f32, yi / h as f32), corner_alpha(xi, yi, w as f32, h as f32, radius));
         let f = |sh: u32| (((c >> sh) & 255) as f32 * a).round() as u8;

@@ -198,9 +198,9 @@ fn goals_probs(lh: f64, la: f64) -> (f64, f64, f64, f64, f64) {
     m[1][1] *= 1.0 - rho;
     let total: f64 = m.iter().map(|r| r.iter().sum::<f64>()).sum();
     let (mut home, mut draw, mut away, mut o15, mut o25) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    for i in 0..11 {
-        for j in 0..11 {
-            let p = m[i][j] / total;
+    for (i, row) in m.iter().enumerate() {
+        for (j, &cell) in row.iter().enumerate() {
+            let p = cell / total;
             if i > j { home += p } else if i == j { draw += p } else { away += p }
             if i + j >= 2 { o15 += p }
             if i + j >= 3 { o25 += p }
@@ -301,7 +301,7 @@ fn main_matches() -> Value {
         let own = get(lid, season);
         if let Some(&hl) = domestic.get(team) {
             if let Some(d) = get(hl, seasons.get(hl).or(season)) {
-                if own.map_or(true, |o| d.games >= o.games) { return (Some(d), league_by_id(hl).map_or(1.0, |l| l.3)); }
+                if own.is_none_or(|o| d.games >= o.games) { return (Some(d), league_by_id(hl).map_or(1.0, |l| l.3)); }
             }
         }
         (own, league_by_id(lid).map_or(1.0, |l| l.3))

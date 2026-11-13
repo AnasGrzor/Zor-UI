@@ -211,8 +211,7 @@ unsafe fn paint(hwnd: HWND) {
 fn grab_bgra(shot: &Shot, x: i32, y: i32, w: i32, h: i32, scale: i32) -> (Vec<u8>, i32, i32) {
     let (pw, ph) = (w * scale, h * scale);
     unsafe {
-        let mut bi = BITMAPINFO::default();
-        bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: pw, biHeight: -ph, biPlanes: 1, biBitCount: 32, ..Default::default() };
+        let bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: pw, biHeight: -ph, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
         let mut bits = std::ptr::null_mut();
         let dc = CreateCompatibleDC(shot.dc);
         let Ok(bmp) = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0) else { let _ = DeleteDC(dc); return (vec![], 0, 0) };
@@ -221,7 +220,7 @@ fn grab_bgra(shot: &Shot, x: i32, y: i32, w: i32, h: i32, scale: i32) -> (Vec<u8
         let _ = SetBrushOrgEx(dc, 0, 0, None);
         let _ = StretchBlt(dc, 0, 0, pw, ph, shot.dc, x, y, w, h, SRCCOPY);
         let mut px = std::slice::from_raw_parts(bits as *const u8, (pw * ph * 4) as usize).to_vec();
-        px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        px.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
         SelectObject(dc, old);
         let _ = DeleteObject(bmp);
         let _ = DeleteDC(dc);

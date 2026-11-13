@@ -151,7 +151,7 @@ fn cover_bg(g: &Gfx, art: Option<&[u8]>, pw: u32, ph: u32, scale: f32, surf: Col
                 let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
                 let s = |xx: usize, yy: usize, c: usize| d[(yy * sw + xx) * 4 + c] as f32;
                 let mut a = [0.0f32; 3];
-                for c in 0..3 { a[c] = (s(x0, y0, c) * (1.0 - tx) + s(x1, y0, c) * tx) * (1.0 - ty) + (s(x0, y1, c) * (1.0 - tx) + s(x1, y1, c) * tx) * ty; }
+                for (c, ac) in a.iter_mut().enumerate() { *ac = (s(x0, y0, c) * (1.0 - tx) + s(x1, y0, c) * tx) * (1.0 - ty) + (s(x0, y1, c) * (1.0 - tx) + s(x1, y1, c) * tx) * ty; }
                 let luma = 0.0722 * a[0] + 0.7152 * a[1] + 0.2126 * a[2];
                 for c in 0..3 { p[c] = (luma + 1.3 * (a[c] - luma)).clamp(0.0, 255.0) * 0.85 + 0x22 as f32 * 0.15; }
             }
@@ -189,7 +189,7 @@ fn same_art(a: Option<&Arc<Vec<u8>>>, b: Option<&Arc<Vec<u8>>>) -> bool {
 impl Np {
     fn art_for(&mut self, g: &Gfx, m: &Media, px: u32) -> Option<&Pixmap> {
         let bytes = m.art.as_ref()?;
-        if self.art.as_ref().map_or(true, |a| !Arc::ptr_eq(&a.0, bytes) || a.1 != px) {
+        if self.art.as_ref().is_none_or(|a| !Arc::ptr_eq(&a.0, bytes) || a.1 != px) {
             self.art = g.load_image_bytes(bytes, px, px).map(|p| (bytes.clone(), px, p));
         }
         self.art.as_ref().map(|a| &a.2)
@@ -294,7 +294,7 @@ impl Np {
         std::thread::spawn(move || loop {
             let Some(a) = apps.upgrade() else { return };
             let list = parse_mixer(&proc::bridge(&cfg, "mixer", &[]));
-            let changed = a.lock().map_or(false, |mut g| if *g != list { *g = list; true } else { false });
+            let changed = a.lock().is_ok_and(|mut g| if *g != list { *g = list; true } else { false });
             drop(a);
             if changed { app::post(Box::new(|_| {})); }
             std::thread::sleep(std::time::Duration::from_secs(4));
@@ -324,7 +324,7 @@ impl Np {
                 match back { Some(b) => c.image(b, R::new(0.0, 0.0, 0.0, 0.0), 1.0), None => c.rect(card, 23.0, alpha(t.c("surfaceContainerLow"), 0.88)) }
                 // two rows or more: the picture on top, title and controls in a strip below; one cell: picture only
                 let (tall, tiny) = (ah > 140.0, c.w < 160.0);
-                let px = ((if tall { c.w - 8.0 } else if tiny { c.w - 8.0 } else { ah }) * scale).round() as u32;
+                let px = ((if tall || tiny { c.w - 8.0 } else { ah }) * scale).round() as u32;
                 let art = self.art_for(c.g, &m, px).cloned();
                 if tall || tiny {
                     let strip = if tall { 92.0 } else { 0.0 };
@@ -434,7 +434,7 @@ impl Np {
         // blurred cover (cached per song and size)
         let (pw, ph) = ((card.w * c.scale).round() as u32, (card.h * c.scale).round() as u32);
         let surf = t.c("surface");
-        if self.bg.as_ref().map_or(true, |b| !same_art(b.0.as_ref(), m.art.as_ref()) || b.1 != (pw, ph, surf)) {
+        if self.bg.as_ref().is_none_or(|b| !same_art(b.0.as_ref(), m.art.as_ref()) || b.1 != (pw, ph, surf)) {
             self.bg = cover_bg(c.g, m.art.as_ref().map(|a| a.as_slice()), pw, ph, c.scale, alpha(surf, 1.0)).map(|p| (m.art.clone(), (pw, ph, surf), p));
         }
         if let Some((_, _, bg)) = &self.bg { c.clip_round(card, 23.0, |c| c.image(bg, card, 1.0)); }
@@ -492,6 +492,7 @@ impl Np {
 
     /// `.lyr`: synced lyrics with the current line in the middle and a slide when it changes, plain lyrics as a scrolling list,
     /// or a status line. `centre`: lyrics card (centred, padding 3/10) vs cover card (left, padding-right 18 %).
+    #[allow(clippy::too_many_arguments)] // the args mirror the callers; a signature refactor is out of scope
     fn paint_lyr(&mut self, c: &mut Canvas, cx: &Ctx, r: R, lyr: Option<&Lyr>, pos: f64, playing: bool, fg: Color, centre: bool, cur_size: f32) {
         let now = hub::now_ms();
         let msg = |c: &mut Canvas, s: &str| c.text(s, r, txt(13.0, 400), alpha(fg, 0.6), Align::Center);
@@ -525,7 +526,7 @@ impl Np {
                 let fresh = !self.lkey.as_ref().is_some_and(|k| Arc::ptr_eq(k, &lyr));
                 let (base, curf) = (txt(13.0, 400), txt(cur_size, 500));
                 let wk = (wrap_w * 10.0) as u32;
-                if self.heights.as_ref().map_or(true, |h| !Arc::ptr_eq(&h.0, &lyr) || h.1 != wk) {
+                if self.heights.as_ref().is_none_or(|h| !Arc::ptr_eq(&h.0, &lyr) || h.1 != wk) {
                     let hs = lines.iter().map(|(_, s)| c.g.measure_wrapped(if s.is_empty() { "♪" } else { s }, base, wrap_w) + 6.0).collect();
                     self.heights = Some((lyr.clone(), wk, hs));
                 }

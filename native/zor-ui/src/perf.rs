@@ -90,8 +90,7 @@ fn read(h: HANDLE) -> Option<(u64, u64, u64)> {
     unsafe {
         let (mut c, mut e, mut k, mut u) = Default::default();
         GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).ok()?;
-        let mut m = PROCESS_MEMORY_COUNTERS_EX::default();
-        m.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        let mut m = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
         GetProcessMemoryInfo(h, &mut m as *mut _ as *mut PROCESS_MEMORY_COUNTERS, m.cb).ok()?;
         Some((ft(k) + ft(u), m.WorkingSetSize as u64, m.PrivateUsage as u64))
     }
@@ -150,7 +149,7 @@ pub fn processes() -> (Proc, Vec<Proc>) {
         kids.push(sample(pid, name, h));
         unsafe { let _ = CloseHandle(h); }
     }
-    kids.sort_by(|a, b| b.ws.cmp(&a.ws));
+    kids.sort_by_key(|k| std::cmp::Reverse(k.ws));
     *g = Some(Sampler { at: now, times, me: me.clone(), kids: kids.clone() });
     (me, kids)
 }

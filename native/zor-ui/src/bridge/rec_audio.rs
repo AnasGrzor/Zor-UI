@@ -117,7 +117,7 @@ unsafe fn capture(loopback: bool, mic: &str, q: &Queue, stop: &AtomicBool) -> Wi
                 let n = frames as usize * 2;
                 let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null();
                 if let Ok(mut q) = q.lock() {
-                    if silent { q.extend(std::iter::repeat(0.0).take(n)); } else { q.extend(std::slice::from_raw_parts(data as *const f32, n)); }
+                    if silent { q.extend(std::iter::repeat_n(0.0, n)); } else { q.extend(std::slice::from_raw_parts(data as *const f32, n)); }
                     let over = q.len().saturating_sub(RATE as usize * 4);   // the writer fell 2 s behind: drop the oldest
                     q.drain(..over);
                 }
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(mix(&[a.clone(), b], 4), [0.75, 1.0, 0.75, 0.0]);   // 0.5+0.75 clamps at 1.0, the short queue counts as silence
         assert_eq!(a.lock().unwrap().len(), 0);
         let c = q(&[0.1, 0.2, 0.3]);
-        assert_eq!(mix(&[c.clone()], 2), [0.1, 0.2]);
+        assert_eq!(mix(std::slice::from_ref(&c), 2), [0.1, 0.2]);
         assert_eq!(c.lock().unwrap().len(), 1);   // unread samples stay queued
         assert_eq!(mix(&[], 3), [0.0, 0.0, 0.0]);
     }

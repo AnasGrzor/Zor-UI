@@ -284,8 +284,8 @@ mod tests {
         let saved = 10_000;
         let record = encode_at(&[entry(&msg, Outcome::Done)], saved);
         let recent = saved + BLOCK_WINDOW_SECS;
-        assert_eq!(blocked_keys_at(&[record.clone()], recent), [key(&msg)], "inside the window: a repeat is refused");
-        assert!(blocked_keys_at(&[record.clone()], recent + 1).is_empty(), "after the window: the step may run again");
+        assert_eq!(blocked_keys_at(std::slice::from_ref(&record), recent), [key(&msg)], "inside the window: a repeat is refused");
+        assert!(blocked_keys_at(std::slice::from_ref(&record), recent + 1).is_empty(), "after the window: the step may run again");
         let unstamped = r#"[{"key":"x","side":true,"status":"done"}]"#.to_string();
         assert!(blocked_keys_at(&[unstamped], saved).is_empty(), "a record with no stamp counts as old");
         // within one request: a Steps that starts with a recent interrupted record refuses the repeat, and an old one doesn't

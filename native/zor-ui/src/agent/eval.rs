@@ -44,7 +44,7 @@ pub fn live_cases() -> Vec<LiveCase> {
 /// Whether a described step is right for a case: one of the expected prefixes, and the case's word inside it when it names one.
 pub fn right_for(case: &LiveCase, described: &str) -> bool {
     let prefix = case.expect.iter().any(|e| described.starts_with(e.as_str()));
-    let word = case.contains.as_ref().map_or(true, |w| described.to_lowercase().contains(&w.to_lowercase()));
+    let word = case.contains.as_ref().is_none_or(|w| described.to_lowercase().contains(&w.to_lowercase()));
     prefix && word
 }
 

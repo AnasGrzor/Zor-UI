@@ -63,7 +63,7 @@ pub fn parse_voices(reply: &[u8]) -> Result<Vec<VoiceInfo>, ProviderError> {
 
 /// Little-endian 16-bit PCM as f32 samples.
 pub fn pcm_samples(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect()
+    bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect()
 }
 
 /// The error an error reply means. ElevenLabs puts the reason under "detail".

@@ -669,7 +669,7 @@ impl Settings {
         let (box_, k) = (R::new(r.x + 12.0, r.y + 8.0, r.w - 24.0, H), p.c.scale);
         let (w, h) = ((box_.w * k).round() as u32, (H * k).round() as u32);
         let key = format!("{g:?}|{img:?}|{w}x{h}");
-        if self.glass_prev.as_ref().map_or(true, |(c, _)| *c != key) {
+        if self.glass_prev.as_ref().is_none_or(|(c, _)| *c != key) {
             // the face area of a 1920x1080 wallpaper, where a card preview is most telling
             let Some(mut pic) = crate::glass::backdrop(p.c.g, &img, (0, 0, 1920, 1080), (900, 250, w, h)) else { return };
             let card = (w as f32 * 0.2, h as f32 * 0.15, w as f32 * 0.6, h as f32 * 0.7, 23.0 * k);

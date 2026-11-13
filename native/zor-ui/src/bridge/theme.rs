@@ -504,9 +504,8 @@ fn run_theme(o: &Opts, p: &Paths) -> Result<Value, String> {
         cfg["wallpaperTheme"]["perMonitor"] = json!(per_monitor);
         if !save_json(&path, &cfg) { return Err("Couldn't save monitor theme policy".into()); }
     }
-    if (o.profile.is_some() || o.scheme.is_some() || o.mode.is_some()) && identity.is_some() {
-        if !intelligence::save_profile(&p.pack, preference.as_deref().unwrap_or(""), &profile) { return Err("Couldn't save wallpaper preferences".into()); }
-    }
+    if (o.profile.is_some() || o.scheme.is_some() || o.mode.is_some()) && identity.is_some()
+        && !intelligence::save_profile(&p.pack, preference.as_deref().unwrap_or(""), &profile) { return Err("Couldn't save wallpaper preferences".into()); }
     if previous["analysis"]["identity"] != payload["analysis"]["identity"] || !p.pack.join("wallpaper.jpg").exists() {
         if let Some(i) = &image { write_thumbnail(&p.pack, Path::new(i)); }
     }

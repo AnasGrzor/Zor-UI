@@ -26,7 +26,7 @@ const ALIASES: [&str; 3] = ["haiku", "sonnet", "opus"];
 /// The model entries for the picker.
 pub fn models() -> Vec<Value> {
     ALIASES.iter().map(|a| {
-        let name = format!("{}{}", &a[..1].to_uppercase(), &a[1..]);
+        let name = format!("{}{}", a[..1].to_uppercase(), &a[1..]);
         json!({ "id": format!("claude-cli:{a}"), "name": format!("Claude subscription: {name}"), "provider": "claude-cli" })
     }).collect()
 }

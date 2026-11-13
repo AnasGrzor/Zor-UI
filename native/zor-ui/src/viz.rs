@@ -83,8 +83,8 @@ impl View for Viz {
         let primary = cx.cfg.viz_color("visualizer.desktopColor").unwrap_or_else(|| cx.theme.c("primary"));
         let gap = (w / n.max(1) as f32 * 0.22).max(2.0);
         let bw = (w / n.max(1) as f32 - gap).max(1.0);
-        for i in 0..n {
-            let v = levels[i].clamp(0.0, 1.0);
+        for (i, lv) in levels.iter().enumerate() {
+            let v = lv.clamp(0.0, 1.0);
             self.peaks[i] = v.max(self.peaks[i] - 0.008 * dt as f32 / 16.7); // falls 0.008 per 60 Hz frame
             let (bh, cap) = bar_geometry(v, self.peaks[i], h);
             let x = i as f32 * (bw + gap) + gap / 2.0;

@@ -285,6 +285,7 @@ const PUBLIC: [Cast; 3] = [
 mod personal;
 
 pub static CASTS: std::sync::LazyLock<Vec<Cast>> = std::sync::LazyLock::new(|| {
+    #[allow(unused_mut)] // only the personal build (cfg(personal)) pushes to it
     let mut v = PUBLIC.to_vec();
     #[cfg(personal)]
     v.extend(personal::PERSONAL);

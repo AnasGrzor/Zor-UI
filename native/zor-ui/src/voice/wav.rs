@@ -29,7 +29,7 @@ pub fn parse(b: &[u8]) -> Result<Wav, ProviderError> {
     };
     if tag != 1 || bits != 16 { return Err(bad("only 16-bit PCM WAV is supported")); }
     if ch == 0 || rate == 0 { return Err(bad("WAV has zero channels or rate")); }
-    let samples = b[data].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect();
+    let samples = b[data].as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect();
     Ok(Wav { rate, channels: ch, samples })
 }
 

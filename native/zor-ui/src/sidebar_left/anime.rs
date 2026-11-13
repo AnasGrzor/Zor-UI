@@ -111,7 +111,7 @@ impl Tab for Anime {
         self.started = true;
         self.source = match cx.cfg.str("booru.source") { "" => "yandere", "waifuim" => "wallhaven", s => s }.into();
         self.nsfw = cx.cfg.bool("booru.allowNsfw");
-        if let Some(t) = std::env::var("ZORUI_RENDER_TAGS").ok() { self.tags.set(&t); }
+        if let Ok(t) = std::env::var("ZORUI_RENDER_TAGS") { self.tags.set(&t); }
         self.load(true, cx);
     }
 

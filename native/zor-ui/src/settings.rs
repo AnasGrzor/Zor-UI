@@ -1254,7 +1254,7 @@ impl View for Settings {
         let now = hub::now_ms();
         if let Some((_, s, l)) = goto {
             if let Some(y) = goto_y(&heads, &tags, &s, &l) { sc = Scroll::default(); sc.y = y - r.y - 6.0; }
-            self.flash = (!l.is_empty()).then(|| (s, l, now + FLASH_MS));
+            self.flash = (!l.is_empty()).then_some((s, l, now + FLASH_MS));
         }
         if self.flash.as_ref().is_some_and(|f| f.2 < now) { self.flash = None; }
         let flash = self.flash.as_ref().map(|(s, l, end)| (s.clone(), l.clone(), ((end - now) / FLASH_MS).clamp(0.0, 1.0) as f32));

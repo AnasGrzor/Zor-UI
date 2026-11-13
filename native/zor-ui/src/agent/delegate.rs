@@ -5,7 +5,9 @@
 use super::{provider, Call, MAX_RESULT_CHARS};
 use crate::assist::{self, Turn};
 use crate::conf::Config;
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 
 /// A tool result longer than this (characters) is summarized before the model reads it.
 pub const DELEGATE_OVER_CHARS: usize = 6000;

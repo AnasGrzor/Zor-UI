@@ -11,7 +11,7 @@ pub fn normalize(samples: &[f32], rate: u32, channels: u16) -> Result<Vec<f32>, 
     if rate == 0 { return Err(ProviderError::InvalidAudio("sample rate is 0".into())); }
     if channels == 0 { return Err(ProviderError::InvalidAudio("channel count is 0".into())); }
     let ch = channels as usize;
-    if samples.len() % ch != 0 {
+    if !samples.len().is_multiple_of(ch) {
         return Err(ProviderError::InvalidAudio(format!("{} samples do not split into {ch} channels", samples.len())));
     }
     if samples.iter().any(|s| !s.is_finite()) {

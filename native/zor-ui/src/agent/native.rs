@@ -38,6 +38,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("see_screen", "Looks at the user's screen and answers. Only when they ask about what is on it.", &[("arg", "the question")], &["arg"]),
         tool("remember", "Keeps a fact about the user for later: when they ask you to remember something, or when it will matter next time. Never a password, key or account number.", &[("arg", "the fact in one short sentence")], &["arg"]),
         tool("forget", "Deletes the remembered fact that matches, when the user asks you to forget something.", &[("arg", "words from the fact to forget")], &["arg"]),
+        tool("session_search", "Finds past conversations with the buddy that mention the words, including ones older than the last few turns. Only when the user asks what was said or done before.", &[("arg", "words to look for")], &["arg"]),
         tool("take_over","Controls the mouse and keyboard for a task no other tool can reach. The user is asked first; use it last.", &[("arg", "the task")], &["arg"]),
         tool("list_tree", "Lists the files and folders in the developer workspace set in Settings. Only for a request about the project or its code.", &[("arg", "folder inside the workspace, or empty for its top")], &[]),
         tool("read_file", "Reads a text file in the developer workspace. Secret files are refused.", &[("arg", "file path inside the workspace")], &["arg"]),
@@ -119,7 +120,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 27, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 28, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -245,7 +246,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 28);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

@@ -166,7 +166,7 @@ impl Outcome {
 /// Reads and memory edits may repeat. Every other tool changes something outside the buddy, and an unknown one counts as a change.
 pub fn side_effect(call: &Call) -> bool {
     !matches!(call, Call::WebSearch(_) | Call::ReadUrl(_) | Call::FindApp(_) | Call::FindFile(_) | Call::SeeScreen(_) | Call::Remember(_) | Call::Forget(_)
-        | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::GitStatus)
+        | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::GitStatus | Call::SessionSearch(_))
 }
 
 /// The identity of a step: the call as the buddy holds it.

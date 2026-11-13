@@ -307,6 +307,8 @@ pub enum Call {
     Wallpaper(String),
     Remember(String),
     Forget(String),
+    /// Past conversations that mention the words (`history::search_turns`).
+    SessionSearch(String),
     /// One browser tool (`browse::run`) with its arguments as the AI gave them.
     Browser { tool: String, args: Value },
     /// The developer tools (`developer.rs`): read-only, inside the workspace folder set in Settings.
@@ -358,6 +360,7 @@ Tools:\n\
 {\"do\":\"take_over\",\"arg\":\"the task\"} controls the mouse and keyboard to do a task inside apps that no other tool can reach; the user is asked first; use it last\n\
 {\"do\":\"remember\",\"arg\":\"the fact in one short sentence\"} keeps a fact about the user for later: when they ask you to remember something, or when it will matter next time; never a password, key or account number\n\
 {\"do\":\"forget\",\"arg\":\"words from the fact to forget\"} deletes the remembered fact that matches, when the user asks you to forget something\n\
+{\"do\":\"session_search\",\"arg\":\"words to look for\"} finds past conversations with the buddy that mention the words, including ones older than the last few turns; only when the user asks what was said or done before\n\
 {\"do\":\"list_tree\",\"arg\":\"folder inside the developer workspace, or empty for its top\"} lists the files and folders there; only for a request about the project or its code\n\
 {\"do\":\"read_file\",\"arg\":\"file path inside the developer workspace\"} reads a text file there; secret files are refused\n\
 {\"do\":\"search_code\",\"arg\":\"words\"} finds the lines in the developer workspace that contain the words\n\
@@ -400,6 +403,7 @@ pub fn parse_step(reply: &str) -> Step {
         "take_over" => need(s("arg"), "\"arg\"").map(Call::TakeOver),
         "remember" => need(s("arg"), "\"arg\"").map(Call::Remember),
         "forget" => need(s("arg"), "\"arg\"").map(Call::Forget),
+        "session_search" => need(s("arg"), "\"arg\"").map(Call::SessionSearch),
         "list_tree" => Ok(Call::ListTree(s("arg"))),
         "read_file" => need(s("arg"), "\"arg\"").map(Call::ReadFile),
         "search_code" => need(s("arg"), "\"arg\"").map(Call::SearchCode),
@@ -687,6 +691,7 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         }
         Call::Forget(_) if !memory_on(cfg) => Err("Remembering is turned off in Settings.".into()),
         Call::Forget(q) => memory::forget_matching(q),
+        Call::SessionSearch(_) => Err("Past conversations are searched in the chat, not here.".into()),
         Call::ListTree(p) => developer::workspace(cfg).and_then(|ws| developer::list_tree(&ws, p)),
         Call::ReadFile(p) => developer::workspace(cfg).and_then(|ws| developer::read_file(&ws, p)),
         Call::SearchCode(q) => developer::workspace(cfg).and_then(|ws| developer::search_code(&ws, q)),
@@ -1084,11 +1089,13 @@ fn chat(cfg: &Config, convo: &str) -> Result<String, String> {
 }
 
 /// One tool call. Under test, the scripted tool in `e2e` answers instead, so no approval is asked there.
-fn run_exec(c: &Call, cfg: &Config, ask_user: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+fn run_exec(c: &Call, cfg: &Config, conversation: &str, ask_user: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
     #[cfg(test)]
     {
         if let Some(r) = e2e::tool_result(c) { return r; }
     }
+    // past turns are searched only within the conversation that asked
+    if let Call::SessionSearch(q) = c { return Ok(history::search_text(conversation, q)); }
     exec(c, cfg, ask_user)
 }
 
@@ -1198,12 +1205,12 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
         }
         let declined = std::cell::Cell::new(false);
         let mut ask_user = |q: &str| { let ok = approved_here || tracked_confirm(q); if !ok { declined.set(true); } ok };
-        let mut res = timing.tool(|| run_exec(c, cfg, &mut ask_user));
+        let mut res = timing.tool(|| run_exec(c, cfg, origin.conversation, &mut ask_user));
         // a read-only lookup that failed (a flaky connection, say) is tried once more; nothing that acts is repeated
         if res.is_err() && policy::may_retry(c) {
             crate::log::line("buddy retry: read-only tool, once more");
             std::thread::sleep(Duration::from_millis(400));
-            res = timing.tool(|| run_exec(c, cfg, &mut ask_user));
+            res = timing.tool(|| run_exec(c, cfg, origin.conversation, &mut ask_user));
         }
         let check = if declined.get() { verifier::Check::Declined } else { verifier::check(verifier::kind_of(c), &res) };
         if res.is_err() && !declined.get() && !policy::may_retry(c) { failed.borrow_mut().insert(format!("{c:?}")); }
@@ -1298,7 +1305,7 @@ pub fn remote_refusal(conversation: &str, call: &Call) -> Option<&'static str> {
 pub fn remote_question(conversation: &str, call: &Call) -> Option<String> {
     if conversation == DESKTOP { return None; }
     let what = match call {
-        Call::Search(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Metrics(_) | Call::RunCheck(_) => return None,
+        Call::Search(_) | Call::WebSearch(_) | Call::ReadUrl(_) | Call::Metrics(_) | Call::RunCheck(_) | Call::SessionSearch(_) => return None,
         Call::SeeScreen(_) => "look at the screen; the result goes into this chat",
         Call::FindFile(_) | Call::ReadFile(_) | Call::ListTree(_) | Call::SearchCode(_) | Call::GitStatus => "read files on this PC; the result goes into this chat",
         Call::TakeOver(_) => "take over the mouse and keyboard on this PC, asking you before each risky click",

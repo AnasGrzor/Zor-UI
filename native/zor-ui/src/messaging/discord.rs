@@ -108,6 +108,15 @@ impl EventHandler for Handler {
             let _ = msg.channel_id.say(&ctx.http, "Stopped.").await;
             return;
         }
+        // "model" lists the models; "model <name>" switches to one. Any other words are a request, even when they start with "model".
+        let lower = text.to_lowercase();
+        if lower == "model" || lower.starts_with("model ") {
+            let arg = if lower == "model" { String::new() } else { text[6..].trim().to_string() };
+            if let Ok(Some(reply)) = tokio::task::spawn_blocking(move || model_reply(&arg)).await {
+                let _ = msg.channel_id.say(&ctx.http, reply).await;
+                return;
+            }
+        }
         // "typing" shows from now until the answer is sent: dropping the guard stops it
         let typing = msg.channel_id.start_typing(&ctx.http);
         let conv = conversation_id(PROVIDER, user, msg.channel_id.get());
@@ -179,6 +188,34 @@ fn approve_in_chat(handle: &Handle, http: &Arc<Http>, channel: ChannelId, user: 
     WAITING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     crate::log::line(&format!("discord approval: {}", if yes { "allowed" } else { "not allowed" }));
     yes
+}
+
+/// The model a chat's words name: the id exactly, else the first model whose name has every one of the words, case not mattering.
+fn pick_model<'a>(models: &'a [(String, String)], arg: &str) -> Option<&'a str> {
+    let want = arg.trim().to_lowercase();
+    if want.is_empty() { return None; }
+    let words: Vec<&str> = want.split_whitespace().collect();
+    models.iter()
+        .find(|(id, _)| id.to_lowercase() == want)
+        .or_else(|| models.iter().find(|(_, name)| { let name = name.to_lowercase(); words.iter().all(|w| name.contains(w)) }))
+        .map(|(id, _)| id.as_str())
+}
+
+/// The reply to "model" (the list and the current one) or to "model <name>" (switches, if the name matches). None when the words
+/// are not a model command, so the message goes to the buddy as a request.
+fn model_reply(arg: &str) -> Option<String> {
+    let models: Vec<(String, String)> = crate::bridge::web::all_models().iter()
+        .filter_map(|m| Some((m["id"].as_str()?.to_string(), m["name"].as_str().unwrap_or("").to_string())))
+        .collect();
+    let cfg = Config::load();
+    let current = cfg.str("ai.model").to_string();
+    if arg.trim().is_empty() {
+        let ids: Vec<&str> = models.iter().take(30).map(|(id, _)| id.as_str()).collect();
+        return Some(format!("Current model: {current}. Switch with \"model <name>\". Choices: {}", ids.join(", ")));
+    }
+    let id = pick_model(&models, arg)?.to_string();
+    crate::proc::bridge(&cfg, "config-set", &["ai.model", &serde_json::Value::from(id.clone()).to_string()]);
+    Some(format!("Model set to {id}."))
 }
 
 /// The DM as a `Chat`: its questions are Allow and Deny buttons that `user` presses, and what it is told goes to the same channel.
@@ -326,6 +363,19 @@ mod tests {
         let (mut map, heard) = waiting_for(42);
         assert_eq!(press(&mut map, "a1", 42, false), Press::Answered(false));
         assert_eq!(heard.recv().ok(), Some(false));
+    }
+
+    #[test]
+    fn a_model_is_picked_by_id_or_by_a_name_that_contains_the_words() {
+        let models = vec![
+            ("claude-cli:opus".to_string(), "Claude subscription: Opus".to_string()),
+            ("gemini-2.5-flash".to_string(), "Gemini 2.5 Flash".to_string()),
+        ];
+        assert_eq!(pick_model(&models, "gemini-2.5-flash"), Some("gemini-2.5-flash"));
+        assert_eq!(pick_model(&models, "OPUS"), Some("claude-cli:opus"), "a name is matched without case");
+        assert_eq!(pick_model(&models, "gemini flash"), Some("gemini-2.5-flash"));
+        assert_eq!(pick_model(&models, "of the car"), None, "words that name no model are a request, not a switch");
+        assert_eq!(pick_model(&models, "  "), None);
     }
 
     #[test]

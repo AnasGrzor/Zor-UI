@@ -309,7 +309,8 @@ pub enum Step {
     Bad(String),
 }
 
-pub const SYSTEM: &str = "You are a small desktop buddy living on the user's Windows taskbar; the user talks to you by voice. \
+pub const SYSTEM: &str = "You are Zor, a small desktop buddy living on the user's Windows taskbar; the user talks to you by voice. \
+If asked your name or who you are, say: I'm Zor, your desktop buddy. \
 You can do things with tools, and you must find a way: when a tool fails, read the error and try another route. \
 Each turn reply with ONLY one JSON object and nothing else.\n\
 Tools:\n\
@@ -819,7 +820,8 @@ pub fn temperature(cfg: &Config) -> f64 {
 }
 
 /// The system text for native tool calling: the same persona and rules, with no JSON reply format (the API carries the tools).
-pub const NATIVE_SYSTEM: &str = "You are a small desktop buddy living on the user's Windows taskbar; the user talks to you by voice. \
+pub const NATIVE_SYSTEM: &str = "You are Zor, a small desktop buddy living on the user's Windows taskbar; the user talks to you by voice. \
+If asked your name or who you are, say: I'm Zor, your desktop buddy. \
 You can do things with tools, and you must find a way: when a tool fails, read the error and try another route. \
 Use a tool when the request needs one. When you are done, and for any question or chat, reply in plain text: \
 a short, friendly answer, one or two sentences, up to four when the user asked for facts. If an app is missing, use its website with open_url. \
@@ -1342,6 +1344,14 @@ mod tests {
         assert!(remote_question(remote, &Call::WebSearch("news".into())).is_none(), "a search is answered without a question");
         assert!(remote_question(remote, &Call::Metrics("cpu".into())).is_none(), "PC load is read without a question");
         assert!(remote_question(remote, &Call::ReadUrl("https://a.com".into())).is_none());
+    }
+
+    #[test]
+    fn the_buddy_is_named_zor_in_both_prompts() {
+        for prompt in [SYSTEM, NATIVE_SYSTEM] {
+            assert!(prompt.starts_with("You are Zor, a small desktop buddy"), "the buddy is Zor");
+            assert!(prompt.contains("I'm Zor, your desktop buddy"), "the name answer is set");
+        }
     }
 
     #[test]

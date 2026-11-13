@@ -421,7 +421,8 @@ fn ollama_models() -> Vec<Value> {
 /// Settings, Services, "Use my Claude subscription" (on unless turned off).
 fn claude_cli_on() -> bool { raw_config()["ai"]["claudeCli"].as_bool().unwrap_or(true) }
 
-fn all_models() -> Vec<Value> {
+/// Every model the buddy can use now: Claude subscription, the CLIs, the built-in list, custom ones, and Ollama's.
+pub(crate) fn all_models() -> Vec<Value> {
     let mut v = if claude_cli_on() && super::claude_cli::find().is_some() { super::claude_cli::models() } else { vec![] };
     v.extend(super::sub_cli::models());
     v.extend(default_models());

@@ -192,9 +192,9 @@ impl<'p, 'a> Pen<'p, 'a> {
         if self.dry { self.heads.push((title.to_string(), self.y)); self.index.push((title.into(), title.into(), String::new())); }
         if self.show(32.0) {
             let (x, y) = (self.x, self.y);
-            use crate::tokens::{HEAD_GAP, HEAD_ICON};
-            let tx = x + 4.0 + HEAD_ICON + HEAD_GAP;
-            self.c.icon(icon, R::new(x + 4.0, y, HEAD_ICON, 32.0), ico(HEAD_ICON, false), ui::accent(self.cx));
+            use crate::tokens::{HEAD_GAP, HEAD_ICON, SECTION_INSET};
+            let tx = x + SECTION_INSET + HEAD_ICON + HEAD_GAP;
+            self.c.icon(icon, R::new(x + SECTION_INSET, y, HEAD_ICON, 32.0), ico(HEAD_ICON, false), ui::accent(self.cx));
             let tw = self.c.g.measure(title, txt(17.0, 500)).0.ceil() + 2.0;
             self.c.text(title, R::new(tx, y, tw, 32.0), txt(17.0, 500), self.col("onSurface"), Align::Left);
             if !extra.is_empty() { self.c.text(extra, R::new(tx + tw + 10.0, y + 2.0, self.w - tw - 52.0, 32.0), txt(12.0, 400), self.col("onSurfaceVariant"), Align::Left); }

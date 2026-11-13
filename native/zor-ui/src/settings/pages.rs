@@ -3,7 +3,7 @@
 use super::{
     form::{chip_w, Act, Fmt, Pen, Sl, ACT0, ROW_GAP},
     layout::{bar_layout, info, SIDES},
-    Load, Settings,
+    registry, Load, Settings,
 };
 use crate::{
     conf, keymap,
@@ -65,41 +65,9 @@ const CLOCK_FORMATS: [&str; 7] = ["EEE, dd/MM '•' HH:mm", "HH:mm", "h:mm a", "
 
 static FONTS: OnceLock<Vec<String>> = OnceLock::new();
 
-pub const PAGES: [(&str, &str, &str); 13] = [
-    ("quick", "tune", "Quick"), ("keys", "keyboard", "Keybinds"), ("wallpapers", "animated_images", "Wallpapers"), ("presets", "palette", "Presets"),
-    ("bar", "toolbar", "Bar & desktop"), ("island", "pill", "Dynamic Island"), ("buddies", "pets", "Buddies"), ("contacts", "contacts", "Contacts"),
-    ("creator", "person_add", "Create a buddy"), ("voice", "mic", "Voice"), ("services", "hub", "Services"), ("usage", "memory", "Usage"), ("about", "info", "About"),
-];
-
-pub struct CategoryInfo {
-    pub name: &'static str,
-    pub icon: &'static str,
-    pub pages: &'static [usize],
-}
-
-pub const CATEGORIES: [CategoryInfo; 4] = [
-    CategoryInfo { name: "Personalization", icon: "palette", pages: &[0, 2, 3] }, // Quick, Wallpapers, Presets
-    CategoryInfo { name: "Interface", icon: "devices", pages: &[4, 5, 1] },       // Bar & desktop, Dynamic Island, Keybinds
-    CategoryInfo { name: "Buddies & Voice", icon: "pets", pages: &[6, 7, 8, 9] }, // Buddies, Contacts, Create a buddy, Voice
-    CategoryInfo { name: "System", icon: "settings_suggest", pages: &[10, 11, 12] }, // Services, Usage, About
-];
-
+/// The category name of `PAGES[idx]`, for the header and search.
 pub fn category_of_page(idx: usize) -> &'static str {
-    for cat in &CATEGORIES {
-        if cat.pages.contains(&idx) {
-            return cat.name;
-        }
-    }
-    "General"
-}
-
-pub fn category_icon_of_page(idx: usize) -> &'static str {
-    for cat in &CATEGORIES {
-        if cat.pages.contains(&idx) {
-            return cat.icon;
-        }
-    }
-    "tune"
+    registry::category_name(registry::PAGES[idx].cat)
 }
 
 /// Finds conflicting keybindings across all registered actions.
@@ -148,24 +116,6 @@ const LANGS: [(&str, &str); 49] = [("af", "Afrikaans"), ("ar", "Arabic"), ("bn",
     ("pl", "Polish"), ("pt", "Portuguese"), ("pa", "Punjabi"), ("ro", "Romanian"), ("ru", "Russian"), ("sr", "Serbian"), ("sk", "Slovak"), ("es", "Spanish"), ("sw", "Swahili"),
     ("sv", "Swedish"), ("ta", "Tamil"), ("te", "Telugu"), ("th", "Thai"), ("tr", "Turkish"), ("uk", "Ukrainian"), ("ur", "Urdu"), ("vi", "Vietnamese")];
 
-fn page_blurb(key: &str) -> &'static str {
-    match key {
-        "quick" => "Wallpaper, colors and the switches you reach for most",
-        "keys" => "Every keyboard shortcut",
-        "wallpapers" => "Pick a picture or a live wallpaper",
-        "presets" => "Save and swap whole looks",
-        "bar" => "The bar, the desktop cards and how they are laid out",
-        "island" => "What the island shows and how it reacts",
-        "buddies" => "The characters that live on your desktop",
-        "contacts" => "The people the buddy can message by voice",
-        "creator" => "Turn a picture into a buddy that looks like your character",
-        "voice" => "Talk to the buddy, what it may do for you, and the speech model",
-        "services" => "API keys, models and sign-ins",
-        "usage" => "What the AI tools have used",
-        _ => "Version and updates",
-    }
-}
-
 /// A speech model's line in the dropdown: its name, size on disk, and "download" when it isn't on this PC yet.
 fn speech_option_label(name: &str, mb: u32, installed: bool) -> String {
     format!("{name} · {mb} MB{}", if installed { "" } else { " · download" })
@@ -198,27 +148,33 @@ pub struct Tile { pub img: Option<PathBuf>, pub badge: String, pub title: String
 impl Settings {
     pub fn page(&mut self, p: &mut Pen) {
         if self.query().is_empty() {
-            let cat = category_of_page(self.page);
-            p.title_cat(PAGES[self.page].2, page_blurb(PAGES[self.page].0), cat);
+            let d = registry::def_of(self.current_page());
+            p.title_cat(d.title, d.blurb, category_of_page(self.page));
             self.body(p)
         } else { self.results(p) }
     }
 
+    /// The page being shown.
+    pub fn current_page(&self) -> registry::Page { registry::PAGES[self.page].page }
+
+    /// Draws the body of the current page. No catch-all arm: a new `Page` must get its own.
     pub fn body(&mut self, p: &mut Pen) {
-        match PAGES[self.page].0 {
-            "quick" => self.quick(p),
-            "keys" => self.keys(p),
-            "wallpapers" => self.wallpapers(p),
-            "presets" => self.presets(p),
-            "bar" => self.bar(p),
-            "island" => self.island(p),
-            "buddies" => self.buddies(p),
-            "contacts" => self.contacts_page(p),
-            "creator" => self.creator_page(p),
-            "voice" => self.voice(p),
-            "services" => self.services(p),
-            "usage" => self.usage(p),
-            _ => self.about(p),
+        use registry::Page;
+        match self.current_page() {
+            Page::Quick => self.quick(p),
+            Page::Keys => self.keys(p),
+            Page::Wallpapers => self.wallpapers(p),
+            Page::Presets => self.presets(p),
+            Page::Bar => self.bar(p),
+            Page::Island => self.island(p),
+            Page::Sidebar => self.sidebar(p),
+            Page::Buddies => self.buddies(p),
+            Page::Contacts => self.contacts_page(p),
+            Page::Creator => self.creator_page(p),
+            Page::Voice => self.voice(p),
+            Page::Services => self.services(p),
+            Page::Usage => self.usage(p),
+            Page::About => self.about(p),
         }
     }
 
@@ -338,8 +294,8 @@ impl Settings {
         }
     }
 
-    /// The island version setting, live: each version's agent pill text, from the same function the pill uses
-    /// (bar::agent_pill_text), with sample data (bar::island_version_sample). The chosen version is marked. The panel
+    /// The island version setting, live: each version's agent pill text, from the same functions the pill uses
+    /// (bar::agent_pill_parts, bar::draw_scroll), with sample data (bar::island_version_sample). The chosen version is marked. The panel
     /// itself is not drawn here: it needs live data, so only the pill text differs in the preview.
     fn island_version_preview(&mut self, p: &mut Pen) {
         const H: f32 = 64.0;
@@ -355,8 +311,13 @@ impl Settings {
             p.c.text(name, R::new(b.x + 10.0, b.y + 6.0, b.w - 20.0, 14.0), txt(11.0, 400), title, Align::Left);
             let pill = R::new(b.x + 10.0, b.y + 28.0, b.w - 20.0, 24.0);
             p.c.rect(pill, 12.0, p.col("secondaryContainer"));
-            let text = crate::bar::agent_pill_text(label, tool, pct);
-            p.c.text(&text, R::new(pill.x + 12.0, pill.y, pill.w - 24.0, pill.h), txt(13.0, 400), p.col("onSecondaryContainer"), Align::Left);
+            let (head, tool) = crate::bar::agent_pill_parts(label, tool, pct);
+            let (f, fg) = (txt(13.0, 400), p.col("onSecondaryContainer"));
+            let head_w = p.c.g.measure(&head, f).0.ceil();
+            p.c.text(&head, R::new(pill.x + 12.0, pill.y, pill.w - 24.0, pill.h), f, fg, Align::Left);
+            // the pill's 7 px gap between its texts; since 0 keeps the sample scrolling on the wall clock
+            let tx = pill.x + 12.0 + head_w + 7.0;
+            crate::bar::draw_scroll(p.c, &tool, R::new(tx, pill.y, (pill.x + pill.w - 12.0 - tx).max(0.0), pill.h), f, fg, 0.0);
         }
     }
 
@@ -392,6 +353,15 @@ impl Settings {
             self.viz_preview(p, &[Viz::Island]);
             self.sw(p, "island.controls", "Controls on hover", "Previous, play / pause and next, with the artist", "play_pause");
             self.num(p, "island.trackSeconds", "Expand on a new song (seconds)", 0, 15, "expand");
+            self.sw(p, "lyrics", "Synced lyrics", "From lrclib.net. Shows under the song here, in the expanded island, on the lyrics card and in the left sidebar", "lyrics");
+        });
+        p.h2("screen_record", "Screen recording", "");
+        p.card(|p| {
+            self.pick(p, "record.audio", crate::bridge::rec_audio::MODES.iter().map(|(k, v, _)| (json!(k), v.to_string())).collect(), "Record", "System sound is what your speakers play", "graphic_eq", 260.0);
+            let mut mics = vec![(json!(""), "Windows default".to_string())];
+            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
+            self.pick(p, "record.mic", mics, "Microphone", "Used when Record includes the microphone", "mic", 260.0);
+            p.note("The sound is joined to the video when you stop, so stopping a long recording takes a few seconds.", 12.0);
         });
         p.h2("bedtime", "When nothing's going on", "");
         p.card(|p| {
@@ -411,7 +381,7 @@ impl Settings {
         p.h2("expand_content", "Expanded island", "");
         p.card(|p| {
             self.sw(p, "island.panel.media", "Now playing", "Cover, progress and controls", "music_note");
-            self.sw(p, "island.panel.lyrics", "Lyrics", "Under the song, when lyrics are on (Quick)", "lyrics");
+            self.sw(p, "island.panel.lyrics", "Lyrics", "Under the song, when lyrics are on (Now playing, above)", "lyrics");
             self.sw(p, "island.panel.recording", "Screen recording", "Time and a stop button", "screen_record");
             self.sw(p, "island.panel.timer", "Timer and stopwatch", "Pause, resume and reset", "timer");
             self.sw(p, "island.panel.clock", "Clock and weather", "When nothing else is going on", "schedule");
@@ -420,6 +390,22 @@ impl Settings {
             self.num(p, "island.panel.notifCount", "Notifications shown", 1, 10, "format_list_numbered");
             self.sw(p, "island.panel.clipboard", "Clipboard history", "Recent copies from Win+V; click one to copy it again", "content_paste");
             self.num(p, "island.panel.clipCount", "Clipboard items shown", 1, 10, "format_list_numbered");
+        });
+    }
+
+    fn sidebar(&mut self, p: &mut Pen) {
+        p.h2("translate", "Translator", "");
+        p.card(|p| self.pick(p, "translator.target", LANGS.iter().map(|(k, v)| (json!(k), v.to_string())).collect(), "Translate into", "", "language", 260.0));
+        p.h2("photo_library", "Anime & wallpapers", "");
+        p.card(|p| {
+            self.seg(p, "booru.source", &[("yandere", "yande.re"), ("konachan", "Konachan"), ("danbooru", "Danbooru"), ("wallhaven", "Wallhaven")], "Default source", "image_search");
+            self.sw(p, "booru.allowNsfw", "Allow NSFW results", "Off by default. Applies to every source.", "explicit");
+        });
+        p.h2("sports_soccer", "Football", "");
+        p.card(|p| {
+            p.lead_label("Leagues to show (none selected = all)");
+            let cur = self.garr(p.cx, "football.leagues");
+            p.chips(LEAGUES.iter().map(|(id, n)| (n.to_string(), None, cur.iter().any(|c| c == id), Act::Do("league", id.to_string()))).collect());
         });
     }
 
@@ -440,7 +426,7 @@ impl Settings {
                 let by = img.y + img.h - 46.0;
                 let bx = img.x + img.w - 10.0 - 36.0 * 3.0 - 12.0;
                 for (i, (ic, kind, act)) in [("image", IconKind::Filled, Act::Do("wall", String::new())), ("shuffle", IconKind::Tonal, Act::Do("random-online", String::new())),
-                    ("animated_images", IconKind::Tonal, Act::Page(2))].into_iter().enumerate() {
+                    ("animated_images", IconKind::Tonal, Act::Page(registry::index_of(registry::Page::Wallpapers)))].into_iter().enumerate() {
                     let id = p.act(act);
                     ui::icon_btn(p.c, p.cx, R::new(bx + i as f32 * 42.0, by, 36.0, 36.0), id, ic, kind, 20.0, false);
                 }
@@ -859,6 +845,7 @@ impl Settings {
         p.card(|p| {
             self.seg(p, "bar.position", &[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], "Bar position", "vertical_align_top");
             self.sw(p, "bar.hideFullscreen", "Hide in full screen", "The bar hides on a monitor while an app (a game, a video) covers it", "fullscreen");
+        self.sw(p, "autoGameMode", "Pause while a game is full screen", "Hides the bars and windows and stops polling, then brings them back", "sports_esports");
             p.note("Side bars show icons and short text only (no window title). Moving the bar frees or takes screen space for windows after zorui restarts.", 12.0);
             self.seg(p, "bar.style", &[("float", "Float"), ("flat", "Flat"), ("islands", "Islands"), ("clear", "Clear")], "Bar style", "style");
             self.seg(p, "bar.groups", &[("filled", "Filled"), ("outlined", "Outlined"), ("none", "None")], "Group backgrounds", "rounded_corner");
@@ -1586,31 +1573,6 @@ impl Settings {
                 p.note("Switching applies to terminals opened afterwards. Open Claude sessions keep their account.", 12.0);
             });
         }
-        p.h2("translate", "Translator", "");
-        p.card(|p| self.pick(p, "translator.target", LANGS.iter().map(|(k, v)| (json!(k), v.to_string())).collect(), "Translate into", "", "language", 260.0));
-        p.h2("screen_record", "Screen recording", "");
-        p.card(|p| {
-            self.pick(p, "record.audio", crate::bridge::rec_audio::MODES.iter().map(|(k, v, _)| (json!(k), v.to_string())).collect(), "Record", "System sound is what your speakers play", "graphic_eq", 260.0);
-            let mut mics = vec![(json!(""), "Windows default".to_string())];
-            mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
-            self.pick(p, "record.mic", mics, "Microphone", "Used when Record includes the microphone", "mic", 260.0);
-            p.note("The sound is joined to the video when you stop, so stopping a long recording takes a few seconds.", 12.0);
-        });
-        p.h2("photo_library", "Anime & wallpapers", "");
-        p.card(|p| {
-            self.seg(p, "booru.source", &[("yandere", "yande.re"), ("konachan", "Konachan"), ("danbooru", "Danbooru"), ("wallhaven", "Wallhaven")], "Default source", "image_search");
-            self.sw(p, "booru.allowNsfw", "Allow NSFW results", "Off by default. Applies to every source.", "explicit");
-        });
-        p.h2("sports_soccer", "Football", "");
-        p.card(|p| {
-            p.lead_label("Leagues to show (none selected = all)");
-            let cur = self.garr(p.cx, "football.leagues");
-            p.chips(LEAGUES.iter().map(|(id, n)| (n.to_string(), None, cur.iter().any(|c| c == id), Act::Do("league", id.to_string()))).collect());
-        });
-        p.h2("sports_esports", "Games", "");
-        p.card(|p| self.sw(p, "autoGameMode", "Pause while a game is full screen", "Hides the bars and windows and stops polling, then brings them back", "sports_esports"));
-        p.h2("lyrics", "Media", "");
-        p.card(|p| self.sw(p, "lyrics", "Synced lyrics", "From lrclib.net, in the left sidebar", "lyrics"));
     }
 
     fn keys(&mut self, p: &mut Pen) {
@@ -1966,7 +1928,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(PAGES.iter().map(|p| p.0).collect::<Vec<_>>(), ["quick", "keys", "wallpapers", "presets", "bar", "island", "buddies", "contacts", "creator", "voice", "services", "usage", "about"]);
+        assert_eq!(registry::PAGES.iter().map(|p| p.key).collect::<Vec<_>>(), ["quick", "wallpapers", "presets", "bar", "island", "sidebar", "keys", "buddies", "contacts", "creator", "voice", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }
@@ -2128,21 +2090,21 @@ mod page_header_tests {
 
     #[test]
     fn every_page_has_a_blurb() {
-        for (key, _, _) in PAGES.iter() { assert!(!page_blurb(key).is_empty(), "{key}"); }
-        assert_ne!(page_blurb("quick"), page_blurb("about"));
-        assert_ne!(page_blurb("contacts"), page_blurb("buddies"), "the new page has its own line");
+        for d in registry::PAGES.iter() { assert!(!d.blurb.is_empty(), "{}", d.key); }
+        assert_ne!(registry::def_of(registry::Page::Quick).blurb, registry::def_of(registry::Page::About).blurb);
+        assert_ne!(registry::def_of(registry::Page::Contacts).blurb, registry::def_of(registry::Page::Buddies).blurb, "the new page has its own line");
     }
 
     #[test]
     fn every_page_maps_to_a_valid_category() {
-        for (idx, (id, _, _)) in PAGES.iter().enumerate() {
+        for (idx, d) in registry::PAGES.iter().enumerate() {
             let cat = category_of_page(idx);
-            assert!(["Personalization", "Interface", "Buddies & Voice", "System"].contains(&cat), "page {id} has valid category {cat}");
+            assert!(["Personalization", "Interface", "Buddies & Voice", "System"].contains(&cat), "page {} has valid category {cat}", d.key);
         }
         assert_eq!(category_of_page(0), "Personalization");
-        assert_eq!(category_of_page(1), "Interface");
-        assert_eq!(category_of_page(6), "Buddies & Voice");
-        assert_eq!(category_of_page(10), "System");
+        assert_eq!(category_of_page(registry::index_of(registry::Page::Sidebar)), "Interface");
+        assert_eq!(category_of_page(registry::index_of(registry::Page::Buddies)), "Buddies & Voice");
+        assert_eq!(category_of_page(registry::index_of(registry::Page::About)), "System");
     }
 
     #[test]

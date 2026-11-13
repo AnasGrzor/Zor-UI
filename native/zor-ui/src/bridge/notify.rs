@@ -400,7 +400,7 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
             "message": waiting.first().map_or(json!(""), |s| or_empty(&s["message"])),
             // the newest prompt that asks for permission: the island offers Allow and Deny for it (permit.rs)
             // only agents whose hook waits for the answer (permit.rs PERMIT_AGENTS) get Allow and Deny
-            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]), "at": num(&s["at"]) })),
+            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]), "at": num(&s["at"]), "choice": s["choice"].clone() })),
             "cwd": first.map_or(json!(""), |s| or_empty(&s["cwd"])),
             "waiting": waiting.len(), "working": working.len(),
             "sessions": ranked.into_iter().map(session_json).collect::<Vec<_>>(),

@@ -242,6 +242,16 @@ mod tests {
     }
 
     #[test]
+    fn a_shrink_is_the_grow_played_backwards() {
+        // the close feeds grow the time left: full height at the close, the island's edge (and transparent) at the end
+        let rows = |t: f32| grow((GROW_SECS - t).max(0.0), 500).0;
+        assert_eq!(rows(0.0), 500);
+        assert_eq!(rows(GROW_SECS), (GROW_FROM * 500.0).round() as i32);
+        assert!(rows(GROW_SECS / 2.0) < 500 && rows(GROW_SECS / 2.0) > rows(GROW_SECS));
+        assert_eq!(grow(0.0, 500).1, 0);
+    }
+
+    #[test]
     fn mix_blends_each_channel() {
         assert_eq!(mix(0xFF000000, 0xFFFFFFFF, 0.0), 0xFF000000);
         assert_eq!(mix(0xFF000000, 0xFFFFFFFF, 1.0), 0xFFFFFFFF);

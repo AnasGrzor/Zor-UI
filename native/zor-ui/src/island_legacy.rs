@@ -161,7 +161,7 @@ impl Island {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
         if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Ask(q), h)); }
-        if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
+        if let Some((label, _, q, _)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
@@ -569,7 +569,7 @@ impl View for Island {
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
                 PERMIT_ALLOW | PERMIT_DENY => {
-                    if let Some((_, session, _)) = crate::bridge::permit::pending() { crate::bridge::permit::decide(&session, i == PERMIT_ALLOW, ""); }
+                    if let Some((_, session, _, _)) = crate::bridge::permit::pending() { crate::bridge::permit::decide(&session, i == PERMIT_ALLOW, ""); }
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
                 ASK_SEND => self.send_reply(cx),

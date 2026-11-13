@@ -123,7 +123,19 @@ fn ask_text(p: &Value) -> String {
     if tool == "AskUserQuestion" {
         if let Some(q) = p["tool_input"]["questions"].as_array().and_then(|q| q.first()) { return short(q["question"].as_str().unwrap_or("Has a question"), ASK_TEXT_MAX); }
     }
+    if tool == "ExitPlanMode" { return "Plan ready for review".into(); } // the plan itself is in choice_of
     short(&if !detail.is_empty() { format!("Allow {tool}: {detail}") } else if !tool.is_empty() { format!("Allow {tool}?") } else { "Needs your input".into() }, ASK_TEXT_MAX)
+}
+
+/// What Claude Code asks beyond a yes or no: the plan (ExitPlanMode) or the questions (AskUserQuestion), for the island
+/// to show and take answers to. Null for a tool permission.
+fn choice_of(p: &Value) -> Value {
+    let inp = &p["tool_input"];
+    match p["tool_name"].as_str() {
+        Some("ExitPlanMode") => json!({ "kind": "plan", "plan": inp["plan"].as_str().unwrap_or("") }),
+        Some("AskUserQuestion") => inp["questions"].as_array().filter(|q| !q.is_empty()).map_or(Value::Null, |q| json!({ "kind": "question", "questions": q })),
+        _ => Value::Null,
+    }
 }
 
 /// The tool a session runs now, in one line: "Bash: npm test". Cursor's shell hook has no tool name, only the command.
@@ -295,7 +307,12 @@ fn record(agents: &Path, agent: &str, p: &Value) -> std::io::Result<()> {
     if let Some(s) = text.as_deref().and_then(codex_spend) { rec["spend"] = s; }
     // a permission prompt: the island offers Allow and Deny (permit.rs). Its permission_prompt Notification keeps the mark.
     let permission = p["hook_event_name"] == "PermissionRequest" || (p["notification_type"] == "permission_prompt" && old["ask"] == "permission");
-    if state == "waiting" && permission { rec["ask"] = json!("permission"); }
+    if state == "waiting" && permission {
+        rec["ask"] = json!("permission");
+        // the plan or questions come with the PermissionRequest; its permission_prompt Notification carries them on
+        let choice = if p["hook_event_name"] == "PermissionRequest" { choice_of(p) } else { old["choice"].clone() };
+        if !choice.is_null() { rec["choice"] = choice; }
+    }
     write(&f, &rec)
 }
 
@@ -525,6 +542,20 @@ mod tests {
         send(json!({ "hook_event_name": "Notification", "session_id": "s1", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash" }));
         assert_eq!(summary(&d)["claude"]["message"], "Allow Bash: npm test");
         assert_eq!(summary(&d)["claude"]["state"], "waiting");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_plan_or_questions_reach_the_island_and_a_tool_does_not() {
+        let d = tmp("choice");
+        let send = |p: Value| record(&d, "claude", &p).unwrap();
+        send(json!({ "hook_event_name": "PermissionRequest", "session_id": "s1", "tool_name": "ExitPlanMode", "tool_input": { "plan": "1. Do it" } }));
+        assert_eq!(session(&d, "claude", "s1")["choice"], json!({ "kind": "plan", "plan": "1. Do it" }));
+        assert_eq!(session(&d, "claude", "s1")["message"], "Plan ready for review");
+        send(json!({ "hook_event_name": "Notification", "session_id": "s1", "notification_type": "permission_prompt", "message": "Claude needs your permission" }));
+        assert_eq!(session(&d, "claude", "s1")["choice"]["kind"], "plan", "the follow-up Notification keeps the plan");
+        send(json!({ "hook_event_name": "PermissionRequest", "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "ls" } }));
+        assert!(session(&d, "claude", "s1")["choice"].is_null(), "a tool permission has no choice");
         let _ = std::fs::remove_dir_all(&d);
     }
 

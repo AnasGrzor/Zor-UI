@@ -229,6 +229,7 @@ enum El {
     Ico(&'static str, f32, bool, Color),
     IcoS(String, f32, bool, Color),
     Txt(String, Font, Color, f32), // max width
+    Scroll(String, Font, Color, f32, f64), // max width, when this text first showed (ms); scrolls when it is wider than max (draw_scroll)
     Ring { size: f32, value: f32, icon: &'static str, isize: f32, fill: bool, color: Color, art: Option<Pixmap> },
     Btn { id: u32, w: f32, h: f32, label: Box<El>, bg: Option<Color>, round: f32 },
     Row(Vec<El>, f32), // inline items with a gap (a chip's icon + text)
@@ -238,6 +239,34 @@ enum El {
     Col(Vec<(String, Font, Color)>, f32), // stacked lines (active window, net speed), max width
     Eq(Color, bool), // the island's equalizer bars, moving while `playing`
     Viz(Color, Vec<f32>), // the bar visualizer (#bar-viz): bars at 0-1 levels
+}
+
+/// Scrolling text: how long it rests at each end, and how fast it moves.
+const SCROLL_PAUSE_MS: f64 = 1500.0;
+const SCROLL_PX_PER_S: f64 = 30.0;
+
+/// How far left text `over` px too wide for its box has moved, `ms` after it first showed:
+/// it rests at the start, scrolls to its end, rests there, then starts over.
+pub fn scroll_x(over: f32, ms: f64) -> f32 {
+    if over <= 0.0 { return 0.0; }
+    let run = over as f64 / SCROLL_PX_PER_S * 1000.0;
+    let t = ms.max(0.0) % (2.0 * SCROLL_PAUSE_MS + run);
+    ((t - SCROLL_PAUSE_MS).clamp(0.0, run) / run) as f32 * over
+}
+
+/// When `text` first showed in `slot` (ms): a new text restarts the clock, so it scrolls from its start.
+fn scroll_since(slot: &mut (String, f64), text: &str) -> f64 {
+    if slot.0 != text { *slot = (text.to_string(), hub::now_ms()); }
+    slot.1
+}
+
+/// One line of text in `r`, scrolling (scroll_x) when it is wider than `r`. `since` is when it first showed (ms).
+/// Shared by the island pill and its preview in Settings.
+pub fn draw_scroll(c: &mut Canvas, s: &str, r: R, f: Font, col: Color, since: f64) {
+    let tw = c.g.measure(s, f).0;
+    if tw <= r.w { return c.text(s, R::new(r.x, r.y, r.w + 1.0, r.h), f, col, Align::Left); }
+    let dx = scroll_x(tw - r.w, hub::now_ms() - since);
+    c.clip_round(r, 0.0, |c| c.text(s, R::new(r.x - dx, r.y, tw + 1.0, r.h), f, col, Align::Left));
 }
 
 /// #bar-viz: a 60 x 22 canvas of 20 bars.
@@ -319,6 +348,12 @@ pub struct Bar {
     di_track: String,
     di_track_until: f64,
     di_scroll_at: f64,
+    /// The island's and the media group's scrolling text and when each first showed (scroll_since).
+    /// Two clocks: both can show at once when the island shows an agent.
+    di_scroll: (String, f64),
+    media_scroll: (String, f64),
+    /// The island's text is scrolling this frame.
+    scrolling: bool,
     art: Option<((std::sync::Arc<Vec<u8>>, u32), Pixmap)>,
     /// Per tray icon: the image it was drawn from (kept alive, so its address can't be reused), the px size, the pixmap.
     tray_px: HashMap<String, (std::sync::Arc<(Vec<u8>, u32, u32)>, u32, Pixmap)>,
@@ -356,7 +391,7 @@ impl Bar {
 
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
         Bar { mon, edge, origin, island: Motion::default(), di_state: "", di_bg: None, di_fade: None, di_hover: false, island_cap: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
-            art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false, mic_live: false,
+            di_scroll: Default::default(), media_scroll: Default::default(), scrolling: false, art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false, mic_live: false,
             viz: Default::default(), viz_stream: None, viz_loud: false }
     }
 
@@ -410,7 +445,7 @@ pub(crate) fn rgba_to_pixmap(rgba: &[u8], w: u32, h: u32, px: u32) -> Option<Pix
 fn el_w(g: &Gfx, e: &El) -> f32 {
     match e {
         El::Ico(_, s, ..) | El::IcoS(_, s, ..) => *s,
-        El::Txt(t, f, _, max) => g.measure(t, *f).0.min(*max).ceil(),
+        El::Txt(t, f, _, max) | El::Scroll(t, f, _, max, _) => g.measure(t, *f).0.min(*max).ceil(),
         El::Ring { size, .. } => *size,
         El::Btn { w, .. } => *w,
         El::Row(items, gap) => items.iter().map(|e| el_w(g, e)).sum::<f32>() + gap * items.len().saturating_sub(1) as f32,
@@ -430,6 +465,7 @@ fn draw_el(c: &mut Canvas, cx: &Ctx, e: &El, x: f32, cy: f32, hover: u32) {
         El::Ico(n, s, fill, col) => c.icon(n, R::new(x, cy - s / 2.0, *s, *s), ico(*s, *fill), *col),
         El::IcoS(n, s, fill, col) => c.icon(n, R::new(x, cy - s / 2.0, *s, *s), ico(*s, *fill), *col),
         El::Txt(s, f, col, _) => c.text(s, R::new(x, cy - 15.0, w + 1.0, 30.0), *f, *col, Align::Left),
+        El::Scroll(s, f, col, _, since) => draw_scroll(c, s, R::new(x, cy - 15.0, w, 30.0), *f, *col, *since),
         El::Ring { size, value, icon, isize, fill, color, art } => {
             let (rx, r) = (x + size / 2.0, (size - 2.5) / 2.0);
             c.arc(rx, cy, r, 1.0, 2.5, t.c("secondaryContainer"));
@@ -506,7 +542,7 @@ fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (
     };
     while free(sides) < AIR {
         let widest = sides.iter_mut().flatten().filter(|p| p.id == MEDIA && p.fixed.is_none())
-            .filter_map(|p| p.els.iter_mut().find_map(|e| if let El::Txt(_, _, _, m) = e { Some(m) } else { None }))
+            .filter_map(|p| p.els.iter_mut().find_map(|e| if let El::Txt(_, _, _, m) | El::Scroll(_, _, _, m, _) = e { Some(m) } else { None }))
             .filter(|m| **m > 60.0).max_by(|a, b| a.total_cmp(b));
         let Some(m) = widest else { break };
         *m = (*m - 20.0).max(60.0);
@@ -531,15 +567,14 @@ fn compact(sides: &mut [Vec<Pill>; 3], room: f32, w: impl Fn(&Pill) -> f32) -> (
     (((free(sides) - AIR).max(0.0) / gaps as f32).min(7.0), cap)
 }
 
-/// The agent pill's text: the label, the newest working tool and the usage percent.
-/// Shared by the pill and the island version preview in Settings.
-pub fn agent_pill_text(label: &str, tool: &str, pct: &str) -> String {
-    let tool = if tool.is_empty() { String::new() } else { format!(" · {tool}") };
-    format!("{label}{tool}{pct}")
+/// The agent pill's text in two parts: the label and usage percent, which always show, and the newest working
+/// tool, which scrolls when it is too long (draw_scroll). Shared by the pill and the island version preview in Settings.
+pub fn agent_pill_parts(label: &str, tool: &str, pct: &str) -> (String, String) {
+    if tool.is_empty() { (format!("{label}{pct}"), String::new()) } else { (format!("{label}{pct} ·"), tool.to_string()) }
 }
 
-/// The sample agent the island version preview draws: a Claude agent on a Bash tool.
-pub fn island_version_sample() -> (&'static str, &'static str, &'static str) { ("Claude", "Bash: npm test", " · 33%") }
+/// The sample agent the island version preview draws: a Claude agent on a Bash tool long enough to scroll.
+pub fn island_version_sample() -> (&'static str, &'static str, &'static str) { ("Claude", "Bash: cargo test --release -p zor-ui", " · 33%") }
 
 /// Identifies one pending permission: its session and the time it was asked. A new prompt gets a new key.
 fn permit_key(a: &Value) -> Option<String> {
@@ -635,7 +670,15 @@ impl Bar {
                     // the newest working session's tool
                     let ws: Vec<&Value> = a["sessions"].as_array().into_iter().flatten().filter(|x| x["state"] == "working").collect();
                     let tool = ws.first().map(|x| s(&x["tool"])).unwrap_or_default();
-                    els.push(El::Txt(agent_pill_text(&s(&a["label"]), &tool, &pct), txt(13.0, 400), fg, text_w));
+                    let (head, tool) = agent_pill_parts(&s(&a["label"]), &tool, &pct);
+                    let f = txt(13.0, 400);
+                    let head_w = c.g.measure(&head, f).0.ceil();
+                    els.push(El::Txt(head, f, fg, text_w));
+                    if !tool.is_empty() {
+                        // a new tool starts its scroll from the beginning
+                        let since = scroll_since(&mut self.di_scroll, &tool);
+                        els.push(El::Scroll(tool, f, fg, (text_w - head_w).max(60.0), since));
+                    }
                 }
             }
             "osd" => {
@@ -663,7 +706,8 @@ impl Bar {
                 let art = if flag("art") { self.art(c.g, cx, (20.0 * c.scale).round() as u32) } else { None };
                 els.push(El::Ring { size: 28.0, value: if flag("progress") { m.progress() } else { 0.0 }, icon: "music_note", isize: 14.0, fill: true, color: fg, art });
                 let title = if wide && !m.artist.is_empty() { format!("{} • {}", m.title, m.artist) } else { m.title.clone() };
-                els.push(El::Txt(title, txt(13.0, 400), fg, if wide { wide_w } else { text_w }));
+                let since = scroll_since(&mut self.di_scroll, &title);
+                els.push(El::Scroll(title, txt(13.0, 400), fg, if wide { wide_w } else { text_w }, since));
                 if !wide && flag("eq") && m.playing { els.push(El::Eq(cx.cfg.viz_color("island.eqColor").unwrap_or_else(|| t.c("primary")), m.playing)); self.eq = m.playing; }
                 if wide && flag("controls") {
                     els.push(btn(CTL, 26.0, "skip_previous", 18.0, true, fg));
@@ -728,7 +772,9 @@ impl Bar {
         let mut p = Pill { id: ISLAND, els, pad: (9.0, 9.0), gap: 7.0, bg, hover: false, fixed: None, kind: Kind::Group, fade };
         if let Some(cap) = self.island_cap {
             while pill_w(c.g, &p) > cap {
-                let Some(El::Txt(_, _, _, m)) = p.els.iter_mut().find(|e| matches!(e, El::Txt(..))) else { break };
+                // the scrolling text gives up room first, so the usage beside it stays whole
+                let i = p.els.iter().position(|e| matches!(e, El::Scroll(..))).or_else(|| p.els.iter().position(|e| matches!(e, El::Txt(..))));
+                let Some(El::Txt(_, _, _, m) | El::Scroll(_, _, _, m, _)) = i.map(|i| &mut p.els[i]) else { break };
                 if *m <= 60.0 { break; }
                 *m = (*m - 10.0).max(60.0);
             }
@@ -784,8 +830,9 @@ impl Bar {
                         out.push(Pill { bg: Some(t.c("secondaryContainer")), ..group(MEDIA, els, (12.0, 12.0), 8.0) });
                     } else if let Some(m) = &cx.media {
                         let text = if m.artist.is_empty() { m.title.clone() } else { format!("{} • {}", m.title, m.artist) };
+                        let since = scroll_since(&mut self.media_scroll, &text);
                         out.push(group(MEDIA, vec![El::Ring { size: 26.0, value: m.progress(), icon: if m.playing { "pause" } else { "play_arrow" }, isize: 16.0, fill: true, color: fg, art: None },
-                            El::Txt(text, txt(13.0, 400), fg, 230.0)], (5.0, 10.0), 6.0));
+                            El::Scroll(text, txt(13.0, 400), fg, 230.0, since)], (5.0, 10.0), 6.0));
                     }
                     // the visualizer follows system audio, so it shows with or without a media session
                     if !island_on { out.extend(self.viz_pill(cx)); }
@@ -913,7 +960,7 @@ fn fit_column(p: &mut Pill, w: f32) {
 
 fn squeeze(e: &mut El, w: f32) {
     match e {
-        El::Txt(_, _, _, max) | El::Col(_, max) => *max = max.min(w),
+        El::Txt(_, _, _, max) | El::Scroll(_, _, _, max, _) | El::Col(_, max) => *max = max.min(w),
         El::Meter(mw, _) => *mw = mw.min(w),
         El::Btn { w: bw, .. } => *bw = bw.min(w),
         El::Row(items, _) => for i in items { squeeze(i, w) },
@@ -924,7 +971,7 @@ fn squeeze(e: &mut El, w: f32) {
 fn el_h(e: &El) -> f32 {
     match e {
         El::Ico(_, s, ..) | El::IcoS(_, s, ..) | El::Ring { size: s, .. } => *s,
-        El::Txt(_, f, ..) => (f.size * 1.3).ceil(),
+        El::Txt(_, f, ..) | El::Scroll(_, f, ..) => (f.size * 1.3).ceil(),
         El::Btn { h, .. } => *h,
         El::Row(items, _) => items.iter().map(el_h).fold(0.0, f32::max),
         El::Dot(s, _) => s.max(10.0),
@@ -995,11 +1042,12 @@ impl View for Bar {
         format!("{}{}{}{m}{}{loud}", st.wHour, st.wMinute, st.wSecond, theme_key(&cx.theme))
     }
 
-    fn frame_ms(&self) -> u32 { if self.island.moving() || self.di_fade.is_some() || self.viz_loud { 16 } else if self.eq || self.mic_live { 50 } else if self.pulsing { 100 } else { 0 } }
+    fn frame_ms(&self) -> u32 { if self.island.moving() || self.di_fade.is_some() || self.viz_loud { 16 } else if self.scrolling { 33 } else if self.eq || self.mic_live { 50 } else if self.pulsing { 100 } else { 0 } }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.mic_live = false; // island() turns it back on
         self.eq = false; // island() turns it back on; off when the island isn't on this bar
+        self.scrolling = false; // set again after layout; stays off if paint returns before it
         self.viz_loud = false; // viz_pill() turns it back on
         let t = &cx.theme;
         let style = cx.cfg.str("bar.style");
@@ -1078,6 +1126,8 @@ impl View for Bar {
             }
             placed
         };
+        // checked after layout, since compact() and fit_column() can narrow a text until it scrolls
+        self.scrolling = sides.iter().flatten().flat_map(|p| &p.els).any(|e| matches!(e, El::Scroll(s, f, _, m, _) if c.g.measure(s, *f).0 > *m));
         // one shadow pass for every group (islands style)
         let shadowed: Vec<R> = placed.iter().filter(|(si, pi, _)| group_look(cx, &sides[*si][*pi]).2).map(|p| p.2).collect();
         if !shadowed.is_empty() { c.shadow(2.0, 8.0, 0.25, |c, col| if let Some(col) = col { for r in &shadowed { c.rect(*r, r.h.min(r.w) / 2.0, col); } }); }
@@ -1403,10 +1453,22 @@ mod tests {
 
     /// The island's equalizer bars show while media plays and are gone when it is paused.
     #[test]
-    fn the_agent_pill_text_is_the_label_the_tool_and_the_usage() {
+    fn the_agent_pill_text_keeps_the_usage_apart_from_the_tool() {
         let (label, tool, pct) = island_version_sample();
-        assert_eq!(agent_pill_text(label, tool, pct), "Claude · Bash: npm test · 33%");
-        assert_eq!(agent_pill_text("Codex", "", ""), "Codex", "no tool dot without a tool");
+        assert_eq!(agent_pill_parts(label, tool, pct), ("Claude · 33% ·".into(), "Bash: cargo test --release -p zor-ui".into()));
+        assert_eq!(agent_pill_parts("Codex", "", ""), ("Codex".into(), String::new()), "no tool dot without a tool");
+    }
+
+    #[test]
+    fn scrolling_text_rests_moves_rests_and_starts_over() {
+        assert_eq!(scroll_x(0.0, 5000.0), 0.0, "text that fits never moves");
+        assert_eq!(scroll_x(30.0, 1000.0), 0.0, "rests at the start");
+        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 500.0), 15.0, "halfway after half the run");
+        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 1000.0 + 700.0), 30.0, "rests at the end");
+        assert_eq!(scroll_x(30.0, 2.0 * SCROLL_PAUSE_MS + 1000.0 + 100.0), 0.0, "starts over");
+        let mut slot = ("Song".to_string(), 5.0);
+        assert_eq!(scroll_since(&mut slot, "Song"), 5.0, "the same text keeps its clock");
+        assert!(scroll_since(&mut slot, "Next song") > 5.0, "a new text restarts it");
     }
 
     #[test]

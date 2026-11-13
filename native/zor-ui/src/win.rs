@@ -168,6 +168,8 @@ pub struct Win {
     pub gliding: bool,
     /// The island panel's open animation: when it started, and whether it grows up from the bottom edge.
     pub grow: Option<(std::time::Instant, bool)>,
+    /// The island panel's close animation: the grow played backwards, from when it closed.
+    pub shrink: Option<(std::time::Instant, bool)>,
 }
 
 struct Drag { start: POINT, from: POINT, moved: bool, snap: Vec<(i32, i32, i32, i32)> }
@@ -205,7 +207,7 @@ impl Win {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None })
+                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None, shrink: None })
         }
     }
 
@@ -260,6 +262,12 @@ impl Win {
     }
 
     pub fn hide(&self) { unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); } }
+
+    /// True once the close animation (`shrink`) has run its course: the window can be dropped.
+    pub fn shrunk(&self) -> bool { self.shrink.is_some_and(|(t0, _)| t0.elapsed().as_secs_f32() >= crate::anim::GROW_SECS) }
+
+    /// Mouse input goes through the window: it is fading out and must not take clicks.
+    pub fn pass_mouse(&self) { unsafe { let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE); SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT.0 as isize); } }
     pub fn visible(&self) -> bool { unsafe { IsWindowVisible(self.hwnd).as_bool() } }
     pub fn part_name(&self) -> &str { &self.part } // TEMP frametrace
 
@@ -354,7 +362,7 @@ impl Win {
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
             let src = POINT::default();
             let (mut size, mut src, mut alpha, mut dst) = (size, src, 255u8, None);
-            if !cx.motion { self.grow = None; } // reduced motion: the panel appears at full size
+            if !cx.motion { self.grow = None; self.shrink = None; } // reduced motion: the panel appears and goes at full size
             if let Some((t0, bottom)) = self.grow {
                 let (rows, a, done) = crate::anim::grow(t0.elapsed().as_secs_f32(), ph as i32);
                 if done { self.grow = None; } else {
@@ -366,6 +374,16 @@ impl Win {
                         dst = Some(POINT { x, y: y + src.y });
                     }
                 }
+            }
+            if let Some((t0, bottom)) = self.shrink {
+                // the open curve backwards: full height at the close, the island's edge at the end
+                let left = (crate::anim::GROW_SECS - t0.elapsed().as_secs_f32()).max(0.0);
+                let (rows, a, _) = crate::anim::grow(left, ph as i32);
+                self.gliding = true; // 16 ms frames until it has shrunk
+                (size.cy, alpha) = (rows, a);
+                src.y = if bottom { ph as i32 - rows } else { 0 };
+                dst = None;
+                if bottom { let (x, y) = self.pos(); dst = Some(POINT { x, y: y + src.y }); }
             }
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
             let _ = UpdateLayeredWindow(self.hwnd, None, dst.as_ref().map(|d| d as *const POINT), Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);

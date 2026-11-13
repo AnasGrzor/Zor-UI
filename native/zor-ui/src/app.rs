@@ -129,6 +129,8 @@ pub struct App {
     bars_edge: bar::Edge,
     /// Open sidebars / overview / island panel / settings.
     pops: Vec<Pop>,
+    /// Closed island panels still shrinking back into the island (see `Win::shrink`).
+    closing: Vec<Win>,
     /// The right-click menu (and when it opened).
     menu: Option<(Win, f64)>,
     /// A UTF-16 high surrogate from WM_CHAR waiting for its pair.
@@ -266,7 +268,7 @@ impl App {
         let mut app = App {
             g,
             cx: Ctx { agents: hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default(), ..Ctx::new(all) },
-            wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
+            wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], closing: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
             ws_main: None,
             theme_file: Watched::new(pack.join("theme.json")),
@@ -445,9 +447,9 @@ impl App {
     /// Keeps a fast timer running while any view animates.
     fn frames(&mut self) {
         if self.game.is_some() { return; }
-        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
+        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.closing.iter()).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
         // a 16 ms view counts as gliding too: its frames need the 1 ms timer resolution (the island spring never set gliding)
-        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
+        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.closing.iter()).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
         if glide != self.hires {
             unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
             self.hires = glide;
@@ -671,6 +673,7 @@ impl App {
         let s = dpi_scale(rect);
         let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s, self.cx.bar_edge());
         let Some(view) = popup::make(name, area) else { return };
+        self.closing.clear(); // a reopen mid-shrink replaces the closing panel, never stacks on it
         let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
         if name == "island-panel" { w.grow = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom)); }
@@ -689,10 +692,20 @@ impl App {
 
     pub fn close(&mut self, name: &str) {
         if let Some(i) = self.pops.iter().position(|p| p.name == name) {
-            self.pops.remove(i);
+            let p = self.pops.remove(i);
             self.hide_popup(); // its tooltip goes with it
             crate::gfx::drop_backdrops();
             hub::set(&format!("zor-ui.closedAt.{name}"), Some(hub::now_ms().to_string()));
+            if name == "island-panel" && self.cx.motion {
+                // the panel shrinks back into the island, then FRAME drops it
+                let mut w = p.win;
+                w.grow = None;
+                w.shrink = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom));
+                w.set_focusable(false);
+                w.pass_mouse();
+                w.gliding = true; // 16 ms frames from the first shrink frame
+                self.closing.push(w);
+            }
             self.frames();
         }
     }
@@ -832,6 +845,9 @@ impl App {
                         w.update(&self.g, &self.cx, due);
                         trace_part(w.part_name(), due, tu.elapsed()); // TEMP frametrace
                     }
+                    // a closing panel repaints every frame (its key doesn't change while it shrinks), then goes
+                    for w in self.closing.iter_mut() { w.update(&self.g, &self.cx, true); }
+                    self.closing.retain(|w| !w.shrunk());
                     self.menu_check();
                     self.frames();
                     trace_frame(t0.elapsed(), self.frame); // TEMP frametrace

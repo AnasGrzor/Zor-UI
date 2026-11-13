@@ -682,7 +682,10 @@ impl App {
         if hwnd == self.msg {
             match (msg, wp.0) {
                 (WM_TIMER, TICK) => self.tick(),
-                (WM_TIMER, GUARD) => if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); },
+                (WM_TIMER, GUARD) => {
+                    if let Some(front) = tray::guard_standin() { crate::log::line(&format!("tray stand-in window was shown; hid it (window in front: {front:?})")); }
+                    if let Some(front) = tray::raise_taskbar() { crate::log::line(&format!("taskbar lost topmost; raised it (window in front: {front:?})")); }
+                }
                 (WM_TIMER, FRAME) => {
                     if self.cx.theme.advance() { self.cx.ver += 1; }
                     // each view paints at its own rate: a tile that wants 33 ms frames must not drag the

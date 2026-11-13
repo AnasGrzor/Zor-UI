@@ -241,6 +241,9 @@ impl Football {
 }
 
 impl Tab for Football {
+    // BODY: the match list's scroll area; LGROW: the league chip row's background
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | BODY | LGROW) }
+
     fn show(&mut self, cx: &Ctx) {
         if self.started { return; }
         self.started = true;

@@ -229,6 +229,9 @@ fn bubble(c: &mut Canvas, r: R, col: u32, tail_right: bool) {
 }
 
 impl Tab for Ai {
+    // VIEW is the message list and MENU the model menu panel: neither takes a click
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | VIEW | MENU) }
+
     fn show(&mut self, cx: &Ctx) {
         if self.ready { return; }
         self.ready = true;

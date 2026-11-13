@@ -106,6 +106,9 @@ impl Anime {
 }
 
 impl Tab for Anime {
+    // 412: the grid's scroll area; tiles and their buttons are registered after it and win where they overlap
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | 412) }
+
     fn show(&mut self, cx: &Ctx) {
         if self.started { return; }
         self.started = true;

@@ -306,25 +306,52 @@ fn restore(saved: &[Saved]) {
 // ---- the stand-in window ----
 
 /// Every window of this process with class `class`, shown or not.
-pub fn ours(class: &str) -> Vec<HWND> {
+pub fn ours(class: &str) -> Vec<HWND> { windows_of(class, true) }
+
+/// Every window with class `class`: ours when `mine`, otherwise those of other processes (Explorer's taskbar).
+pub fn windows_of(class: &str, mine: bool) -> Vec<HWND> {
     use windows::Win32::{
         Foundation::BOOL,
         System::Threading::GetCurrentProcessId,
         UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowThreadProcessId},
     };
-    struct Job<'a> { class: &'a str, out: Vec<HWND> }
+    struct Job<'a> { class: &'a str, mine: bool, out: Vec<HWND> }
     unsafe extern "system" fn each(h: HWND, l: LPARAM) -> BOOL {
         let job = &mut *(l.0 as *mut Job);
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
         let mut name = [0u16; 64];
         let n = GetClassNameW(h, &mut name).max(0) as usize;
-        if pid == GetCurrentProcessId() && String::from_utf16_lossy(&name[..n]).eq_ignore_ascii_case(job.class) { job.out.push(h); }
+        if (pid == GetCurrentProcessId()) == job.mine && String::from_utf16_lossy(&name[..n]).eq_ignore_ascii_case(job.class) { job.out.push(h); }
         BOOL(1)
     }
-    let mut job = Job { class, out: vec![] };
+    let mut job = Job { class, mine, out: vec![] };
     unsafe { let _ = EnumWindows(Some(each), LPARAM(&mut job as *mut Job as isize)); }
     job.out
+}
+
+/// Puts Explorer's taskbar back above normal windows. A window in front can drop the taskbar's topmost flag,
+/// and then an auto-hidden taskbar slides in behind it. Returns the title of the window in front when it raised one.
+pub fn raise_taskbar() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowLongPtrW, GetWindowTextW, IsWindowVisible, IsZoomed, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST};
+    // A real full-screen app (game, video) stays in front of the taskbar, as game mode does. A maximized window
+    // also covers the whole monitor when the taskbar auto-hides, so it is not treated as full-screen.
+    let fg = unsafe { GetForegroundWindow() };
+    if crate::buddy::fullscreen_monitor().is_some() && !unsafe { IsZoomed(fg) }.as_bool() { return None; }
+    let mut raised = 0;
+    for class in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+        for h in windows_of(class, false) {
+            unsafe {
+                if !IsWindowVisible(h).as_bool() || GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize != 0 { continue; }
+                let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            raised += 1;
+        }
+    }
+    if raised == 0 { return None; }
+    let mut t = [0u16; 128];
+    let n = unsafe { GetWindowTextW(GetForegroundWindow(), &mut t) }.max(0) as usize;
+    Some(String::from_utf16_lossy(&t[..n]))
 }
 
 /// systray-util builds its stand-in `Shell_TrayWnd` as a normal captioned window (WS_OVERLAPPEDWINDOW) and never shows it. If anything

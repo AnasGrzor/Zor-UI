@@ -39,6 +39,8 @@ trait Tab {
     fn input(&mut self, ev: &Input, cx: &mut Ctx, hover: u32);
     fn frame_ms(&self) -> u32 { 0 }
     fn captures_esc(&self) -> bool { false }
+    /// Shows the hand over spot `id`. False for background spots (scroll areas, panels), so the hand shows only on controls.
+    fn hand(&self, id: u32) -> bool { id != 0 }
 }
 
 pub struct SidebarLeft {
@@ -88,6 +90,8 @@ impl SidebarLeft {
 
 impl View for SidebarLeft {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
+
+    fn hand(&self, id: u32) -> bool { self.cur_ref().hand(id) }
 
     fn key(&self, _: &Ctx) -> String {
         match self.cur_ref().frame_ms() { 0 => String::new(), ms => ((crate::hub::now_ms() / ms as f64) as u64).to_string() }

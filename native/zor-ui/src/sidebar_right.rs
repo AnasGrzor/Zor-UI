@@ -442,6 +442,8 @@ impl Drop for SidebarRight { fn drop(&mut self) { self.alive.store(false, Orderi
 impl View for SidebarRight {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
 
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | ID_BG) }
+
     fn key(&self, _: &Ctx) -> String {
         let now = hub::now_ms();
         format!("{}|{}|{}", unsafe { GetTickCount64() } / 60_000, if rec_started() > 0.0 { (now / 1000.0) as u64 } else { 0 }, if self.timer_ticking() { (now / 100.0) as u64 } else { 0 })

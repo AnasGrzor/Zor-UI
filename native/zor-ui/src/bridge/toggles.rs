@@ -410,9 +410,13 @@ fn parse_plan(line: &str) -> Option<(String, String, bool)> {
 }
 
 /// Win+V history, at most 30 items.
+/// Thumbnails go to %TEMP%\zor-ui-clip as <UniversalTime>.png; files of items that left the history are removed.
 fn clipboard_list() -> Result<Value, String> {
     let r = history_items()?;
+    let dir = std::env::temp_dir().join("zor-ui-clip");
+    let _ = std::fs::create_dir_all(&dir);
     let mut list = vec![];
+    let mut keep = vec![];
     for (i, it) in r.into_iter().take(30).enumerate() {
         let c = it.Content().map_err(msg)?;
         let text = if c.Contains(&HSTRING::from("Text")).unwrap_or(false) {
@@ -422,9 +426,35 @@ fn clipboard_list() -> Result<Value, String> {
         } else { Value::Null };
         let image = StandardDataFormats::Bitmap().ok().and_then(|f| c.Contains(&f).ok()).unwrap_or(false);
         let time = it.Timestamp().map_err(msg)?.UniversalTime.div_euclid(10_000_000) - 11_644_473_600;
-        list.push(json!({ "i": i, "text": text, "image": image, "time": time }));
+        let mut row = json!({ "i": i, "text": text, "image": image, "time": time });
+        if image {
+            let raw = it.Timestamp().map_err(msg)?.UniversalTime;
+            let name = format!("{raw}.png");
+            let p = dir.join(&name);
+            // a bitmap that fails to read just has no thumbnail; the row still shows
+            if p.exists() || write_bitmap(&c, &p).is_ok() { row["thumb"] = json!(p.to_string_lossy()); }
+            keep.push(name);
+        }
+        list.push(row);
+    }
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if !keep.contains(&e.file_name().to_string_lossy().into_owned()) { let _ = std::fs::remove_file(e.path()); }
+        }
     }
     Ok(json!({ "items": list }))
+}
+
+/// The item's bitmap bytes (PNG from Windows) into a file.
+fn write_bitmap(c: &windows::ApplicationModel::DataTransfer::DataPackageView, p: &std::path::Path) -> Result<(), String> {
+    let stream = c.GetBitmapAsync().and_then(|o| o.get()).and_then(|r| r.OpenReadAsync()).and_then(|o| o.get()).map_err(msg)?;
+    let size = stream.Size().map_err(msg)? as u32;
+    let input = stream.GetInputStreamAt(0).map_err(msg)?;
+    let reader = windows::Storage::Streams::DataReader::CreateDataReader(&input).map_err(msg)?;
+    reader.LoadAsync(size).and_then(|o| o.get()).map_err(msg)?;
+    let mut buf = vec![0u8; size as usize];
+    reader.ReadBytes(&mut buf).map_err(msg)?;
+    std::fs::write(p, &buf).map_err(|e| e.to_string())
 }
 
 fn clipboard_set_item(i: usize) -> Result<Value, String> {

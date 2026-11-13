@@ -46,6 +46,8 @@ pub const CHIP_R: f32 = CHIP_H / 2.0;
 /// Slider track corner radius, and the radius of its fill.
 pub const SLIDER_R: f32 = 17.0;
 pub const SLIDER_FILL_R: f32 = 6.0;
+/// Corner radius of a card: a box around a group of rows, or a session card in the Dynamic Island.
+pub const CARD_R: f32 = 14.0;
 
 // ---- controls ----
 /// Space inside a chip, left and right, and between its icon and label.
@@ -105,11 +107,15 @@ pub const PAGE_COLLAPSED_X: f32 = DIVIDER_COLLAPSED_X + 35.0;
 pub const PAGE_Y: f32 = 44.0;
 /// Corner radius for interactive preview studios and cards.
 pub const STUDIO_R: f32 = 16.0;
+/// Room kept free on the Settings page's right edge for the scrollbar: cards stop this far from the thumb's side.
+pub const SCROLL_GUTTER: f32 = 24.0;
 
 // ---- island panel ----
 /// Width of the Dynamic Island panel (the window adds a margin each side for the shadow), and the transport buttons in it.
 pub const ISLAND_W: f32 = 420.0;
 pub const TRANSPORT_BTN: f32 = 44.0;
+/// Gap above the volume slider in the Dynamic Island, between it and the lyrics block above it.
+pub const ISLAND_VOL_GAP: f32 = SP_S;
 
 // ---- quick panel (right sidebar) ----
 /// Space between the panel edge and its content.
@@ -194,5 +200,44 @@ mod tests {
     #[test]
     fn alphas_are_fractions() {
         for a in [HOVER_A, PANEL_EDGE_A, SHADOW_A, GLASS_EDGE_A] { assert!(a > 0.0 && a < 1.0); }
+    }
+
+    /// A spacing, radius or edge const with a plain number is a token that belongs in this file.
+    fn is_spacing_const(line: &str) -> bool {
+        const SUFFIXES: [&str; 7] = ["_PAD", "_GAP", "_INSET", "_R", "_RADIUS", "_EDGE", "_SP"];
+        let t = line.trim_start();
+        let t = t.strip_prefix("pub ").or_else(|| t.strip_prefix("pub(crate) ")).unwrap_or(t);
+        let Some(rest) = t.strip_prefix("const ") else { return false };
+        let Some((name, tail)) = rest.split_once(": f32 = ") else { return false };
+        let Some(number) = tail.strip_suffix(';') else { return false };
+        !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '.') && SUFFIXES.iter().any(|s| name.ends_with(s))
+    }
+
+    #[test]
+    fn no_spacing_const_is_declared_outside_tokens() {
+        assert!(is_spacing_const("const CARD_PAD: f32 = 12.0;"), "the scan must catch a plain-number spacing const");
+        assert!(!is_spacing_const("const CARD_PAD: f32 = crate::tokens::CARD_INSET;"), "an alias of a token is fine");
+        // One-off sizes that stay local on purpose: paste the whole declaration line here to allow it. None today.
+        const ALLOW: &[&str] = &[];
+        let files: [(&str, &str); 9] = [
+            ("settings/form.rs", include_str!("settings/form.rs")),
+            ("settings/pages.rs", include_str!("settings/pages.rs")),
+            ("settings/layout.rs", include_str!("settings/layout.rs")),
+            ("settings/picker.rs", include_str!("settings/picker.rs")),
+            ("settings/wallpaper.rs", include_str!("settings/wallpaper.rs")),
+            ("settings/store.rs", include_str!("settings/store.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("island.rs", include_str!("island.rs")),
+            ("bar.rs", include_str!("bar.rs")),
+        ];
+        let mut hits = Vec::new();
+        for (file, src) in files {
+            for line in src.lines() {
+                if is_spacing_const(line) && !ALLOW.iter().any(|a| line.contains(a)) {
+                    hits.push(format!("{file}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(hits.is_empty(), "move these into tokens.rs, or allow them in ALLOW:\n{}", hits.join("\n"));
     }
 }

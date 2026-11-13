@@ -35,6 +35,17 @@ static LISTENER: Mutex<Option<proc::Stream>> = Mutex::new(None);
 
 /// Where the primary buddy should point next: (x, y in screen pixels, label).
 static POINT: Mutex<Option<(i32, i32, String)>> = Mutex::new(None);
+/// The answer as it is typed out so far (the buddy's bubble shows it; it is not spoken until the final line).
+static LIVE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The newest partial answer, once, for the buddy's bubble.
+pub fn take_live() -> Option<String> { LIVE.lock().ok().and_then(|mut l| l.take()) }
+
+/// Shows the reply so far: the `say` text of a JSON reply (a tool step shows nothing), or the plain text.
+pub fn show_live(acc: &str) {
+    let shown = if acc.trim_start().starts_with('{') { crate::agent::partial_say(acc) } else { Some(acc.to_string()) };
+    if let Some(s) = shown.filter(|s| !s.trim().is_empty()) { if let Ok(mut l) = LIVE.lock() { *l = Some(s); } }
+}
 
 pub fn say_later(s: &str, secs: f32) { if let Ok(mut l) = LINES.lock() { l.push((s.to_string(), secs)); } }
 /// Asks the buddy to fly to a spot on the screen (a newer request replaces one he hasn't started).
@@ -658,6 +669,11 @@ pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, St
 
 /// `stream_turn` without the token count: the caller adds `Turn::usage` itself (`agent::delegate` does).
 pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
+    stream_turn_live(cfg, convo, wait_secs, |_| {})
+}
+
+/// `stream_turn_raw`, and `live` gets the text so far after each delta.
+pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, live: impl FnMut(&str)) -> Result<Turn, String> {
     let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {
@@ -665,17 +681,19 @@ pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn
         if v.is_object() { let _ = tx2.send(Some(v)); }
     }, move || { let _ = tx3.send(None); });
     if stream.is_none() { return Err("I can't reach my brain.".into()); }
-    Ok(fold_turn(&collect_events(&rx, std::time::Duration::from_secs(wait_secs))?))
+    Ok(fold_turn(&collect_events(&rx, std::time::Duration::from_secs(wait_secs), live)?))
 }
 
 /// Reads stream events until the end (a None, or the sender dropped). A stream that goes quiet for `wait` is an error, not a
 /// short reply, and so is an error event. Split out so the timeout can be tested with a plain channel.
-fn collect_events(rx: &mpsc::Receiver<Option<Value>>, wait: std::time::Duration) -> Result<Vec<Value>, String> {
+fn collect_events(rx: &mpsc::Receiver<Option<Value>>, wait: std::time::Duration, mut live: impl FnMut(&str)) -> Result<Vec<Value>, String> {
     let mut events = vec![];
+    let mut acc = String::new();
     loop {
         match rx.recv_timeout(wait) {
             Ok(Some(v)) => {
                 if let Some(e) = v["error"].as_str() { return Err(e.to_string()); }
+                if let Some(d) = v["delta"].as_str() { acc.push_str(d); live(&acc); }
                 events.push(v);
             }
             Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(events),
@@ -832,14 +850,14 @@ mod tests {
         use std::time::Duration;
         let (tx, rx) = mpsc::channel::<Option<Value>>();
         tx.send(Some(json!({ "text": "half" }))).unwrap();
-        assert!(collect_events(&rx, Duration::from_millis(20)).is_err(), "no end marker before the wait: a timeout, not a short reply");
+        assert!(collect_events(&rx, Duration::from_millis(20), |_| {}).is_err(), "no end marker before the wait: a timeout, not a short reply");
         let (tx, rx) = mpsc::channel::<Option<Value>>();
         tx.send(Some(json!({ "text": "whole" }))).unwrap();
         tx.send(None).unwrap();
-        assert_eq!(collect_events(&rx, Duration::from_millis(20)).unwrap().len(), 1, "the end marker ends it normally");
+        assert_eq!(collect_events(&rx, Duration::from_millis(20), |_| {}).unwrap().len(), 1, "the end marker ends it normally");
         let (tx, rx) = mpsc::channel::<Option<Value>>();
         drop(tx);
-        assert_eq!(collect_events(&rx, Duration::from_millis(20)).unwrap().len(), 0, "a dropped sender is a normal end");
+        assert_eq!(collect_events(&rx, Duration::from_millis(20), |_| {}).unwrap().len(), 0, "a dropped sender is a normal end");
     }
 
     #[test]

@@ -31,7 +31,8 @@ fn defaults() -> Value {
             "media": true, "art": true, "progress": true, "eq": true, "eqColor": "", "controls": true, "trackSeconds": 3,
             "idle": "auto", "status": true, "badges": true, "textWidth": 170, "wideWidth": 280,
             "version": "new", "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
-            "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3 }
+            "clipboardPeek": true,
+            "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3, "clipboard": true, "clipCount": 3 }
         },
         "desktop": { "widgets": ["clock", "weather", "week", "greet", "media"], "clock": "cookie", "clockVertical": false, "snap": true, "snapLines": true,
             "worldClocks": ["Europe/London", "America/New_York", "Asia/Tokyo"], "text": "" },

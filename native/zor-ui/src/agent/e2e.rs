@@ -92,7 +92,7 @@ fn cfg() -> Config { Config::parse(&json!({ "ai": { "model": "fake-model" } }).t
 
 fn run(said: &str, start: Start) -> Result<String, String> {
     let timing = state::Timing::start();
-    run_task(&cfg(), said, said, &[], &timing, start)
+    run_task(&cfg(), said, said, &[], &timing, start, &crate::agent::desktop())
 }
 
 /// (status, verdict, plan, resumes) of one task row.
@@ -272,7 +272,7 @@ fn scripted_sub(replies: &[&str], sub: Result<&str, &str>, rec: &Shared) -> Mode
 
 fn run_with_config(cfg: &Config, said: &str) -> Result<String, String> {
     let timing = state::Timing::start();
-    run_task(cfg, said, said, &[], &timing, Start::New)
+    run_task(cfg, said, said, &[], &timing, Start::New, &crate::agent::desktop())
 }
 
 #[test]

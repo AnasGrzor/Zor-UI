@@ -10,6 +10,7 @@
 mod form;
 mod layout;
 mod pages;
+mod registry;
 mod wallpaper;
 pub(crate) mod store;
 pub(crate) mod picker;
@@ -23,7 +24,8 @@ use crate::{
     win::{Btn, Input, Phase, View},
 };
 use form::{num_json, snap, Act, Pen, Sl, ACT0};
-use pages::{DESKTOP_WIDGETS, PAGES};
+use pages::DESKTOP_WIDGETS;
+use registry::{Page, PAGES};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, rc::Rc};
 use store::Inbox;
@@ -32,8 +34,6 @@ const BG: u32 = 1;
 const MENU_BG: u32 = 2;
 const NAV_BG: u32 = 3;
 const MENU0: u32 = 10;
-/// Room kept free on the page's right edge for the scrollbar.
-const SCROLL_GAP: f32 = 18.0;
 const NAV_ITEM_H: f32 = crate::tokens::NAV_ITEM_H;
 const NAV_STEP: f32 = crate::tokens::NAV_STEP;
 
@@ -213,7 +213,7 @@ const PAGE_KEY: &str = "settings.page";
 
 /// Index of the saved page key in PAGES; 0 (Quick) when it is missing or unknown.
 fn page_from_key(key: Option<&str>) -> usize {
-    key.and_then(|k| PAGES.iter().position(|p| p.0 == k)).unwrap_or(0)
+    key.and_then(|k| registry::index_of_key(k)).unwrap_or(0)
 }
 
 /// The error of a preset's switchwall answer, None when the wallpaper / theme step worked (or gave no answer).
@@ -236,7 +236,7 @@ impl Settings {
     pub fn new(area: (f32, f32)) -> Settings {
         let area = hub::get(SIZE_KEY).and_then(|s| parse_size(&s)).unwrap_or(area);
         let env = std::env::var("ZORUI_RENDER_PAGE").ok();
-        let page = env.as_deref().and_then(|e| PAGES.iter().position(|p| p.0 == e)).unwrap_or_else(|| page_from_key(hub::get(PAGE_KEY).as_deref()));
+        let page = env.as_deref().and_then(|e| registry::index_of_key(e)).unwrap_or_else(|| page_from_key(hub::get(PAGE_KEY).as_deref()));
         let mut s = Settings {
             area, page, scroll: Scroll::default(), content_h: 0.0, view_h: 0.0, nav_scroll: Scroll::default(), nav_h: 0.0, nav_view: 0.0, nav_n: 0,
             nav_collapsed: false, page_scrolls: HashMap::new(), inbox: Inbox::default(), cfgc: Config::parse(""),
@@ -252,7 +252,7 @@ impl Settings {
 
     /// Opens on the page `key` (Mod+/ opens "keys").
     pub fn on_page(mut self, key: &str) -> Settings {
-        if let Some(i) = PAGES.iter().position(|p| p.0 == key) { self.set_page(i); }
+        if let Some(i) = registry::index_of_key(key) { self.set_page(i); }
         self
     }
 
@@ -261,7 +261,7 @@ impl Settings {
         if self.page != i {
             self.page_scrolls.insert(self.page, self.scroll.y);
             self.page = i;
-            hub::set(PAGE_KEY, Some(PAGES[i].0.to_string()));
+            hub::set(PAGE_KEY, Some(PAGES[i].key.to_string()));
             let saved_y = self.page_scrolls.get(&i).copied().unwrap_or(0.0);
             self.scroll = Scroll::default();
             self.scroll.y = saved_y;
@@ -422,8 +422,8 @@ impl Settings {
 
     fn ensure_loaded(&mut self, cx: &Ctx) {
         if self.rendering { return; }
-        match PAGES[self.page].0 {
-            "presets" => {
+        match self.current_page() {
+            Page::Presets => {
                 if matches!(self.online, Load::Idle) {
                     self.online = Load::Loading;
                     store::bridge(cx, &self.inbox, "presets-online", vec![], |s, r| {
@@ -450,7 +450,7 @@ impl Settings {
                     store::bridge(cx, &self.inbox, "presets-local", vec![], |s, r| s.local = Load::Ready(r["presets"].as_array().cloned().unwrap_or_default()));
                 }
             }
-            "wallpapers" => {
+            Page::Wallpapers => {
                 if matches!(self.we, Load::Idle) {
                     self.we = Load::Loading;
                     store::bridge(cx, &self.inbox, "we-status", vec![], |s, r| s.we = Load::Ready(if r["error"].is_string() || r.is_null() { json!({ "installed": false }) } else { r }));
@@ -460,7 +460,7 @@ impl Settings {
                     store::bridge(cx, &self.inbox, "we-list", vec![], |s, r| s.we_list = Load::Ready(r["items"].as_array().cloned().unwrap_or_default()));
                 }
             }
-            "quick" => {
+            Page::Quick => {
                 if matches!(self.wmons, Load::Idle) {
                     self.wmons = Load::Loading;
                     store::bridge(cx, &self.inbox, "wall-monitors", vec![], |s, r| s.wmons = Load::Ready(r["monitors"].as_array().cloned().unwrap_or_default()));
@@ -476,12 +476,12 @@ impl Settings {
                 }
             }
             // the buddies page lists the same models, for "Screen help model"
-            "services" | "buddies" => {
-                if PAGES[self.page].0 == "services" && matches!(self.keys, Load::Idle) {
+            Page::Services | Page::Buddies => {
+                if self.current_page() == Page::Services && matches!(self.keys, Load::Idle) {
                     self.keys = Load::Loading;
                     store::bridge(cx, &self.inbox, "secret-status", vec![], |s, r| s.keys = Load::Ready(if r["error"].is_string() || r.is_null() { json!({}) } else { r }));
                 }
-                if PAGES[self.page].0 == "services" && matches!(self.claude, Load::Idle) && crate::bridge::claude_installed() {
+                if self.current_page() == Page::Services && matches!(self.claude, Load::Idle) && crate::bridge::claude_installed() {
                     self.claude = Load::Loading;
                     store::bridge(cx, &self.inbox, "claude-accounts", vec![], |s, r| s.claude = Load::Ready(if r.is_null() { json!({}) } else { r }));
                 }
@@ -500,7 +500,7 @@ impl Settings {
     }
 
     fn loading(&self) -> bool {
-        matches!(PAGES[self.page].0, "presets" | "wallpapers" | "services")
+        matches!(self.current_page(), Page::Presets | Page::Wallpapers | Page::Services)
             && [matches!(self.online, Load::Loading), matches!(self.local, Load::Loading), matches!(self.we, Load::Loading), matches!(self.we_list, Load::Loading),
                 matches!(self.keys, Load::Loading), matches!(self.claude, Load::Loading), matches!(self.models, Load::Loading)].contains(&true)
     }
@@ -591,7 +591,7 @@ impl Settings {
             Act::Goto(i, sect, label) => {
                 if let Some(f) = self.fields.get_mut(SEARCH) { f.tb.set(""); }
                 self.focus = None;
-                hub::set(GOTO, Some(format!("{}|{sect}|{label}", PAGES[i].0)));
+                hub::set(GOTO, Some(format!("{}|{sect}|{label}", PAGES[i].key)));
                 self.set_page(i);
             }
             Act::Slider(..) | Act::Field(..) => {}
@@ -1094,7 +1094,17 @@ impl Settings {
                     s.toast(&if r["ok"] == true { ok.to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() });
                 });
             }
-            "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| s.keys = Load::Idle),
+            "clear-key" => store::bridge(cx, &inbox, "secret-set", vec![arg], |s, _| {
+                s.keys = Load::Idle;
+                // a cleared Discord token stops the bot
+                crate::messaging::sync();
+            }),
+            // a new pairing code for the Discord bot; the card shows it until it is used or runs out
+            "discord-pair" => { crate::messaging::pairing::new_code(std::time::Instant::now()); }
+            // the account stops reaching the buddy from its next message
+            "discord-revoke" => {
+                if let Ok(id) = arg.parse::<u64>() { crate::messaging::pairing::unpair(crate::messaging::DISCORD, id); }
+            }
             "save-key" => {
                 let Some(f) = self.fields.get_mut(&format!("key-{arg}")) else { return };
                 let v = f.tb.text.trim().to_string();
@@ -1102,6 +1112,8 @@ impl Settings {
                 f.tb.set("");
                 store::bridge(cx, &inbox, "secret-set", vec![arg, v], |s, r| {
                     s.keys = Load::Idle;
+                    // a new Discord token takes effect at once
+                    crate::messaging::sync();
                     let m = if r["ok"] == true { "Key saved".to_string() } else { r["error"].as_str().unwrap_or("Failed").to_string() };
                     s.toast(&m);
                 });
@@ -1161,7 +1173,7 @@ impl View for Settings {
 
     fn key(&self, _: &Ctx) -> String {
         // the Usage page redraws every second
-        let tick = if PAGES[self.page].0 == "usage" { (hub::now_ms() / 1000.0) as u64 } else { 0 };
+        let tick = if self.current_page() == Page::Usage { (hub::now_ms() / 1000.0) as u64 } else { 0 };
         format!("{}{}{tick}{}", self.toast.is_some(), self.busy, self.flash.is_some())
     }
 
@@ -1169,7 +1181,7 @@ impl View for Settings {
         if self.rendering { 0 }
         else if self.scroll.moving() { 16 }
         else if self.toast.is_some() || self.flash.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
-        else if PAGES[self.page].0 == "usage" { 1000 }
+        else if self.current_page() == Page::Usage { 1000 }
         else if (self.focus.is_some() && self.active) || self.picker.is_some() { 500 }
         else { 0 }
     }
@@ -1196,7 +1208,7 @@ impl View for Settings {
         let goto = hub::get(GOTO).and_then(|g| parse_goto(&g));
         if let Some((page, _, _)) = &goto {
             hub::set(GOTO, None);
-            if let Some(i) = PAGES.iter().position(|p| p.0 == page) { self.set_page(i); }
+            if let Some(i) = registry::index_of_key(page) { self.set_page(i); }
         }
         let (w, h) = (c.w, c.h);
         if self.index.is_empty() && !self.query().is_empty() { self.build_index(c, cx); }
@@ -1220,10 +1232,11 @@ impl View for Settings {
         sc.region(c, cx, lr, ch, |c, top| {
             let mut pen = Pen::new(c, cx, crate::tokens::NAV_X, top, nav_w, 0.0, h);
             pen.acts = std::mem::take(&mut nav_acts);
-            for (i, (_, ic, label)) in PAGES.iter().enumerate() {
-                let y = top + i as f32 * NAV_STEP;
+            // rows are placed by nav position; the page index (Act::Page, self.page) stays the PAGES index
+            for (row, i) in registry::nav_order().into_iter().enumerate() {
+                let y = top + row as f32 * NAV_STEP;
                 if y + NAV_ITEM_H < lr.y || y > lr.y + lr.h { continue; } // hit spots ignore the clip
-                self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, nav_w, NAV_ITEM_H), ic, label, Act::Page(i), i == self.page);
+                self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, nav_w, NAV_ITEM_H), PAGES[i].icon, PAGES[i].title, Act::Page(i), i == self.page);
             }
             nav_acts = pen.acts;
         });
@@ -1234,7 +1247,7 @@ impl View for Settings {
         let r = R::new(page_x, crate::tokens::PAGE_Y, w - page_x - 22.0, h - crate::tokens::PAGE_Y - 22.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
         let (ch, heads, tags) = {
-            let mut dry = Pen::new(c, cx, r.x, r.y, r.w - SCROLL_GAP, r.y, r.y + r.h);
+            let mut dry = Pen::new(c, cx, r.x, r.y, r.w - crate::tokens::SCROLL_GUTTER, r.y, r.y + r.h);
             dry.dry = true;
             self.page(&mut dry);
             (dry.y - r.y, dry.heads, dry.tags)
@@ -1250,7 +1263,7 @@ impl View for Settings {
         if self.flash.as_ref().is_some_and(|f| f.2 < now) { self.flash = None; }
         let flash = self.flash.as_ref().map(|(s, l, end)| (s.clone(), l.clone(), ((end - now) / FLASH_MS).clamp(0.0, 1.0) as f32));
         sc.region(c, cx, r, ch, |c, top| {
-            let mut pen = Pen::new(c, cx, r.x, top, r.w - SCROLL_GAP, r.y, r.y + r.h);
+            let mut pen = Pen::new(c, cx, r.x, top, r.w - crate::tokens::SCROLL_GUTTER, r.y, r.y + r.h);
             pen.flash = flash;
             pen.acts = std::mem::take(&mut acts);
             self.page(&mut pen);
@@ -1451,7 +1464,7 @@ impl Settings {
         let words: Vec<String> = self.query().split_whitespace().map(String::from).collect();
         let hits: Vec<_> = self.index.iter().filter(|(i, s, l, sub)| {
             let cat = pages::category_of_page(*i);
-            let hay = format!("{} {} {s} {l} {sub}", cat, PAGES[*i].2).to_lowercase();
+            let hay = format!("{} {} {s} {l} {sub}", cat, PAGES[*i].title).to_lowercase();
             words.iter().all(|w| hay.contains(w))
         }).take(40).cloned().collect();
         p.h2("search", "Search results", &format!("{} matches", hits.len()));
@@ -1464,7 +1477,7 @@ impl Settings {
             for (i, sect, label, sub) in hits {
                 let Some(r) = p.row(44.0) else { continue };
                 let cat = pages::category_of_page(i);
-                let sub = if sub.is_empty() { format!("{cat} · {}", PAGES[i].2) } else { format!("{cat} · {} > {sub}", PAGES[i].2) };
+                let sub = if sub.is_empty() { format!("{cat} · {}", PAGES[i].title) } else { format!("{cat} · {} > {sub}", PAGES[i].title) };
                 let want = if label == sect { String::new() } else { label.clone() }; // a section title has no control to flash
                 let id = p.act(Act::Goto(i, sect, want));
                 if p.c.hit(r, id) { p.c.rect(r, 12.0, alpha(p.col("onSurface"), 0.08)); }
@@ -1657,10 +1670,10 @@ mod tests {
     #[test]
     fn saved_page_falls_back_to_quick() {
         let last = PAGES.len() - 1;
-        assert_eq!(super::page_from_key(Some(PAGES[last].0)), last);
+        assert_eq!(super::page_from_key(Some(PAGES[last].key)), last);
         assert_eq!(super::page_from_key(Some("nope")), 0);
         assert_eq!(super::page_from_key(None), 0);
-        assert_eq!(PAGES[0].0, "quick");
+        assert_eq!(PAGES[0].key, "quick");
     }
 
     #[test]
@@ -1801,10 +1814,10 @@ mod tests {
 
     #[test]
     fn contacts_have_their_own_page_right_after_buddies() {
-        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.key).collect();
         let b = keys.iter().position(|k| *k == "buddies").unwrap();
         assert_eq!(keys[b + 1], "contacts");
-        assert_eq!(PAGES[b + 1].2, "Contacts");
+        assert_eq!(PAGES[b + 1].title, "Contacts");
         assert_eq!(super::page_from_key(Some("contacts")), b + 1);
         let mut sorted = keys.clone();
         sorted.sort();
@@ -1836,9 +1849,13 @@ mod tests {
     }
 
     #[test]
-    fn every_page_fits_a_default_height_window() {
-        let (r, ch) = nav_list(209.0, 870.0);
-        assert!(ch <= r.h, "{} pages need {ch}, the list has {}", PAGES.len(), r.h);
+    fn the_nav_is_as_tall_as_its_pages_and_scrolls_when_short() {
+        // The list scrolls rather than clipping: every page's row fits in the scroll height, at any window height.
+        for h in [870.0, 1200.0] {
+            let (r, ch) = nav_list(209.0, h);
+            assert_eq!(ch, PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H), "scroll height at window {h}");
+            assert!(r.h > 0.0, "the list has room at window {h}");
+        }
     }
 
     #[test]
@@ -2062,17 +2079,17 @@ mod tests {
 
     #[test]
     fn voice_has_its_own_page_after_the_creator() {
-        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.key).collect();
         let c = keys.iter().position(|k| *k == "creator").unwrap();
-        assert_eq!((keys[c + 1], PAGES[c + 1].2), ("voice", "Voice"));
+        assert_eq!((keys[c + 1], PAGES[c + 1].title), ("voice", "Voice"));
         assert_eq!(super::page_from_key(Some("voice")), c + 1);
     }
 
     #[test]
     fn the_creator_has_its_own_page_after_contacts_and_sensible_defaults() {
-        let keys: Vec<&str> = PAGES.iter().map(|p| p.0).collect();
+        let keys: Vec<&str> = PAGES.iter().map(|p| p.key).collect();
         let c = keys.iter().position(|k| *k == "contacts").unwrap();
-        assert_eq!((keys[c + 1], PAGES[c + 1].2), ("creator", "Create a buddy"));
+        assert_eq!((keys[c + 1], PAGES[c + 1].title), ("creator", "Create a buddy"));
         assert_eq!(super::page_from_key(Some("creator")), c + 1);
         let mut st = s();
         let cx = Ctx::new(false);
@@ -2145,7 +2162,7 @@ mod tests {
         let mut cx = Ctx::new(false);
         st.do_named(&mut cx, "new-buddy", "b".into());
         assert_eq!(st.get(&cx, "buddies.custom").as_array().map(Vec::len), Some(1));
-        assert!(SCROLL_GAP >= 12.0);
+        assert!(crate::tokens::SCROLL_GUTTER >= 12.0);
     }
 
     #[test]

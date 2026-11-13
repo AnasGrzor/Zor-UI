@@ -1,6 +1,6 @@
 [package]
 name = "zor-setup"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "Graphical installer and uninstaller for Zor UI. Embeds the release zip and runs install.ps1 behind a wizard window."
 

@@ -155,12 +155,12 @@ pub fn search_all(conn: &Connection, query: &str, k: usize) -> rusqlite::Result<
 }
 
 /// The query's words that count for matching: not common, not in `drop`.
-fn terms(query: &str, drop: &[&str]) -> Vec<String> {
+pub(crate) fn terms(query: &str, drop: &[&str]) -> Vec<String> {
     words(query).into_iter().filter(|w| !STOP.contains(&w.as_str()) && !drop.contains(&w.as_str())).collect()
 }
 
 /// Each word is letters and digits only, so quoting it can't break the search syntax.
-fn quote(t: &str) -> String { format!("\"{t}\"") }
+pub(crate) fn quote(t: &str) -> String { format!("\"{t}\"") }
 
 fn ranked(conn: &Connection, expr: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
     let mut stmt = conn.prepare(

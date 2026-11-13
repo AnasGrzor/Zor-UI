@@ -17,7 +17,7 @@ pub(crate) mod agent_restart;
 pub(crate) mod permit;
 pub(crate) mod common;
 mod agy_usage;
-mod football;
+pub(crate) mod football;
 pub mod listen;
 mod media;
 pub mod native_tools;

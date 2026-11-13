@@ -9,9 +9,8 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 
 const LATEST: &str = "https://api.github.com/repos/AnasGrzor/Zor-UI/releases/latest";
-/// The release assets that hold the app, newest name first. "payload.zip" is what builds up to 0.1.2 ask for, so
-/// releases keep shipping it for one version; then drop it here and in scripts/build-release.ps1.
-const ASSETS: [&str; 2] = ["zorui-app.zip", "payload.zip"];
+/// The release asset that holds the app.
+const ASSETS: [&str; 1] = ["zorui-app.zip"];
 /// Where the download is saved.
 const SAVED: &str = "update.zip";
 
@@ -125,14 +124,14 @@ mod tests {
 
     #[test]
     fn finds_the_app_asset() {
+        let app = json!({ "assets": [
+            { "name": "ZorUI-Setup.exe", "browser_download_url": "https://x/setup" },
+            { "name": "zorui-app.zip", "browser_download_url": "https://x/app" } ] });
+        assert_eq!(asset_url(&app), Some("https://x/app"));
         let old = json!({ "assets": [
             { "name": "ZorUI-Setup.exe", "browser_download_url": "https://x/setup" },
             { "name": "payload.zip", "browser_download_url": "https://x/payload" } ] });
-        assert_eq!(asset_url(&old), Some("https://x/payload"));
-        let both = json!({ "assets": [
-            { "name": "payload.zip", "browser_download_url": "https://x/payload" },
-            { "name": "zorui-app.zip", "browser_download_url": "https://x/app" } ] });
-        assert_eq!(asset_url(&both), Some("https://x/app"));
+        assert_eq!(asset_url(&old), None, "payload.zip is no longer an app asset");
         assert_eq!(asset_url(&json!({ "assets": [] })), None);
     }
 

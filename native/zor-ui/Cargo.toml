@@ -1,6 +1,6 @@
 [package]
 name = "zor-ui"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "Zor UI: a native Windows desktop shell (bar, island, sidebars, desktop cards), drawn on the CPU in one process."
 
@@ -83,6 +83,11 @@ windows = { version = "0.58", features = [
   "Win32_System_Environment",
 ] }
 rusqlite = { version = "0.38", features = ["bundled"] }
+# the Discord bot (messaging/discord.rs). Off by default: the normal build does not compile it.
+serenity = { version = "0.12.5", default-features = false, features = ["client", "gateway", "model", "http", "rustls_backend"], optional = true }
+
+[features]
+discord = ["dep:serenity"]
 
 [profile.release]
 lto = true

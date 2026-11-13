@@ -30,6 +30,7 @@ mod keymap;
 mod cast;
 mod claude_usage;
 mod log;
+mod messaging;
 mod lyrics;
 mod media;
 mod mcp;

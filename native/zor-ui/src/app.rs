@@ -55,6 +55,8 @@ pub struct Ctx {
     pub agents: Vec<serde_json::Value>,
     /// The apps holding the microphone and camera (polled every tick while the island shows it).
     pub privacy: crate::privacy::Privacy,
+    /// Bumped on each clipboard change, so an open island panel refetches its history.
+    pub clip_seq: u32,
     /// Bumps whenever any of the above changes; windows repaint on a new version.
     pub ver: u64,
     /// Views animate. False when Windows' Animation effects are off or reducedMotion is set: values snap (anim::animate).
@@ -93,7 +95,7 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, agents: vec![], privacy: Default::default(), ver: 0, motion: true, all, actions: vec![],
+            notif: None, osd: None, agents: vec![], privacy: Default::default(), clip_seq: 0, ver: 0, motion: true, all, actions: vec![],
         }
     }
 
@@ -127,6 +129,8 @@ pub struct App {
     bars_edge: bar::Edge,
     /// Open sidebars / overview / island panel / settings.
     pops: Vec<Pop>,
+    /// Closed island panels still shrinking back into the island (see `Win::shrink`).
+    closing: Vec<Win>,
     /// The right-click menu (and when it opened).
     menu: Option<(Win, f64)>,
     /// A UTF-16 high surrogate from WM_CHAR waiting for its pair.
@@ -259,11 +263,12 @@ impl App {
         let msg = unsafe {
             CreateWindowExW(WINDOW_EX_STYLE(0), win::CLASS, windows::core::w!("zor-ui"), WINDOW_STYLE(0), 0, 0, 0, 0, HWND_MESSAGE, None, None, None)?
         };
+        unsafe { let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(msg); } // WM_CLIPBOARDUPDATE on every copy
         MSG_HWND.store(msg.0 as isize, Ordering::Relaxed);
         let mut app = App {
             g,
             cx: Ctx { agents: hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default(), ..Ctx::new(all) },
-            wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
+            wins: vec![], bars: vec![], bars_edge: bar::Edge::Top, pops: vec![], closing: vec![], menu: None, hi: 0, last_focus: None, popup: None, pending: None, shown: None, jobs,
             cfg_file: Watched::new(pack.join("config.json")),
             ws_main: None,
             theme_file: Watched::new(pack.join("theme.json")),
@@ -274,6 +279,8 @@ impl App {
         buddy::sync(&mut app);
         // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
         crate::agent::resume_on_start();
+        // the chat bots (Discord, when built with the feature and enabled in Settings), on their own threads
+        crate::messaging::sync();
         dock::sync(&mut app);
         frame::sync(&mut app);
         guides::sync(&mut app);
@@ -391,6 +398,8 @@ impl App {
                 crate::log::line("config.json isn't valid JSON; keeping the last good settings");
             } else {
                 self.cx.cfg = Config::parse(&t);
+                // a switch in Settings turns a chat bot on or off here, without a restart
+                crate::messaging::sync();
                 self.g.set_font(self.cx.cfg.str("font.family"), self.cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32,
                     self.cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
                 let m = self.cx.cfg.get("workspacesMain").as_u64().unwrap_or(5) as u32;
@@ -438,9 +447,9 @@ impl App {
     /// Keeps a fast timer running while any view animates.
     fn frames(&mut self) {
         if self.game.is_some() { return; }
-        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
+        let ms = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.closing.iter()).chain(self.menu.iter().map(|m| &m.0)).map(|w| if w.gliding { 16 } else { w.view.frame_ms() }).chain(self.cx.theme.animating().then_some(16)).filter(|&m| m > 0).min().unwrap_or(0);
         // a 16 ms view counts as gliding too: its frames need the 1 ms timer resolution (the island spring never set gliding)
-        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
+        let glide = self.bars.iter().chain(self.wins.iter()).chain(self.pops.iter().map(|p| &p.win)).chain(self.closing.iter()).chain(self.menu.iter().map(|m| &m.0)).any(|w| w.gliding || w.view.frame_ms() == 16);
         if glide != self.hires {
             unsafe { if glide { windows::Win32::Media::timeBeginPeriod(1); } else { windows::Win32::Media::timeEndPeriod(1); } }
             self.hires = glide;
@@ -465,6 +474,24 @@ impl App {
         media::MIC_WATCH.store(new.mic.is_some(), std::sync::atomic::Ordering::Relaxed);
         cx.privacy = new;
         cx.ver += 1;
+    }
+
+    /// A copy happened: the island peeks at it (unless a password manager marked it private) and an open panel refetches.
+    fn clip_changed(&mut self) {
+        let cx = &mut self.cx;
+        cx.clip_seq = cx.clip_seq.wrapping_add(1);
+        cx.ver += 1;
+        let on = cx.island_shown() && cx.cfg.get("island.clipboardPeek").as_bool() != Some(false);
+        if on && !util::clipboard_private() {
+            let text = match util::clipboard_get() {
+                Some(t) => crate::island::peek_text(&t),
+                None if util::clipboard_has(util::CF_DIB) => "Image copied".to_string(),
+                None => String::new(),
+            };
+            if !text.is_empty() {
+                cx.osd = Some(Osd { icon: "content_copy", value: None, text, until: hub::now_ms() + 2500.0 });
+            }
+        }
     }
 
     /// Hides the shell while a game (any full-screen app) is in front, and restores it after.
@@ -543,6 +570,7 @@ impl App {
         let shows = |id: &str| self.wins.iter().any(|w| w.drag_key.as_deref() == Some(id));
         if n.is_multiple_of(3) && (bars || shows("resources")) {
             self.cx.cpu = self.cpu.usage();
+            crate::util::set_cpu(self.cx.cpu);
             self.cx.mem = util::memory_usage();
             if shows("resources") || popups { self.cx.disk = util::disk_usage(); }
             self.cx.ver += 1;
@@ -645,6 +673,7 @@ impl App {
         let s = dpi_scale(rect);
         let area = popup::area(name, (rect.right - rect.left) as f32 / s, (rect.bottom - rect.top) as f32 / s, self.cx.bar_edge());
         let Some(view) = popup::make(name, area) else { return };
+        self.closing.clear(); // a reopen mid-shrink replaces the closing panel, never stacks on it
         let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
         if name == "island-panel" { w.grow = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom)); }
@@ -663,10 +692,20 @@ impl App {
 
     pub fn close(&mut self, name: &str) {
         if let Some(i) = self.pops.iter().position(|p| p.name == name) {
-            self.pops.remove(i);
+            let p = self.pops.remove(i);
             self.hide_popup(); // its tooltip goes with it
             crate::gfx::drop_backdrops();
             hub::set(&format!("zor-ui.closedAt.{name}"), Some(hub::now_ms().to_string()));
+            if name == "island-panel" && self.cx.motion {
+                // the panel shrinks back into the island, then FRAME drops it
+                let mut w = p.win;
+                w.grow = None;
+                w.shrink = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom));
+                w.set_focusable(false);
+                w.pass_mouse();
+                w.gliding = true; // 16 ms frames from the first shrink frame
+                self.closing.push(w);
+            }
             self.frames();
         }
     }
@@ -806,12 +845,16 @@ impl App {
                         w.update(&self.g, &self.cx, due);
                         trace_part(w.part_name(), due, tu.elapsed()); // TEMP frametrace
                     }
+                    // a closing panel repaints every frame (its key doesn't change while it shrinks), then goes
+                    for w in self.closing.iter_mut() { w.update(&self.g, &self.cx, true); }
+                    self.closing.retain(|w| !w.shrunk());
                     self.menu_check();
                     self.frames();
                     trace_frame(t0.elapsed(), self.frame); // TEMP frametrace
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
                 (WM_TIMER, OUTSIDE) => self.outside_check(),
+                (WM_CLIPBOARDUPDATE, _) => self.clip_changed(),
                 (crate::appicon::CALLBACK, _) => match lp.0 as u32 & 0xFFFF {
                     WM_LBUTTONUP => self.open("settings", None, None),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
@@ -891,7 +934,9 @@ impl App {
                 }
                 if !click { self.popup_check(self.bars.len() + i); }
                 if self.wins[i].drag_key.is_some() { guides::refresh(self); }
-                self.wins[i].update(&self.g, &self.cx, false);
+                // a click repaints at once: the buddy's bubble and hop change no key the frame check reads
+                let up = matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_LBUTTONDBLCLK);
+                self.wins[i].update(&self.g, &self.cx, up);
                 self.frames(); // a wheel may have started a scroll glide
             }
         }
@@ -974,7 +1019,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
     }
     const MOUSE: [u32; 10] = [WM_MOUSEMOVE, win::WM_MOUSELEAVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_LBUTTONDBLCLK, WM_MOUSEWHEEL];
-    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
+    let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | WM_CLIPBOARDUPDATE | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
     if ours(msg) || matches!(msg, WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SYSKEYDOWN | WM_ACTIVATE) {
         // try_borrow: a call made while handling a message (SetWindowPos, DestroyWindow) can re-enter here
         APP.with(|a| if let Ok(mut a) = a.try_borrow_mut() { if let Some(app) = a.as_mut() { app.on(hwnd, msg, wp, lp); } });

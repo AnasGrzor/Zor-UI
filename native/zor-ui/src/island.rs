@@ -30,8 +30,7 @@ const CLEAR: u32 = 8;
 const LYRICS: u32 = 9;
 /// The volume slider under the transport controls: the playing app's volume (master when it isn't in the mixer).
 const VOL: u32 = 19;
-/// Gap above the volume slider, and the slider's height (ui::slider is a pill: its radius is half this).
-const VOL_GAP: f32 = 8.0;
+/// The volume slider's height (ui::slider is a pill: its radius is half this). Its gap is `tokens::ISLAND_VOL_GAP`.
 const VOL_H: f32 = 34.0;
 /// Most lines the buddy's question shows before it scrolls.
 const ASK_MAX_LINES: f32 = 8.0;
@@ -41,6 +40,9 @@ const AGENT_CLEAR: u32 = 12;
 /// Allow and Deny for a Claude Code permission prompt (permit.rs); the same block as the buddy's question.
 const PERMIT_ALLOW: u32 = 17;
 const PERMIT_DENY: u32 = 18;
+/// A plan or question's option rows (PERMIT_OPT + question * PERMIT_MAX + option, 20..36) and its Send chip.
+const PERMIT_OPT: u32 = 20;
+const PERMIT_SEND: u32 = 40;
 /// The open notification's buttons and its body (the list rows are NOTIF + index).
 const NOTIF_BACK: u32 = 130;
 const NOTIF_OPEN: u32 = 131;
@@ -52,7 +54,17 @@ const ASK_SEND: u32 = 15;
 const ASK_MIC: u32 = 16;
 const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
-/// The tab row: TAB + the tab's index (Now, Agents, Inbox). Above NOTIF + index, so input() checks it first.
+/// Clipboard rows are CLIP + position. Matched before the notification catch-all (`i >= NOTIF`).
+const CLIP: u32 = 150;
+const CLIP_MAX: usize = 30;
+/// Seconds the clipboard history may take before the section shows an error instead of "Loading…".
+const CLIP_WAIT_S: u64 = 8;
+/// Thumbnail box, and the space inside a history row (card rule: at least 12 px).
+const CLIP_THUMB: f32 = 36.0;
+/// Most characters a history row shows: two lines at panel width.
+const CLIP_CHARS: usize = 80;
+
+/// The tab row: TAB + the tab's index (Now, Agents, Inbox, Clipboard). Above NOTIF + index, so input() checks it first.
 const TAB: u32 = 200;
 const TABS_H: f32 = 30.0;
 /// AI agents spacing: from the usage bars to the first session, between session cards, between agents, and inside a card.
@@ -62,7 +74,6 @@ const AGENT_GAP: f32 = crate::tokens::SECTION_GAP;
 const CARD_PAD: f32 = crate::tokens::CARD_INSET;
 const USAGE_GAP: f32 = crate::tokens::USAGE_GAP;
 const BLOCK_GAP: f32 = crate::tokens::BLOCK_GAP;
-const CARD_R: f32 = 14.0;
 /// Padding above and below the filter chips, inside the chips row.
 const CHIPS_PAD: f32 = crate::tokens::CHIP_EDGE_PAD;
 /// The filter chips row under the AI agents title: the chips with CHIPS_PAD above and below, then their gap.
@@ -77,10 +88,11 @@ const AGENT_TOGGLE: u32 = 240;
 /// A session card: a tap brings its window forward, or resumes it when it has ended. SESSION + index into `cards`.
 const SESSION: u32 = 280;
 
-/// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
-/// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
 /// Agents carries the sessions the filter shows and (needs you, working, idle) counted over all of them.
-enum Sec { Ask(String), Permit(String, String), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value) }
+/// Ask: the buddy's question. Permit: what Claude Code wants to do, and the plan or questions it asks (Null for a plain
+/// permission); the answer finds its session itself.
+/// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
+enum Sec { Ask(String), Permit(String, String, Value), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value), Clips(Vec<Value>, String) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -110,7 +122,11 @@ pub struct Island {
     notif_open: Option<Value>,
     body_scroll: ui::Scroll,
     body_full: f32,
-    /// The open tab: 0 Now, 1 Agents, 2 Inbox. Asks and permission prompts show above it whatever it is.
+    /// The clipboard history (None until loaded), the clip_seq it was loaded at, and decoded thumbnails by path.
+    clips: Arc<Mutex<Option<Value>>>,
+    clip_seen: Option<u32>,
+    thumbs: Vec<(String, Option<Pixmap>)>,
+    /// The open tab: 0 Now, 1 Agents, 2 Inbox, 3 Clipboard. Asks and permission prompts show above it whatever it is.
     tab: u8,
     /// The filter chip on: "waiting", "working" or "idle"; None shows every session.
     filter: Option<&'static str>,
@@ -118,6 +134,9 @@ pub struct Island {
     collapsed: Vec<String>,
     /// (agent id, session id) of each session card the last paint drew, in hit order.
     cards: Vec<(String, String)>,
+    /// The options picked per question of the waiting question, and the session they were picked for (a new one clears them).
+    picks: Vec<Vec<usize>>,
+    picks_for: String,
 }
 
 impl Island {
@@ -126,17 +145,17 @@ impl Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
             seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), vol_r: R::default(), vol: Default::default(), mix: AppMix::default(), tkind: (false, false), frames: Cell::new(0),
             reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
-            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: if std::env::var_os("ZORUI_SAMPLE").is_some() { 0 } else { 1 }, filter: None, collapsed: Vec::new(), cards: Vec::new() } // --render (ZORUI_SAMPLE) opens on Now, where the media is
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0, clips: Default::default(), clip_seen: None, thumbs: vec![], tab: if std::env::var_os("ZORUI_SAMPLE").is_some() { 0 } else { 1 }, filter: None, collapsed: Vec::new(), cards: Vec::new(), picks: vec![], picks_for: String::new() } // --render (ZORUI_SAMPLE) opens on Now, where the media is
     }
 
     /// Whether a section belongs to the open tab (asks and permission prompts are handled before this).
     fn in_tab(&self, sec: &Sec) -> bool {
-        matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)))
+        matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)) | (3, Sec::Clips(..)))
     }
 }
 
 /// Top of the lyrics, measured from the controls' top: 70 px, or further down by the volume row when it is shown.
-fn lyrics_top(volume: bool) -> f32 { 70.0 + if volume { VOL_GAP + VOL_H } else { 0.0 } }
+fn lyrics_top(volume: bool) -> f32 { 70.0 + if volume { crate::tokens::ISLAND_VOL_GAP + VOL_H } else { 0.0 } }
 
 /// Width the question wraps to. The text is drawn 8 px narrower than the row, so the height is measured at the same width.
 fn question_width() -> f32 { W - 2.0 * PAD - 8.0 }
@@ -146,6 +165,66 @@ fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
 
 /// Height of the whole ask section for a question that wraps to `full` px.
 fn ask_section_h(full: f32) -> f32 { 16.0 + 10.0 + ask_h(full) + 12.0 + ASK_BOX_H + 10.0 + 32.0 }
+
+/// A plan or question permit takes up to PERMIT_MAX questions, each with up to PERMIT_MAX options (the ids allow no more).
+const PERMIT_MAX: usize = 4;
+/// Gap between questions, and between the last question and the reply box (the card rule's 12 px).
+const PERMIT_GAP: f32 = crate::tokens::SP_M;
+
+/// The array under `key` of `v`, empty when there is none.
+fn items<'a>(v: &'a Value, key: &str) -> &'a [Value] { v[key].as_array().map_or(&[], |a| a.as_slice()) }
+/// The questions of a question choice, at most PERMIT_MAX.
+fn questions_of(choice: &Value) -> &[Value] { let q = items(choice, "questions"); &q[..q.len().min(PERMIT_MAX)] }
+/// The options of one question, at most PERMIT_MAX.
+fn options_of(q: &Value) -> &[Value] { let o = items(q, "options"); &o[..o.len().min(PERMIT_MAX)] }
+/// Several questions, or one that takes several picks: the Send chip gives the answers, a tap does not.
+fn needs_send(qs: &[Value]) -> bool { qs.len() > 1 || qs.iter().any(|q| q["multiSelect"] == true) }
+/// Width of an option's text: the row less CARD_PAD on each side.
+fn option_w() -> f32 { W - 2.0 * PAD - 2.0 * CARD_PAD }
+/// Height of an option row: CARD_PAD above and below the label, and the wrapped description under it (4 px gap).
+fn option_h(g: &Gfx, o: &Value) -> f32 {
+    let label = g.measure_wrapped(o["label"].as_str().unwrap_or(""), txt(13.0, 500), option_w());
+    let desc = o["description"].as_str().unwrap_or("");
+    let desc_h = if desc.is_empty() { 0.0 } else { 4.0 + g.measure_wrapped(desc, txt(12.0, 400), option_w()) };
+    2.0 * CARD_PAD + label + desc_h
+}
+/// Height of one question: its header (if any), the wrapped text, 8 px, then its option rows with SESS_GAP between them.
+fn question_h(g: &Gfx, q: &Value) -> f32 {
+    let header = if q["header"].as_str().is_some_and(|h| !h.is_empty()) { lh(12.0) + 4.0 } else { 0.0 };
+    let text = g.measure_wrapped(q["question"].as_str().unwrap_or(""), txt(13.0, 400), question_width());
+    let opts = options_of(q);
+    header + text + 8.0 + opts.iter().map(|o| option_h(g, o)).sum::<f32>() + SESS_GAP * opts.len().saturating_sub(1) as f32
+}
+/// Height of a plan or question permit as permit_choice draws it: the head, the body, the reply box and the chips row.
+fn permit_choice_h(g: &Gfx, choice: &Value) -> f32 {
+    let body = if choice["kind"] == "plan" {
+        ask_h(g.measure_wrapped(choice["plan"].as_str().unwrap_or(""), txt(13.0, 400), question_width())) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0
+    } else {
+        let qs = questions_of(choice);
+        let blocks: f32 = qs.iter().map(|q| question_h(g, q) + PERMIT_GAP).sum();
+        blocks + ASK_BOX_H + if needs_send(qs) { 10.0 + 32.0 } else { 0.0 }
+    };
+    26.0 + body
+}
+
+/// The first line of a copied text, its spaces collapsed, cut to 48 characters: what the island's peek shows. "" when blank.
+pub fn peek_text(s: &str) -> String {
+    let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    clip_cut(&line.split_whitespace().collect::<Vec<_>>().join(" "), 48)
+}
+
+/// A history row's text: all of it with spaces collapsed, cut to `CLIP_CHARS`.
+fn clip_text(s: &str) -> String { clip_cut(&s.split_whitespace().collect::<Vec<_>>().join(" "), CLIP_CHARS) }
+
+fn clip_cut(s: &str, n: usize) -> String {
+    if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
+}
+
+/// Height of one history row: a thumbnail, or two lines of text, with the row padding on both sides.
+fn clip_row_h(image: bool) -> f32 { 2.0 * CARD_PAD + if image { CLIP_THUMB } else { clip_text_h() } }
+
+/// Two lines of history text, plus 4 px so the box is never tighter than its lines.
+fn clip_text_h() -> f32 { lh(13.0) * 2.0 + 4.0 }
 
 /// island-panel.js `ago`: "now", "5m", "3h", "2d".
 pub fn ago(now: f64, t: f64) -> String {
@@ -294,10 +373,13 @@ impl Island {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
         if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())); v.push((Sec::Ask(q), h)); }
-        if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
+        if let Some((label, _, q, choice)) = crate::bridge::permit::pending() {
+            let h = if choice.is_null() { ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())) } else { permit_choice_h(g, &choice) };
+            v.push((Sec::Permit(format!("{label} is asking"), q, choice), h));
+        }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
-        let vol = if self.vol_level(cx).is_some() { VOL_GAP + VOL_H } else { 0.0 };
+        let vol = if self.vol_level(cx).is_some() { crate::tokens::ISLAND_VOL_GAP + VOL_H } else { 0.0 };
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + vol + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
         if dp(cx, "recording") && hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
         let t = hub::timer();
@@ -329,6 +411,24 @@ impl Island {
                 v.push((Sec::Notifs(n), h));
             }
         }
+        if dp(cx, "clipboard") {
+            let count = cx.cfg.get("island.panel.clipCount").as_u64().unwrap_or(3) as usize;
+            let (items, note) = match self.clips.lock().ok().and_then(|c| c.clone()) {
+                None => (vec![], "Loading…".to_string()),
+                Some(v) => match v["error"].as_str() {
+                    Some(e) => (vec![], e.to_string()),
+                    None => {
+                        let items: Vec<Value> = v["items"].as_array().map(|a| a.iter().take(count).cloned().collect()).unwrap_or_default();
+                        let note = if items.is_empty() { "Clipboard history is empty".to_string() } else { String::new() };
+                        (items, note)
+                    }
+                },
+            };
+            let h = if items.is_empty() { 16.0 + 10.0 + g.measure_wrapped(&note, txt(12.5, 400), W - 2.0 * PAD) } else {
+                22.0 + items.iter().map(|x| 10.0 + clip_row_h(x["image"].as_bool() == Some(true))).sum::<f32>()
+            };
+            v.push((Sec::Clips(items, note), h));
+        }
         // the asks stay on top; under them, the tab row and only the open tab's sections
         let (mut out, rest): (Vec<_>, Vec<_>) = v.into_iter().partition(|p| matches!(p.0, Sec::Ask(_) | Sec::Permit(..)));
         let running: usize = hub::get_json("zor-ui.agents").as_array().map_or(0, |l| l.iter()
@@ -337,7 +437,7 @@ impl Island {
         out.push((Sec::Tabs(running, inbox), TABS_H));
         let shown: Vec<(Sec, f32)> = rest.into_iter().filter(|p| self.in_tab(&p.0)).collect();
         if shown.is_empty() {
-            out.push((Sec::Empty(["Nothing playing, no timer or recording", "No agents running", "No notifications"][self.tab as usize]), 16.0));
+            out.push((Sec::Empty(["Nothing playing, no timer or recording", "No agents running", "No notifications", "Clipboard history is off in Settings"][self.tab as usize]), 16.0));
         } else {
             out.extend(shown);
         }
@@ -402,7 +502,7 @@ impl Island {
         // volume of the playing app (master when it isn't in the mixer), under the controls
         self.mix.poll(cx);
         if let Some((level, muted)) = self.vol_level(cx) {
-            self.vol_r = R::new(x, cy + 60.0 + VOL_GAP, w, VOL_H);
+            self.vol_r = R::new(x, cy + 60.0 + crate::tokens::ISLAND_VOL_GAP, w, VOL_H);
             let frac = self.vol.get().unwrap_or(if muted { 0.0 } else { level / 100.0 }).clamp(0.0, 1.0);
             let label = format!("{}%", (frac * 100.0).round());
             ui::slider(c, cx, self.vol_r, VOL, Some(if muted { "volume_off" } else { "volume_up" }), frac, &label);
@@ -481,6 +581,114 @@ impl Island {
         let (allow, deny) = if permit.is_some() { (PERMIT_ALLOW, PERMIT_DENY) } else { (ALLOW, DENY) };
         ui::chip(c, cx, x + w - wa - 8.0 - wd, y, allow, Some("check"), la, true);
         ui::chip(c, cx, x + w - wd, y, deny, Some("close"), ld, false);
+    }
+
+    /// A plan (its text, then Approve or Keep planning) or questions (each option a row to tap, then the reply box, and
+    /// Send when several answers are due). Plans answer through permit::decide, questions through permit::answer.
+    fn permit_choice(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, head: &str, choice: &Value) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let plan = choice["kind"] == "plan";
+        let qs = questions_of(choice);
+        c.icon("terminal", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
+        c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        let mut y = y + 26.0;
+        let f = txt(13.0, 400);
+        if plan {
+            let text = choice["plan"].as_str().unwrap_or("");
+            self.ask_full = c.g.measure_wrapped(text, f, question_width());
+            let qr = R::new(x, y, w, ask_h(self.ask_full));
+            c.hit(qr, ASK_Q);
+            let full = self.ask_full;
+            self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(text, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
+            y += qr.h + PERMIT_GAP;
+        }
+        for (qi, q) in qs.iter().enumerate() {
+            if let Some(hd) = q["header"].as_str().filter(|h| !h.is_empty()) {
+                c.text(hd, R::new(x, y, w, lh(12.0)), txt(12.0, 500), t.c("tertiary"), Align::Left);
+                y += lh(12.0) + 4.0;
+            }
+            let text = q["question"].as_str().unwrap_or("");
+            let th = c.g.measure_wrapped(text, f, question_width());
+            c.para(text, R::new(x, y, question_width(), th), f, t.c("onSurface"), Align::Left);
+            y += th + 8.0;
+            for (oi, o) in options_of(q).iter().enumerate() {
+                if oi > 0 { y += SESS_GAP; }
+                let r = R::new(x, y, w, option_h(c.g, o));
+                let over = c.hit(r, PERMIT_OPT + (qi * PERMIT_MAX + oi) as u32);
+                let picked = self.picks.get(qi).is_some_and(|p| p.contains(&oi));
+                c.rect(r, 12.0, cx.theme.c(if picked { "secondaryContainer" } else { "surfaceContainer" }));
+                if over { c.rect(r, 12.0, alpha(t.c("onSurface"), crate::tokens::HOVER_A)); }
+                let (fg, fgv) = if picked { (t.c("onSecondaryContainer"), t.c("onSecondaryContainer")) } else { (t.c("onSurface"), t.c("onSurfaceVariant")) };
+                let lab = o["label"].as_str().unwrap_or("");
+                let label_h = c.g.measure_wrapped(lab, txt(13.0, 500), option_w());
+                c.para(lab, R::new(r.x + CARD_PAD, r.y + CARD_PAD, option_w(), label_h), txt(13.0, 500), fg, Align::Left);
+                if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
+                    let dh = c.g.measure_wrapped(d, txt(12.0, 400), option_w());
+                    c.para(d, R::new(r.x + CARD_PAD, r.y + CARD_PAD + label_h + 4.0, option_w(), dh), txt(12.0, 400), fgv, Align::Left);
+                }
+                y += r.h;
+            }
+            y += PERMIT_GAP;
+        }
+        let br = R::new(x, y, w, ASK_BOX_H);
+        c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
+        c.hit(br, ASK_BOX);
+        let ph = if plan { "Type feedback to keep planning, or tap the mic" } else { "Type another answer, or tap the mic" };
+        self.reply.draw(c, cx, R::new(br.x + 14.0, br.y, br.w - 14.0 - 72.0, br.h), f, ph, self.reply_focus);
+        let kind = if crate::pill::active() { ui::IconKind::Filled } else { ui::IconKind::Plain }; // filled while it listens
+        ui::icon_btn(c, cx, R::new(br.x + br.w - 70.0, br.y + 2.0, 32.0, 32.0), ASK_MIC, "mic", kind, 18.0, false);
+        ui::icon_btn(c, cx, R::new(br.x + br.w - 34.0, br.y + 2.0, 32.0, 32.0), ASK_SEND, "send", ui::IconKind::Plain, 18.0, false);
+        let y = y + ASK_BOX_H + 10.0;
+        if plan {
+            let (la, ld) = ("Approve", "Keep planning");
+            let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
+            ui::chip(c, cx, x + w - wa - 8.0 - wd, y, PERMIT_ALLOW, Some("check"), la, true);
+            ui::chip(c, cx, x + w - wd, y, PERMIT_DENY, Some("edit"), ld, false);
+        } else if needs_send(qs) {
+            let cw = chip_w(c, "Send", true);
+            ui::chip(c, cx, x + w - cw, y, PERMIT_SEND, Some("send"), "Send", self.all_picked(qs.len()));
+        }
+    }
+
+    /// Whether every one of the first `n` questions has a pick.
+    fn all_picked(&self, n: usize) -> bool { (0..n).all(|qi| self.picks.get(qi).is_some_and(|p| !p.is_empty())) }
+
+    /// The answer to each question: its picked labels (multi-select joined with ", "), or `typed` where nothing is picked.
+    fn answers(&self, choice: &Value, typed: Option<&str>) -> Vec<String> {
+        questions_of(choice).iter().enumerate().map(|(qi, q)| {
+            let picked: Vec<&str> = options_of(q).iter().enumerate()
+                .filter(|(oi, _)| self.picks.get(qi).is_some_and(|p| p.contains(oi)))
+                .filter_map(|(_, o)| o["label"].as_str()).collect();
+            if picked.is_empty() { typed.unwrap_or("").to_string() } else { picked.join(", ") }
+        }).collect()
+    }
+
+    /// Taps option `idx` (question * PERMIT_MAX + option) of the waiting question: a single choice replaces its pick, a
+    /// multi-select toggles it. A lone single-choice question is answered at once.
+    fn pick(&mut self, cx: &mut Ctx, idx: usize) {
+        let Some((_, session, _, choice)) = crate::bridge::permit::pending() else { return };
+        if choice["kind"] != "question" { return; }
+        let qs = questions_of(&choice);
+        let (qi, oi) = (idx / PERMIT_MAX, idx % PERMIT_MAX);
+        let Some(q) = qs.get(qi) else { return };
+        if oi >= options_of(q).len() { return; }
+        let multi = q["multiSelect"] == true;
+        if self.picks.len() < qs.len() { self.picks.resize(qs.len(), vec![]); }
+        let p = &mut self.picks[qi];
+        match (multi, p.iter().position(|&x| x == oi)) {
+            (true, Some(i)) => { p.remove(i); }
+            (true, None) => p.push(oi),
+            (false, _) => *p = vec![oi],
+        }
+        if qs.len() == 1 && !multi { self.answer_picks(cx, &session, &choice); }
+    }
+
+    /// Sends the picks as the answers, and closes the panel.
+    fn answer_picks(&mut self, cx: &mut Ctx, session: &str, choice: &Value) {
+        let answers = self.answers(choice, None);
+        crate::bridge::permit::answer(session, &choice["questions"], &answers);
+        self.picks.clear();
+        cx.actions.push(Action::Close("island-panel".into()));
     }
 
     fn rec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
@@ -613,12 +821,12 @@ impl Island {
         }
     }
 
-    /// The tab row: Now, Agents and Inbox. The open one is filled; a count badge shows what is waiting in it.
+    /// The tab row: Now, Agents, Inbox and Clipboard. The open one is filled; a count badge shows what is waiting in it.
     fn tabs(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, running: usize, inbox: usize) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         let gap = 4.0;
-        let tw = (w - 2.0 * gap) / 3.0;
-        let items = [("Now", "music_note", 0), ("Agents", "smart_toy", running), ("Inbox", "notifications", inbox)];
+        let tw = (w - 3.0 * gap) / 4.0;
+        let items = [("Now", "music_note", 0), ("Agents", "smart_toy", running), ("Inbox", "notifications", inbox), ("Clipboard", "content_paste", 0)];
         for (k, (label, icon, count)) in items.into_iter().enumerate() {
             let r = R::new(x + k as f32 * (tw + gap), y, tw, TABS_H);
             let hover = c.hit(r, TAB + k as u32);
@@ -675,7 +883,7 @@ impl Island {
     fn session(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, w: f32, sess: &Value, now: f64) -> f32 {
         let (t, h) = (&cx.theme, session_h(sess) - SESS_GAP);
         let bg = if s(sess, "state") == "waiting" { alpha(t.c("tertiaryContainer"), 0.5) } else { t.c("surfaceContainer") };
-        c.rect(R::new(x, y, w, h), CARD_R, bg);
+        c.rect(R::new(x, y, w, h), crate::tokens::CARD_R, bg);
         self.session_body(c, cx, x + CARD_PAD, y + CARD_PAD, w - 2.0 * CARD_PAD, sess, now);
         y + h + SESS_GAP
     }
@@ -809,6 +1017,73 @@ impl Island {
         if let Ok(n) = serde_json::from_str::<Value>(&t) { self.notif_open = Some(n); self.body_scroll = Default::default(); }
     }
 
+    /// The clipboard history: Win+V items as rows (text, or a thumbnail for an image), a click copies one back.
+    fn clips_sec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], note: &str) {
+        let (t, w) = (&cx.theme, W - 2.0 * PAD);
+        let hh = if list.is_empty() { 16.0 } else { 22.0 };
+        c.icon("content_paste", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
+        c.text("Clipboard", R::new(x + 22.0, y, w - 22.0, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        let mut y = y + hh + 10.0;
+        if list.is_empty() {
+            let nh = c.g.measure_wrapped(note, txt(12.5, 400), w);
+            return c.para(note, R::new(x, y, w, nh), txt(12.5, 400), t.c("onSurfaceVariant"), Align::Left);
+        }
+        let now = hub::now_ms() / 1000.0;
+        for (i, it) in list.iter().enumerate() {
+            let image = it["image"].as_bool() == Some(true);
+            let h = clip_row_h(image);
+            let r = R::new(x, y, w, h);
+            let over = c.hit(r, CLIP + i as u32);
+            c.rect(r, 14.0, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
+            let ago = ago(now, it["time"].as_f64().unwrap_or(now));
+            let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
+            c.text(&ago, R::new(r.x + w - CARD_PAD - aw - 2.0, r.y + CARD_PAD, aw + 4.0, lh(11.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+            let bx = R::new(r.x + CARD_PAD, r.y + CARD_PAD, CLIP_THUMB, CLIP_THUMB);
+            let tx = bx.x + CLIP_THUMB + 10.0;
+            let tw = (r.x + w - CARD_PAD - aw - 10.0 - tx).max(10.0);
+            if image {
+                let thumb = it["thumb"].as_str().and_then(|p| self.thumb(c.g, p, (CLIP_THUMB * c.scale).round() as u32));
+                match thumb {
+                    Some(p) => c.clip_round(bx, 8.0, |c| c.image(&p, bx, 1.0)),
+                    None => c.icon("image", bx, ico(24.0, false), t.c("onSurfaceVariant")),
+                }
+                c.text("Image", R::new(tx, r.y + CARD_PAD, tw, lh(13.0)), txt(13.0, 500), t.c("onSurface"), Align::Left);
+            } else {
+                c.icon("notes", bx, ico(24.0, false), t.c("onSurfaceVariant"));
+                c.para(&clip_text(&s(it, "text")), R::new(tx, r.y + CARD_PAD, tw, clip_text_h()), txt(13.0, 400), t.c("onSurface"), Align::Left);
+            }
+            y += h + 10.0;
+        }
+    }
+
+    /// A thumbnail file's decoded image, cached by path (cleared once the cache is full).
+    fn thumb(&mut self, g: &Gfx, path: &str, px: u32) -> Option<Pixmap> {
+        if let Some((_, p)) = self.thumbs.iter().find(|(k, _)| k == path) { return p.clone(); }
+        if self.thumbs.len() >= CLIP_MAX { self.thumbs.clear(); }
+        let p = g.load_image(std::path::Path::new(path), px, px);
+        self.thumbs.push((path.to_string(), p.clone()));
+        p
+    }
+
+    /// Loads the history again after each copy; only while the section is on.
+    fn fetch_clips(&mut self, cx: &Ctx) {
+        if self.clip_seen == Some(cx.clip_seq) || !dp(cx, "clipboard") { return; }
+        self.clip_seen = Some(cx.clip_seq);
+        let (cfg, slot) = (Config(cx.cfg.0.clone()), self.clips.clone());
+        // the read runs on its own thread; if it doesn't answer in time the section shows an error instead of "Loading…" forever
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(crate::proc::run(&cfg, "toggles", &["-Action", "clipboard"])); });
+        std::thread::spawn(move || {
+            let r = match rx.recv_timeout(std::time::Duration::from_secs(CLIP_WAIT_S)) {
+                Ok(r) if !r.is_null() => r,
+                Ok(_) => json!({ "error": "Could not read the clipboard history" }),
+                Err(_) => json!({ "error": "The clipboard didn't answer in time" }),
+            };
+            if let Ok(mut c) = slot.lock() { *c = Some(r); }
+            app::post(Box::new(|_| {})); // repaint
+        });
+    }
+
     fn fetch_notifs(&mut self, cx: &Ctx) {
         if self.asked || !dp(cx, "notifications") { return; }
         self.asked = true;
@@ -833,6 +1108,10 @@ impl View for Island {
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.take_banner_notif();
         self.fetch_notifs(cx);
+        self.fetch_clips(cx);
+        // the picks belong to the question on screen: a new session starts with none
+        let sess = crate::bridge::permit::pending().map(|p| p.1).unwrap_or_default();
+        if sess != self.picks_for { self.picks.clear(); self.picks_for = sess; }
         let plan = self.plan(c.g, cx);
         let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
         ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
@@ -851,7 +1130,8 @@ impl View for Island {
             }
             match sec {
                 Sec::Ask(q) => self.ask(c, cx, x, y, q, None),
-                Sec::Permit(head, q) => self.ask(c, cx, x, y, q, Some(head.as_str())),
+                Sec::Permit(head, q, choice) if choice.is_null() => self.ask(c, cx, x, y, q, Some(head.as_str())),
+                Sec::Permit(head, _, choice) => self.permit_choice(c, cx, x, y, head, choice),
                 Sec::Media => self.now_playing(c, cx, x, y, lyr),
                 Sec::Rec => self.rec(c, cx, x, y),
                 Sec::Timer => self.timer(c, cx, x, y),
@@ -861,6 +1141,7 @@ impl View for Island {
                 Sec::Agents(l, counts) => self.agents(c, cx, x, y, l, *counts),
                 Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
                 Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
+                Sec::Clips(l, note) => self.clips_sec(c, cx, x, y, l, note),
             }
             y += sh + SEP;
         }
@@ -875,9 +1156,18 @@ impl View for Island {
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
                 PERMIT_ALLOW | PERMIT_DENY => {
-                    if let Some((_, session, _)) = crate::bridge::permit::pending() { crate::bridge::permit::decide(&session, i == PERMIT_ALLOW, ""); }
+                    if let Some((_, session, _, choice)) = crate::bridge::permit::pending() {
+                        let why = if choice["kind"] == "plan" && i == PERMIT_DENY { "The user wants to keep planning. Ask what to change, or refine the plan." } else { "" };
+                        crate::bridge::permit::decide(&session, i == PERMIT_ALLOW, why);
+                    }
                     cx.actions.push(Action::Close("island-panel".into()));
                 }
+                PERMIT_SEND => {
+                    if let Some((_, session, _, choice)) = crate::bridge::permit::pending() {
+                        if self.all_picked(questions_of(&choice).len()) { self.answer_picks(cx, &session, &choice); }
+                    }
+                }
+                i if (PERMIT_OPT..PERMIT_OPT + 16).contains(&i) => self.pick(cx, (i - PERMIT_OPT) as usize),
                 ASK_SEND => self.send_reply(cx),
                 // the same recording as the hotkey; while a question waits, what you say answers it (assist::listen)
                 ASK_MIC => cx.actions.push(Action::Command("buddy listen".into())),
@@ -915,7 +1205,12 @@ impl View for Island {
                         std::thread::spawn(move || { crate::proc::bridge(&cfg, "notifications-dismiss", &[id.as_str()]); });
                     }
                 }
-                i if (TAB..TAB + 3).contains(&i) => { self.tab = (i - TAB) as u8; self.notif_open = None; }
+                i if (CLIP..CLIP + CLIP_MAX as u32).contains(&i) => {
+                    let pos = (i - CLIP).to_string();
+                    let cfg = Config(cx.cfg.0.clone());
+                    std::thread::spawn(move || { crate::proc::run(&cfg, "toggles", &["-Action", "clipboard-set", "-Value", &pos]); });
+                }
+                i if (TAB..TAB + 4).contains(&i) => { self.tab = (i - TAB) as u8; self.notif_open = None; }
                 i if (FILTER..FILTER + 3).contains(&i) => {
                     let want = ["waiting", "working", "idle"][(i - FILTER) as usize];
                     self.filter = if self.filter == Some(want) { None } else { Some(want) };
@@ -974,8 +1269,16 @@ impl Island {
     /// Sends what you typed to the buddy as your answer, and closes the panel. An empty box sends nothing.
     fn send_reply(&mut self, cx: &mut Ctx) {
         if self.reply.text.trim().is_empty() { return; }
-        // the buddy's question first (it shows first); otherwise the words answer the Claude Code permission
-        if crate::drive::waiting() || !crate::bridge::permit::answer_with(&self.reply.text) { crate::drive::reply(&self.reply.text); }
+        match crate::bridge::permit::pending() {
+            // a question: the words answer each question with no pick (the buddy's question shows first)
+            Some((_, session, _, choice)) if choice["kind"] == "question" && !crate::drive::waiting() => {
+                let typed = self.reply.text.trim().to_string();
+                crate::bridge::permit::answer(&session, &choice["questions"], &self.answers(&choice, Some(&typed)));
+                self.picks.clear();
+            }
+            // the buddy's question first (it shows first); otherwise the words answer the Claude Code permission
+            _ => { if crate::drive::waiting() || !crate::bridge::permit::answer_with(&self.reply.text) { crate::drive::reply(&self.reply.text); } }
+        }
         self.reply.set("");
         self.reply_focus = false;
         cx.actions.push(Action::Close("island-panel".into()));
@@ -987,10 +1290,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn peek_is_the_first_line_collapsed_and_cut() {
+        assert_eq!(peek_text("\n  hello   world \nsecond line"), "hello world");
+        assert_eq!(peek_text(&"a".repeat(60)), format!("{}…", "a".repeat(48)));
+        assert_eq!(peek_text("  \n\t "), "");
+    }
+
+    #[test]
+    fn history_text_collapses_spaces_and_cuts_at_two_lines() {
+        assert_eq!(clip_text("a\n\n  b\tc"), "a b c");
+        assert_eq!(clip_text(&"x ".repeat(100)).chars().count(), CLIP_CHARS + 1);
+    }
+
+    #[test]
+    fn history_rows_keep_their_padding_and_fit_two_lines() {
+        assert!(clip_row_h(true) >= CLIP_THUMB + 2.0 * CARD_PAD);
+        assert!(clip_row_h(false) >= 2.0 * CARD_PAD + 2.0 * lh(13.0) + 4.0);
+    }
+
+    #[test]
     fn the_volume_row_pushes_the_lyrics_down_by_its_height() {
         assert_eq!(lyrics_top(false), 70.0);
-        assert_eq!(lyrics_top(true), 70.0 + VOL_GAP + VOL_H);
-        assert!(VOL_GAP >= 8.0, "a gap of at least 8 px above the slider");
+        assert_eq!(lyrics_top(true), 70.0 + crate::tokens::ISLAND_VOL_GAP + VOL_H);
+        assert!(crate::tokens::ISLAND_VOL_GAP >= 8.0, "a gap of at least 8 px above the slider");
     }
 
     #[test]
@@ -1066,6 +1388,10 @@ mod tests {
         assert!(island.in_tab(&Sec::Agents(vec![], (0, 0, 0))) && !island.in_tab(&Sec::Notifs(vec![])));
         island.tab = 2;
         assert!(island.in_tab(&Sec::Notifs(vec![])) && island.in_tab(&Sec::NotifDetail(json!({}))) && !island.in_tab(&Sec::Media));
+        island.tab = 3;
+        assert!(island.in_tab(&Sec::Clips(vec![], String::new())) && !island.in_tab(&Sec::Media) && !island.in_tab(&Sec::Notifs(vec![])));
+        island.tab = 0;
+        assert!(!island.in_tab(&Sec::Clips(vec![], String::new())), "the clipboard has its own tab now");
     }
 
     #[test]
@@ -1093,6 +1419,25 @@ mod tests {
         let mut cx = Ctx::new(false);
         Island::new((0.0, 0.0)).input(Input::Click(ASK_MIC, Btn::Left), &mut cx);
         assert!(matches!(cx.actions.as_slice(), [Action::Command(c)] if c == "buddy listen"), "{}", cx.actions.len());
+    }
+
+    #[test]
+    fn a_choice_permit_grows_with_its_options_and_adds_its_send_row() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let one = json!({ "kind": "question", "questions": [{ "question": "Which one?", "options": [{ "label": "A" }, { "label": "B" }] }] });
+        let described = json!({ "kind": "question", "questions": [{ "question": "Which one?", "options": [{ "label": "A", "description": "the first, with a longer note" }, { "label": "B" }] }] });
+        let two = json!({ "kind": "question", "questions": [{ "question": "Which one?", "options": [{ "label": "A" }, { "label": "B" }] }, { "question": "Which two?", "options": [{ "label": "C" }, { "label": "D" }] }] });
+        assert!(permit_choice_h(&g, &described) > permit_choice_h(&g, &one), "a description adds height");
+        // head, the question block, the reply box: one single-select question has no Send row
+        let q0 = &one["questions"][0];
+        assert_eq!(permit_choice_h(&g, &one), 26.0 + question_h(&g, q0) + PERMIT_GAP + ASK_BOX_H);
+        // two questions: each block with its gap, the box, then the Send row (10 px gap and the chip)
+        let (q1, q2) = (&two["questions"][0], &two["questions"][1]);
+        assert_eq!(permit_choice_h(&g, &two), 26.0 + question_h(&g, q1) + PERMIT_GAP + question_h(&g, q2) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0);
+        let plan = json!({ "kind": "plan", "plan": "Step one." });
+        assert_eq!(permit_choice_h(&g, &plan), 26.0 + ask_h(g.measure_wrapped("Step one.", txt(13.0, 400), question_width())) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0);
+        assert_eq!(questions_of(&json!({ "questions": vec![json!({}); 6] })).len(), PERMIT_MAX, "at most PERMIT_MAX questions are drawn");
     }
 
     #[test]

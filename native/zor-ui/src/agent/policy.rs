@@ -22,7 +22,7 @@ pub enum Risk {
 pub fn risk_of(call: &Call) -> Risk {
     use Call::*;
     match call {
-        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus => Risk::ReadOnly,
+        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) => Risk::ReadOnly,
         Open(_) | Url(_) | Play { .. } | Media(_) | Volume(_) | Brightness(_) | Radio { .. } | Clip(_) | OpenFile(_)
         | Wallpaper(_) | Message { .. } | Remember(_) | Forget(_) => Risk::Reversible,
         // lock can be undone by signing in; every other power action ends the session
@@ -148,6 +148,7 @@ mod tests {
     #[test]
     fn reading_is_read_only_and_opening_or_saving_is_reversible() {
         assert_eq!(risk_of(&Call::WebSearch("weather".into())), Risk::ReadOnly);
+        assert_eq!(risk_of(&Call::SessionSearch("lisbon".into())), Risk::ReadOnly);
         assert_eq!(risk_of(&Call::FindFile("cv".into())), Risk::ReadOnly);
         assert_eq!(risk_of(&Call::Open("Spotify".into())), Risk::Reversible);
         assert_eq!(risk_of(&Call::Volume("up".into())), Risk::Reversible);

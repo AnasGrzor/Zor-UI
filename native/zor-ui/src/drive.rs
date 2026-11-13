@@ -62,6 +62,7 @@ pub enum Act {
     Hold(Vec<u16>, u64),
 }
 
+
 /// Things the buddy can do without driving the screen. `Open` and `Launch` ask you each time and show the exact target.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Tool { Open, Launch, Focus, Windows }
@@ -69,6 +70,7 @@ pub enum Tool { Open, Launch, Focus, Windows }
 impl Tool {
     pub fn asks(self) -> bool { matches!(self, Tool::Open | Tool::Launch) }
 }
+
 
 /// One action as the model sent it. `pos` is in the picture's pixels on screen `screen` (default: screen 1).
 #[derive(Debug, PartialEq, Clone)]
@@ -913,7 +915,9 @@ fn focused_is_password() -> bool {
 }
 
 struct Live<'a> { cfg: &'a Config, model: String, held: Vec<u16>, /// The left button is down because of a drag.
-    button: bool, t0: std::time::Instant, limit_ms: u64 }
+    button: bool, t0: std::time::Instant, limit_ms: u64,
+    /// The chat that started this take-over, if any: its questions go there, not to the island (`agent::Chat`).
+    chat: Option<crate::agent::Chat> }
 
 impl Host for Live<'_> {
     fn capture(&mut self) -> Result<Vec<screen::Cap>, String> {
@@ -997,9 +1001,13 @@ The screens now are attached. Answer with the JSON."), caps);
     }
     fn say(&mut self, line: &str) { assist::say_later(line, 6.0); }
     fn point(&mut self, at: (i32, i32), label: &str) { if crate::buddy::on() { assist::point_later(at.0, at.1, label); } }
-    fn confirm(&mut self, q: &str) -> bool { ask_island(q) == Answer::Yes } // words are not a yes
+    fn confirm(&mut self, q: &str) -> bool { // words are not a yes
+        match &self.chat { Some(c) => (c.ask)(q), None => ask_island(q) == Answer::Yes }
+    }
     fn refusal(&self) -> &'static str { refusal_text(LAST_NO.load(Ordering::Relaxed)) }
-    fn ask(&mut self, q: &str) -> Answer { ask_island(q) }
+    fn ask(&mut self, q: &str) -> Answer {
+        match &self.chat { Some(c) => if (c.ask)(q) { Answer::Yes } else { Answer::No }, None => ask_island(q) }
+    }
     fn password_focused(&self) -> bool { focused_is_password() }
     fn tool(&mut self, tool: Tool, arg: &str) -> Result<String, String> {
         crate::log::line(&format!("drive tool: {tool:?} {}", assist::short(arg, 80)));
@@ -1063,13 +1071,19 @@ pub fn start_approved(cfg: &Config, goal: &str, on_done: Option<OnDone>) -> Resu
 /// Declined. `shown` is the words the island card shows instead of the goal; `prep` is a step that runs once you said yes (opening
 /// the app the task needs, say) before the take-over begins. `Err` when it can't start.
 pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>) -> Result<String, String> {
+    start_with_chat(cfg, goal, shown, prep, approved, on_done, None)
+}
+
+/// `start_with` for a take-over that a chat started: its questions go to the chat, and its final line is sent there too (the PC
+/// still gets its bubble). With no chat it is the same as `start_with`.
+pub fn start_with_chat(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>, chat: Option<crate::agent::Chat>) -> Result<String, String> {
     check_ready(cfg)?;
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
         let lim = limits(&cfg);
         let model = assist::screen_model(&cfg);
-        let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms };
+        let mut live = Live { cfg: &cfg, model, held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: lim.ms, chat: chat.clone() };
         ESC.store(false, Ordering::Relaxed);
         VOICE.store(false, Ordering::Relaxed);
         let q = question(shown.as_deref().unwrap_or(&goal));
@@ -1092,6 +1106,7 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
         } else { failed = true; "I can't watch the Esc key, so I won't drive.".to_string() };
         ACTIVE.store(false, Ordering::Relaxed);
         if let Some(done) = on_done { done(status); }
+        if let Some(c) = &chat { (c.tell)(&line); }
         if failed { assist::fail_later(&line) } else { assist::say_later(&line, 8.0) }
     });
     Ok(if approved { "Taking over now.".into() } else { "Checking with you first.".into() })
@@ -1100,6 +1115,20 @@ pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_take_over_from_a_chat_asks_the_chat_for_each_risky_click_and_not_the_island() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let chat = crate::agent::Chat {
+            ask: std::sync::Arc::new(move |q: &str| { seen.lock().unwrap().push(q.to_string()); false }),
+            tell: std::sync::Arc::new(|_: &str| {}),
+        };
+        let cfg = Config::parse("{}");
+        let mut live = Live { cfg: &cfg, model: String::new(), held: vec![], button: false, t0: std::time::Instant::now(), limit_ms: 1000, chat: Some(chat) };
+        assert!(!live.confirm("The buddy wants to send the form. Allow it?"), "the chat's no is the answer");
+        assert_eq!(asked.lock().unwrap().as_slice(), ["The buddy wants to send the form. Allow it?"], "the chat was asked once");
+    }
 
     /// The tests that touch the shared `ASK` take turns.
     static ASK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

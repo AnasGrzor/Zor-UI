@@ -6,7 +6,7 @@ use crate::{
     app::{self, Action, Ctx},
     conf::Config,
     gfx::{alpha, ico, txt, Align, Canvas, Gfx, Pixmap, R},
-    hub, lyrics::{self, Lyr, Lyrics, Track}, media, ui, util, weather,
+    hub, lyrics::{self, Lyr, Lyrics, Track}, media, mixer_app::AppMix, ui, util, weather,
     win::{Btn, Input, Phase, View},
 };
 use serde_json::{json, Value};
@@ -28,6 +28,11 @@ const TIMER_A: u32 = 6;
 const TIMER_B: u32 = 7;
 const CLEAR: u32 = 8;
 const LYRICS: u32 = 9;
+/// The volume slider under the transport controls: the playing app's volume (master when it isn't in the mixer).
+const VOL: u32 = 19;
+/// Gap above the volume slider, and the slider's height (ui::slider is a pill: its radius is half this).
+const VOL_GAP: f32 = 8.0;
+const VOL_H: f32 = 34.0;
 /// Most lines the buddy's question shows before it scrolls.
 const ASK_MAX_LINES: f32 = 8.0;
 const ALLOW: u32 = 10;
@@ -88,6 +93,10 @@ pub struct Island {
     plain_h: f32,
     seek: R,
     scrub: ui::Scrub,
+    /// The volume slider's rect from the last paint, its drag value, and the mixer it changes.
+    vol_r: R,
+    vol: ui::Scrub,
+    mix: AppMix,
     /// What the two timer buttons do: (stopwatch, done) from the last paint.
     tkind: (bool, bool),
     /// frame_ms: 50 while the wave moves, 100 while the recording dot pulses.
@@ -115,9 +124,9 @@ impl Island {
     /// `area`: unused, the panel sizes itself.
     pub fn new(_area: (f32, f32)) -> Island {
         Island { notifs: Default::default(), asked: false, art: None, ly: 0.0, ly_key: String::new(), scroll: Default::default(), plain_h: 0.0,
-            seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), tkind: (false, false), frames: Cell::new(0),
+            seek: R::new(0.0, 0.0, 1.0, 22.0), scrub: Default::default(), vol_r: R::default(), vol: Default::default(), mix: AppMix::default(), tkind: (false, false), frames: Cell::new(0),
             reply: ui::TextBox::new(false), reply_focus: false, ask_scroll: Default::default(), ask_full: 0.0,
-            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: 1, filter: None, collapsed: Vec::new(), cards: Vec::new() }
+            notif_open: None, body_scroll: Default::default(), body_full: 0.0, tab: if std::env::var_os("ZORUI_SAMPLE").is_some() { 0 } else { 1 }, filter: None, collapsed: Vec::new(), cards: Vec::new() } // --render (ZORUI_SAMPLE) opens on Now, where the media is
     }
 
     /// Whether a section belongs to the open tab (asks and permission prompts are handled before this).
@@ -125,6 +134,9 @@ impl Island {
         matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)))
     }
 }
+
+/// Top of the lyrics, measured from the controls' top: 70 px, or further down by the volume row when it is shown.
+fn lyrics_top(volume: bool) -> f32 { 70.0 + if volume { VOL_GAP + VOL_H } else { 0.0 } }
 
 /// Width the question wraps to. The text is drawn 8 px narrower than the row, so the height is measured at the same width.
 fn question_width() -> f32 { W - 2.0 * PAD - 8.0 }
@@ -150,8 +162,15 @@ const AGENT_SESSIONS: usize = 5;
 
 /// Height of the AI agents section: its title, then each agent's block. Matches what agents() draws.
 fn agents_h(list: &[Value], collapsed: &[String]) -> f32 {
-    AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS + list.iter().map(|a| agent_h(a, !collapsed.contains(&s(a, "label")))).sum::<f32>()
+    AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS + list.iter().map(|a| agent_h(a, is_open(a, collapsed))).sum::<f32>()
 }
+
+/// The chevron shows only when a tap reveals a session card: the filtered list has one for this agent.
+/// Idle-hidden sessions are not revealed by the chevron (the Idle chip is their control), so those agents have none.
+fn has_chevron(a: &Value) -> bool { a["sessions"].as_array().is_some_and(|v| !v.is_empty()) }
+
+/// Whether an agent's block is open. With no chevron there is nothing to fold, so it stays open (its idle hint shows).
+fn is_open(a: &Value, collapsed: &[String]) -> bool { !has_chevron(a) || !collapsed.contains(&s(a, "label")) }
 
 /// Sessions the filter chip keeps: "waiting", "working" or "idle"; None keeps all. Agents stay, with their sessions cut down.
 fn filter_sessions(mut list: Vec<Value>, want: Option<&str>) -> Vec<Value> {
@@ -278,7 +297,8 @@ impl Island {
         if let Some((label, _, q)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width())); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
-        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
+        let vol = if self.vol_level(cx).is_some() { VOL_GAP + VOL_H } else { 0.0 };
+        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + vol + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
         if dp(cx, "recording") && hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
         let t = hub::timer();
         let done = hub::get("zor-ui.timerDone").is_some_and(|d| !d.is_empty());
@@ -379,8 +399,19 @@ impl Island {
         if c.hit(big, PLAY) { c.rect(big, 20.0, alpha(t.c("onPrimary"), crate::tokens::HOVER_A)); }
         c.icon(if m.playing { "pause" } else { "play_arrow" }, big, ico(30.0, true), t.c("onPrimary"));
         ui::icon_btn(c, cx, R::new(cx0 + 124.0, cy + 8.0, crate::tokens::TRANSPORT_BTN, crate::tokens::TRANSPORT_BTN), NEXT, "skip_next", ui::IconKind::Plain, 26.0, true);
-        if lyr > 0.0 { self.lyrics(c, cx, R::new(x, cy + 70.0, w, lyr), m, pos); }
+        // volume of the playing app (master when it isn't in the mixer), under the controls
+        self.mix.poll(cx);
+        if let Some((level, muted)) = self.vol_level(cx) {
+            self.vol_r = R::new(x, cy + 60.0 + VOL_GAP, w, VOL_H);
+            let frac = self.vol.get().unwrap_or(if muted { 0.0 } else { level / 100.0 }).clamp(0.0, 1.0);
+            let label = format!("{}%", (frac * 100.0).round());
+            ui::slider(c, cx, self.vol_r, VOL, Some(if muted { "volume_off" } else { "volume_up" }), frac, &label);
+        }
+        if lyr > 0.0 { self.lyrics(c, cx, R::new(x, cy + lyrics_top(self.vol_level(cx).is_some()), w, lyr), m, pos); }
     }
+
+    /// The volume the slider shows: (level 0-100, muted). None when there's nothing to control.
+    fn vol_level(&self, cx: &Ctx) -> Option<(f32, bool)> { self.mix.level(cx).map(|(v, m, _)| (v, m)) }
 
     /// renderLyrics(): the current synced line stays centred (sliding), the edges fade; plain lyrics scroll.
     fn lyrics(&mut self, c: &mut Canvas, cx: &Ctx, r: R, m: &media::Media, pos: f64) {
@@ -519,12 +550,14 @@ impl Island {
         for a in list {
             let state = s(a, "state");
             let (label, model) = (s(a, "label"), s(a, "model"));
-            // the header row folds this agent's usage and sessions away; the chevron says which
-            let open = !self.collapsed.contains(&label);
+            // the header row folds this agent's usage and sessions away; the chevron says which (only when it has one)
+            let open = is_open(a, &self.collapsed);
             let k = list.iter().position(|x| s(x, "label") == label).unwrap_or(0) as u32;
             let head = R::new(x - 4.0, y - 4.0, w + 8.0, 26.0);
-            if c.hit(head, AGENT_TOGGLE + k) { c.rect(head, 9.0, alpha(t.c("onSurface"), 0.06)); }
-            c.icon(if open { "expand_more" } else { "chevron_right" }, R::new(x, y + 1.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
+            if has_chevron(a) {
+                if c.hit(head, AGENT_TOGGLE + k) { c.rect(head, 9.0, alpha(t.c("onSurface"), 0.06)); }
+                c.icon(if open { "expand_more" } else { "chevron_right" }, R::new(x, y + 1.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
+            }
             let (pill, bg, fg) = match state.as_str() {
                 "waiting" => ("Needs you", t.c("tertiaryContainer"), t.c("onTertiaryContainer")),
                 "working" => ("Working", t.c("secondaryContainer"), t.c("onSecondaryContainer")),
@@ -896,9 +929,9 @@ impl View for Island {
                     }
                 }
                 i if (AGENT_TOGGLE..AGENT_TOGGLE + 32).contains(&i) => {
-                    // same order as the painted list: filter_sessions keeps every agent in place
-                    let list = hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default();
-                    if let Some(label) = list.get((i - AGENT_TOGGLE) as usize).map(|a| s(a, "label")) {
+                    // same filtered list as the painted one (agents_h and agents draw from it), so has_chevron agrees
+                    let list = filter_sessions(hub::get_json("zor-ui.agents").as_array().cloned().unwrap_or_default(), self.filter);
+                    if let Some(label) = list.get((i - AGENT_TOGGLE) as usize).filter(|a| has_chevron(a)).map(|a| s(a, "label")) {
                         match self.collapsed.iter().position(|l| *l == label) {
                             Some(p) => { self.collapsed.remove(p); }
                             None => self.collapsed.push(label),
@@ -911,6 +944,11 @@ impl View for Island {
                 }
                 _ => {}
             },
+            Input::Drag(VOL, x, _, ph) => {
+                let v = ui::slider_value(self.vol_r, x);
+                self.vol.set(v, ph == Phase::End);
+                self.mix.set_volume(cx, (v * 100.0).round());
+            }
             Input::Drag(SEEK, x, _, ph) => {
                 if let Some(m) = cx.media.as_ref().filter(|m| m.duration > 0.0) {
                     let v = ui::slider_value(self.seek, x);
@@ -949,6 +987,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_volume_row_pushes_the_lyrics_down_by_its_height() {
+        assert_eq!(lyrics_top(false), 70.0);
+        assert_eq!(lyrics_top(true), 70.0 + VOL_GAP + VOL_H);
+        assert!(VOL_GAP >= 8.0, "a gap of at least 8 px above the slider");
+    }
+
+    #[test]
     fn session_spend_shows_only_what_the_agent_sent() {
         assert_eq!(spend_text(&json!({ "ctx": 62.0, "tok": 184000.0, "cost": 1.2 })), "62% ctx · 184k · $1.20");
         assert_eq!(spend_text(&json!({ "tok": 5000.0 })), "5k", "a Codex session has tokens only");
@@ -970,6 +1015,27 @@ mod tests {
         assert_eq!(agent_h(&many, true), 18.0 + SESS_LEAD + 5.0 * idle_card + BLOCK_GAP + lh(12.0) + AGENT_GAP, "only 5 sessions are drawn, then +N more");
         assert_eq!(agents_h(&[], &[]), AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS);
         assert_eq!(agents_h(&[json!({ "label": "Claude", "sessions": [] })], &["Claude".to_string()]), AGENTS_HEAD + CHIPS_ROW + CHIPS_TO_AGENTS + 18.0 + AGENT_GAP);
+    }
+
+    #[test]
+    fn chevron_shows_only_when_a_tap_reveals_a_card() {
+        let agents = json!([
+            { "label": "Antigravity", "usage": {}, "sessions": [] },
+            { "label": "Claude", "sessions": [{ "state": "idle" }, { "state": "done" }] },
+            { "label": "Codex", "sessions": [{ "state": "working" }, { "state": "idle" }] }
+        ]);
+        let list = agents.as_array().unwrap().clone();
+        // no chip: idle sessions fold into a count, so Claude has no card to reveal; Codex has its working card
+        let quiet = filter_sessions(list.clone(), None);
+        let shown: Vec<bool> = quiet.iter().map(has_chevron).collect();
+        assert_eq!(shown, vec![false, false, true]);
+        assert_eq!(quiet[1]["idle"], 2, "Claude's hidden idle sessions are counted, not drawn");
+        // the Idle chip brings Claude's sessions back as cards
+        let idle = filter_sessions(list.clone(), Some("idle"));
+        assert_eq!([has_chevron(&idle[0]), has_chevron(&idle[1]), has_chevron(&idle[2])], [false, true, true]);
+        // a folded agent with only hidden idle sessions stays open, so its hint still draws
+        assert!(is_open(&quiet[1], &["Claude".to_string()]));
+        assert!(!is_open(&quiet[2], &["Codex".to_string()]));
     }
 
     #[test]

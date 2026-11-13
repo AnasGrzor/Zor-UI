@@ -18,6 +18,8 @@ pub struct Spring { x: f32, v: f32, to: f32, last: Option<Instant> }
 
 impl Spring {
     /// Moves the target. The first target (from 0) is taken at once, and a move in flight keeps its speed.
+    /// Only the tests use it: the island goes through `Motion`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set(&mut self, to: f32) {
         if (to - self.to).abs() < 0.5 { return; }
         if self.to == 0.0 { self.x = to; self.v = 0.0; }
@@ -102,14 +104,12 @@ impl Curve {
 }
 
 impl Motion {
-    /// The value as of the last `tick`.
+    /// The value as of the last `tick`. Read by the tests; the island draws what `tick` returns.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn value(&self) -> f32 { self.s.x }
 
     /// Sets the value at once, with no motion.
     pub fn jump(&mut self, v: f32) { self.curve = None; self.s = Spring { x: v, v: 0.0, to: v, last: None }; }
-
-    /// Springs to `to` (grow). A move in flight keeps its speed.
-    pub fn spring_to(&mut self, to: f32) { self.spring_to_at(to, Instant::now()) }
 
     fn spring_to_at(&mut self, to: f32, now: Instant) {
         if let Some(c) = self.curve.take() {
@@ -141,8 +141,20 @@ impl Motion {
         self.s.x
     }
 
+    /// Moves to `to` at `now`: a grow springs, a shrink eases on the close curve. The first target, and every
+    /// target when `animate` is false (reduced motion), is placed at once.
+    pub fn set(&mut self, to: f32, now: Instant, animate: bool) {
+        if !animate || (self.curve.is_none() && self.s.to == 0.0) { return self.jump(to); }
+        self.tick(now); // a new move starts from the value as of now
+        if (to - self.s.to).abs() < 0.5 { return; }
+        if to > self.s.to { self.spring_to_at(to, now) } else { self.curve_to(to, now) }
+    }
+
     pub fn moving(&self) -> bool { self.curve.is_some() || self.s.moving() }
 }
+
+/// Whether views animate: false when Windows' Animation effects are off or the reducedMotion setting is on, and they snap.
+pub fn animate(reduced: bool) -> bool { !reduced }
 
 /// `a` to `b` (ARGB), channel by channel.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -305,5 +317,63 @@ mod tests {
         m.s.last = Some(t0);
         let x = m.tick(after(t0, 5000));
         assert!(x < 150.0, "a 5 s stall moved it to {x}");
+    }
+
+    #[test]
+    fn set_jumps_the_first_target_and_grows_or_shrinks_after_it() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.set(300.0, t0, true);
+        assert_eq!((m.value(), m.moving()), (300.0, false), "first target at once");
+        m.set(100.0, t0, true);
+        assert!(m.moving() && m.value() == 300.0, "a shrink starts from 300 and eases");
+        assert!(m.tick(after(t0, 170)) < 300.0);
+        assert_eq!(m.tick(after(t0, 340)), 100.0);
+    }
+
+    #[test]
+    fn a_shrink_ticks_down_to_its_target_without_a_jump() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.set(300.0, t0, true);
+        m.set(100.0, t0, true);
+        let mut prev = 300.0;
+        for ms in (16..=352).step_by(16) {
+            let x = m.tick(after(t0, ms));
+            assert!(x <= prev + 1e-3 && prev - x < 40.0, "step at {ms} ms: {prev} to {x}");
+            prev = x;
+        }
+        assert_eq!(prev, 100.0);
+    }
+
+    #[test]
+    fn a_grow_retargeted_mid_shrink_does_not_jump() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.set(300.0, t0, true);
+        m.set(100.0, t0, true);
+        let t1 = after(t0, 120);
+        let x = m.tick(t1);
+        m.set(300.0, t1, true);
+        assert_eq!(m.value(), x, "same position right after the retarget");
+        let after_one_frame = m.tick(after(t1, 1));
+        assert!((after_one_frame - x).abs() < 10.0, "moved {} in 1 ms", after_one_frame - x);
+    }
+
+    #[test]
+    fn reduced_motion_snaps_every_target() {
+        let t0 = Instant::now();
+        let mut m = Motion::default();
+        m.set(300.0, t0, false);
+        m.set(100.0, t0, false);
+        assert_eq!((m.value(), m.moving()), (100.0, false));
+        m.set(200.0, t0, false);
+        assert_eq!((m.tick(after(t0, 16)), m.moving()), (200.0, false));
+    }
+
+    #[test]
+    fn animate_is_off_only_when_reduced() {
+        assert!(animate(false));
+        assert!(!animate(true));
     }
 }

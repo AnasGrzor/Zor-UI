@@ -10,7 +10,7 @@ use crate::{
 };
 use crate::tokens as tk;
 use serde_json::Value;
-use crate::anim::{self, Spring};
+use crate::anim::{self, Motion};
 use std::{collections::HashMap, time::Instant};
 
 const LH: f32 = 1.252;
@@ -307,7 +307,8 @@ pub struct Bar {
     pub edge: Edge,
     /// Top-left of the bar window (physical px).
     pub origin: (i32, i32),
-    island: Spring,
+    /// The island's width: springs out, eases back on the close curve.
+    island: Motion,
     /// The activity the island showed last frame, its colour, and when and from what colour it last changed.
     di_state: &'static str,
     di_bg: Option<Color>,
@@ -354,7 +355,7 @@ impl Bar {
     }
 
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
-        Bar { mon, edge, origin, island: Spring::default(), di_state: "", di_bg: None, di_fade: None, di_hover: false, island_cap: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
+        Bar { mon, edge, origin, island: Motion::default(), di_state: "", di_bg: None, di_fade: None, di_hover: false, island_cap: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
             art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false, mic_live: false,
             viz: Default::default(), viz_stream: None, viz_loud: false }
     }
@@ -711,7 +712,7 @@ impl Bar {
         // a new activity: the colour blends from the old one and the content fades in
         let now = Instant::now();
         if self.di_state != state {
-            if !self.di_state.is_empty() { self.di_fade = Some((now, self.di_bg)); }
+            if !self.di_state.is_empty() && cx.motion { self.di_fade = Some((now, self.di_bg)); }
             self.di_state = state;
         }
         self.di_bg = bg;
@@ -732,10 +733,14 @@ impl Bar {
                 *m = (*m - 10.0).max(60.0);
             }
         }
-        let target = pill_w(c.g, &p);
-        self.island.set(target);
-        p.fixed = Some(self.island.tick(now).max(10.0));
+        p.fixed = Some(self.island_width(pill_w(c.g, &p), now, cx.motion));
         Some(p)
+    }
+
+    /// The island's width at `now` on its way to `target`: the pill is drawn and hit-tested at this value.
+    fn island_width(&mut self, target: f32, now: Instant, animate: bool) -> f32 {
+        self.island.set(target, now, animate);
+        self.island.tick(now).max(10.0)
     }
 
     /// All groups for one side, in the configured order.
@@ -1751,5 +1756,43 @@ mod tests {
         assert!(bezier(0.34, 1.35, 0.64, 1.0, 0.6) > 1.0); // overshoots like the CSS spring
         let a = media::Audio { volume: 50.0, ..Default::default() };
         assert_eq!(volume_icon(Some(&a)), "volume_down");
+    }
+
+    #[test]
+    fn island_width_is_what_each_shrink_tick_draws() {
+        let t0 = Instant::now();
+        let mut bar = Bar::new((0, 0, 1920, 1080), Edge::Top, (0, 0));
+        assert_eq!(bar.island_width(300.0, t0, true), 300.0, "first width at once");
+        assert_eq!(bar.island_width(100.0, t0, true), 300.0, "the shrink starts at the old width");
+        let mut prev = 300.0;
+        for ms in (16..=352).step_by(16) {
+            let now = t0 + std::time::Duration::from_millis(ms);
+            let w = bar.island_width(100.0, now, true);
+            assert_eq!(w, bar.island.value().max(10.0), "the drawn width at {ms} ms");
+            assert!(w <= prev + 1e-3, "shrinks at {ms} ms");
+            prev = w;
+        }
+        assert_eq!(prev, 100.0);
+    }
+
+    #[test]
+    fn island_grow_retargeted_mid_shrink_keeps_its_place() {
+        let t0 = Instant::now();
+        let mut bar = Bar::new((0, 0, 1920, 1080), Edge::Top, (0, 0));
+        bar.island_width(300.0, t0, true);
+        bar.island_width(100.0, t0, true);
+        let t1 = t0 + std::time::Duration::from_millis(120);
+        let mid = bar.island_width(100.0, t1, true);
+        let grown = bar.island_width(300.0, t1, true);
+        assert_eq!(grown, mid, "no jump when the grow starts");
+    }
+
+    #[test]
+    fn island_snaps_when_motion_is_off() {
+        let t0 = Instant::now();
+        let mut bar = Bar::new((0, 0, 1920, 1080), Edge::Top, (0, 0));
+        bar.island_width(300.0, t0, false);
+        assert_eq!(bar.island_width(100.0, t0, false), 100.0);
+        assert!(!bar.island.moving());
     }
 }

@@ -57,6 +57,8 @@ pub struct Ctx {
     pub privacy: crate::privacy::Privacy,
     /// Bumps whenever any of the above changes; windows repaint on a new version.
     pub ver: u64,
+    /// Views animate. False when Windows' Animation effects are off or reducedMotion is set: values snap (anim::animate).
+    pub motion: bool,
     /// `--all`: run every ported part even if config.json "native" doesn't list it (side-by-side testing).
     pub all: bool,
     /// What views ask the app to do; drained after every input and job.
@@ -91,7 +93,7 @@ impl Ctx {
             cfg: Config::parse(""), theme: Theme::parse(""), state: State::load(conf::data_dir().join("state.json")),
             weather: None, claude: None, host: util::hostname(), cpu: 0.0, mem: 0.0, disk: 0.0,
             wm: Default::default(), media: None, sessions: vec![], audio: None, net: None, battery: sys::battery(), kb: String::new(), tray: vec![],
-            notif: None, osd: None, agents: vec![], privacy: Default::default(), ver: 0, all, actions: vec![],
+            notif: None, osd: None, agents: vec![], privacy: Default::default(), ver: 0, motion: true, all, actions: vec![],
         }
     }
 
@@ -200,6 +202,47 @@ fn pace_set(on: bool, msg: HWND) {
 }
 
 fn lock_pace() -> std::sync::MutexGuard<'static, bool> { PACE.0.lock().unwrap_or_else(|e| e.into_inner()) }
+
+// TEMP frametrace: per-second FRAME rate, handler time and per-window update counts into zorui.log. Remove with the measurement.
+#[derive(Default)]
+struct Trace { ticks: u32, busy_ns: u128, max_ns: u128, since: Option<std::time::Instant>, ms16: u32, parts: std::collections::BTreeMap<String, (u32, u32, u128)> }
+static TRACE: Mutex<Option<Trace>> = Mutex::new(None);
+
+/// One window's update in a FRAME tick: `due` = it painted, otherwise it only checked for changes.
+fn trace_part(part: &str, due: bool, busy: std::time::Duration) {
+    let Ok(mut g) = TRACE.lock() else { return };
+    let t = g.get_or_insert_with(Trace::default);
+    let e = t.parts.entry(part.to_string()).or_insert((0, 0, 0));
+    if due { e.0 += 1; } else { e.1 += 1; }
+    e.2 += busy.as_nanos();
+}
+
+/// TEMP frametrace: which message bumped the shared ver (counted in the summary as `ver<-msg/wp`).
+fn trace_bump(msg: u32, wp: usize) {
+    let Ok(mut g) = TRACE.lock() else { return };
+    let t = g.get_or_insert_with(Trace::default);
+    t.parts.entry(format!("ver<-{msg:x}/{wp}")).or_insert((0, 0, 0)).0 += 1;
+}
+
+fn trace_frame(busy: std::time::Duration, frame_ms: u32) {
+    let Ok(mut g) = TRACE.lock() else { return };
+    let t = g.get_or_insert_with(Trace::default);
+    let now = std::time::Instant::now();
+    let since = *t.since.get_or_insert(now);
+    t.ticks += 1;
+    t.busy_ns += busy.as_nanos();
+    t.max_ns = t.max_ns.max(busy.as_nanos());
+    if frame_ms == 16 { t.ms16 += 1; }
+    let secs = now.duration_since(since).as_secs_f64();
+    if secs >= 1.0 {
+        let n = t.ticks as f64;
+        let parts: Vec<String> = t.parts.iter().map(|(k, (due, idle, ns))| format!("{k}: paint {due} check {idle} {:.2}ms", *ns as f64 / 1e6)).collect();
+        crate::log::line(&format!("[frametrace] {:.1} fps (16 ms views {}/{} ticks), handler avg {:.2} ms, max {:.2} ms over {:.2} s | {}",
+            n / secs, t.ms16, t.ticks, t.busy_ns as f64 / n / 1e6, t.max_ns as f64 / 1e6, secs, parts.join("; ")));
+        *t = Trace::default();
+    }
+}
+
 const HOVER: usize = 3;
 /// While the tray flyout is open: watches for a click outside it, the only thing that closes it.
 const OUTSIDE: usize = 4;
@@ -357,11 +400,13 @@ impl App {
                 changed = true;
             }
         }
+        // Windows' Animation effects switch, read on every reload so a change takes effect without a theme edit
+        let mut animate = BOOL(0);
+        let system_motion = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&mut animate as *mut BOOL).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() } && animate.as_bool();
+        self.cx.motion = crate::anim::animate(!system_motion || self.cx.cfg.bool("wallpaperTheme.reducedMotion"));
         if let Some(t) = self.theme_file.changed() {
             let mut theme = Theme::parse(&t);
-            let mut animate = BOOL(0);
-            let system_motion = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&mut animate as *mut BOOL).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() } && animate.as_bool();
-            theme.transition_from(&self.cx.theme, self.cx.ver > 0 && system_motion && !self.cx.cfg.bool("wallpaperTheme.reducedMotion"));
+            theme.transition_from(&self.cx.theme, self.cx.ver > 0 && self.cx.motion);
             self.cx.theme = theme; changed = true;
         }
         if changed { self.cx.ver += 1; }
@@ -734,8 +779,10 @@ impl App {
     }
 
     fn on(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) {
+        let ver = self.cx.ver; // TEMP frametrace
         self.dispatch(hwnd, msg, wp, lp);
         self.run_actions();
+        if self.cx.ver != ver { trace_bump(msg, wp.0); } // TEMP frametrace
     }
 
     fn dispatch(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) {
@@ -747,17 +794,21 @@ impl App {
                     if let Some(front) = tray::raise_taskbar() { crate::log::line(&format!("taskbar lost topmost; raised it (window in front: {front:?})")); }
                 }
                 (WM_TIMER, FRAME) => {
+                    let t0 = std::time::Instant::now(); // TEMP frametrace
                     if self.cx.theme.advance() { self.cx.ver += 1; }
                     // each view paints at its own rate: a tile that wants 33 ms frames must not drag the
                     // bar, the desk cards and the island down to 30 fps with it
                     let now = std::time::Instant::now();
                     for w in self.bars.iter_mut().chain(self.wins.iter_mut()).chain(self.pops.iter_mut().map(|p| &mut p.win)) {
                         let ms = if w.gliding { 16 } else { w.view.frame_ms() };
-                        if ms > 0 && w.due(now, ms) { w.update(&self.g, &self.cx, true); }
-                        else { w.update(&self.g, &self.cx, false); }
+                        let due = ms > 0 && w.due(now, ms);
+                        let tu = std::time::Instant::now(); // TEMP frametrace
+                        w.update(&self.g, &self.cx, due);
+                        trace_part(w.part_name(), due, tu.elapsed()); // TEMP frametrace
                     }
                     self.menu_check();
                     self.frames();
+                    trace_frame(t0.elapsed(), self.frame); // TEMP frametrace
                 }
                 (WM_TIMER, HOVER) => self.show_popup(),
                 (WM_TIMER, OUTSIDE) => self.outside_check(),

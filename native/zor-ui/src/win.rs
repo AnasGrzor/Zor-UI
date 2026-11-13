@@ -261,6 +261,7 @@ impl Win {
 
     pub fn hide(&self) { unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); } }
     pub fn visible(&self) -> bool { unsafe { IsWindowVisible(self.hwnd).as_bool() } }
+    pub fn part_name(&self) -> &str { &self.part } // TEMP frametrace
 
     pub fn pos(&self) -> (i32, i32) {
         let mut r = RECT::default();
@@ -316,6 +317,7 @@ impl Win {
         let px = ((w * s).ceil() as i32, (h * s).ceil() as i32);
         let now = (cx.ver, key, self.hover, px);
         if !force && now == self.last { return; }
+        if !force { let why = if self.last.0 != now.0 { "ver" } else if self.last.1 != now.1 { "key" } else if self.last.2 != now.2 { "hover" } else { "px" }; crate::log::line(&format!("[frametrace-why] {} {why}", self.part)); } // TEMP frametrace
         self.last = now;
         unsafe {
             if px != self.px || self.bits.is_null() {
@@ -352,6 +354,7 @@ impl Win {
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
             let src = POINT::default();
             let (mut size, mut src, mut alpha, mut dst) = (size, src, 255u8, None);
+            if !cx.motion { self.grow = None; } // reduced motion: the panel appears at full size
             if let Some((t0, bottom)) = self.grow {
                 let (rows, a, done) = crate::anim::grow(t0.elapsed().as_secs_f32(), ph as i32);
                 if done { self.grow = None; } else {

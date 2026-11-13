@@ -2,17 +2,17 @@
 
 use super::{LH, W};
 use crate::{
-    app::{self, Ctx},
+    app::Ctx,
     bar,
-    conf::Config,
     gfx::{alpha, cookie_points, ico, polygon, txt, Align, Canvas, Color, Font, Gfx, Pixmap, R},
     hub,
     lyrics::{self, Lyr, Lyrics, Track},
     media::{self, Audio, Media},
-    proc, ui,
+    mixer_app::{AppMix, Cmd},
+    ui,
     win::{Input, Phase},
 };
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 
 /// The lyrics / cover cards are wider than the rest (`body[data-card="lyrics"] #col`).
 pub const W2: f32 = 428.0;
@@ -25,11 +25,6 @@ const VOL: u32 = 6;
 const LYR: u32 = 7;
 const NONE_H: f32 = 16.0 + 20.0 + 16.0; // .np-none: padding 16, 20 px icon
 const WHITE: Color = 0xFFFF_FFFF;
-
-/// (app name, volume 0-100, muted) per app in Windows' mixer.
-type AppVols = Vec<(String, f32, bool)>;
-
-enum Cmd { Volume(String, f32), Mute(String, bool) }
 
 pub struct Np {
     // Each cache holds the Arc it was made from: the address of a live Arc is never reused, so `Arc::ptr_eq` can't match a freed one.
@@ -47,9 +42,7 @@ pub struct Np {
     seek: R,
     scrub: ui::Scrub,
     vol: R,
-    apps: Arc<Mutex<AppVols>>,
-    polling: bool,
-    tx: Option<mpsc::Sender<Cmd>>,
+    mix: AppMix,
     drag_v: Option<f32>,
     /// ms between repaints the card wants right now (0: still).
     pub anim: u32,
@@ -58,7 +51,7 @@ pub struct Np {
 impl Np {
     pub fn new() -> Np {
         Np { art: None, bg: None, lkey: None, idx: None, prev: None, since: 0.0, from: 0.0, heights: None, scroll: Default::default(), plain_h: 0.0,
-            seek: R::default(), scrub: Default::default(), vol: R::default(), apps: Default::default(), polling: false, tx: None, drag_v: None, anim: 0 }
+            seek: R::default(), scrub: Default::default(), vol: R::default(), mix: AppMix::default(), drag_v: None, anim: 0 }
     }
 }
 
@@ -77,26 +70,6 @@ fn session(cx: &Ctx) -> Option<&Media> { cx.media.as_ref().filter(|m| !m.title.i
 pub fn fmt_time(s: f64) -> String {
     let s = s.max(0.0).floor() as u64;
     format!("{}:{:02}", s / 60, s % 60)
-}
-
-/// sessionApp() in desktop.js: "Spotify.exe" / "pkg!App" -> "spotify" / "app".
-pub fn session_app(id: &str) -> String {
-    let n = id.rsplit(['\\', '!']).next().unwrap_or("");
-    n.strip_suffix(".exe").or_else(|| n.strip_suffix(".EXE")).unwrap_or(n).to_lowercase()
-}
-
-fn parse_mixer(v: &serde_json::Value) -> AppVols {
-    v["apps"].as_array().map(|a| a.iter().filter_map(|x| Some((x["app"].as_str()?.to_string(), x["volume"].as_f64()? as f32, x["muted"].as_bool().unwrap_or(false)))).collect()).unwrap_or_default()
-}
-
-/// Collapses each run of Volume commands for one app to the last, so a drag makes one bridge call.
-fn coalesce(cmds: Vec<Cmd>) -> Vec<Cmd> {
-    let mut out: Vec<Cmd> = vec![];
-    for c in cmds {
-        if let (Some(Cmd::Volume(a, _)), Cmd::Volume(b, _)) = (out.last(), &c) { if a == b { out.pop(); } }
-        out.push(c);
-    }
-    out
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -196,16 +169,9 @@ impl Np {
     }
 
     /// The playing app's volume: (level, muted, is the app's own). None: nothing to show.
-    fn volume(&self, cx: &Ctx) -> Option<(f32, bool, bool)> {
-        let want = session(cx).map(|m| session_app(&m.id)).unwrap_or_default();
-        if let Some(a) = self.apps.lock().ok()?.iter().find(|a| !want.is_empty() && a.0.to_lowercase() == want) { return Some((a.1, a.2, true)); }
-        cx.audio.map(|a| (a.volume, a.muted, false))
-    }
+    fn volume(&self, cx: &Ctx) -> Option<(f32, bool, bool)> { self.mix.level(cx) }
 
-    fn app_name(&self, cx: &Ctx) -> Option<String> {
-        let want = session(cx).map(|m| session_app(&m.id))?;
-        self.apps.lock().ok()?.iter().find(|a| a.0.to_lowercase() == want).map(|a| a.0.clone())
-    }
+    fn app_name(&self, cx: &Ctx) -> Option<String> { self.mix.app(cx).map(|a| a.0) }
 
     pub fn size(&self, cx: &Ctx, id: &str) -> (f32, f32) {
         let pad = 8.0;
@@ -240,66 +206,19 @@ impl Np {
         }
     }
 
-    fn send(&mut self, cx: &Ctx, c: Cmd) {
-        let tx = self.tx.get_or_insert_with(|| {
-            let (tx, rx) = mpsc::channel::<Cmd>();
-            let cfg = Config(cx.cfg.0.clone());
-            std::thread::spawn(move || {
-                while let Ok(first) = rx.recv() {
-                    std::thread::sleep(std::time::Duration::from_millis(150)); // one bridge call per pause in a drag
-                    let mut all = vec![first];
-                    while let Ok(n) = rx.try_recv() { all.push(n); }
-                    for cmd in coalesce(all) {
-                        match cmd {
-                            Cmd::Volume(a, v) => proc::bridge(&cfg, "mixer", &["volume", &a, &v.to_string()]),
-                            Cmd::Mute(a, m) => proc::bridge(&cfg, "mixer", &["mute", &a, if m { "1" } else { "0" }]),
-                        };
-                    }
-                }
-            });
-            tx
-        });
-        let _ = tx.send(c);
-    }
-
     /// setVolume() in desktop.js.
-    fn set_volume(&mut self, cx: &Ctx, v: f32) {
-        match self.app_name(cx) {
-            None => {
-                media::set_volume(v);
-                if cx.audio.is_some_and(|a| a.muted) { media::set_mute(false); }
-            }
-            Some(app) => {
-                let mut unmute = false;
-                if let Ok(mut l) = self.apps.lock() { if let Some(a) = l.iter_mut().find(|a| a.0 == app) { unmute = a.2; a.2 = false; a.1 = v; } }
-                if unmute { self.send(cx, Cmd::Mute(app.clone(), false)); }
-                self.send(cx, Cmd::Volume(app, v));
-            }
-        }
-    }
+    fn set_volume(&mut self, cx: &Ctx, v: f32) { self.mix.set_volume(cx, v); }
 
     fn toggle_mute(&mut self, cx: &Ctx) {
         if let Some(app) = self.app_name(cx) {
-            let mut now = false;
-            if let Ok(mut l) = self.apps.lock() { if let Some(a) = l.iter_mut().find(|a| a.0 == app) { a.2 = !a.2; now = a.2; } }
-            self.send(cx, Cmd::Mute(app, now));
+            let now = !self.mix.muted(&app);
+            self.mix.cache(&app, None, Some(now));
+            self.mix.send(cx, Cmd::Mute(app, now));
         } else if let Some(a) = cx.audio { media::set_mute(!a.muted); }
     }
 
     /// Polls the mixer every 4 s while this card lives (apps start and stop playing).
-    fn poll_mixer(&mut self, cx: &Ctx) {
-        if self.polling { return; }
-        self.polling = true;
-        let (cfg, apps) = (Config(cx.cfg.0.clone()), Arc::downgrade(&self.apps));
-        std::thread::spawn(move || loop {
-            let Some(a) = apps.upgrade() else { return };
-            let list = parse_mixer(&proc::bridge(&cfg, "mixer", &[]));
-            let changed = a.lock().is_ok_and(|mut g| if *g != list { *g = list; true } else { false });
-            drop(a);
-            if changed { app::post(Box::new(|_| {})); }
-            std::thread::sleep(std::time::Duration::from_secs(4));
-        });
-    }
+    fn poll_mixer(&mut self, cx: &Ctx) { self.mix.poll(cx); }
 
     pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx, id: &str, back: Option<&Pixmap>) {
         let t = &cx.theme;
@@ -575,6 +494,7 @@ impl Np {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mixer_app::{coalesce, parse_mixer, session_app};
     #[test]
     fn app_names() {
         assert_eq!(session_app("Spotify.exe"), "spotify");

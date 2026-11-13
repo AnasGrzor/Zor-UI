@@ -2,6 +2,28 @@
 //! draw with. Each value equals what was hard-coded there before, so naming them changes no pixels.
 //! Change a value here and every widget that uses it follows.
 
+// ---- spacing scale: a 4 px grid ----
+/// Every gap and inset in the app is one of these, or a role built from them below. Add a step here before using a new number.
+pub const SP_XS: f32 = 4.0;
+pub const SP_S: f32 = 8.0;
+pub const SP_M: f32 = 12.0;
+pub const SP_L: f32 = 16.0;
+pub const SP_XL: f32 = 24.0;
+pub const SP_XXL: f32 = 32.0;
+/// Roles, named for what they space. Each one is a step of the scale.
+/// Inside a card, on every side.
+pub const CARD_INSET: f32 = SP_M;
+/// Above and below a chip, inside its row, and between two chips across the row.
+pub const CHIP_EDGE_PAD: f32 = SP_S;
+/// Above each usage row (a limit bar with its label).
+pub const USAGE_GAP: f32 = SP_S;
+/// Above a count or hint line that follows a block of rows.
+pub const BLOCK_GAP: f32 = SP_M;
+/// Between cards in a list.
+pub const ITEM_GAP: f32 = SP_M;
+/// Between sections or agents.
+pub const SECTION_GAP: f32 = SP_XL;
+
 // ---- spacing ----
 /// Space between two rows in a Settings card. The divider line sits in the middle of it.
 pub const ROW_GAP: f32 = 29.0;
@@ -46,6 +68,17 @@ pub const PANEL_EDGE_A: f32 = 0.45;
 pub const SHADOW_DY: f32 = 6.0;
 pub const SHADOW_BLUR: f32 = 24.0;
 pub const SHADOW_A: f32 = 0.35;
+
+// ---- bar spacing: groups on the scale ----
+/// Gap between two groups on the bar, across a horizontal bar or down a side bar.
+pub const BAR_GROUP_GAP: f32 = SP_S;
+/// Inside a group, left and right (horizontal) or top and bottom (side bar).
+pub const BAR_GROUP_PAD: f32 = SP_S;
+/// The clock is the one group with more air than the others.
+pub const CLOCK_PAD: f32 = SP_M;
+/// Margin from the screen edge to the bar: a floating bar, and a flat one that is attached to the edge.
+pub const BAR_EDGE: f32 = SP_S;
+pub const BAR_EDGE_FLAT: f32 = SP_M;
 
 // ---- bar spacing ----
 /// Width of a workspace button, and of the active one (a wider accent pill) on a horizontal bar.
@@ -101,6 +134,14 @@ pub const CONTROL_SURFACE: &str = "surfaceContainerHigh";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spacing_scale_is_a_4_px_grid_and_grows() {
+        for v in [SP_XS, SP_S, SP_M, SP_L, SP_XL, SP_XXL] { assert_eq!(v % 4.0, 0.0, "{v} is off the grid"); }
+        assert!(SP_XS < SP_S && SP_S < SP_M && SP_M < SP_L && SP_L < SP_XL && SP_XL < SP_XXL);
+        for role in [CARD_INSET, CHIP_EDGE_PAD, USAGE_GAP, BLOCK_GAP, ITEM_GAP, SECTION_GAP, BAR_GROUP_GAP, BAR_GROUP_PAD, CLOCK_PAD, BAR_EDGE, BAR_EDGE_FLAT] { assert_eq!(role % 4.0, 0.0, "role {role} is off the grid"); }
+        assert!(BAR_GROUP_GAP >= SP_S && BAR_GROUP_PAD >= SP_S, "a bar group keeps at least 8 px around its content");
+    }
 
     #[test]
     fn the_divider_has_the_same_air_above_and_below() {

@@ -99,6 +99,9 @@ impl Translate {
 }
 
 impl Tab for Translate {
+    // 306: the output card (COPY sits on it and wins); 399: the language menu panel, its rows win where they overlap
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | 306 | 399) }
+
     fn show(&mut self, cx: &Ctx) {
         if self.ready { return; }
         self.ready = true;

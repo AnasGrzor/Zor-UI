@@ -30,7 +30,7 @@ fn defaults() -> Value {
             "agents": true, "agentWorking": true, "recording": true, "timer": true, "privacy": true,
             "media": true, "art": true, "progress": true, "eq": true, "eqColor": "", "controls": true, "trackSeconds": 3,
             "idle": "auto", "status": true, "badges": true, "textWidth": 170, "wideWidth": 280,
-            "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
+            "version": "new", "click": "panel", "rightClick": "sidebar-left", "scroll": "volume",
             "clipboardPeek": true,
             "panel": { "media": true, "lyrics": true, "recording": true, "timer": true, "clock": true, "agents": true, "notifications": true, "notifCount": 3, "clipboard": true, "clipCount": 3 }
         },

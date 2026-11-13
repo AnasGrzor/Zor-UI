@@ -1168,6 +1168,9 @@ impl Drop for Settings {
 impl View for Settings {
     fn size(&self, _: &Gfx, _: &Ctx, _: f32) -> (f32, f32) { self.area }
 
+    // BG and MENU_BG are full-area spots; NAV_BG (3) is also picker::BG, the colour picker backdrop.
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | BG | MENU_BG | NAV_BG) }
+
     fn key(&self, _: &Ctx) -> String {
         // the Usage page redraws every second
         let tick = if PAGES[self.page].0 == "usage" { (hub::now_ms() / 1000.0) as u64 } else { 0 };
@@ -1694,6 +1697,13 @@ mod tests {
     use super::*;
 
     fn s() -> Settings { Settings::new((1200.0, 800.0)) }
+
+    #[test]
+    fn hand_skips_background_spots() {
+        let st = s();
+        assert!(!st.hand(0) && !st.hand(BG) && !st.hand(MENU_BG) && !st.hand(NAV_BG), "background spots keep the arrow");
+        assert!(st.hand(NAV_BG + 1), "a control gets the hand");
+    }
 
     #[test]
     fn contacts_are_added_replaced_and_deleted() {

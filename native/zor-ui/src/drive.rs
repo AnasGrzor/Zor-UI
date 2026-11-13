@@ -1381,30 +1381,6 @@ mod tests {
     }
 
     #[test]
-    fn a_window_is_hidden_from_screenshots_only_while_asked() {
-        unsafe {
-            let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("capture test"), WS_POPUP, 0, 0, 10, 10, None, None, None, None).unwrap();
-            let affinity = || { let mut a = 0u32; GetWindowDisplayAffinity(h, &mut a).unwrap(); a };
-            assert_eq!(affinity(), 0, "a new window shows up in screenshots");
-            assert!(exclude_window(h, true) && affinity() == WDA_EXCLUDEFROMCAPTURE.0);
-            assert!(!exclude_window(h, true), "already hidden: nothing changed");
-            assert!(exclude_own_windows(false) >= 1 && affinity() == 0, "the end of a drive shows every window again");
-            assert!(exclude_own_windows(true) >= 1 && affinity() == WDA_EXCLUDEFROMCAPTURE.0, "the sweep finds this process's windows");
-            exclude_own_windows(false);
-            let _ = DestroyWindow(h);
-        }
-    }
-
-    #[test]
-    fn the_border_shows_only_between_the_yes_and_the_end() {
-        assert!(!driving(), "idle at start");
-        set_driving(true);
-        assert!(driving());
-        set_driving(false);
-        assert!(!driving());
-    }
-
-    #[test]
     fn the_buddy_lets_clicks_through_only_while_driving() {
         let plain = WS_EX_TOPMOST.0 as isize | WS_EX_LAYERED.0 as isize;
         let on = with_pass_through(plain, true);

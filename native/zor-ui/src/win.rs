@@ -60,6 +60,8 @@ pub trait View {
     fn resize(&mut self, _w: f32, _h: f32) {}
     /// A resize drag ended (settings saves the size).
     fn resize_end(&mut self) {}
+    /// Shows the hand over spot `id`. Views return false for background spots (wheel targets, backdrops) so the hand shows only on controls.
+    fn hand(&self, id: u32) -> bool { id != 0 }
 }
 
 /// Width of the resize band along each edge, CSS px. Settings' panel starts 6 px in and the shadow
@@ -88,6 +90,8 @@ pub fn drag_rect(r: (i32, i32, i32, i32), edge: (i32, i32), d: (i32, i32), min: 
 thread_local! {
     /// The pointer is over a resizable window's edge (see `edge_at`): WM_SETCURSOR shows the matching arrow.
     static EDGE_HOT: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((0, 0)) };
+    /// The pointer is over a clickable element (a registered hit): WM_SETCURSOR shows the hand.
+    static HAND_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -428,11 +432,15 @@ impl Win {
                         self.view.input(Input::Drag(self.press, x, y, Phase::Move), cx);
                     }
                     let id = self.hit_lp(lp);
+                    HAND_HOT.with(|h| h.set(self.view.hand(id)));
                     if id != self.hover { self.hover = id; self.view.input(Input::Hover(id), cx); }
                     let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut t);
                 }
-                WM_MOUSELEAVE => if EDGE_HOT.with(|e| e.replace((0, 0))) != (0, 0) || self.hover != 0 { self.hover = 0; self.view.input(Input::Hover(0), cx); },
+                WM_MOUSELEAVE => {
+                    HAND_HOT.with(|h| h.set(false));
+                    if EDGE_HOT.with(|e| e.replace((0, 0))) != (0, 0) || self.hover != 0 { self.hover = 0; self.view.input(Input::Hover(0), cx); }
+                }
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                     let (x, y) = self.xy(lp);
                     if msg == WM_LBUTTONDOWN && self.view.limits().is_some() {
@@ -535,6 +543,10 @@ pub unsafe fn early(hwnd: HWND, msg: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRE
             let (ex, ey) = EDGE_HOT.with(|e| e.get());
             let c = match (ex, ey) { (0, _) => IDC_SIZENS, (_, 0) => IDC_SIZEWE, _ if ex == ey => IDC_SIZENWSE, _ => IDC_SIZENESW };
             SetCursor(LoadCursorW(None, c).unwrap_or_default());
+            Some(LRESULT(1))
+        }
+        WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT && HAND_HOT.with(|h| h.get()) => {
+            SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());
             Some(LRESULT(1))
         }
         WM_MOUSEACTIVATE => {

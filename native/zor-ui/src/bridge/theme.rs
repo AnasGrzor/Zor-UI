@@ -230,7 +230,7 @@ fn plan(dw: &IDesktopWallpaper, main: &str, own: &Value) -> windows::core::Resul
         let (src, custom) = monitor_source(own, n, main);
         // no main picture in state (a solid-color theme): show what Windows has on this monitor
         let src = if src.is_empty() { windows_picture(dw, &id) } else { src };
-        let file =if w > 0 && h > 0 { fit_file(&src, n, w, h) } else { None }.unwrap_or(src);
+        let file = if w > 0 && h > 0 { fit_file(&src, n, w, h) } else { None }.unwrap_or(src);
         let name = crate::util::monitor_label(&names, (r.left, r.top), n);
         out.push(Plan { id, w, h, name, file, custom });
     }

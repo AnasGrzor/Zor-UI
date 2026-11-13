@@ -18,14 +18,17 @@ const WAIT: Duration = Duration::from_secs(110);
 fn permits() -> PathBuf { root().join("permits") }
 
 /// The permission the island shows: (agent label, session, what the agent wants to do), from the agents list.
-pub fn pending() -> Option<(String, String, String)> {
-    hub::get_json("zor-ui.agents").as_array()?.iter().find_map(|a| {
+pub fn pending() -> Option<(String, String, String)> { newest_permit(hub::get_json("zor-ui.agents").as_array()?) }
+
+/// The waiting permission with the newest prompt, across all agents and their sessions.
+fn newest_permit(agents: &[Value]) -> Option<(String, String, String)> {
+    agents.iter().filter_map(|a| {
         let p = &a["permit"];
         let session = p["session"].as_str().filter(|s| !s.is_empty())?;
         let msg = p["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("needs permission");
         let label = a["label"].as_str().filter(|l| !l.is_empty()).unwrap_or("Agent");
-        Some((label.to_string(), session.to_string(), msg.to_string()))
-    })
+        Some((p["at"].as_f64().unwrap_or(0.0), (label.to_string(), session.to_string(), msg.to_string())))
+    }).max_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, permit)| permit)
 }
 
 /// A permission is waiting for you.
@@ -79,6 +82,7 @@ fn clear_in(dir: &Path, session: &str) { let _ = std::fs::remove_file(decision_f
 
 fn await_in(agents: &Path, dir: &Path, agent: &str, session: &str, wait: Duration) -> Option<Value> {
     let (start, df, sf) = (Instant::now(), decision_file(dir, session), session_file(agents, agent, session));
+    let prompt_at = load_json(&sf, json!({}))["at"].clone();
     loop {
         let d = load_json(&df, Value::Null);
         if d.is_object() {
@@ -87,7 +91,18 @@ fn await_in(agents: &Path, dir: &Path, agent: &str, session: &str, wait: Duratio
             if s.is_object() { s["state"] = json!("working"); let _ = write(&sf, &s); } // the row leaves "Needs you" at once
             return Some(d);
         }
-        if load_json(&sf, json!({}))["state"] != "waiting" || start.elapsed() >= wait { return None; }
+        if load_json(&sf, json!({}))["state"] != "waiting" { return None; }
+        if start.elapsed() >= wait {
+            // The hook is gone, so Allow and Deny would answer nothing. The agent still waits in its own terminal.
+            let _ = std::fs::remove_file(&df);
+            let mut s = load_json(&sf, json!({}));
+            if s.is_object() && s["at"] == prompt_at && s["ask"] == "permission" {
+                s["ask"] = json!("terminal");
+                s["message"] = json!("Answer in the terminal");
+                let _ = write(&sf, &s);
+            }
+            return None;
+        }
         std::thread::sleep(Duration::from_millis(150));
     }
 }
@@ -95,6 +110,17 @@ fn await_in(agents: &Path, dir: &Path, agent: &str, session: &str, wait: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_newest_waiting_permission_is_shown() {
+        let agents = json!([
+            { "label": "Claude", "permit": { "session": "s1", "message": "Allow Bash: a", "at": 100.0 } },
+            { "label": "Codex", "permit": { "session": "c1", "message": "Allow shell: b", "at": 250.0 } },
+            { "label": "Gemini", "permit": null }
+        ]);
+        assert_eq!(newest_permit(agents.as_array().unwrap()), Some(("Codex".into(), "c1".into(), "Allow shell: b".into())));
+        assert_eq!(newest_permit(&[json!({ "label": "Gemini", "permit": null })]), None);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("zorui-permit-test-{name}-{}", std::process::id()));
@@ -134,6 +160,18 @@ mod tests {
         assert!(await_in(&agents, &permits, "claude", "s3", Duration::from_millis(300)).is_none(), "claude has no session s3 waiting");
         decide_in(&permits, "s3", true, "");
         assert!(await_in(&agents, &permits, "codex", "s3", Duration::from_secs(5)).is_some(), "codex's file says waiting");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_timed_out_prompt_drops_its_buttons() {
+        let d = tmp("timeout");
+        let (agents, permits) = (d.join("agents"), d.join("permits"));
+        let sf = session_file(&agents, "codex", "t1");
+        write(&sf, &json!({ "state": "waiting", "ask": "permission", "message": "Allow Bash: a", "at": 5.0 })).unwrap();
+        assert!(await_in(&agents, &permits, "codex", "t1", Duration::from_millis(300)).is_none());
+        let s = load_json(&sf, json!({}));
+        assert_eq!((s["state"].clone(), s["ask"].clone()), (json!("waiting"), json!("terminal")), "still waiting, but no Allow or Deny");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -22,7 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::{CloseHandle, FILETIME},
+    Foundation::{CloseHandle, BOOL, FILETIME, HWND, LPARAM, TRUE},
+    UI::WindowsAndMessaging::{EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE},
     System::{
         Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
         Threading::{GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE},
@@ -144,6 +145,110 @@ fn resume_line(template: &str, model_arg: &str, id: &str, model: Option<&str>) -
         if !model_arg.trim().is_empty() { line = format!("{line} {}", model_arg.replace("{model}", m)); }
     }
     Some(line)
+}
+
+// ------------------------------------------------------------------ opening a session
+
+/// The processes from `pid` up to the top of its tree, nearest first. Bounded, and never revisits a pid.
+fn ancestry(list: &[(u32, u32, String)], pid: u32) -> Vec<u32> {
+    let (mut cur, mut seen, mut out) = (pid, HashSet::new(), vec![]);
+    while seen.insert(cur) && seen.len() <= 64 {
+        out.push(cur);
+        let Some(e) = list.iter().find(|e| e.0 == cur) else { break };
+        if e.1 == 0 { break; }
+        cur = e.1;
+    }
+    out
+}
+
+/// Visible, titled top-level windows, each with the process that owns it.
+fn windows_of() -> Vec<(HWND, u32)> {
+    unsafe extern "system" fn collect(hwnd: HWND, lp: LPARAM) -> BOOL {
+        let v = &mut *(lp.0 as *mut Vec<(HWND, u32)>);
+        if IsWindowVisible(hwnd).as_bool() && GetWindowTextLengthW(hwnd) > 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            v.push((hwnd, pid));
+        }
+        TRUE
+    }
+    let mut v: Vec<(HWND, u32)> = vec![];
+    unsafe { let _ = EnumWindows(Some(collect), LPARAM(&mut v as *mut Vec<(HWND, u32)> as isize)); }
+    v
+}
+
+/// The index of the window to use: for the nearest ancestor (in `chain`) that has a window, the first window owned by a
+/// process of the same exe name. Electron apps such as Orca keep their window in a sibling process of the same exe.
+fn pick_window(list: &[(u32, u32, String)], chain: &[u32], owners: &[u32]) -> Option<usize> {
+    let name_of = |pid: u32| list.iter().find(|e| e.0 == pid).map(|e| e.2.to_lowercase());
+    for p in chain {
+        let Some(name) = name_of(*p) else { continue };
+        if let Some(i) = owners.iter().position(|o| name_of(*o).as_deref() == Some(name.as_str())) { return Some(i); }
+    }
+    None
+}
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Orca's own CLI, the way to select a session's tab inside Orca.
+fn orca_exe() -> PathBuf { PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Programs").join("orca").join("resources").join("bin").join("orca.exe") }
+
+/// Selects the Orca tab a session runs in. Orca puts "tabId:leafId" in ORCA_PANE_KEY, which matches a terminal from
+/// `orca terminal list`. Returns whether the tab was selected.
+fn orca_switch(s: &Value) -> bool {
+    let Some(env) = s["env"].as_str().and_then(unseal) else { return false };
+    let Some(key) = env.iter().find(|(k, _)| k == "ORCA_PANE_KEY").map(|(_, v)| v.clone()) else { return false };
+    let exe = orca_exe();
+    let Ok(out) = Command::new(&exe).args(["terminal", "list", "--json"]).creation_flags(CREATE_NO_WINDOW).output() else { return false };
+    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else { return false };
+    let handle = v["result"]["terminals"].as_array().into_iter().flatten()
+        .find(|t| format!("{}:{}", t["tabId"].as_str().unwrap_or(""), t["leafId"].as_str().unwrap_or("")) == key)
+        .and_then(|t| t["handle"].as_str().map(str::to_string));
+    let Some(handle) = handle.filter(|h| plain(h, "_")) else { return false };
+    Command::new(&exe).args(["terminal", "switch", "--terminal", &handle]).creation_flags(CREATE_NO_WINDOW).status().map(|st| st.success()).unwrap_or(false)
+}
+
+/// Brings the session to the front: in Orca, selects its tab first, then brings the Orca window forward. Windows
+/// Terminal tabs are not found, since WT is not in the session's process tree.
+pub fn focus_session(s: &Value) -> bool {
+    let Some(pid) = s["pid"].as_u64().map(|p| p as u32) else { return false };
+    if s["orca"] == true {
+        let switched = orca_switch(s);
+        crate::log::line(&format!("open session: orca tab {}", if switched { "selected" } else { "not found" }));
+    }
+    let (list, wins) = (snapshot(), windows_of());
+    let owners: Vec<u32> = wins.iter().map(|w| w.1).collect();
+    let Some(i) = pick_window(&list, &ancestry(&list, pid), &owners) else { return false };
+    let hwnd = wins[i].0;
+    unsafe {
+        if IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_RESTORE); }
+        SetForegroundWindow(hwnd).as_bool()
+    }
+}
+
+/// Opens a session from the island: a running one comes to the front, an ended one starts its resume command.
+/// A running session with no window found is left alone, since resuming it would start a second copy of it.
+pub fn open_session(agent: &str, id: &str) -> Result<&'static str, String> {
+    let file = crate::bridge::common::root().join("agents").join(super::agent_hook::safe(agent)).join(format!("{}.json", super::agent_hook::safe(id)));
+    let s: Value = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).ok_or("that session isn't recorded any more")?;
+    if alive(&s) {
+        let focused = focus_session(&s);
+        crate::log::line(&format!("open session {id}: {}", if focused { "focused its window" } else { "no window found for it" }));
+        return if focused { Ok("focused") } else { Err("it is still running, but its window can't be brought forward from here".into()) };
+    }
+    resume(agent, &s)
+}
+
+/// Starts the session's resume command in a new console, with the environment it ran in.
+fn resume(agent: &str, s: &Value) -> Result<&'static str, String> {
+    let id = s["id"].as_str().unwrap_or("");
+    let (template, model_arg) = super::agent_hook::resume_of(agent, &Value::Null).ok_or("this agent has no resume command")?;
+    let line = resume_line(&template, &model_arg, id, s["model"].as_str()).ok_or("the session id can't be used in a command")?;
+    let env = s["env"].as_str().and_then(unseal).ok_or("its environment wasn't recorded, so it can't be resumed here")?;
+    let cwd = s["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(crate::conf::home);
+    let mut cmd = Command::new("cmd.exe");
+    cmd.raw_arg(format!("/k {line}")).current_dir(cwd).env_clear().envs(env);
+    cmd.creation_flags(CREATE_NEW_CONSOLE).spawn().map(|_| "resumed").map_err(|e| format!("couldn't start it ({e}); run {line} yourself"))
 }
 
 // ------------------------------------------------------------------ restarting
@@ -302,6 +407,25 @@ mod tests {
         assert!(!s.contains("sk-1"), "the key isn't stored in the clear");
         assert_eq!(unseal(&s), Some(env));
         assert_eq!(unseal("not sealed"), None);
+    }
+
+    #[test]
+    fn ancestry_walks_up_once_and_stops_at_a_loop() {
+        let list = vec![(10, 5, "claude.exe".to_string()), (5, 4, "cmd.exe".into()), (4, 0, "explorer.exe".into())];
+        assert_eq!(ancestry(&list, 10), vec![10, 5, 4], "nearest first, up to the top");
+        let loop_list = vec![(1, 2, "a".to_string()), (2, 1, "b".into())];
+        assert_eq!(ancestry(&loop_list, 1), vec![1, 2], "a parent pid that loops back is not walked again");
+        assert_eq!(ancestry(&list, 99), vec![99], "an unknown pid is only itself");
+    }
+
+    #[test]
+    fn a_window_is_matched_by_the_exe_of_the_nearest_ancestor() {
+        // claude -> bash -> Orca (the process in the chain); the window belongs to another Orca process
+        let list = vec![(10, 5, "claude.exe".to_string()), (5, 4, "bash.exe".into()), (4, 3, "Orca.exe".into()), (30, 2, "Orca.exe".into()), (31, 2, "explorer.exe".into())];
+        let chain = ancestry(&list, 10);
+        assert_eq!(pick_window(&list, &chain, &[31, 30]), Some(1), "the Orca window, though owned by a sibling Orca");
+        assert_eq!(pick_window(&list, &chain, &[31]), None, "no Orca window, no match");
+        assert_eq!(pick_window(&list, &[10], &[30]), None, "the agent alone, with no window of its own name");
     }
 
     #[test]

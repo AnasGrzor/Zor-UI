@@ -380,3 +380,104 @@ fn a_summary_is_cut_to_the_word_cap() {
     assert!(s.contains("w149") && !s.contains("w150"), "words 0 to 149 are kept and w150 is cut");
     assert!(s.starts_with("w0 w1 "), "the start is kept");
 }
+
+// ---- Live checks (M5). They call the real model, so they are #[ignore]d: run with `cargo test live_ -- --ignored --nocapture`.
+// The database is the test database of `memory::with_app`, never the real buddy.db. Tools are the real ones, and only harmless reads are asked for.
+
+fn live_cfg() -> Config { Config::parse(&json!({ "ai": { "model": "claude-cli:haiku" } }).to_string()) }
+
+/// A model that records each call kind, then asks the real model.
+fn tee(rec: &Shared) -> Model {
+    let rec = rec.clone();
+    Box::new(move |convo: &str| {
+        let kind = if convo.contains(PLAN_MARK) { "plan" } else if convo.contains(delegate::SYSTEM_MARK) { "sum" } else { "turn" };
+        rec.lock().unwrap_or_else(|e| e.into_inner()).events.push(kind);
+        assist::chat(&live_cfg(), convo, 60)
+    })
+}
+
+fn live_run(said: &str) -> (Result<String, String>, Vec<&'static str>) {
+    let rec = shared();
+    let _model = { MODEL.with(|m| *m.borrow_mut() = Some(tee(&rec))); Fake };
+    let out = run_task(&live_cfg(), said, said, &[], &state::Timing::start(), Start::New, &crate::agent::desktop());
+    let ev = rec.lock().unwrap().events.clone();
+    (out, ev)
+}
+
+fn dump(id: i64) {
+    let (status, verdict, plan_text, resumes) = row(id);
+    println!("ROW id={id} status={status} verdict={verdict:?} plan_present={} resumes={resumes}", plan_text.is_some());
+    for e in steps_of(id) { println!("  STEP key={:?} side={} status={:?} detail={:?}", e.key, e.side, e.status, e.detail); }
+}
+
+#[test]
+#[ignore]
+fn live_plan() {
+    let _db = fresh_db();
+    let (out, ev) = live_run("First look up what example.com is, then tell me in one sentence what it is for");
+    println!("EVENTS {ev:?}\nOUT {out:?}");
+    dump(task_ids()[0]);
+    let first_turn = ev.iter().position(|e| *e == "turn").unwrap_or(usize::MAX);
+    assert_eq!(ev.iter().position(|e| *e == "plan"), Some(0), "planning is the first model call");
+    assert!(first_turn > 0);
+    assert!(row(task_ids()[0]).2.is_some(), "plan saved");
+}
+
+#[test]
+#[ignore]
+fn live_replan() {
+    let _db = fresh_db();
+    let (out, ev) = live_run("First read the page https://zz-no-such-host-9431.invalid/a with read_url, then find the file named zz-no-such-file-9431.txt with find_file, and then summarize both. Use only those tools.");
+    println!("EVENTS {ev:?}\nOUT {out:?}");
+    let id = task_ids()[0];
+    dump(id);
+}
+
+fn seeded(plan_json: &str, done_key: &str) -> i64 {
+    let id = tasks::begin(SAID).expect("the task is saved");
+    tasks::save_plan(Some(id), plan_json);
+    tasks::save_steps(Some(id), &plan::encode(&[done(done_key, false)]));
+    tasks::set(Some(id), state::TaskStatus::Interrupted, "", 1);
+    id
+}
+
+#[test]
+#[ignore]
+fn live_resume_read() {
+    let _db = fresh_db();
+    let p = r#"{"objective":"find what example.com is","done_when":"a sentence is given","steps":[{"does":"web search for example.com","expect":"results","side_effect":false},{"does":"read the page https://example.com with read_url","expect":"page text","side_effect":false}]}"#;
+    let id = seeded(p, r#"WebSearch("example.com")"#);
+    let rec = shared();
+    MODEL.with(|m| *m.borrow_mut() = Some(tee(&rec)));
+    let _f = Fake;
+    resume_pending(live_cfg);
+    println!("EVENTS {:?}", rec.lock().unwrap().events);
+    dump(id);
+    println!("TASKS {:?}", task_ids());
+}
+
+#[test]
+#[ignore]
+fn live_resume_change() {
+    let _db = fresh_db();
+    let id = seeded(PLAN, r#"WebSearch("news")"#);
+    let rec = shared();
+    MODEL.with(|m| *m.borrow_mut() = Some(tee(&rec)));
+    let _f = Fake;
+    resume_pending(live_cfg);
+    println!("EVENTS {:?}", rec.lock().unwrap().events);
+    dump(id);
+}
+
+#[test]
+#[ignore]
+fn live_replan_second_failure() {
+    let _db = fresh_db();
+    let (out, ev) = live_run("First read https://zz-no-such-host-9431.invalid/a with read_url, then read https://zz-other-host-7720.invalid/b with read_url, and then compare them. Use only read_url.");
+    println!("EVENTS {ev:?}\nOUT {out:?}");
+    let id = task_ids()[0];
+    dump(id);
+    let (status, _, _, _) = row(id);
+    assert!(status == "Failed" || status == "Partial");
+    assert!(ev.iter().filter(|e| **e == "plan").count() <= 2, "at most the plan and one re-plan");
+}

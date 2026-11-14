@@ -74,5 +74,5 @@ mod tests {
     /// Needs a logged-in Claude Code: cargo test live_usage -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn live_usage() { println!("{:?}", fetch()); assert!(fetch().is_some()); }
+    fn live_usage() { let u = fetch(); println!("{u:?}"); assert!(u.is_some()); }
 }

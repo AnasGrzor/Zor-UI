@@ -23,6 +23,8 @@ mod guides;
 mod glaze;
 mod buddy;
 mod hub;
+#[cfg(test)]
+mod headless_test;
 mod island;
 mod island_legacy;
 mod mixer_app;

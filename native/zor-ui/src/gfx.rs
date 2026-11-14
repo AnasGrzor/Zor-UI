@@ -612,6 +612,28 @@ impl<'a> Canvas<'a> {
 
     pub fn clip_round(&mut self, r: R, radius: f32, draw: impl FnOnce(&mut Self)) { self.clip(round_rect(r, radius), draw) }
 
+    /// Runs `draw` clipped to `r`, its first `left` and last `right` px fading to nothing (scrolling text's edges).
+    pub fn clip_fade(&mut self, r: R, left: f32, right: f32, draw: impl FnOnce(&mut Self)) {
+        let Surface::Pix(_) = &self.surf else { return draw(self) };
+        let (pw, ph) = self.size_px();
+        let (pw, s) = (pw as usize, self.scale);
+        let Some(mut m) = Mask::new(pw as u32, ph) else { return draw(self) };
+        let (x0, x1) = (r.x * s, (r.x + r.w) * s);
+        let (y0, y1) = ((((r.y + self.dy) * s).floor().max(0.0)) as usize, ((((r.y + r.h + self.dy) * s).ceil().max(0.0)) as usize).min(ph as usize));
+        // distance into the edge over the fade width; no fade is a hard edge
+        let ramp = |d: f32, w: f32| if w <= 0.0 { if d > 0.0 { 1.0 } else { 0.0 } } else { d / w };
+        let old = self.clip.as_ref().map(|o| o.data());
+        let d = m.data_mut();
+        for px in (x0.floor().max(0.0) as usize)..((x1.ceil().max(0.0) as usize).min(pw)) {
+            let c = px as f32 + 0.5;
+            let a = (ramp(c - x0, left * s).min(ramp(x1 - c, right * s)).clamp(0.0, 1.0) * 255.0) as u32;
+            for y in y0..y1 { let i = y * pw + px; d[i] = old.map_or(a, |o| a * o[i] as u32 / 255) as u8; }
+        }
+        let old = std::mem::replace(&mut self.clip, Some(m));
+        draw(self);
+        self.clip = old;
+    }
+
     /// A square-cornered clip that costs almost nothing: draws unclipped, then puts back what was outside `r`
     /// (a mask clip slows every fill and glyph in the closure). Only the strips around `r` are saved: the full
     /// height above and below, but sideways just 24 px. shortcut: drawing more than 24 px past the left or

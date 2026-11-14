@@ -15,10 +15,10 @@ use windows::Win32::{Foundation::{FILETIME, SYSTEMTIME}, System::Time::{FileTime
 use std::sync::{Arc, Mutex};
 
 const W: f32 = crate::tokens::ISLAND_W; // the panel; the window adds 12 px each side for the shadow
-const PAD: f32 = 15.0; // 1 px border + 14 px padding
-const SEP: f32 = 25.0; // gap 12 + border 1 + padding 12 between sections
+const PAD: f32 = crate::tokens::ISLAND_PAD; // 1 px border + 14 px padding
+const SEP: f32 = crate::tokens::ISLAND_SEP; // gap 12 + border 1 + padding 12 between sections
 const LYR_H: f32 = 70.0;
-const ROW: f32 = 13.0 * ui::LH + 4.0; // one lyric line
+const ROW: f32 = 13.0 * ui::LH + crate::tokens::SP_XS; // one lyric line
 const PREV: u32 = 1;
 const PLAY: u32 = 2;
 const NEXT: u32 = 3;
@@ -68,7 +68,7 @@ const CLIP_CHARS: usize = 80;
 const TAB: u32 = 200;
 const TABS_H: f32 = 30.0;
 /// AI agents spacing: from the usage bars to the first session, between session cards, between agents, and inside a card.
-const SESS_LEAD: f32 = 12.0;
+const SESS_LEAD: f32 = crate::tokens::ISLAND_SESS_LEAD;
 const SESS_GAP: f32 = crate::tokens::ITEM_GAP;
 const AGENT_GAP: f32 = crate::tokens::SECTION_GAP;
 const CARD_PAD: f32 = crate::tokens::CARD_INSET;
@@ -158,13 +158,13 @@ impl Island {
 fn lyrics_top(volume: bool) -> f32 { 70.0 + if volume { crate::tokens::ISLAND_VOL_GAP + VOL_H } else { 0.0 } }
 
 /// Width the question wraps to. The text is drawn 8 px narrower than the row, so the height is measured at the same width.
-fn question_width() -> f32 { W - 2.0 * PAD - 8.0 }
+fn question_width() -> f32 { W - 2.0 * PAD - crate::tokens::ISLAND_TEXT_INSET }
 
 /// Height the question gets: all of it, from one line up to `ASK_MAX_LINES` (it scrolls past that).
 fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
 
 /// Height of the whole ask section for a question that wraps to `full` px.
-fn ask_section_h(full: f32) -> f32 { 16.0 + 10.0 + ask_h(full) + 12.0 + ASK_BOX_H + 10.0 + 32.0 }
+fn ask_section_h(full: f32) -> f32 { crate::tokens::ISLAND_HEAD_H + ask_h(full) + crate::tokens::SP_M + ASK_BOX_H + crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H }
 
 /// A plan or question permit takes up to PERMIT_MAX questions, each with up to PERMIT_MAX options (the ids allow no more).
 const PERMIT_MAX: usize = 4;
@@ -185,26 +185,26 @@ fn option_w() -> f32 { W - 2.0 * PAD - 2.0 * CARD_PAD }
 fn option_h(g: &Gfx, o: &Value) -> f32 {
     let label = g.measure_wrapped(o["label"].as_str().unwrap_or(""), txt(13.0, 500), option_w());
     let desc = o["description"].as_str().unwrap_or("");
-    let desc_h = if desc.is_empty() { 0.0 } else { 4.0 + g.measure_wrapped(desc, txt(12.0, 400), option_w()) };
+    let desc_h = if desc.is_empty() { 0.0 } else { crate::tokens::SP_XS + g.measure_wrapped(desc, txt(12.0, 400), option_w()) };
     2.0 * CARD_PAD + label + desc_h
 }
 /// Height of one question: its header (if any), the wrapped text, 8 px, then its option rows with SESS_GAP between them.
 fn question_h(g: &Gfx, q: &Value) -> f32 {
-    let header = if q["header"].as_str().is_some_and(|h| !h.is_empty()) { lh(12.0) + 4.0 } else { 0.0 };
+    let header = if q["header"].as_str().is_some_and(|h| !h.is_empty()) { lh(12.0) + crate::tokens::SP_XS } else { 0.0 };
     let text = g.measure_wrapped(q["question"].as_str().unwrap_or(""), txt(13.0, 400), question_width());
     let opts = options_of(q);
-    header + text + 8.0 + opts.iter().map(|o| option_h(g, o)).sum::<f32>() + SESS_GAP * opts.len().saturating_sub(1) as f32
+    header + text + crate::tokens::SP_S + opts.iter().map(|o| option_h(g, o)).sum::<f32>() + SESS_GAP * opts.len().saturating_sub(1) as f32
 }
 /// Height of a plan or question permit as permit_choice draws it: the head, the body, the reply box and the chips row.
 fn permit_choice_h(g: &Gfx, choice: &Value) -> f32 {
     let body = if choice["kind"] == "plan" {
-        ask_h(g.measure_wrapped(choice["plan"].as_str().unwrap_or(""), txt(13.0, 400), question_width())) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0
+        ask_h(g.measure_wrapped(choice["plan"].as_str().unwrap_or(""), txt(13.0, 400), question_width())) + PERMIT_GAP + ASK_BOX_H + crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H
     } else {
         let qs = questions_of(choice);
         let blocks: f32 = qs.iter().map(|q| question_h(g, q) + PERMIT_GAP).sum();
-        blocks + ASK_BOX_H + if needs_send(qs) { 10.0 + 32.0 } else { 0.0 }
+        blocks + ASK_BOX_H + if needs_send(qs) { crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H } else { 0.0 }
     };
-    26.0 + body
+    crate::tokens::ISLAND_HEAD_H + body
 }
 
 /// The first line of a copied text, its spaces collapsed, cut to 48 characters: what the island's peek shows. "" when blank.
@@ -215,6 +215,27 @@ pub fn peek_text(s: &str) -> String {
 
 /// A history row's text: all of it with spaces collapsed, cut to `CLIP_CHARS`.
 fn clip_text(s: &str) -> String { clip_cut(&s.split_whitespace().collect::<Vec<_>>().join(" "), CLIP_CHARS) }
+
+/// The Win+V history from a hidden `zorui --script toggles -Action clipboard`. Read inside this process, the WinRT
+/// call sometimes never returned and the section stuck on an error; a child that hangs gets killed after `CLIP_WAIT_S`.
+fn read_clips() -> Value {
+    use std::{io::Read, process::Stdio};
+    let failed = || json!({ "error": "Could not read the clipboard history" });
+    let Ok(exe) = std::env::current_exe() else { return failed() };
+    let mut cmd = crate::bridge::common::hidden(exe);
+    cmd.args(["--script", "toggles", "-Action", "clipboard"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else { return failed() };
+    let Some(mut out) = child.stdout.take() else { return failed() };
+    // stdout is read on its own thread: 30 rows can outgrow the pipe buffer and would block the child
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let mut b = vec![]; let _ = out.read_to_end(&mut b); let _ = tx.send(b); });
+    let r = match rx.recv_timeout(std::time::Duration::from_secs(CLIP_WAIT_S)) {
+        Ok(b) => serde_json::from_slice::<Value>(&b).ok().filter(|v| !v.is_null()).unwrap_or_else(failed),
+        Err(_) => { let _ = child.kill(); json!({ "error": "The clipboard didn't answer in time" }) }
+    };
+    let _ = child.wait();
+    r
+}
 
 fn clip_cut(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
@@ -301,9 +322,32 @@ fn agent_h(a: &Value, open: bool) -> f32 {
 
 /// Height of one session: the first line, the busy line while it waits or works, its subagent lines, and the gap below.
 fn session_h(sess: &Value) -> f32 {
-    let busy = if matches!(sess["state"].as_str(), Some("waiting" | "working")) { 4.0 + lh(12.0) } else { 0.0 };
-    let subs = sess["subs"].as_array().map_or(0.0, |v| v.len() as f32 * (3.0 + lh(11.5)));
+    let busy = if has_second_line(sess) { crate::tokens::SP_XS + lh(12.0) } else { 0.0 };
+    let subs = sess["subs"].as_array().map_or(0.0, |v| v.len() as f32 * (crate::tokens::ISLAND_SUB_GAP + lh(11.5)));
     2.0 * CARD_PAD + 18.0 + busy + subs + SESS_GAP
+}
+
+/// Whether a card has a second line: what a busy session is doing or waiting on, or an idle one's last prompt.
+fn has_second_line(sess: &Value) -> bool {
+    matches!(sess["state"].as_str(), Some("waiting" | "working")) || sess["prompt"].as_str().is_some_and(|p| !p.is_empty())
+}
+
+/// A working session's busy line: the tool it is running, else the prompt it is working on (between tool calls).
+fn working_text(sess: &Value) -> String {
+    let (tool, prompt) = (s(sess, "tool"), s(sess, "prompt"));
+    if !tool.is_empty() { tool } else if !prompt.is_empty() { format!("Thinking: {prompt}") } else { "Working".into() }
+}
+
+/// A subagent row: its type, the task its parent gave it, and the tool it is running, e.g.
+/// "Explore · Find the hook code · Grep: src". Parts the hook didn't get are left out.
+fn sub_text(sb: &Value) -> String {
+    [s(sb, "type"), s(sb, "task"), s(sb, "tool")].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
+}
+
+/// Elapsed time as the card shows it: "41m", "8h 43m", or "<1m" under a minute.
+fn elapsed(sec: f64) -> String {
+    let m = (sec.max(0.0) / 60.0) as u64;
+    match m { 0 => "<1m".into(), m if m < 60 => format!("{m}m"), m => format!("{}h {}m", m / 60, m % 60) }
 }
 
 /// A session's spend, e.g. "62% ctx · 184k · $1.20": whichever parts the agent sent.
@@ -366,7 +410,7 @@ fn add_secs(st: &SYSTEMTIME, secs: i64) -> SYSTEMTIME {
     }
 }
 
-fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { 14.0 + if icon { 24.0 } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + 14.0 }
+fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { crate::tokens::CHIP_PAD + if icon { crate::tokens::CHIP_ICON + crate::tokens::CHIP_ICON_GAP } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + crate::tokens::CHIP_PAD }
 
 impl Island {
     fn plan(&self, g: &Gfx, cx: &Ctx) -> Vec<(Sec, f32)> {
@@ -380,11 +424,11 @@ impl Island {
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         let vol = if self.vol_level(cx).is_some() { crate::tokens::ISLAND_VOL_GAP + VOL_H } else { 0.0 };
-        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + vol + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
+        if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + vol + 20.0 + if ly > 0.0 { crate::tokens::ISLAND_GAP + ly } else { 0.0 })); }
         if dp(cx, "recording") && hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).is_some_and(|r| r > 0.0) { v.push((Sec::Rec, 44.0)); }
         let t = hub::timer();
         let done = hub::get("zor-ui.timerDone").is_some_and(|d| !d.is_empty());
-        if dp(cx, "timer") && (done || t["running"].as_bool() == Some(true) || t["sw"]["running"].as_bool() == Some(true)) { v.push((Sec::Timer, 16.0 + 10.0 + 44.0)); }
+        if dp(cx, "timer") && (done || t["running"].as_bool() == Some(true) || t["sw"]["running"].as_bool() == Some(true)) { v.push((Sec::Timer, crate::tokens::ISLAND_HEAD_H + 44.0)); }
         if dp(cx, "clock") && v.is_empty() { v.push((Sec::Idle, 72.0)); }
         if dp(cx, "agents") {
             let list = cx.agents.clone();
@@ -399,14 +443,14 @@ impl Island {
             // a clicked notification opens in place of the list
             if let Some(n) = self.notif_open.clone() {
                 let (title_h, body_full) = Self::notif_text_h(g, &n);
-                let body = if s(&n, "body").is_empty() { 0.0 } else { ask_h(body_full) + 12.0 };
-                v.push((Sec::NotifDetail(n), 26.0 + title_h + 8.0 + body + 32.0));
+                let body = if s(&n, "body").is_empty() { 0.0 } else { ask_h(body_full) + crate::tokens::SP_M };
+                v.push((Sec::NotifDetail(n), crate::tokens::ISLAND_HEAD_H + title_h + crate::tokens::SP_S + body + crate::tokens::CHIP_H));
             } else {
                 let n = self.notifs.lock().map(|n| n.clone()).unwrap_or_default();
                 let count = cx.cfg.get("island.panel.notifCount").as_u64().unwrap_or(3) as usize;
                 let n: Vec<Value> = n.into_iter().take(count).collect();
-                let h = if n.is_empty() { 16.0 + 10.0 + lh(12.5) } else {
-                    22.0 + n.iter().map(|x| 10.0 + 16.0 + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum::<f32>()
+                let h = if n.is_empty() { crate::tokens::ISLAND_HEAD_H + lh(12.5) } else {
+                    22.0 + n.iter().map(|x| crate::tokens::ISLAND_GAP + 2.0 * crate::tokens::SP_S + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum::<f32>()
                 };
                 v.push((Sec::Notifs(n), h));
             }
@@ -424,8 +468,8 @@ impl Island {
                     }
                 },
             };
-            let h = if items.is_empty() { 16.0 + 10.0 + g.measure_wrapped(&note, txt(12.5, 400), W - 2.0 * PAD) } else {
-                22.0 + items.iter().map(|x| 10.0 + clip_row_h(x["image"].as_bool() == Some(true))).sum::<f32>()
+            let h = if items.is_empty() { crate::tokens::ISLAND_HEAD_H + g.measure_wrapped(&note, txt(12.5, 400), W - 2.0 * PAD) } else {
+                22.0 + items.iter().map(|x| crate::tokens::ISLAND_GAP + clip_row_h(x["image"].as_bool() == Some(true))).sum::<f32>()
             };
             v.push((Sec::Clips(items, note), h));
         }
@@ -473,9 +517,9 @@ impl Island {
         let (t, Some(m)) = (&cx.theme, cx.media.as_ref()) else { return };
         let (w, pos) = (W - 2.0 * PAD, self.scrub.get().filter(|_| m.duration > 0.0).map_or(m.now(), |v| v as f64 * m.duration));
         let art = R::new(x, y, 92.0, 92.0);
-        c.rect(art, 20.0, t.c("secondaryContainer"));
+        c.rect(art, crate::tokens::ISLAND_ART_R, t.c("secondaryContainer"));
         match self.art(c.g, m, (92.0 * c.scale).round() as u32) {
-            Some(p) => c.clip_round(art, 20.0, |c| c.image(&p, art, 1.0)),
+            Some(p) => c.clip_round(art, crate::tokens::ISLAND_ART_R, |c| c.image(&p, art, 1.0)),
             None => c.icon("music_note", art, ico(36.0, true), t.c("onSecondaryContainer")),
         }
         let ty = y + (92.0 - lh(17.0) - lh(13.0)) / 2.0;
@@ -488,15 +532,15 @@ impl Island {
         let small = txt(11.5, 400);
         c.text(&ps, R::new(x, sy, pw + 2.0, 22.0), small, t.c("onSurfaceVariant"), Align::Left);
         c.text(&ds, R::new(x + w - dw - 2.0, sy, dw + 2.0, 22.0), small, t.c("onSurfaceVariant"), Align::Right);
-        self.seek = R::new(x + pw + 10.0, sy, (w - pw - dw - 20.0).max(10.0), 22.0);
+        self.seek = R::new(x + pw + crate::tokens::ISLAND_GAP, sy, (w - pw - dw - 2.0 * crate::tokens::ISLAND_GAP).max(10.0), 22.0);
         ui::wave(c, self.seek, SEEK, if m.duration > 0.0 { (pos / m.duration) as f32 } else { 0.0 }, m.playing, t.c("primary"));
         // controls
         let cy = y + 134.0;
         let cx0 = x + (w - 168.0) / 2.0;
         ui::icon_btn(c, cx, R::new(cx0, cy + 8.0, crate::tokens::TRANSPORT_BTN, crate::tokens::TRANSPORT_BTN), PREV, "skip_previous", ui::IconKind::Plain, 26.0, true);
         let big = R::new(cx0 + 54.0, cy, 60.0, 60.0);
-        c.rect(big, 20.0, ui::accent(cx));
-        if c.hit(big, PLAY) { c.rect(big, 20.0, alpha(t.c("onPrimary"), crate::tokens::HOVER_A)); }
+        c.rect(big, crate::tokens::ISLAND_ART_R, ui::accent(cx));
+        if c.hit(big, PLAY) { c.rect(big, crate::tokens::ISLAND_ART_R, alpha(t.c("onPrimary"), crate::tokens::HOVER_A)); }
         c.icon(if m.playing { "pause" } else { "play_arrow" }, big, ico(30.0, true), t.c("onPrimary"));
         ui::icon_btn(c, cx, R::new(cx0 + 124.0, cy + 8.0, crate::tokens::TRANSPORT_BTN, crate::tokens::TRANSPORT_BTN), NEXT, "skip_next", ui::IconKind::Plain, 26.0, true);
         // volume of the playing app (master when it isn't in the mixer), under the controls
@@ -530,7 +574,7 @@ impl Island {
                 self.scroll.region(c, cx, r, self.plain_h, |c, top| {
                     for (i, l) in lines.iter().enumerate() {
                         let y = top + i as f32 * ROW;
-                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + 8.0, y, r.w - 16.0, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
+                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + crate::tokens::ISLAND_TEXT_INSET, y, r.w - 2.0 * crate::tokens::ISLAND_TEXT_INSET, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
                     }
                 });
             }
@@ -547,7 +591,7 @@ impl Island {
                     let l = if l.is_empty() { "♪" } else { l };
                     let cur = idx == Some(i);
                     let (f, col) = if cur { (txt(13.0 * 1.12, 500), t.c("onSurface")) } else { (txt(13.0, 400), alpha(t.c("onSurfaceVariant"), 0.5)) };
-                    c.text(l, R::new(r.x + 8.0, y, r.w - 16.0, ROW), f, alpha(col, fade), Align::Center);
+                    c.text(l, R::new(r.x + crate::tokens::ISLAND_TEXT_INSET, y, r.w - 2.0 * crate::tokens::ISLAND_TEXT_INSET, ROW), f, alpha(col, fade), Align::Center);
                 });
             }
         }
@@ -559,27 +603,27 @@ impl Island {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         let (icon, head) = match permit { Some(h) => ("terminal", h), None => ("smart_toy", "The buddy is asking") };
         c.icon(icon, R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
-        c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
-        let y = y + 26.0;
+        c.text(head, R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        let y = y + crate::tokens::ISLAND_HEAD_H;
         let f = txt(13.0, 400);
         self.ask_full = c.g.measure_wrapped(q, f, question_width());
         let qr = R::new(x, y, w, ask_h(self.ask_full));
         c.hit(qr, ASK_Q);
         let full = self.ask_full;
         self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
-        let y = y + qr.h + 12.0;
+        let y = y + qr.h + crate::tokens::SP_M;
         let br = R::new(x, y, w, ASK_BOX_H);
         c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
         c.hit(br, ASK_BOX);
-        self.reply.draw(c, cx, R::new(br.x + 14.0, br.y, br.w - 14.0 - 72.0, br.h), f, "Type an answer, or tap the mic", self.reply_focus);
+        self.reply.draw(c, cx, R::new(br.x + crate::tokens::ISLAND_BOX_PAD, br.y, br.w - crate::tokens::ISLAND_BOX_PAD - 72.0, br.h), f, "Type an answer, or tap the mic", self.reply_focus);
         let kind = if crate::pill::active() { ui::IconKind::Filled } else { ui::IconKind::Plain }; // filled while it listens
         ui::icon_btn(c, cx, R::new(br.x + br.w - 70.0, br.y + 2.0, 32.0, 32.0), ASK_MIC, "mic", kind, 18.0, false);
         ui::icon_btn(c, cx, R::new(br.x + br.w - 34.0, br.y + 2.0, 32.0, 32.0), ASK_SEND, "send", ui::IconKind::Plain, 18.0, false);
-        let y = y + ASK_BOX_H + 10.0;
+        let y = y + ASK_BOX_H + crate::tokens::ISLAND_GAP;
         let (la, ld) = ("Allow", "Deny");
         let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
         let (allow, deny) = if permit.is_some() { (PERMIT_ALLOW, PERMIT_DENY) } else { (ALLOW, DENY) };
-        ui::chip(c, cx, x + w - wa - 8.0 - wd, y, allow, Some("check"), la, true);
+        ui::chip(c, cx, x + w - wa - crate::tokens::CHIP_EDGE_PAD - wd, y, allow, Some("check"), la, true);
         ui::chip(c, cx, x + w - wd, y, deny, Some("close"), ld, false);
     }
 
@@ -590,8 +634,8 @@ impl Island {
         let plan = choice["kind"] == "plan";
         let qs = questions_of(choice);
         c.icon("terminal", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
-        c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
-        let mut y = y + 26.0;
+        c.text(head, R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        let mut y = y + crate::tokens::ISLAND_HEAD_H;
         let f = txt(13.0, 400);
         if plan {
             let text = choice["plan"].as_str().unwrap_or("");
@@ -605,26 +649,26 @@ impl Island {
         for (qi, q) in qs.iter().enumerate() {
             if let Some(hd) = q["header"].as_str().filter(|h| !h.is_empty()) {
                 c.text(hd, R::new(x, y, w, lh(12.0)), txt(12.0, 500), t.c("tertiary"), Align::Left);
-                y += lh(12.0) + 4.0;
+                y += lh(12.0) + crate::tokens::SP_XS;
             }
             let text = q["question"].as_str().unwrap_or("");
             let th = c.g.measure_wrapped(text, f, question_width());
             c.para(text, R::new(x, y, question_width(), th), f, t.c("onSurface"), Align::Left);
-            y += th + 8.0;
+            y += th + crate::tokens::SP_S;
             for (oi, o) in options_of(q).iter().enumerate() {
                 if oi > 0 { y += SESS_GAP; }
                 let r = R::new(x, y, w, option_h(c.g, o));
                 let over = c.hit(r, PERMIT_OPT + (qi * PERMIT_MAX + oi) as u32);
                 let picked = self.picks.get(qi).is_some_and(|p| p.contains(&oi));
-                c.rect(r, 12.0, cx.theme.c(if picked { "secondaryContainer" } else { "surfaceContainer" }));
-                if over { c.rect(r, 12.0, alpha(t.c("onSurface"), crate::tokens::HOVER_A)); }
+                c.rect(r, crate::tokens::ISLAND_ROW_R, cx.theme.c(if picked { "secondaryContainer" } else { "surfaceContainer" }));
+                if over { c.rect(r, crate::tokens::ISLAND_ROW_R, alpha(t.c("onSurface"), crate::tokens::HOVER_A)); }
                 let (fg, fgv) = if picked { (t.c("onSecondaryContainer"), t.c("onSecondaryContainer")) } else { (t.c("onSurface"), t.c("onSurfaceVariant")) };
                 let lab = o["label"].as_str().unwrap_or("");
                 let label_h = c.g.measure_wrapped(lab, txt(13.0, 500), option_w());
                 c.para(lab, R::new(r.x + CARD_PAD, r.y + CARD_PAD, option_w(), label_h), txt(13.0, 500), fg, Align::Left);
                 if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
                     let dh = c.g.measure_wrapped(d, txt(12.0, 400), option_w());
-                    c.para(d, R::new(r.x + CARD_PAD, r.y + CARD_PAD + label_h + 4.0, option_w(), dh), txt(12.0, 400), fgv, Align::Left);
+                    c.para(d, R::new(r.x + CARD_PAD, r.y + CARD_PAD + label_h + crate::tokens::SP_XS, option_w(), dh), txt(12.0, 400), fgv, Align::Left);
                 }
                 y += r.h;
             }
@@ -634,15 +678,15 @@ impl Island {
         c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
         c.hit(br, ASK_BOX);
         let ph = if plan { "Type feedback to keep planning, or tap the mic" } else { "Type another answer, or tap the mic" };
-        self.reply.draw(c, cx, R::new(br.x + 14.0, br.y, br.w - 14.0 - 72.0, br.h), f, ph, self.reply_focus);
+        self.reply.draw(c, cx, R::new(br.x + crate::tokens::ISLAND_BOX_PAD, br.y, br.w - crate::tokens::ISLAND_BOX_PAD - 72.0, br.h), f, ph, self.reply_focus);
         let kind = if crate::pill::active() { ui::IconKind::Filled } else { ui::IconKind::Plain }; // filled while it listens
         ui::icon_btn(c, cx, R::new(br.x + br.w - 70.0, br.y + 2.0, 32.0, 32.0), ASK_MIC, "mic", kind, 18.0, false);
         ui::icon_btn(c, cx, R::new(br.x + br.w - 34.0, br.y + 2.0, 32.0, 32.0), ASK_SEND, "send", ui::IconKind::Plain, 18.0, false);
-        let y = y + ASK_BOX_H + 10.0;
+        let y = y + ASK_BOX_H + crate::tokens::ISLAND_GAP;
         if plan {
             let (la, ld) = ("Approve", "Keep planning");
             let (wa, wd) = (chip_w(c, la, true), chip_w(c, ld, true));
-            ui::chip(c, cx, x + w - wa - 8.0 - wd, y, PERMIT_ALLOW, Some("check"), la, true);
+            ui::chip(c, cx, x + w - wa - crate::tokens::CHIP_EDGE_PAD - wd, y, PERMIT_ALLOW, Some("check"), la, true);
             ui::chip(c, cx, x + w - wd, y, PERMIT_DENY, Some("edit"), ld, false);
         } else if needs_send(qs) {
             let cw = chip_w(c, "Send", true);
@@ -709,8 +753,8 @@ impl Island {
         let phase = tm["phase"].as_str().unwrap_or("focus");
         let title = if !done.is_empty() { if done == "focus" { "Focus done: break time" } else { "Break over: focus time" } } else if sw { "Stopwatch" } else { phase_name(phase) };
         c.icon(if sw { "timer_play" } else { "timer" }, R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
-        c.text(title, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
-        let y = y + 26.0;
+        c.text(title, R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        let y = y + crate::tokens::ISLAND_HEAD_H;
         let secs = if sw { hub::sw_elapsed(&tm) } else { hub::left(&tm, &cx.cfg) };
         c.text(&hub::clock(secs), R::new(x, y, 220.0, 44.0), txt(44.0, 500), t.c("onSurface"), Align::Left);
         self.tkind = (sw, !done.is_empty());
@@ -743,13 +787,13 @@ impl Island {
     fn agents(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], counts: (usize, usize, usize)) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
-        c.text("AI agents", R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        c.text("AI agents", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
         if list.iter().any(|a| a["state"] == "waiting") {
             let tw = c.g.measure("Dismiss", txt(12.0, 500)).0.ceil();
-            let b = R::new(x + w - (9.0 + 16.0 + 4.0 + tw + 9.0), y - 3.0, 9.0 + 16.0 + 4.0 + tw + 9.0, 22.0);
-            if c.hit(b, AGENT_CLEAR) { c.rect(b, 11.0, t.c("surfaceContainer")); }
-            c.icon("clear_all", R::new(b.x + 9.0, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
-            c.text("Dismiss", R::new(b.x + 29.0, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
+            let b = R::new(x + w - (crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS + tw + crate::tokens::ISLAND_BTN_PAD), y - 3.0, crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS + tw + crate::tokens::ISLAND_BTN_PAD, 22.0);
+            if c.hit(b, AGENT_CLEAR) { c.rect(b, crate::tokens::ISLAND_BTN_R, t.c("surfaceContainer")); }
+            c.icon("clear_all", R::new(b.x + crate::tokens::ISLAND_BTN_PAD, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
+            c.text("Dismiss", R::new(b.x + crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
         }
         let now = hub::now_ms() / 1000.0;
         self.cards.clear();
@@ -761,21 +805,23 @@ impl Island {
             // the header row folds this agent's usage and sessions away; the chevron says which (only when it has one)
             let open = is_open(a, &self.collapsed);
             let k = list.iter().position(|x| s(x, "label") == label).unwrap_or(0) as u32;
-            let head = R::new(x - 4.0, y - 4.0, w + 8.0, 26.0);
+            let head = R::new(x - crate::tokens::SP_XS, y - crate::tokens::SP_XS, w + 2.0 * crate::tokens::SP_XS, 18.0 + 2.0 * crate::tokens::SP_XS);
             if has_chevron(a) {
-                if c.hit(head, AGENT_TOGGLE + k) { c.rect(head, 9.0, alpha(t.c("onSurface"), 0.06)); }
-                c.icon(if open { "expand_more" } else { "chevron_right" }, R::new(x, y + 1.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
+                if c.hit(head, AGENT_TOGGLE + k) { c.rect(head, crate::tokens::ISLAND_PILL_R, alpha(t.c("onSurface"), 0.06)); }
             }
             let (pill, bg, fg) = match state.as_str() {
                 "waiting" => ("Needs you", t.c("tertiaryContainer"), t.c("onTertiaryContainer")),
                 "working" => ("Working", t.c("secondaryContainer"), t.c("onSecondaryContainer")),
                 _ => ("Idle", t.c("surfaceContainerHigh"), t.c("onSurface")),
             };
-            let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 16.0;
+            let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 2.0 * crate::tokens::SP_S;
             let lw = c.g.measure(&label, txt(13.0, 500)).0.ceil() + 2.0;
-            c.text(&label, R::new(x + 20.0, y, lw.min(w - pw - 28.0), 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
-            if !model.is_empty() { c.text(&model, R::new(x + 20.0 + lw + 8.0, y, (w - lw - pw - 36.0).max(0.0), 18.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left); }
-            c.rect(R::new(x + w - pw, y, pw, 18.0), 9.0, bg);
+            // the name starts at the left edge, then the model; the chevron follows the model
+            c.text(&label, R::new(x, y, lw.min(w - pw - crate::tokens::SP_S), 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
+            let model_w = if model.is_empty() { 0.0 } else { crate::tokens::SP_S + c.g.measure(&model, txt(11.5, 400)).0.ceil() };
+            if !model.is_empty() { c.text(&model, R::new(x + lw + crate::tokens::SP_S, y, (w - lw - pw - 2.0 * crate::tokens::SP_S).max(0.0), 18.0), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left); }
+            if has_chevron(a) { c.icon(if open { "expand_more" } else { "chevron_right" }, R::new(x + lw + model_w + crate::tokens::SP_XS, y + 1.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant")); }
+            c.rect(R::new(x + w - pw, y, pw, 18.0), crate::tokens::ISLAND_PILL_R, bg);
             c.text(pill, R::new(x + w - pw, y, pw, 18.0), txt(11.0, 400), fg, Align::Center);
             y += 18.0;
             // usage older than 90 s is greyed out, not shown as current
@@ -788,9 +834,9 @@ impl Island {
                 let h = lh(12.0);
                 c.text(usage_name(k), R::new(x, y, 56.0, h), txt(12.0, 400), fade(t.c("onSurface")), Align::Left);
                 let bar = R::new(x + 64.0, y + (h - 6.0) / 2.0, (w - 64.0 - 38.0 - rw - 24.0).max(10.0), 6.0);
-                c.rect(bar, 3.0, fade(alpha(t.c("primary"), 0.18)));
-                c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), 3.0, fade(t.c("primary")));
-                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + 8.0, y, 38.0, h), txt(12.0, 500), fade(t.c("onSurface")), Align::Right);
+                c.rect(bar, crate::tokens::ISLAND_BAR_R, fade(alpha(t.c("primary"), 0.18)));
+                c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), crate::tokens::ISLAND_BAR_R, fade(t.c("primary")));
+                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + crate::tokens::SP_S, y, 38.0, h), txt(12.0, 500), fade(t.c("onSurface")), Align::Right);
                 c.text(&rs, R::new(x + w - rw - 2.0, y, rw + 4.0, h), txt(11.0, 400), fade(t.c("onSurfaceVariant")), Align::Right);
                 y += h;
             }
@@ -824,25 +870,35 @@ impl Island {
     /// The tab row: Now, Agents, Inbox and Clipboard. The open one is filled; a count badge shows what is waiting in it.
     fn tabs(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, running: usize, inbox: usize) {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
-        let gap = 4.0;
-        let tw = (w - 3.0 * gap) / 4.0;
+        let gap = crate::tokens::SP_XS;
         let items = [("Now", "music_note", 0), ("Agents", "smart_toy", running), ("Inbox", "notifications", inbox), ("Clipboard", "content_paste", 0)];
+        let icon_gap = crate::tokens::CHIP_ICON_GAP;
+        // each tab's label and count badge, measured first, so every tab is as wide as what it holds
+        let parts: Vec<(f32, f32)> = items.iter().map(|(label, _, count)| {
+            let lw = c.g.measure(label, txt(13.0, 500)).0.ceil();
+            let bw = if *count > 0 { c.g.measure(&count.to_string(), txt(11.0, 500)).0.ceil() + 10.0 } else { 0.0 };
+            (lw, bw)
+        }).collect();
+        let content: Vec<f32> = items.iter().zip(&parts).map(|((_, _, count), (lw, bw))| 16.0 + icon_gap + lw + if *count > 0 { icon_gap + bw } else { 0.0 }).collect();
+        // the row's width left over after the gaps is shared out as equal padding on both sides of every tab
+        let pad = (w - 3.0 * gap - content.iter().sum::<f32>()).max(0.0) / (2.0 * items.len() as f32);
+        let mut tab_x = x;
         for (k, (label, icon, count)) in items.into_iter().enumerate() {
-            let r = R::new(x + k as f32 * (tw + gap), y, tw, TABS_H);
+            let total = content[k];
+            let r = R::new(tab_x, y, total + 2.0 * pad, TABS_H);
+            tab_x += r.w + gap;
             let hover = c.hit(r, TAB + k as u32);
             let on = self.tab as usize == k;
             if on { c.rect(r, TABS_H / 2.0, t.c("secondaryContainer")); }
             else if hover { c.rect(r, TABS_H / 2.0, alpha(t.c("onSurface"), 0.08)); }
             let fg = if on { t.c("onSecondaryContainer") } else { t.c("onSurfaceVariant") };
-            let lw = c.g.measure(label, txt(13.0, 500)).0.ceil();
-            let bw = if count > 0 { c.g.measure(&count.to_string(), txt(11.0, 500)).0.ceil() + 10.0 } else { 0.0 };
-            let total = 16.0 + 6.0 + lw + if count > 0 { 6.0 + bw } else { 0.0 };
-            let sx = r.x + (r.w - total) / 2.0;
+            let (lw, bw) = parts[k];
+            let sx = r.x + pad;
             c.icon(icon, R::new(sx, r.y + (TABS_H - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), fg);
-            c.text(label, R::new(sx + 22.0, r.y, lw + 2.0, TABS_H), txt(13.0, 500), fg, Align::Left);
+            c.text(label, R::new(sx + 16.0 + icon_gap, r.y, lw + 2.0, TABS_H), txt(13.0, 500), fg, Align::Left);
             if count > 0 {
-                let b = R::new(sx + 22.0 + lw + 6.0, r.y + (TABS_H - 16.0) / 2.0, bw, 16.0);
-                c.rect(b, 8.0, t.c("primary"));
+                let b = R::new(sx + crate::tokens::ISLAND_TITLE_X + lw + crate::tokens::CHIP_ICON_GAP, r.y + (TABS_H - 16.0) / 2.0, bw, 16.0);
+                c.rect(b, crate::tokens::ISLAND_BADGE_R, t.c("primary"));
                 c.text(&count.to_string(), b, txt(11.0, 500), t.c("onPrimary"), Align::Center);
             }
         }
@@ -861,7 +917,7 @@ impl Island {
             let hover = c.hit(r, FILTER + k as u32);
             let on = self.filter == Some(key);
             let (fill, fg) = if on { (t.c("primary"), t.c("onPrimary")) } else { (t.c("surfaceContainer"), t.c("onSurfaceVariant")) };
-            c.rect(r, 12.0, if hover && !on { alpha(t.c("onSurface"), 0.08) } else { fill });
+            c.rect(r, crate::tokens::ISLAND_ROW_R, if hover && !on { alpha(t.c("onSurface"), 0.08) } else { fill });
             // each state has its own colour: a dot and the count take it, so the three chips tell apart at a glance
             let accent = if on { t.c("onPrimary") } else { match key { "waiting" => t.c("tertiary"), "working" => t.c("primary"), _ => t.c("onSurfaceVariant") } };
             let dot_col = if on { t.c("onPrimary") } else { match key { "waiting" => t.c("tertiary"), "working" => t.c("primary"), _ => t.c("outlineVariant") } };
@@ -902,13 +958,13 @@ impl Island {
             p.rsplit(['/', '\\']).find(|x| !x.is_empty()).unwrap_or("").to_string()
         });
         let spend = spend_text(&sess["spend"]);
-        let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 16.0;
-        let sw = if spend.is_empty() { 0.0 } else { c.g.measure(&spend, txt(11.0, 400)).0.ceil() + 8.0 };
+        let pw = c.g.measure(pill, txt(11.0, 400)).0.ceil() + 2.0 * crate::tokens::SP_S;
+        let sw = if spend.is_empty() { 0.0 } else { c.g.measure(&spend, txt(11.0, 400)).0.ceil() + crate::tokens::SP_S };
         let fw = c.g.measure(&folder, txt(13.0, 500)).0.ceil().min((w - pw - sw - 16.0).max(40.0));
         c.text(&folder, R::new(x, y, fw, 18.0), txt(13.0, 500), t.c("onSurface"), Align::Left);
         // the spend ends 8 px before the state pill
-        if sw > 0.0 { c.text(&spend, R::new(x + w - pw - 8.0 - sw, y, sw, 18.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
-        c.rect(R::new(x + w - pw, y, pw, 18.0), 9.0, bg);
+        if sw > 0.0 { c.text(&spend, R::new(x + w - pw - crate::tokens::SP_S - sw, y, sw, 18.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
+        c.rect(R::new(x + w - pw, y, pw, 18.0), crate::tokens::ISLAND_PILL_R, bg);
         c.text(pill, R::new(x + w - pw, y, pw, 18.0), txt(11.0, 400), fg, Align::Center);
         let mut y = y + 18.0;
         let since = sess["since"].as_f64().unwrap_or(0.0);
@@ -917,21 +973,24 @@ impl Island {
             let (what, col) = if state == "waiting" {
                 (s(sess, "message"), t.c("tertiary"))
             } else {
-                (Some(s(sess, "tool")).filter(|t| !t.is_empty()).unwrap_or("Working".into()), t.c("onSurfaceVariant"))
+                (working_text(sess), t.c("onSurfaceVariant"))
             };
-            let tm = if since > 0.0 { hub::clock(now - since) } else { String::new() };
-            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + 8.0;
-            c.text(&what, R::new(x, y + 4.0, w - tw, lh(12.0)), txt(12.0, 400), col, Align::Left);
-            if !tm.is_empty() { c.text(&tm, R::new(x + w - tw, y + 4.0, tw, lh(12.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
-            y += 4.0 + lh(12.0);
+            let tm = if since > 0.0 { elapsed(now - since) } else { String::new() };
+            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + crate::tokens::SP_S;
+            c.text(&what, R::new(x, y + crate::tokens::SP_XS, w - tw, lh(12.0)), txt(12.0, 400), col, Align::Left);
+            if !tm.is_empty() { c.text(&tm, R::new(x + w - tw, y + crate::tokens::SP_XS, tw, lh(12.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right); }
+            y += crate::tokens::SP_XS + lh(12.0);
+        } else if let Some(p) = sess["prompt"].as_str().filter(|p| !p.is_empty()) {
+            c.text(&format!("Last: {p}"), R::new(x, y + crate::tokens::SP_XS, w, lh(12.0)), txt(12.0, 400), t.c("onSurfaceVariant"), Align::Left);
+            y += crate::tokens::SP_XS + lh(12.0);
         }
         for sb in sess["subs"].as_array().into_iter().flatten() {
-            let (at, tm) = (x + 14.0, hub::clock(now - sb["since"].as_f64().unwrap_or(now)));
-            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + 8.0;
-            c.icon("subdirectory_arrow_right", R::new(x + 2.0, y + 3.0, 12.0, 12.0), ico(12.0, false), t.c("primary"));
-            c.text(&format!("{} · {}", s(sb, "type"), s(sb, "tool")), R::new(at, y + 3.0, w - 14.0 - tw, lh(11.5)), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
-            c.text(&tm, R::new(x + w - tw, y + 3.0, tw, lh(11.5)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
-            y += 3.0 + lh(11.5);
+            let (at, tm) = (x + crate::tokens::ISLAND_SUB_INDENT, elapsed(now - sb["since"].as_f64().unwrap_or(now)));
+            let tw = c.g.measure(&tm, txt(11.0, 400)).0.ceil() + crate::tokens::SP_S;
+            c.icon("subdirectory_arrow_right", R::new(x + 2.0, y + crate::tokens::ISLAND_SUB_GAP, 12.0, 12.0), ico(12.0, false), t.c("primary"));
+            c.text(&sub_text(sb), R::new(at, y + crate::tokens::ISLAND_SUB_GAP, w - crate::tokens::ISLAND_SUB_INDENT - tw, lh(11.5)), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Left);
+            c.text(&tm, R::new(x + w - tw, y + crate::tokens::ISLAND_SUB_GAP, tw, lh(11.5)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+            y += crate::tokens::ISLAND_SUB_GAP + lh(11.5);
         }
         y + SESS_GAP
     }
@@ -940,30 +999,30 @@ impl Island {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         let hh = if list.is_empty() { 16.0 } else { 22.0 };
         c.icon("notifications", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
-        c.text("Notifications", R::new(x + 22.0, y, w - 22.0, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        c.text("Notifications", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
         if !list.is_empty() {
             let tw = c.g.measure("Clear all", txt(12.0, 500)).0.ceil();
-            let b = R::new(x + w - (9.0 + 16.0 + 4.0 + tw + 9.0), y, 9.0 + 16.0 + 4.0 + tw + 9.0, 22.0);
-            if c.hit(b, CLEAR) { c.rect(b, 11.0, t.c("surfaceContainer")); }
-            c.icon("clear_all", R::new(b.x + 9.0, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
-            c.text("Clear all", R::new(b.x + 29.0, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
+            let b = R::new(x + w - (crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS + tw + crate::tokens::ISLAND_BTN_PAD), y, crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS + tw + crate::tokens::ISLAND_BTN_PAD, 22.0);
+            if c.hit(b, CLEAR) { c.rect(b, crate::tokens::ISLAND_BTN_R, t.c("surfaceContainer")); }
+            c.icon("clear_all", R::new(b.x + crate::tokens::ISLAND_BTN_PAD, b.y + 3.0, 16.0, 16.0), ico(16.0, false), t.c("primary"));
+            c.text("Clear all", R::new(b.x + crate::tokens::ISLAND_BTN_PAD + 16.0 + crate::tokens::SP_XS, b.y, tw + 4.0, 22.0), txt(12.0, 500), t.c("primary"), Align::Left);
         }
-        let mut y = y + hh + 10.0;
+        let mut y = y + hh + crate::tokens::ISLAND_GAP;
         if list.is_empty() { return c.text("Nothing new", R::new(x, y, w, lh(12.5)), txt(12.5, 400), t.c("onSurfaceVariant"), Align::Left); }
         let now = hub::now_ms() / 1000.0;
         for (i, n) in list.iter().enumerate() {
             let body = s(n, "body");
-            let h = 16.0 + lh(13.0) * if body.is_empty() { 1.0 } else { 2.0 };
+            let h = 2.0 * crate::tokens::SP_S + lh(13.0) * if body.is_empty() { 1.0 } else { 2.0 };
             let r = R::new(x, y, w, h);
             let over = c.hit(r, NOTIF + i as u32);
-            c.rect(r, 14.0, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
+            c.rect(r, crate::tokens::CARD_R, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
             let ago = ago(now, n["time"].as_f64().unwrap_or(now));
             let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
-            c.text(&ago, R::new(r.x + w - 10.0 - aw - 2.0, r.y + 8.0, aw + 4.0, lh(11.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
-            let tw = w - 20.0 - aw - 10.0;
-            c.text(&format!("{} · {}", s(n, "app"), s(n, "title")), R::new(r.x + 10.0, r.y + 8.0, tw, lh(13.0)), txt(13.0, 500), t.c("onSurface"), Align::Left);
-            if !body.is_empty() { c.text(&body, R::new(r.x + 10.0, r.y + 8.0 + lh(13.0), tw, lh(13.0)), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left); }
-            y += h + 10.0;
+            c.text(&ago, R::new(r.x + w - crate::tokens::ISLAND_ROW_PAD - aw - 2.0, r.y + crate::tokens::SP_S, aw + 4.0, lh(11.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+            let tw = w - 2.0 * crate::tokens::ISLAND_ROW_PAD - aw - crate::tokens::ISLAND_GAP;
+            c.text(&format!("{} · {}", s(n, "app"), s(n, "title")), R::new(r.x + crate::tokens::ISLAND_ROW_PAD, r.y + crate::tokens::SP_S, tw, lh(13.0)), txt(13.0, 500), t.c("onSurface"), Align::Left);
+            if !body.is_empty() { c.text(&body, R::new(r.x + crate::tokens::ISLAND_ROW_PAD, r.y + crate::tokens::SP_S + lh(13.0), tw, lh(13.0)), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left); }
+            y += h + crate::tokens::ISLAND_GAP;
         }
     }
 
@@ -978,17 +1037,17 @@ impl Island {
         let ago = ago(now, n["time"].as_f64().unwrap_or(now));
         let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
         c.icon("notifications", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
-        c.text(&app, R::new(x + 22.0, y, w - 22.0 - aw - 8.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
+        c.text(&app, R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X - aw - crate::tokens::SP_S, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         c.text(&ago, R::new(x + w - aw, y, aw, 16.0), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
-        let y = y + 26.0;
+        let y = y + crate::tokens::ISLAND_HEAD_H;
         c.para(&title, R::new(x, y, w, title_h), txt(13.0, 500), t.c("onSurface"), Align::Left);
-        let mut y = y + title_h + 8.0;
+        let mut y = y + title_h + crate::tokens::SP_S;
         if !body.is_empty() {
             let br = R::new(x, y, w, ask_h(body_full));
             c.hit(br, NOTIF_BODY);
             let f = txt(13.0, 400);
             self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - 8.0, body_full), f, t.c("onSurface"), Align::Left));
-            y += br.h + 12.0;
+            y += br.h + crate::tokens::SP_M;
         }
         // Back on the left; Open (the app that sent it, if it names one) and Dismiss on the right
         let (ld, lo) = ("Dismiss", "Open");
@@ -997,7 +1056,7 @@ impl Island {
         ui::chip(c, cx, x + w - wd, y, NOTIF_DISMISS, None, ld, false);
         if !s(n, "open").is_empty() {
             let wo = chip_w(c, lo, true);
-            ui::chip(c, cx, x + w - wd - 8.0 - wo, y, NOTIF_OPEN, Some("open_in_new"), lo, true);
+            ui::chip(c, cx, x + w - wd - crate::tokens::CHIP_EDGE_PAD - wo, y, NOTIF_OPEN, Some("open_in_new"), lo, true);
         }
     }
 
@@ -1022,8 +1081,8 @@ impl Island {
         let (t, w) = (&cx.theme, W - 2.0 * PAD);
         let hh = if list.is_empty() { 16.0 } else { 22.0 };
         c.icon("content_paste", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
-        c.text("Clipboard", R::new(x + 22.0, y, w - 22.0, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
-        let mut y = y + hh + 10.0;
+        c.text("Clipboard", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
+        let mut y = y + hh + crate::tokens::ISLAND_GAP;
         if list.is_empty() {
             let nh = c.g.measure_wrapped(note, txt(12.5, 400), w);
             return c.para(note, R::new(x, y, w, nh), txt(12.5, 400), t.c("onSurfaceVariant"), Align::Left);
@@ -1034,17 +1093,17 @@ impl Island {
             let h = clip_row_h(image);
             let r = R::new(x, y, w, h);
             let over = c.hit(r, CLIP + i as u32);
-            c.rect(r, 14.0, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
+            c.rect(r, crate::tokens::CARD_R, t.c(if over { "surfaceContainer" } else { "surfaceContainerLow" }));
             let ago = ago(now, it["time"].as_f64().unwrap_or(now));
             let aw = c.g.measure(&ago, txt(11.0, 400)).0.ceil();
             c.text(&ago, R::new(r.x + w - CARD_PAD - aw - 2.0, r.y + CARD_PAD, aw + 4.0, lh(11.0)), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
             let bx = R::new(r.x + CARD_PAD, r.y + CARD_PAD, CLIP_THUMB, CLIP_THUMB);
-            let tx = bx.x + CLIP_THUMB + 10.0;
-            let tw = (r.x + w - CARD_PAD - aw - 10.0 - tx).max(10.0);
+            let tx = bx.x + CLIP_THUMB + crate::tokens::ISLAND_GAP;
+            let tw = (r.x + w - CARD_PAD - aw - crate::tokens::ISLAND_GAP - tx).max(10.0);
             if image {
                 let thumb = it["thumb"].as_str().and_then(|p| self.thumb(c.g, p, (CLIP_THUMB * c.scale).round() as u32));
                 match thumb {
-                    Some(p) => c.clip_round(bx, 8.0, |c| c.image(&p, bx, 1.0)),
+                    Some(p) => c.clip_round(bx, crate::tokens::ISLAND_THUMB_R, |c| c.image(&p, bx, 1.0)),
                     None => c.icon("image", bx, ico(24.0, false), t.c("onSurfaceVariant")),
                 }
                 c.text("Image", R::new(tx, r.y + CARD_PAD, tw, lh(13.0)), txt(13.0, 500), t.c("onSurface"), Align::Left);
@@ -1052,7 +1111,7 @@ impl Island {
                 c.icon("notes", bx, ico(24.0, false), t.c("onSurfaceVariant"));
                 c.para(&clip_text(&s(it, "text")), R::new(tx, r.y + CARD_PAD, tw, clip_text_h()), txt(13.0, 400), t.c("onSurface"), Align::Left);
             }
-            y += h + 10.0;
+            y += h + crate::tokens::ISLAND_GAP;
         }
     }
 
@@ -1069,16 +1128,9 @@ impl Island {
     fn fetch_clips(&mut self, cx: &Ctx) {
         if self.clip_seen == Some(cx.clip_seq) || !dp(cx, "clipboard") { return; }
         self.clip_seen = Some(cx.clip_seq);
-        let (cfg, slot) = (Config(cx.cfg.0.clone()), self.clips.clone());
-        // the read runs on its own thread; if it doesn't answer in time the section shows an error instead of "Loading…" forever
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || { let _ = tx.send(crate::proc::run(&cfg, "toggles", &["-Action", "clipboard"])); });
+        let slot = self.clips.clone();
         std::thread::spawn(move || {
-            let r = match rx.recv_timeout(std::time::Duration::from_secs(CLIP_WAIT_S)) {
-                Ok(r) if !r.is_null() => r,
-                Ok(_) => json!({ "error": "Could not read the clipboard history" }),
-                Err(_) => json!({ "error": "The clipboard didn't answer in time" }),
-            };
+            let r = read_clips();
             if let Ok(mut c) = slot.lock() { *c = Some(r); }
             app::post(Box::new(|_| {})); // repaint
         });
@@ -1098,7 +1150,7 @@ impl Island {
 
 impl View for Island {
     fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
-        (W + 24.0, Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 24.0)
+        (W + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM, Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM)
     }
     fn key(&self, _: &Ctx) -> String { format!("{}", (hub::now_ms() / 1000.0) as u64) }
     fn frame_ms(&self) -> u32 {
@@ -1113,10 +1165,10 @@ impl View for Island {
         let sess = crate::bridge::permit::pending().map(|p| p.1).unwrap_or_default();
         if sess != self.picks_for { self.picks.clear(); self.picks_for = sess; }
         let plan = self.plan(c.g, cx);
-        let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, 12.0 + PAD);
-        ui::panel(c, cx, R::new(12.0, 12.0, W, h), 28.0);
+        let (h, x) = (Self::content_h(&plan) + 2.0 * PAD, crate::tokens::ISLAND_SHADOW_ROOM + PAD);
+        ui::panel(c, cx, R::new(crate::tokens::ISLAND_SHADOW_ROOM, crate::tokens::ISLAND_SHADOW_ROOM, W, h), crate::tokens::ISLAND_PANEL_R);
         let lyr = Self::lyrics_h(cx);
-        let mut y = 12.0 + PAD;
+        let mut y = crate::tokens::ISLAND_SHADOW_ROOM + PAD;
         let asking = |p: &(Sec, f32)| matches!(p.0, Sec::Ask(_) | Sec::Permit(..));
         if !plan.iter().any(asking) && !self.reply.text.is_empty() { self.reply.set(""); self.reply_focus = false; } // answered by voice: the box starts empty next time
         self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 }
@@ -1126,7 +1178,7 @@ impl View for Island {
         }
         for (i, (sec, sh)) in plan.iter().enumerate() {
             if i > 0 {
-                c.rect(R::new(x, y - 12.5, W - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
+                c.rect(R::new(x, y - SEP / 2.0, W - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
             }
             match sec {
                 Sec::Ask(q) => self.ask(c, cx, x, y, q, None),
@@ -1313,6 +1365,37 @@ mod tests {
         assert_eq!(lyrics_top(false), 70.0);
         assert_eq!(lyrics_top(true), 70.0 + crate::tokens::ISLAND_VOL_GAP + VOL_H);
         assert!(crate::tokens::ISLAND_VOL_GAP >= 8.0, "a gap of at least 8 px above the slider");
+    }
+
+    #[test]
+    fn elapsed_reads_minutes_then_hours() {
+        assert_eq!(elapsed(41.0 * 60.0), "41m");
+        assert_eq!(elapsed(8.0 * 3600.0 + 43.0 * 60.0), "8h 43m");
+        assert_eq!(elapsed(20.0), "<1m");
+    }
+
+    #[test]
+    fn working_line_falls_back_to_the_prompt_between_tools() {
+        assert_eq!(working_text(&json!({ "tool": "Bash: cargo test", "prompt": "run tests" })), "Bash: cargo test");
+        assert_eq!(working_text(&json!({ "tool": "", "prompt": "run tests" })), "Thinking: run tests");
+        assert_eq!(working_text(&json!({})), "Working");
+    }
+
+    #[test]
+    fn subagent_row_drops_the_dot_between_tools() {
+        assert_eq!(sub_text(&json!({ "type": "Explore", "tool": "Grep: src" })), "Explore · Grep: src");
+        assert_eq!(sub_text(&json!({ "type": "Explore", "tool": "" })), "Explore");
+        assert_eq!(sub_text(&json!({ "type": "Explore", "task": "Find the hook code", "tool": "Grep: src" })), "Explore · Find the hook code · Grep: src");
+        assert_eq!(sub_text(&json!({ "type": "", "task": "", "tool": "Read: x.rs" })), "Read: x.rs");
+    }
+
+    #[test]
+    fn idle_card_shows_its_last_prompt_on_a_second_line() {
+        let bare = json!({ "state": "idle" });
+        let last = json!({ "state": "idle", "prompt": "Summarise yesterday's meeting notes" });
+        assert!(!has_second_line(&bare));
+        assert!(has_second_line(&last));
+        assert_eq!(session_h(&last), session_h(&json!({ "state": "working" })), "the Last line takes the same room as the busy line");
     }
 
     #[test]

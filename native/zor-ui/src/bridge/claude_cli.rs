@@ -247,8 +247,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let bat = dir.join("echo.cmd");
         std::fs::write(&bat, "@echo off\r\necho %~1\r\n").unwrap();
-        let run = |arg: String| std::process::Command::new(&bat).arg(arg).output().map(|o| o.status.success()).ok();
-        let nl = std::process::Command::new(&bat).arg("line one\nline two").output();
+        let run = |arg: String| crate::bridge::common::hidden(&bat).arg(arg).output().map(|o| o.status.success()).ok();
+        let nl = crate::bridge::common::hidden(&bat).arg("line one\nline two").output();
         let (short, long) = (run("x".repeat(7000)), run("x".repeat(8500)));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(nl.is_err(), "std accepted a newline argument: {nl:?}");

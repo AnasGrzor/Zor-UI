@@ -57,7 +57,7 @@ pub struct Reply { pub text: String, pub input: u64, pub cache_create: u64, pub 
 pub fn ask_subscription(model: &str, system: &str, user: &str) -> Result<Reply, String> {
     use std::io::Write;
     let exe = crate::bridge::claude_cli::find().ok_or("Claude Code is not installed")?;
-    let mut child = std::process::Command::new(exe)
+    let mut child = crate::bridge::common::hidden(exe)
         .args(["-p", "--output-format", "stream-json", "--verbose", "--model", model, "--tools", "", "--system-prompt", system,
                "--setting-sources", "", "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config"])
         .current_dir(std::env::temp_dir())

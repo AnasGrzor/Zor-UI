@@ -21,7 +21,7 @@ use std::{
 };
 
 /// The states a pack can give pictures for, in the order the last-resort fallback tries them.
-pub const MODES: [&str; 8] = ["stand", "walk", "sit", "sleep", "fall", "held", "point", "talk"];
+pub const MODES: [&str; 9] = ["stand", "walk", "sit", "sleep", "fall", "held", "point", "talk", "work"];
 /// Most pictures per state, lines per category, characters per line, and bytes of buddy.json.
 pub const MAX_FRAMES: usize = 24;
 pub const MAX_LINES: usize = 64;
@@ -146,6 +146,7 @@ impl Pack {
             "fall" => &["fall", "stand"],
             "point" => &["point", "stand"],
             "talk" => &["talk", "stand"],
+            "work" => &["work", "stand"],
             _ => &["stand"],
         };
         let own = |m: &str| self.frames.contains_key(m);
@@ -302,6 +303,7 @@ mod tests {
         assert_eq!(p.resolve("held"), Some(("fall", false)));
         assert_eq!(p.resolve("point"), Some(("stand", false)));
         assert_eq!(p.resolve("talk"), Some(("stand", false)));
+        assert_eq!(p.resolve("work"), Some(("stand", false)), "a buddy with no work pictures works standing");
         assert_eq!(p.resolve("stand"), Some(("stand", true)));
         let q = pk(r#"{"frames":{"walk":["w.png"]}}"#).unwrap();
         assert_eq!(q.resolve("stand"), Some(("walk", false)), "no standing pictures: the first state there is");

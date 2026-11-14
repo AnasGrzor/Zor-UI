@@ -1,5 +1,15 @@
 # Project rules
 
+## Everything runs headless
+
+No process we start may open a visible window, console, or terminal on the user's PC. This covers the app's own child processes.
+
+- App code: start every child process through `bridge::common::hidden()` (or set `CREATE_NO_WINDOW`, `0x0800_0000`, on the command yourself). Never set `DETACHED_PROCESS`, since it removes the console that `powershell.exe` and `cmd.exe` need. Only `zor-setup` has its own copy, in `job.rs`, and it must keep the same flag.
+- Do not close other sessions' terminals or windows. They may hold unsaved work. Ask the user first.
+- A new spawn that skips the hidden flag is a bug. Fix it in the same change. `native/zor-ui/src/headless_test.rs` checks this in both crates and fails on any unflagged `Command::new(`. Intentionally visible spawns go in its `VISIBLE_ON_PURPOSE` list, with a reason.
+
+**Why:** the user lost focus to Claude terminal popups opened while agents worked on their PC.
+
 ## Every customizable setting gets a live preview
 
 When you add a setting that changes how something looks (a color, size, shape, width, style, font, blur, opacity), add a preview of it to the same Settings page, next to the control. A switch that only turns a feature on or off is exempt, and so is a setting that changes behavior with no visual result.

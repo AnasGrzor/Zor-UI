@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn stream_reports_the_first_error_line_on_failure() {
         let (tx, rx) = channel();
-        let r = stream(Command::new("cmd.exe").args(["/c", "echo hello & echo boom 1>&2 & exit 3"]), &tx);
+        let r = stream(hidden("cmd.exe").args(["/c", "echo hello & echo boom 1>&2 & exit 3"]), &tx);
         assert_eq!(r, Err("boom".to_string()));
         assert!(lines(&rx).contains(&"hello".to_string()));
     }
@@ -189,8 +189,8 @@ mod tests {
     #[test]
     fn stream_falls_back_to_the_exit_code() {
         let (tx, _rx) = channel();
-        assert_eq!(stream(Command::new("cmd.exe").args(["/c", "exit 7"]), &tx), Err("PowerShell exited with code 7".to_string()));
-        assert_eq!(stream(Command::new("cmd.exe").args(["/c", "echo ok"]), &tx), Ok(()));
+        assert_eq!(stream(hidden("cmd.exe").args(["/c", "exit 7"]), &tx), Err("PowerShell exited with code 7".to_string()));
+        assert_eq!(stream(hidden("cmd.exe").args(["/c", "echo ok"]), &tx), Ok(()));
     }
 
     #[test]

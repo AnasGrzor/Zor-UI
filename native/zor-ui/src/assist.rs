@@ -82,6 +82,9 @@ pub fn try_busy() -> Option<Busy> {
     BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).ok().map(|_| Busy)
 }
 
+/// True while a request runs; the lead buddy shows his working phase then.
+pub fn busy() -> bool { BUSY.load(std::sync::atomic::Ordering::Relaxed) }
+
 impl Drop for Busy {
     fn drop(&mut self) { BUSY.store(false, std::sync::atomic::Ordering::SeqCst); }
 }

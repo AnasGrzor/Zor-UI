@@ -338,7 +338,7 @@ mod tests {
         std::fs::write(outside.join("secret-note.txt"), "outside").unwrap();
         let link = w.join("link");
         // a junction needs no admin rights; if the tool can't create one here, the test has nothing to prove
-        if std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).status().is_ok_and(|s| s.success()) {
+        if hidden("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).status().is_ok_and(|s| s.success()) {
             assert!(resolve(&w, "link/secret-note.txt").is_err(), "the junction points outside");
             assert!(list_tree(&w, "link").is_err() || !list_tree(&w, ".").unwrap().contains("secret-note"));
         }
@@ -431,7 +431,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
         std::fs::create_dir_all(&target).unwrap();
         // a junction needs no admin rights; if mklink fails here, this test fails and says so (it must not pass silently)
-        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&target).output()
+        let made = hidden("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&target).output()
             .expect("could not start cmd to run mklink");
         assert!(made.status.success(), "mklink /J failed, so the junction case was NOT tested: {}", String::from_utf8_lossy(&made.stdout));
         let err = workspace(&cfg_for(&link)).unwrap_err();
@@ -468,7 +468,7 @@ mod tests {
 
     #[cfg(windows)]
     fn ping_exe_count() -> usize {
-        let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq PING.EXE", "/NH"]).output().expect("tasklist");
+        let out = hidden("tasklist").args(["/FI", "IMAGENAME eq PING.EXE", "/NH"]).output().expect("tasklist");
         String::from_utf8_lossy(&out.stdout).to_lowercase().matches("ping.exe").count()
     }
 
@@ -525,7 +525,7 @@ mod tests {
     #[ignore = "live: runs the real cargo build; run with --ignored"]
     fn live_cargo_build_timeout_leaves_no_rustc() {
         fn rustc_pids() -> std::collections::BTreeSet<String> {
-            let out = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq rustc.exe", "/NH", "/FO", "CSV"]).output().expect("tasklist");
+            let out = hidden("tasklist").args(["/FI", "IMAGENAME eq rustc.exe", "/NH", "/FO", "CSV"]).output().expect("tasklist");
             String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.split(',').nth(1)).map(|p| p.trim_matches('"').to_string()).collect()
         }
         let root = std::env::temp_dir().join(format!("zorui-dev-live-{}", std::process::id()));

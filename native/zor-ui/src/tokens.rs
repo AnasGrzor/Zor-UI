@@ -116,6 +116,50 @@ pub const ISLAND_W: f32 = 420.0;
 pub const TRANSPORT_BTN: f32 = 44.0;
 /// Gap above the volume slider in the Dynamic Island, between it and the lyrics block above it.
 pub const ISLAND_VOL_GAP: f32 = SP_S;
+/// Edge of the panel to its content: a 1 px border and 14 px of padding.
+pub const ISLAND_PAD: f32 = 15.0;
+/// Gap between two sections of the panel: 12 px, the 1 px divider, then 12 px more.
+pub const ISLAND_SEP: f32 = 25.0;
+/// Gap from an agent's usage bars down to its first session card.
+pub const ISLAND_SESS_LEAD: f32 = 12.0;
+/// Room the window leaves around the panel for its shadow, on each side.
+pub const ISLAND_SHADOW_ROOM: f32 = 12.0;
+/// Corner radius of the panel.
+pub const ISLAND_PANEL_R: f32 = 28.0;
+/// Corner radius of the album art and of the big play button.
+pub const ISLAND_ART_R: f32 = 20.0;
+/// Corner radius of a 24 px filter chip and of a permit option row.
+pub const ISLAND_ROW_R: f32 = 12.0;
+/// Corner radius of an 18 px state pill, and of an agent header's hover box.
+pub const ISLAND_PILL_R: f32 = 9.0;
+/// Corner radius of the count badge on a tab (16 px tall).
+pub const ISLAND_BADGE_R: f32 = 8.0;
+/// Corner radius of a clipboard history thumbnail.
+pub const ISLAND_THUMB_R: f32 = 8.0;
+/// Corner radius of a 22 px text button (Dismiss, Clear all).
+pub const ISLAND_BTN_R: f32 = 11.0;
+/// Corner radius of a usage bar (6 px tall).
+pub const ISLAND_BAR_R: f32 = 3.0;
+/// Gap between two island rows or blocks: two notifications or clipboard rows, a clip and its text, a block and its buttons.
+pub const ISLAND_GAP: f32 = 10.0;
+/// Inset of text from the left and right edge of a notification or clipboard row.
+pub const ISLAND_ROW_PAD: f32 = 10.0;
+/// Inset of text from the edge of a lyric line or a question, and the width a wrapped text keeps free on its right.
+pub const ISLAND_TEXT_INSET: f32 = 8.0;
+/// Inset of the typed text from the left of the reply box, and the room kept free on its right for the mic and send buttons.
+pub const ISLAND_BOX_PAD: f32 = 14.0;
+/// Where a section title starts: right of its 16 px icon, with a 6 px gap.
+pub const ISLAND_TITLE_X: f32 = 22.0;
+/// Height of a section header row: its 16 px icon or title, then the 10 px gap under it.
+pub const ISLAND_HEAD_H: f32 = 26.0;
+/// Inside a text button (Dismiss, Clear all): space left of the icon and right of the label.
+pub const ISLAND_BTN_PAD: f32 = 9.0;
+/// An agent's label is indented past the 16 px chevron slot and its 4 px gap.
+pub const ISLAND_INDENT: f32 = 20.0;
+/// A subagent line: how far its text is indented from the card edge.
+pub const ISLAND_SUB_INDENT: f32 = 14.0;
+/// The gap in a subagent line: the space above each line.
+pub const ISLAND_SUB_GAP: f32 = 3.0;
 
 // ---- quick panel (right sidebar) ----
 /// Space between the panel edge and its content.
@@ -204,22 +248,37 @@ mod tests {
 
     /// A spacing, radius or edge const with a plain number is a token that belongs in this file.
     fn is_spacing_const(line: &str) -> bool {
-        const SUFFIXES: [&str; 7] = ["_PAD", "_GAP", "_INSET", "_R", "_RADIUS", "_EDGE", "_SP"];
+        const SUFFIXES: [&str; 9] = ["_PAD", "_GAP", "_INSET", "_R", "_RADIUS", "_EDGE", "_SP", "_MARGIN", "_GUTTER"];
+        const EXACT: [&str; 7] = ["PAD", "GAP", "MARGIN", "INSET", "R", "SEP", "SESS_LEAD"];
         let t = line.trim_start();
         let t = t.strip_prefix("pub ").or_else(|| t.strip_prefix("pub(crate) ")).unwrap_or(t);
         let Some(rest) = t.strip_prefix("const ") else { return false };
         let Some((name, tail)) = rest.split_once(": f32 = ") else { return false };
-        let Some(number) = tail.strip_suffix(';') else { return false };
-        !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '.') && SUFFIXES.iter().any(|s| name.ends_with(s))
+        // a trailing `// comment` on the line is not part of the value
+        let Some(number) = tail.split("//").next().and_then(|v| v.trim_end().strip_suffix(';')) else { return false };
+        let spacing_name = SUFFIXES.iter().any(|s| name.ends_with(s)) || EXACT.contains(&name);
+        !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '.') && spacing_name
     }
 
     #[test]
     fn no_spacing_const_is_declared_outside_tokens() {
         assert!(is_spacing_const("const CARD_PAD: f32 = 12.0;"), "the scan must catch a plain-number spacing const");
         assert!(!is_spacing_const("const CARD_PAD: f32 = crate::tokens::CARD_INSET;"), "an alias of a token is fine");
-        // One-off sizes that stay local on purpose: paste the whole declaration line here to allow it. None today.
-        const ALLOW: &[&str] = &[];
-        let files: [(&str, &str); 9] = [
+        assert!(is_spacing_const("const PAD: f32 = 15.0; // border"), "a trailing comment must not hide the value");
+        assert!(!is_spacing_const("const PREVIEW_W: f32 = 200.0;"), "a width is not a spacing const");
+        // One-off sizes that stay local on purpose: paste the whole declaration line here to allow it.
+        // settings/picker.rs: the colour picker popup's own inset (its 300 px panel). Local to that file, which this pass does not edit.
+        // island_legacy.rs: the committed island panel (island.version = "current"); its own copy of the padding, not in this pass.
+        // bar.rs: the gap between the side groups and the centre, inside one layout function.
+        // bar.rs: the space between scrolling text and its looping copy; part of the scroll motion, not layout padding.
+        const ALLOW: &[(&str, &str)] = &[
+            ("settings/picker.rs", "const PAD: f32 = 14.0;"),
+            ("island_legacy.rs", "const PAD: f32 = 15.0;"),
+            ("island_legacy.rs", "const SEP: f32 = 25.0;"),
+            ("bar.rs", "const MARGIN: f32 = 12.0;"),
+            ("bar.rs", "const SCROLL_GAP: f32 = 32.0;"),
+        ];
+        let files: [(&str, &str); 10] = [
             ("settings/form.rs", include_str!("settings/form.rs")),
             ("settings/pages.rs", include_str!("settings/pages.rs")),
             ("settings/layout.rs", include_str!("settings/layout.rs")),
@@ -228,12 +287,13 @@ mod tests {
             ("settings/store.rs", include_str!("settings/store.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("island.rs", include_str!("island.rs")),
+            ("island_legacy.rs", include_str!("island_legacy.rs")),
             ("bar.rs", include_str!("bar.rs")),
         ];
         let mut hits = Vec::new();
         for (file, src) in files {
             for line in src.lines() {
-                if is_spacing_const(line) && !ALLOW.iter().any(|a| line.contains(a)) {
+                if is_spacing_const(line) && !ALLOW.iter().any(|(f, t)| *f == file && line.contains(t)) {
                     hits.push(format!("{file}: {}", line.trim()));
                 }
             }

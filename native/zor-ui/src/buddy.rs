@@ -239,7 +239,17 @@ fn clock() -> f32 {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Stand, Walk, Sit, Sleep, Held, Fall, Point }
+enum Mode { Stand, Walk, Sit, Sleep, Held, Fall, Point, Work }
+
+/// The mode to switch to when a request starts or ends (`busy`, see `assist::busy`); None to stay. A calm buddy
+/// starts working, and stands again when the work is done. Held, falling and pointing finish first.
+fn work_mode(mode: Mode, busy: bool) -> Option<Mode> {
+    match (mode, busy) {
+        (Mode::Stand | Mode::Walk | Mode::Sit | Mode::Sleep, true) => Some(Mode::Work),
+        (Mode::Work, false) => Some(Mode::Stand),
+        _ => None,
+    }
+}
 
 /// Seconds a move plays. A shield isn't timed here: it lasts as long as `infinity` says.
 fn move_secs(m: Move) -> f32 { match m { Move::Orbs => 2.6, Move::Beam => 2.4, Move::Aura => 2.0, Move::Shield | Move::None => 0.0 } }
@@ -516,7 +526,7 @@ impl Gojo {
     fn pick_sprite(&mut self, c: &Canvas) -> Option<(String, bool)> {
         let p = self.pack.clone()?;
         let mode = match self.mode {
-            Mode::Walk => "walk", Mode::Sit => "sit", Mode::Sleep => "sleep", Mode::Fall => "fall", Mode::Held => "held", Mode::Point => "point",
+            Mode::Walk => "walk", Mode::Sit => "sit", Mode::Sleep => "sleep", Mode::Fall => "fall", Mode::Held => "held", Mode::Point => "point", Mode::Work => "work",
             Mode::Stand if self.bubble.as_ref().is_some_and(|b| b.1 > self.t) && p.frames.contains_key("talk") => "talk",
             Mode::Stand => "stand",
         };
@@ -700,7 +710,7 @@ impl Gojo {
             self.follow_game(ctx);
             self.hidden = fullscreen_on(self.mon);
             // the window he sits on moved or closed
-            if self.perch.is_some() && matches!(self.mode, Mode::Sit | Mode::Stand) {
+            if self.perch.is_some() && matches!(self.mode, Mode::Sit | Mode::Stand | Mode::Work) {
                 match window_top(self.mon, self.x, self.line()) {
                     Some(t) => { self.perch = Some(t); self.y = t; }
                     None => { self.perch = None; self.y = self.line(); self.poof = Some(self.t); self.mode = Mode::Stand; self.wait = 2.0; }
@@ -753,6 +763,8 @@ impl Gojo {
                 if let Some((px, py, label)) = assist::next_point() { self.start_point((px as f32, py as f32), label); }
             }
         }
+        // a request is running: he stops wandering and works until it ends
+        if let Some(m) = work_mode(self.mode, self.leads() && assist::busy()) { self.mode = m; self.wait = 2.0; }
 
         match self.mode {
             Mode::Held => {
@@ -814,6 +826,8 @@ impl Gojo {
                 }
             },
             Mode::Sleep => if idle_s < 2.0 { self.mode = Mode::Stand; self.wait = 3.0; self.say(self.cast.say.back, 3.0); },
+            // stays put, even past the sleep timeout: a long task is not you being away
+            Mode::Work => {}
             // he only sleeps when nothing is playing: a video is company, and his bubble stays up
             _ if idle_s > 180.0 && !ctx.media.as_ref().is_some_and(|m| m.playing) => { self.mode = Mode::Sleep; self.queued = None; }
             Mode::Walk => {
@@ -1193,6 +1207,8 @@ impl View for Gojo {
         let pt = self.move_t.map(|p| t - p);
         // the front arm points forward while he fires orbs or a beam
         let arm = pt.filter(|_| matches!(self.playing, Move::Orbs | Move::Beam)).map_or(0.0, |p| { let dur = move_secs(self.playing); (p / 0.3).min(1.0) * if p > dur - 0.6 { (dur - p) / 0.6 } else { 1.0 } });
+        // working, the front hand is out and taps as if typing
+        let arm = if self.mode == Mode::Work && pt.is_none() { 0.3 + (t * 14.0).sin() * 0.08 } else { arm };
         // where his feet are in the window, and how much taller than the drawn figure he is (the effects scale with it)
         let fy = self.fy;
         let k = self.sprite_h.max(pack::DEFAULT_H) / pack::DEFAULT_H;
@@ -1334,6 +1350,15 @@ impl View for Gojo {
                 let p = (t * 0.6 + i as f32 / 3.0) % 1.0;
                 let r = R::new(FX + 9.0 + p * 10.0, fy - 22.0 * k - p * 26.0, 20.0, 16.0);
                 c.text("z", r, txt(8.0 + p * 6.0, 700), alpha(cx.theme.c("onSurface"), 1.0 - p), Align::Left);
+            }
+        }
+        // working: three dots beside his head pulse in turn, on the side away from his bubble (above the head they
+        // would be cut off under a top bar)
+        if self.mode == Mode::Work {
+            let side = -self.bubble_side();
+            for i in 0..3 {
+                let p = ((t * 3.0 - i as f32 * 0.6).sin() + 1.0) / 2.0;
+                c.circle(FX + side * (18.0 + i as f32 * 6.0) * k, fy - 34.0 * k - p * 2.0, 2.0, alpha(cx.theme.c("onSurface"), 0.35 + p * 0.65));
             }
         }
 
@@ -2036,6 +2061,15 @@ mod tests {
         g.breaks = false;
         g.watch_break(0.0, 1.0);
         assert!(g.bubble.is_none(), "the switch turns reminders off");
+    }
+
+    #[test]
+    fn he_works_while_a_request_runs_and_stands_when_it_ends() {
+        for m in [Mode::Stand, Mode::Walk, Mode::Sit, Mode::Sleep] { assert_eq!(work_mode(m, true), Some(Mode::Work), "{m:?}"); }
+        for m in [Mode::Held, Mode::Fall, Mode::Point] { assert_eq!(work_mode(m, true), None, "{m:?} finishes first"); }
+        assert_eq!(work_mode(Mode::Work, true), None);
+        assert_eq!(work_mode(Mode::Work, false), Some(Mode::Stand));
+        for m in [Mode::Stand, Mode::Walk, Mode::Sit, Mode::Sleep, Mode::Held] { assert_eq!(work_mode(m, false), None, "{m:?}"); }
     }
 
     #[test]

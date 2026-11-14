@@ -349,7 +349,7 @@ fn rank(s: &Value) -> u8 { match s["state"].as_str() { Some("waiting") => 0, Som
 /// One session as the island draws it: what it is doing now, its subagents and its spend.
 fn session_json(s: &Value) -> Value {
     let subs: Vec<Value> = s["subs"].as_object().into_iter().flatten()
-        .map(|(k, v)| json!({ "id": k, "type": or_empty(&v["type"]), "tool": or_empty(&v["tool"]), "since": num(&v["since"]) })).collect();
+        .map(|(k, v)| json!({ "id": k, "type": or_empty(&v["type"]), "tool": or_empty(&v["tool"]), "task": or_empty(&v["task"]), "since": num(&v["since"]) })).collect();
     json!({
         "id": or_empty(&s["id"]), "state": or_empty(&s["state"]), "message": or_empty(&s["message"]), "cwd": or_empty(&s["cwd"]),
         "model": or_empty(&s["model"]), "prompt": or_empty(&s["prompt"]), "tool": or_empty(&s["tool"]), "since": num(&s["since"]),

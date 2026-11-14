@@ -184,23 +184,41 @@ fn turn_fields(rec: &mut Value, old: &Value, p: &Value, state: &str) {
     let end_ev = matches!(ev, "PostToolUse" | "PostToolUseFailure" | "AfterTool" | "afterFileEdit");
     let sub = first_str(p, &["agent_id"]);
     let mut subs = old["subs"].as_object().cloned().unwrap_or_default();
+    // SubagentStart names only the type; the task is in the parent's Agent call, so it waits here for the start
+    let mut spawns: Vec<Value> = old["spawns"].as_array().cloned().unwrap_or_default();
+    if sub.is_empty() && tool_ev && matches!(first_str(p, &["tool_name"]), "Agent" | "Task") {
+        let i = &p["tool_input"];
+        spawns.push(json!({ "type": i["subagent_type"].as_str().unwrap_or(""), "task": short(i["description"].as_str().unwrap_or(""), 60) }));
+    }
     match ev {
-        "SubagentStart" => { subs.insert(sub.to_string(), json!({ "type": first_str(p, &["agent_type"]), "tool": "", "since": now })); }
+        "SubagentStart" => {
+            let ty = first_str(p, &["agent_type"]);
+            // an Agent call without a type starts the default agent, so an untyped spawn matches any start
+            let task = spawns.iter().position(|s| s["type"] == ty || s["type"] == "").map_or(json!(""), |k| spawns.remove(k)["task"].clone());
+            subs.insert(sub.to_string(), json!({ "type": ty, "tool": "", "task": task, "since": now }));
+        }
         "SubagentStop" => { subs.remove(sub); }
         _ => {}
     }
     let mut tool = old["tool"].as_str().unwrap_or("").to_string();
     if !sub.is_empty() {
+        // a subagent we have no row for (its SubagentStart was lost to a parallel hook write): its first tool call adds it
+        if tool_ev && !subs.contains_key(sub) { subs.insert(sub.to_string(), json!({ "type": first_str(p, &["agent_type"]), "tool": "", "since": now })); }
         if let (Some(s), true) = (subs.get_mut(sub), tool_ev || end_ev) { s["tool"] = json!(if tool_ev { tool_text(p) } else { String::new() }); }
     } else if tool_ev || end_ev || !active {
         tool = if tool_ev { tool_text(p) } else { String::new() };
     }
-    if !active { subs.clear(); } // a finished turn has no subagent still running
+    // Stop keeps the subagents: a background one outlives the turn that started it and ends with its own SubagentStop.
+    // shortcut: a subagent whose SubagentStop never arrives stays until SessionEnd or the 12 h cleanup; add an age cut if that shows up.
     let since = if !active { Value::Null } else if starts || !was_active || old["since"].is_null() { json!(now) } else { old["since"].clone() };
     rec["prompt"] = json!(if starts { short(first_str(p, &["prompt"]), 90) } else { old["prompt"].as_str().unwrap_or("").to_string() });
     rec["tool"] = json!(tool);
     rec["since"] = since;
     rec["subs"] = Value::Object(subs);
+    // an Agent call that never started a subagent (it failed) is dropped with its turn, and the list stays short
+    if !active { spawns.clear(); }
+    if spawns.len() > 8 { spawns.drain(..spawns.len() - 8); }
+    rec["spawns"] = Value::Array(spawns);
     rec["spend"] = spend_of(p).or_else(|| Some(old["spend"].clone()).filter(|s| !s.is_null())).unwrap_or(Value::Null);
 }
 
@@ -742,6 +760,41 @@ mod tests {
         send(json!({ "hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1" }));
         let v = session(&d, "claude", "s1");
         assert_eq!(v["subs"].as_object().unwrap().keys().collect::<Vec<_>>(), ["a2"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_background_subagent_outlives_its_turn() {
+        let d = tmp("bgsubs");
+        let send = |p: Value| record(&d, "claude", &p).unwrap();
+        send(json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "run jobs in the bg" }));
+        send(json!({ "hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a1", "agent_type": "Explore" }));
+        send(json!({ "hook_event_name": "Stop", "session_id": "s1" }));
+        assert_eq!(session(&d, "claude", "s1")["subs"]["a1"]["type"], "Explore", "the turn ended, the background subagent did not");
+        send(json!({ "hook_event_name": "PreToolUse", "session_id": "s1", "agent_id": "a1", "tool_name": "Grep", "tool_input": { "path": "src" } }));
+        let v = session(&d, "claude", "s1");
+        assert_eq!((v["state"].clone(), v["subs"]["a1"]["tool"].clone()), (json!("working"), json!("Grep: src")));
+        // a subagent whose start we missed shows up on its first tool call
+        send(json!({ "hook_event_name": "PreToolUse", "session_id": "s1", "agent_id": "a9", "agent_type": "Plan", "tool_name": "Read", "tool_input": { "file_path": "x.rs" } }));
+        assert_eq!(session(&d, "claude", "s1")["subs"]["a9"]["type"], "Plan");
+        send(json!({ "hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1" }));
+        assert_eq!(session(&d, "claude", "s1")["subs"].as_object().unwrap().keys().collect::<Vec<_>>(), ["a9"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_subagent_gets_the_task_its_parent_gave_it() {
+        let d = tmp("subtask");
+        let send = |p: Value| record(&d, "claude", &p).unwrap();
+        send(json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "look around" }));
+        let spawn = |ty: &str, task: &str| json!({ "hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Agent", "tool_input": { "subagent_type": ty, "description": task, "prompt": "..." } });
+        send(spawn("Plan", "Plan the fix"));
+        send(spawn("Explore", "Find the hook code"));
+        send(json!({ "hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a1", "agent_type": "Explore" }));
+        send(json!({ "hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a2", "agent_type": "Plan" }));
+        let v = session(&d, "claude", "s1");
+        assert_eq!((v["subs"]["a1"]["task"].clone(), v["subs"]["a2"]["task"].clone()), (json!("Find the hook code"), json!("Plan the fix")), "matched by type, not by order");
+        assert_eq!(v["spawns"], json!([]), "each task is used once");
         let _ = std::fs::remove_dir_all(&d);
     }
 

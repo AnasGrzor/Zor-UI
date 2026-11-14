@@ -241,17 +241,26 @@ enum El {
     Viz(Color, Vec<f32>), // the bar visualizer (#bar-viz): bars at 0-1 levels
 }
 
-/// Scrolling text: how long it rests at each end, and how fast it moves.
+/// Scrolling text: how long it rests at the start, how fast it moves on average, and the space between the
+/// text and the copy that follows it round the loop.
 const SCROLL_PAUSE_MS: f64 = 1500.0;
 const SCROLL_PX_PER_S: f64 = 30.0;
+const SCROLL_GAP: f32 = 32.0;
+/// How wide the fade is where scrolling text runs under the pill's edge.
+const SCROLL_FADE: f32 = 14.0;
 
-/// How far left text `over` px too wide for its box has moved, `ms` after it first showed:
-/// it rests at the start, scrolls to its end, rests there, then starts over.
-pub fn scroll_x(over: f32, ms: f64) -> f32 {
-    if over <= 0.0 { return 0.0; }
-    let run = over as f64 / SCROLL_PX_PER_S * 1000.0;
-    let t = ms.max(0.0) % (2.0 * SCROLL_PAUSE_MS + run);
-    ((t - SCROLL_PAUSE_MS).clamp(0.0, run) / run) as f32 * over
+/// The left edge's fade, `dx` px into a lap of `span`: none at rest, so the first letters show whole, growing as
+/// the text moves and shrinking again as the lap ends, so it never snaps on or off.
+pub fn scroll_fade_left(dx: f32, span: f32) -> f32 { SCROLL_FADE.min(dx).min(span - dx).max(0.0) }
+
+/// How far left looping text has moved, `ms` after it first showed. `span` is one lap: the text's width plus
+/// SCROLL_GAP. It rests at the start, eases into the lap and out of it, and a lap ends where it began, so the
+/// copy following it takes the text's place with no jump.
+pub fn scroll_x(span: f32, ms: f64) -> f32 {
+    if span <= 0.0 { return 0.0; }
+    let run = span as f64 / SCROLL_PX_PER_S * 1000.0;
+    let p = ((ms.max(0.0) % (SCROLL_PAUSE_MS + run) - SCROLL_PAUSE_MS).max(0.0) / run) as f32;
+    p * p * (3.0 - 2.0 * p) * span // smoothstep: no hard start or stop
 }
 
 /// When `text` first showed in `slot` (ms): a new text restarts the clock, so it scrolls from its start.
@@ -265,8 +274,10 @@ fn scroll_since(slot: &mut (String, f64), text: &str) -> f64 {
 pub fn draw_scroll(c: &mut Canvas, s: &str, r: R, f: Font, col: Color, since: f64) {
     let tw = c.g.measure(s, f).0;
     if tw <= r.w { return c.text(s, R::new(r.x, r.y, r.w + 1.0, r.h), f, col, Align::Left); }
-    let dx = scroll_x(tw - r.w, hub::now_ms() - since);
-    c.clip_round(r, 0.0, |c| c.text(s, R::new(r.x - dx, r.y, tw + 1.0, r.h), f, col, Align::Left));
+    let span = tw + SCROLL_GAP;
+    let dx = scroll_x(span, hub::now_ms() - since);
+    // the text and the copy that follows it round the loop, faded where they run under the edges
+    c.clip_fade(r, scroll_fade_left(dx, span), SCROLL_FADE, |c| for x0 in [r.x - dx, r.x - dx + span] { c.text(s, R::new(x0, r.y, tw + 1.0, r.h), f, col, Align::Left) });
 }
 
 /// #bar-viz: a 60 x 22 canvas of 20 bars.
@@ -1042,7 +1053,7 @@ impl View for Bar {
         format!("{}{}{}{m}{}{loud}", st.wHour, st.wMinute, st.wSecond, theme_key(&cx.theme))
     }
 
-    fn frame_ms(&self) -> u32 { if self.island.moving() || self.di_fade.is_some() || self.viz_loud { 16 } else if self.scrolling { 33 } else if self.eq || self.mic_live { 50 } else if self.pulsing { 100 } else { 0 } }
+    fn frame_ms(&self) -> u32 { if self.island.moving() || self.di_fade.is_some() || self.viz_loud { 16 } else if self.scrolling { 16 } else if self.eq || self.mic_live { 50 } else if self.pulsing { 100 } else { 0 } }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         self.mic_live = false; // island() turns it back on
@@ -1460,12 +1471,18 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_text_rests_moves_rests_and_starts_over() {
-        assert_eq!(scroll_x(0.0, 5000.0), 0.0, "text that fits never moves");
+    fn scrolling_text_rests_then_loops_without_a_jump() {
+        // a 30 px lap runs 1000 ms at 30 px/s
+        assert_eq!(scroll_x(0.0, 5000.0), 0.0, "no lap, no movement");
         assert_eq!(scroll_x(30.0, 1000.0), 0.0, "rests at the start");
-        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 500.0), 15.0, "halfway after half the run");
-        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 1000.0 + 700.0), 30.0, "rests at the end");
-        assert_eq!(scroll_x(30.0, 2.0 * SCROLL_PAUSE_MS + 1000.0 + 100.0), 0.0, "starts over");
+        assert!(scroll_x(30.0, SCROLL_PAUSE_MS + 50.0) < 0.3, "eases in, no hard start");
+        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 500.0), 15.0, "halfway after half the lap");
+        assert!(scroll_x(30.0, SCROLL_PAUSE_MS + 999.0) > 29.99, "a lap ends a full span along, where the copy took the text's place");
+        assert_eq!(scroll_x(30.0, SCROLL_PAUSE_MS + 1000.0 + 100.0), 0.0, "then rests at the start again");
+        assert_eq!(scroll_fade_left(0.0, 200.0), 0.0, "no left fade at rest");
+        assert_eq!(scroll_fade_left(5.0, 200.0), 5.0, "grows as it moves");
+        assert_eq!(scroll_fade_left(100.0, 200.0), SCROLL_FADE, "full fade mid-lap");
+        assert_eq!(scroll_fade_left(198.0, 200.0), 2.0, "shrinks back as the lap ends");
         let mut slot = ("Song".to_string(), 5.0);
         assert_eq!(scroll_since(&mut slot, "Song"), 5.0, "the same text keeps its clock");
         assert!(scroll_since(&mut slot, "Next song") > 5.0, "a new text restarts it");

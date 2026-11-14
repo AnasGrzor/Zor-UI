@@ -60,6 +60,8 @@ pub enum Verdict {
     Declined,
 }
 
+/// The evidence kind of each call. No wildcard arm: a new `Call` variant does not compile until it is decided here, either as a kind
+/// that reads the real outcome back or as `Kind::Action` with a reason in `unverified_reason`.
 pub fn kind_of(call: &Call) -> Kind {
     use Call::*;
     match call {
@@ -67,13 +69,29 @@ pub fn kind_of(call: &Call) -> Kind {
         Remember(_) | Forget(_) => Kind::Memory,
         WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
-        Radio { .. } | Brightness(_) => Kind::ReadBack,
+        // brightness, radio, clipboard and wallpaper read the state back (`brightness_reply`, `readback::radio_reply`, `clip_reply`, `wallpaper_reply`)
+        Radio { .. } | Brightness(_) | Clip(_) | Wallpaper(_) => Kind::ReadBack,
         Volume(_) => Kind::Volume,
         Open(_) => Kind::AppOpen,
         RunCheck(_) => Kind::Check,
-        // a page that loads or is read is evidence; a click or typing is an action that nothing reports back on
+        // a page that loads or is read is evidence; the other browser tools report nothing back
         Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
-        _ => Kind::Action,
+        Browser { .. } | Search(_) | Url(_) | Media(_) | OpenFile(_) | Message { .. } | Power(_) | TakeOver(_) => Kind::Action,
+    }
+}
+
+/// Why a `Kind::Action` call cannot be read back. None for every call that has evidence.
+pub fn unverified_reason(call: &Call) -> Option<&'static str> {
+    use Call::*;
+    match call {
+        Browser { .. } if kind_of(call) == Kind::Action => Some("a click, key press, typed text or dialog answer on a page has no read-back"),
+        Search(_) | Url(_) => Some("the page is handed to the default browser; Windows reports only that the handoff worked"),
+        Media(_) => Some("the player command is sent to the media session without waiting; there is no synchronous playback-state read"),
+        OpenFile(_) => Some("the file is handed to its default app; Windows reports only that the handoff worked"),
+        Message { .. } => Some("the chat opens in another app with the text ready; nothing on this PC reports whether it did"),
+        Power(_) => Some("sleep, restart, shutdown and sign-out end this session, and lock has no cheap read of the lock state"),
+        TakeOver(_) => Some("the take-over runs on its own thread; its end state is saved on the task when it finishes (`tasks::take_over_ended`)"),
+        _ => None,
     }
 }
 
@@ -89,11 +107,12 @@ pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
     match kind {
         Kind::Check => Check::Passed,
         Kind::Play => if t.starts_with("Playing") { Check::Verified } else { Check::Unverified },
-        Kind::Memory => if t.starts_with("Remembered") || t.starts_with("Updated what I remember") || t.starts_with("Forgot:") { Check::Verified } else { Check::Unverified },
+        // the saved or deleted row was checked in the database first (`readback::remember_reply`, `forget_reply`)
+        Kind::Memory => if t.to_lowercase().contains("not confirmed") { Check::NotConfirmed } else if t.starts_with("Remembered") || t.starts_with("Updated what I remember") || t.starts_with("Forgot:") { Check::Verified } else { Check::Unverified },
         Kind::Lookup => if !t.is_empty() && !t.starts_with("No ") { Check::Verified } else { Check::Failed },
         Kind::FileSearch => if t.starts_with("Found:") { Check::Verified } else { Check::Failed },
-        // an Ok from these tools is only returned after the state was read back (radio: `exec`; brightness: `brightness_reply`)
-        Kind::ReadBack => Check::Verified,
+        // an Ok from these tools is only returned after the state was read back; "not confirmed" is a read-back that could not answer
+        Kind::ReadBack => if t.to_lowercase().contains("not confirmed") { Check::NotConfirmed } else { Check::Verified },
         Kind::Action => Check::Unverified,
         // the read-back texts say "not confirmed" when the device or the process list could not confirm the change
         Kind::Volume | Kind::AppOpen => if t.to_lowercase().contains("not confirmed") { Check::NotConfirmed } else { Check::Verified },
@@ -170,6 +189,53 @@ mod tests {
         assert_eq!(check(Kind::FileSearch, &ok("Found: C:\\a\\cv.pdf.")), Check::Verified);
         assert_eq!(check(Kind::FileSearch, &ok("No file or folder matches \"cv\".")), Check::Failed);
         assert_eq!(check(Kind::Action, &ok("Done.")), Check::Unverified, "nothing reports what the device did");
+    }
+
+    /// One sample of every `Call` variant (and each browser tool). A variant added to `Call` fails to compile in `kind_of` until it is
+    /// decided there; add it here too so the table below proves the decision.
+    fn every_call() -> Vec<Call> {
+        use Call::*;
+        let mut v = vec![
+            Search("x".into()), WebSearch("x".into()), ReadUrl("https://a.com".into()), FindApp("x".into()), FindFile("x".into()),
+            SeeScreen("x".into()), ListTree("".into()), ReadFile("a".into()), SearchCode("x".into()), GitStatus, Metrics("".into()),
+            SessionSearch("x".into()), Open("x".into()), Url("https://a.com".into()), Play { query: "x".into(), service: "".into() },
+            Media("pause".into()), Volume("up".into()), Brightness("50".into()), Radio { which: "wifi".into(), state: "on".into() },
+            Clip("x".into()), OpenFile("a".into()), Wallpaper("random".into()), Message { to: "a".into(), text: "b".into(), via: "".into() },
+            Remember("x".into()), Forget("x".into()), Power("lock".into()), Power("sleep".into()), TakeOver("x".into()), RunCheck("cargo test".into()),
+        ];
+        v.extend(crate::browse::TOOLS.iter().map(|(t, _)| Browser { tool: t.to_string(), args: serde_json::json!({}) }));
+        v
+    }
+
+    #[test]
+    fn no_side_effecting_call_completes_from_its_own_ok_message() {
+        use crate::agent::{outcome, policy::{risk_of, Risk}, state::TaskStatus};
+        for c in every_call() {
+            let kind = kind_of(&c);
+            // a call is either unverified with a reason in code, or has a kind that reads evidence
+            assert_eq!(kind == Kind::Action, unverified_reason(&c).is_some(), "{c:?}: Action and its reason go together");
+            if risk_of(&c) == Risk::ReadOnly && kind != Kind::Action { continue; }
+            let ok: Result<String, String> = Ok("Done.".into());
+            let nc: Result<String, String> = Ok("Done. Not confirmed: no read.".into());
+            match kind {
+                // no read-back: any Ok, however it is worded, ends Unverified
+                Kind::Action => {
+                    assert_eq!(check(kind, &ok), Check::Unverified, "{c:?}");
+                    assert_eq!(outcome(&ok, &[check(kind, &ok)]).1, TaskStatus::Unverified, "{c:?} must not complete from its own Ok");
+                }
+                // read-back kinds: the read-back's own "not confirmed" is never Verified, and a failure is never Completed
+                Kind::ReadBack | Kind::Volume | Kind::AppOpen | Kind::Memory => {
+                    assert_eq!(check(kind, &nc), Check::NotConfirmed, "{c:?}");
+                    assert_eq!(outcome(&nc, &[check(kind, &nc)]).1, TaskStatus::Unverified, "{c:?}");
+                    let bad: Result<String, String> = Err("no".into());
+                    assert_ne!(outcome(&bad, &[check(kind, &bad)]).1, TaskStatus::Completed, "{c:?}");
+                }
+                // a play that does not say "Playing" is unverified; a check needs its own exit code
+                Kind::Play => assert_eq!(check(kind, &ok), Check::Unverified, "{c:?}"),
+                Kind::Check => assert_eq!(check(kind, &Err("The check failed: x".into())), Check::CheckFailed, "{c:?}"),
+                Kind::Lookup | Kind::FileSearch => {}
+            }
+        }
     }
 
     #[test]

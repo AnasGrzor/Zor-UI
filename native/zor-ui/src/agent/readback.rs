@@ -96,6 +96,74 @@ pub fn open_reply(launched: Result<String, String>, asked: &str, running: &dyn F
     if missing.is_empty() { Ok(reply) } else { Ok(format!("{reply} Not confirmed: {} did not show up as running within {} seconds.", missing.join(" and "), APP_WAIT.as_secs())) }
 }
 
+/// The reply for a clipboard copy: Ok when the clipboard now holds `text`, Err when it holds something else, "not confirmed" when it
+/// can't be read (another app has it open). `read` gives the clipboard text.
+pub fn clip_reply(text: &str, read: &dyn Fn() -> Option<String>) -> Result<String, String> {
+    let norm = |s: &str| s.replace("\r\n", "\n");
+    match read() {
+        Some(got) if norm(&got) == norm(text) => Ok("Copied.".into()),
+        Some(_) => Err("The clipboard doesn't hold that text.".into()),
+        None => Ok("Copied. Not confirmed: I can't read the clipboard right now.".into()),
+    }
+}
+
+/// The reply for a Wi-Fi or Bluetooth switch from the state the bridge read after it: Err when an asked-for on or off is not what
+/// the radio reports. `want` is None for a toggle.
+pub fn radio_reply(label: &str, want: Option<bool>, now_on: bool) -> Result<String, String> {
+    let word = |on: bool| if on { "on" } else { "off" };
+    if want.is_some_and(|w| w != now_on) { return Err(format!("{label} is still {}.", word(now_on))); }
+    Ok(format!("{label} is {}.", word(now_on)))
+}
+
+/// The reply for a wallpaper change: `said` stands when Windows reports the picture's file name as the wallpaper. A different
+/// name or no answer is "not confirmed", not a failure, because the theme tool may hand Windows a converted copy. `read` gives
+/// the wallpaper path Windows reports.
+pub fn wallpaper_reply(file: &str, said: String, read: &dyn Fn() -> Option<String>) -> Result<String, String> {
+    let name = |p: &str| p.rsplit(['\\', '/']).next().unwrap_or(p).to_lowercase();
+    match read() {
+        Some(now) if name(&now) == name(file) => Ok(said),
+        Some(_) => Ok(format!("{said} Not confirmed: Windows reports a different wallpaper file.")),
+        None => Ok(format!("{said} Not confirmed: I can't read the wallpaper Windows uses.")),
+    }
+}
+
+/// The wallpaper path Windows reports now (`SPI_GETDESKWALLPAPER`). None when the call fails or the path is empty.
+pub fn wallpaper_now() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+    let mut buf = [0u16; 520];
+    unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, Some(buf.as_mut_ptr().cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()? };
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    (len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
+}
+
+/// The reply for a saved fact: Ok when the memory database now holds the text, Err when it does not, "not confirmed" when the
+/// database can't be read. `rows` gives the text of every stored fact.
+pub fn remember_reply(saved: Result<String, String>, text: &str, rows: &dyn Fn() -> Option<Vec<String>>) -> Result<String, String> {
+    let reply = saved?;
+    match rows() {
+        Some(all) if all.iter().any(|r| r == text.trim()) => Ok(reply),
+        Some(_) => Err("I couldn't find that in my memory after saving it.".into()),
+        None => Ok(format!("{reply} Not confirmed: I can't read my memory.")),
+    }
+}
+
+/// The reply for a forgotten fact: when the answer says "Forgot: X", the database must no longer hold X. "I don't remember anything
+/// like that" deleted nothing and is returned as it is.
+pub fn forget_reply(deleted: Result<String, String>, rows: &dyn Fn() -> Option<Vec<String>>) -> Result<String, String> {
+    let reply = deleted?;
+    let Some(text) = reply.strip_prefix("Forgot: ") else { return Ok(reply) };
+    match rows() {
+        Some(all) if !all.iter().any(|r| r == text) => Ok(reply),
+        Some(_) => Err("That fact is still in my memory.".into()),
+        None => Ok(format!("{reply} Not confirmed: I can't read my memory.")),
+    }
+}
+
+/// The text of every stored fact, or None when the database can't be read.
+pub fn memory_rows() -> Option<Vec<String>> {
+    super::memory::with_app(|c| super::memory::all(c).ok().map(|v| v.into_iter().map(|m| m.text).collect())).ok().flatten()
+}
+
 /// The image names (`Notepad.exe`) of the processes running now. Empty when the snapshot cannot be taken.
 pub fn running_images() -> Vec<String> {
     use windows::Win32::{Foundation::CloseHandle, System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS}};
@@ -324,5 +392,45 @@ mod tests {
         let r = change_and_read(&dev, Want::Mute(true), NEVER, &|_| {});
         assert_eq!(r, Err("The output is still not muted.".into()));
         assert_eq!(verifier::check(Kind::Volume, &r), Check::Failed);
+    }
+
+    #[test]
+    fn a_clipboard_copy_is_read_back() {
+        assert_eq!(clip_reply("hi\nthere", &|| Some("hi\r\nthere".into())), Ok("Copied.".into()), "line ends do not matter");
+        assert!(clip_reply("hi", &|| Some("other".into())).is_err(), "another text on the clipboard is a failure");
+        let r = clip_reply("hi", &|| None);
+        assert_eq!(verifier::check(Kind::ReadBack, &r), Check::NotConfirmed);
+        assert_eq!(verifier::check(Kind::ReadBack, &clip_reply("hi", &|| Some("hi".into()))), Check::Verified);
+    }
+
+    #[test]
+    fn a_radio_that_reports_the_other_state_is_failed() {
+        assert_eq!(radio_reply("Wi-Fi", Some(true), true), Ok("Wi-Fi is on.".into()));
+        assert_eq!(radio_reply("Wi-Fi", None, false), Ok("Wi-Fi is off.".into()), "a toggle takes whatever it reports");
+        assert_eq!(radio_reply("Bluetooth", Some(false), true), Err("Bluetooth is still on.".into()));
+    }
+
+    #[test]
+    fn a_wallpaper_is_verified_by_file_name_and_otherwise_not_confirmed() {
+        let said = || "Wallpaper changed to a.png.".to_string();
+        assert_eq!(wallpaper_reply("C:\\Pictures\\A.png", said(), &|| Some("c:\\pictures\\a.PNG".into())), Ok(said()));
+        let other = wallpaper_reply("C:\\Pictures\\a.png", said(), &|| Some("C:\\x\\TranscodedWallpaper".into()));
+        assert_eq!(verifier::check(Kind::ReadBack, &other), Check::NotConfirmed);
+        assert_eq!(verifier::check(Kind::ReadBack, &wallpaper_reply("a.png", said(), &|| None)), Check::NotConfirmed);
+    }
+
+    #[test]
+    fn a_saved_or_forgotten_fact_is_checked_in_the_database() {
+        let rows = || Some(vec!["My sister is called Lina".to_string()]);
+        let saved = || Ok("Remembered: My sister is called Lina".to_string());
+        assert_eq!(remember_reply(saved(), "  My sister is called Lina ", &rows), saved());
+        assert!(remember_reply(saved(), "My sister is called Lina", &|| Some(vec![])).is_err(), "not in the table: not remembered");
+        assert_eq!(verifier::check(Kind::Memory, &remember_reply(saved(), "x", &|| None)), Check::NotConfirmed);
+        let gone = || Ok("Forgot: green tea".to_string());
+        assert_eq!(forget_reply(gone(), &rows), gone());
+        assert!(forget_reply(gone(), &|| Some(vec!["green tea".to_string()])).is_err(), "the row is still there");
+        let none = Ok("I don't remember anything like that.".to_string());
+        assert_eq!(forget_reply(none.clone(), &|| panic!("nothing was deleted, so nothing is read")), none);
+        assert_eq!(verifier::check(Kind::Memory, &forget_reply(gone(), &|| None)), Check::NotConfirmed);
     }
 }

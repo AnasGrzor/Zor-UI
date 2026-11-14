@@ -4,7 +4,7 @@
 //! unknown tools fail closed (`agent::parse_step` refuses them before a `Call` exists).
 
 use super::Call;
-use crate::{browse, drive, webread};
+use crate::{browse, conf::Config, drive, webread};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +114,72 @@ pub fn check_browser(tool: &str, args: &Value, page: &str, approved: bool, confi
     Ok(Permit { tool: tool.to_string(), args: args.clone() })
 }
 
+/// Proof that the policy let one call run. The field is private and only `approve` makes one, so an executor that takes a
+/// `&Cleared` (`agent::exec`, `browse::run`, `developer::run_check`) cannot be reached without passing the gate.
+#[derive(Debug, PartialEq)]
+pub struct Cleared<'a> { call: &'a Call }
+
+impl<'a> Cleared<'a> {
+    pub fn call(&self) -> &'a Call { self.call }
+
+    /// A permit for a test of an executor on its own.
+    #[cfg(test)]
+    pub fn for_test(call: &'a Call) -> Self { Cleared { call } }
+}
+
+/// The one gate every tool call passes before it runs: the early refusals (a switch that is off, a name that is not allowed, a
+/// take-over that cannot start), then `approve`. Unknown tools never get here: `agent::parse_step` has no `Call` for them, and an
+/// unknown browser tool is refused in `approve`.
+pub fn gate<'a>(call: &'a Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<Cleared<'a>, String> {
+    match call {
+        Call::Power(_) if !crate::assist::allowed(cfg, "system") => return Err("PC control is turned off in Settings.".into()),
+        // the name is checked before the question, so a refused name asks nothing and starts nothing
+        Call::RunCheck(name) => { super::developer::check_named(name)?; }
+        // the switches and the model check come before the question, so a take-over that can't run asks nothing
+        Call::TakeOver(_) => { crate::assist::drive_switches(cfg)?; crate::drive::check_ready(cfg)?; }
+        Call::Browser { .. } if !browse::enabled(cfg) => return Err(browse::OFF.into()),
+        _ => {}
+    }
+    approve(call, cfg, confirm)
+}
+
+/// The question step of the gate (`gate` calls it; a take-over started from a fixed phrase calls it directly). A "no" comes back
+/// as an error, which the verifier records as Declined. The browser asks once per request, and not at all when Settings skips the
+/// question. Rules: ReadOnly and Reversible pass, Consequential asks, Destructive asks with its own question.
+pub fn approve<'a>(call: &'a Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<Cleared<'a>, String> {
+    decide(call, cfg, confirm).map(|()| Cleared { call })
+}
+
+fn decide(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
+    use super::{developer, intent, DECLINED};
+    // a request whose object was assumed never gets a consequential or destructive step: refused, not asked (intent.rs)
+    if intent::is_assumed() && matches!(risk_of(call), Risk::Consequential | Risk::Destructive) {
+        return Err(intent::ASSUMED_REFUSAL.into());
+    }
+    // every browser step asks once per request, whatever its level, so this comes before the level check; an unknown name is refused
+    if let Call::Browser { tool, .. } = call {
+        if browser_risk(tool).is_none() { return Err(no_such_browser_tool(tool)); }
+        if browse::approved() { return Ok(()); }
+        let q = approval_for(call).unwrap_or_default();
+        let asks = browse::first_step_needs_yes(cfg);
+        if asks && !confirm(&q) { return Err(DECLINED.into()); }
+        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
+        browse::approve_request();
+        return Ok(());
+    }
+    if !needs_approval(risk_of(call)) { return Ok(()); }
+    // a risky call with no question has no way to be approved, so it does not run
+    let Some(q) = approval_for(call) else { return Err("I can't run that safely.".into()) };
+    // a check asks once per workspace: a yes holds for the rest of this app session (developer::remember_check_yes)
+    if matches!(call, Call::RunCheck(_)) {
+        let ws = developer::workspace(cfg)?;
+        if developer::check_allowed_here(&ws) { return Ok(()); }
+        if confirm(&q) { developer::remember_check_yes(&ws); return Ok(()); }
+        return Err(DECLINED.into());
+    }
+    if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
+}
+
 /// Whether a failed call may be tried once more. Only read-only calls: a retry of anything that acts (open, play, save,
 /// power) could do it twice.
 pub fn may_retry(call: &Call) -> bool { risk_of(call) == Risk::ReadOnly }
@@ -208,6 +274,64 @@ mod tests {
         assert!(approval_for(&Call::Power("shutdown".into())).unwrap().contains("Unsaved work is lost"));
         assert!(approval_for(&Call::Power("sleep".into())).is_some());
         assert_eq!(approval_for(&Call::Power("format c:".into())), None, "an unknown word asks nothing; `power` refuses it");
+    }
+
+    fn cfg(v: Value) -> Config { Config(v) }
+
+    #[test]
+    fn an_unknown_tool_is_refused_on_every_path() {
+        // the model's tool name: no `Call` exists for it, so nothing can be gated or run
+        for reply in [r#"{"do":"format_disk","arg":"c:"}"#, r#"{"do":"run_shell","arg":"dir"}"#, r#"{"do":"","arg":"x"}"#] {
+            assert!(matches!(crate::agent::parse_step(reply), crate::agent::Step::Bad(_)), "{reply}");
+        }
+        // a browser tool name that is not in the table is refused by the gate and asks nothing
+        let on = cfg(json!({ "buddies": { "browser": true } }));
+        for bad in ["browser_evaluate", "browser_run_code_unsafe", ""] {
+            let call = Call::Browser { tool: bad.into(), args: json!({}) };
+            let r = gate(&call, &on, &mut |_| panic!("an unknown tool asks nothing"));
+            assert!(matches!(r, Err(m) if m.contains("no browser tool")), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_destructive_or_consequential_call_is_not_cleared_without_a_yes() {
+        use crate::agent::DECLINED;
+        let dev = cfg(json!({}));
+        for c in [Call::Power("sleep".into()), Call::Power("restart".into()), Call::Power("shutdown".into()), Call::Power("logout".into())] {
+            let mut asked = 0;
+            assert_eq!(approve(&c, &dev, &mut |_| { asked += 1; false }).unwrap_err(), DECLINED, "{c:?}");
+            assert_eq!(asked, 1, "{c:?} asks once");
+            assert!(approve(&c, &dev, &mut |_| true).is_ok(), "{c:?} with a yes");
+        }
+        // a take-over and a check never clear on a no (a check with no workspace is refused before it can ask)
+        assert_eq!(approve(&Call::TakeOver("fill the form".into()), &dev, &mut |_| false).unwrap_err(), DECLINED);
+        assert!(approve(&Call::RunCheck("cargo test".into()), &dev, &mut |_| false).is_err());
+        // a risky browser step stops at the request's first question unless this request was already allowed
+        if !browse::approved() {
+            let click = Call::Browser { tool: "browser_click".into(), args: json!({}) };
+            assert_eq!(approve(&click, &dev, &mut |_| false).unwrap_err(), DECLINED);
+        }
+        // a reversible or read-only call is cleared without a question
+        for c in [Call::Volume("up".into()), Call::Power("lock".into()), Call::WebSearch("x".into())] {
+            assert!(approve(&c, &dev, &mut |_| panic!("{c:?} asks nothing")).is_ok(), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_call_whose_switch_is_off_before_it_asks() {
+        let off = cfg(json!({ "buddies": { "allow": { "system": false } } }));
+        let never = &mut |_: &str| -> bool { panic!("a refused call asks nothing") };
+        assert!(gate(&Call::Power("shutdown".into()), &off, never).unwrap_err().contains("turned off"));
+        assert!(gate(&Call::Browser { tool: "browser_click".into(), args: json!({}) }, &cfg(json!({})), never).is_err(), "the browser is off by default");
+        assert!(gate(&Call::RunCheck("rm -rf /".into()), &cfg(json!({})), never).is_err(), "a name that is not a check");
+        assert!(gate(&Call::TakeOver("x".into()), &cfg(json!({})), never).is_err(), "take-over is off by default");
+    }
+
+    #[test]
+    fn a_permit_carries_the_call_it_was_given_for() {
+        let c = Call::Volume("up".into());
+        let p = gate(&c, &cfg(json!({})), &mut |_| false).expect("a reversible call is cleared");
+        assert_eq!(p.call(), &c);
     }
 
     const PAGE: &str = "- button \"Delete account\" [ref=e7]\n- button \"Next\" [ref=e8]";

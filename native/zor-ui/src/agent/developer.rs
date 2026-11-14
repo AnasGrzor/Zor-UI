@@ -214,7 +214,7 @@ pub fn remember_check_yes(ws: &Path) {
 }
 
 /// Runs one check in `ws` (a workspace from `workspace`). The caller checks the name and gets the user's yes first.
-pub fn run_check(ws: &Path, name: &str) -> Result<String, String> {
+pub fn run_check(_permit: &super::policy::Cleared, ws: &Path, name: &str) -> Result<String, String> {
     let spec = check_named(name)?;
     run_program(ws, spec.name, "cargo", spec.args, CHECK_LIMIT)
 }

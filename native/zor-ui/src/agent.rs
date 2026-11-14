@@ -82,7 +82,7 @@ pub struct Chat {
     pub tell: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
 }
 
-fn ask_island_yes(q: &str) -> bool { crate::drive::ask_island(q) == crate::drive::Answer::Yes }
+pub(crate) fn ask_island_yes(q: &str) -> bool { crate::drive::ask_island(q) == crate::drive::Answer::Yes }
 static ASK_ISLAND: fn(&str) -> bool = ask_island_yes;
 
 /// A request made at the PC: its turns are the desktop's, and its approvals ask on the island.
@@ -496,54 +496,28 @@ pub fn power(what: &str, act: &mut dyn FnMut(&str) -> Result<(), String>) -> Res
     act(&w).map(|_| said.into())
 }
 
-/// The one place a risky call asks the user first (`policy::approval_for`). A "no" comes back as an error, which the verifier
-/// records as Declined. The browser asks once per request, and not at all when Settings skips the question.
-fn approve(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
-    // a request whose object was assumed never gets a consequential or destructive step: refused, not asked (intent.rs)
-    if intent::is_assumed() && matches!(policy::risk_of(call), policy::Risk::Consequential | policy::Risk::Destructive) {
-        return Err(intent::ASSUMED_REFUSAL.into());
-    }
-    // every browser step asks once per request, whatever its level, so this comes before the level check; an unknown name is refused
-    if let Call::Browser { tool, .. } = call {
-        if policy::browser_risk(tool).is_none() { return Err(policy::no_such_browser_tool(tool)); }
-        if crate::browse::approved() { return Ok(()); }
-        let q = policy::approval_for(call).unwrap_or_default();
-        let asks = crate::browse::first_step_needs_yes(cfg);
-        if asks && !confirm(&q) { return Err(DECLINED.into()); }
-        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
-        crate::browse::approve_request();
-        return Ok(());
-    }
-    if !policy::needs_approval(policy::risk_of(call)) { return Ok(()); }
-    // a risky call with no question has no way to be approved, so it does not run
-    let Some(q) = policy::approval_for(call) else { return Err("I can't run that safely.".into()) };
-    // a check asks once per workspace: a yes holds for the rest of this app session (developer::remember_check_yes)
-    if matches!(call, Call::RunCheck(_)) {
-        let ws = developer::workspace(cfg)?;
-        if developer::check_allowed_here(&ws) { return Ok(()); }
-        if confirm(&q) { developer::remember_check_yes(&ws); return Ok(()); }
-        return Err(DECLINED.into());
-    }
-    if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
-}
+use policy::approve;
 
 /// What a refused risky call says back to the AI and the user.
-const DECLINED: &str = "You didn't allow it, so I did nothing.";
+pub(crate) const DECLINED: &str = "You didn't allow it, so I did nothing.";
 
 /// A take-over started from a fixed phrase, not from the AI. It is checked and asked like the AI's take-over, and saved as a
 /// task like any request: Declined on a no, Running once you say yes, and its end state when the take-over finishes.
-pub fn take_over(cfg: &Config, goal: &str) -> Result<String, String> {
+pub fn take_over(cfg: &Config, goal: &str) -> Result<String, String> { take_over_with(cfg, goal, &mut ask_island_yes) }
+
+/// `take_over` with the question's answer passed in, so a test can say no.
+pub fn take_over_with(cfg: &Config, goal: &str, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
     assist::drive_switches(cfg)?;
     crate::drive::check_ready(cfg)?;
     let task = tasks::begin(goal);
-    let mut confirm = |q: &str| crate::drive::ask_island(q) == crate::drive::Answer::Yes;
-    if approve(&Call::TakeOver(goal.to_string()), cfg, &mut confirm).is_err() {
+    let call = Call::TakeOver(goal.to_string());
+    let Ok(permit) = approve(&call, cfg, confirm) else {
         tasks::set(task, state::TaskStatus::Declined, "Declined", 0);
         return Ok("Okay, I won't.".into());
-    }
+    };
     tasks::set(task, state::TaskStatus::Running, "", 0);
     let done: crate::drive::OnDone = Box::new(move |status| tasks::set(task, status, &format!("{status:?}"), 0));
-    let r = crate::drive::start_approved(cfg, goal, Some(done));
+    let r = crate::drive::start_approved(&permit, cfg, goal, Some(done));
     if r.is_err() { tasks::set(task, state::TaskStatus::Failed, "Failed", 0); }
     r
 }
@@ -618,17 +592,18 @@ pub fn wallpaper_file(arg: &str, roots: &[PathBuf], wallpapers: &Path, pick: usi
     Ok(target)
 }
 
-fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+fn exec(permit: &policy::Cleared, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+    let call = permit.call();
     // the level only, never the arguments: they can hold what the user said
     crate::log::line(&format!("buddy risk {:?}", policy::risk_of(call)));
     match call {
-        Call::Search(q) => assist::run(assist::Intent::Search(q.clone()), cfg),
+        Call::Search(q) => assist::run_cleared(permit, assist::Intent::Search(q.clone()), cfg),
         Call::WebSearch(_) | Call::ReadUrl(_) if !assist::allowed(cfg, "search") => Err("Web search is turned off in Settings.".into()),
         Call::WebSearch(q) => crate::webread::search(q),
         Call::ReadUrl(u) => crate::webread::read(u),
         // the launch's own reply, then the app is looked for in the running processes for up to 5 s (readback.rs)
-        Call::Open(n) => readback::open_reply(assist::run(assist::Intent::Open(n.clone()), cfg), n, &readback::running_images, &|t| std::thread::sleep(t), &|| stop_check().is_some()),
-        Call::Message { to, text, via } => assist::run(assist::Intent::Message { to: to.clone(), text: text.clone(), via: via.clone() }, cfg),
+        Call::Open(n) => readback::open_reply(assist::run_cleared(permit, assist::Intent::Open(n.clone()), cfg), n, &readback::running_images, &|t| std::thread::sleep(t), &|| stop_check().is_some()),
+        Call::Message { to, text, via } => assist::run_cleared(permit, assist::Intent::Message { to: to.clone(), text: text.clone(), via: via.clone() }, cfg),
         Call::Url(u) => open_url(cfg, u),
         Call::Metrics(what) => metrics::read(what),
         Call::Play { query, service } => play(cfg, query, service),
@@ -663,17 +638,21 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
             let v = crate::proc::run(cfg, "toggles", &["-Action", &w, "-Value", &st]);
             toggled(&v)?;
             let on = v[&w].as_bool().ok_or_else(|| format!("There is no {w} on this PC."))?;
-            Ok(format!("{} is {}.", if w == "wifi" { "Wi-Fi" } else { "Bluetooth" }, if on { "on" } else { "off" }))
+            // the bridge reports the state after the switch; an asked-for on or off must match it
+            readback::radio_reply(if w == "wifi" { "Wi-Fi" } else { "Bluetooth" }, match st.as_str() { "on" => Some(true), "off" => Some(false), _ => None }, on)
         }
-        Call::Power(w) => { approve(call, cfg, confirm)?; power(w, &mut |a| toggled(&crate::proc::run(cfg, "toggles", &["-Action", a]))) }
+        Call::Power(w) => { power(w, &mut |a| toggled(&crate::proc::run(cfg, "toggles", &["-Action", a]))) }
         Call::Wallpaper(a) => {
             let wallpapers = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Pictures").join("Wallpapers");
             let pick = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
             let file = wallpaper_file(a, &user_dirs(), &wallpapers, pick)?;
             // switchwall sets the picture and rebuilds the theme colors from it
-            toggled(&crate::proc::run(cfg, "switchwall", &["-Image", &file])).map(|_| format!("Wallpaper changed to {}.", assist::short(file.rsplit('\\').next().unwrap_or(&file), 40)))
+            toggled(&crate::proc::run(cfg, "switchwall", &["-Image", &file]))?;
+            // Windows is asked which wallpaper it uses now (readback.rs)
+            let said = format!("Wallpaper changed to {}.", assist::short(file.rsplit('\\').next().unwrap_or(&file), 40));
+            readback::wallpaper_reply(&file, said, &readback::wallpaper_now)
         }
-        Call::Clip(t) => { util::clipboard_set(t); Ok("Copied.".into()) }
+        Call::Clip(t) => { util::clipboard_set(t); readback::clip_reply(t, &util::clipboard_get) }
         Call::FindFile(_) if !assist::allowed(cfg, "open") => Err("Opening apps is turned off in Settings.".into()),
         Call::FindFile(q) => {
             let found = find_files(&user_dirs(), q, 4, 30_000);
@@ -687,39 +666,30 @@ fn exec(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Res
         Call::Remember(t) => {
             let project = project::lookup(t, &crate::drive::front_title(), &project::roots(cfg), &project::list_dirs)
                 .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_lowercase()));
-            memory::remember(t, project.as_deref())
+            readback::remember_reply(memory::remember(t, project.as_deref()), t, &readback::memory_rows)
         }
         Call::Forget(_) if !memory_on(cfg) => Err("Remembering is turned off in Settings.".into()),
-        Call::Forget(q) => memory::forget_matching(q),
+        Call::Forget(q) => readback::forget_reply(memory::forget_matching(q), &readback::memory_rows),
         Call::SessionSearch(_) => Err("Past conversations are searched in the chat, not here.".into()),
         Call::ListTree(p) => developer::workspace(cfg).and_then(|ws| developer::list_tree(&ws, p)),
         Call::ReadFile(p) => developer::workspace(cfg).and_then(|ws| developer::read_file(&ws, p)),
         Call::SearchCode(q) => developer::workspace(cfg).and_then(|ws| developer::search_code(&ws, q)),
         Call::GitStatus => developer::workspace(cfg).and_then(|ws| developer::git_status(&ws)),
         // the name is checked before the question, so a refused name asks nothing and starts nothing
-        Call::RunCheck(name) => {
-            developer::check_named(name)?;
-            approve(call, cfg, confirm)?;
-            developer::workspace(cfg).and_then(|ws| developer::run_check(&ws, name))
-        }
+        Call::RunCheck(name) => developer::workspace(cfg).and_then(|ws| developer::run_check(permit, &ws, name)),
         // the switches and the model check come before the question, so a take-over that can't run asks nothing
         Call::TakeOver(g) => {
-            assist::drive_switches(cfg)?;
-            crate::drive::check_ready(cfg)?;
-            approve(call, cfg, confirm)?;
             // the request's task keeps its own state; when the take-over ends, that row gets the take-over's end state too
             let task = *CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner());
             let done: Option<crate::drive::OnDone> = task.map(|id| Box::new(move |s| tasks::take_over_ended(id, s)) as crate::drive::OnDone);
             // a take-over a chat started asks that chat for each risky click and reports its result there
             let chat = CURRENT_CHAT.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            crate::drive::start_with_chat(cfg, g, None, None, true, done, chat)
+            crate::drive::start_with_chat(permit, cfg, g, None, None, true, done, chat)
         }
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
         Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
         Call::Browser { tool, args } => {
-            if !crate::browse::enabled(cfg) { return Err(crate::browse::OFF.into()); }
-            approve(call, cfg, confirm)?;
-            crate::browse::run(cfg, tool, args, confirm)
+            crate::browse::run(permit, cfg, tool, args, confirm)
         }
     }
 }
@@ -1096,7 +1066,9 @@ fn run_exec(c: &Call, cfg: &Config, conversation: &str, ask_user: &mut dyn FnMut
     }
     // past turns are searched only within the conversation that asked
     if let Call::SessionSearch(q) = c { return Ok(history::search_text(conversation, q)); }
-    exec(c, cfg, ask_user)
+    // the one gate (policy::gate): nothing below runs without its permit
+    let permit = policy::gate(c, cfg, ask_user)?;
+    exec(&permit, cfg, ask_user)
 }
 
 /// Runs one request as a task: the plan, the tool loop over the model chain, and the verdict. `framed` is the text the model gets.
@@ -1372,6 +1344,12 @@ fn resume_pending(load: impl FnOnce() -> Config) {
 
 #[cfg(test)]
 mod tests {
+    /// `exec` the way `run_exec` reaches it: through the policy gate. It shadows the glob-imported `exec`, so these tests cannot skip it.
+    fn exec(c: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+        let permit = policy::gate(c, cfg, confirm)?;
+        super::exec(&permit, cfg, confirm)
+    }
+
     use super::*;
     use std::cell::RefCell;
 
@@ -1589,7 +1567,8 @@ mod tests {
     fn a_risky_call_asks_first_and_a_no_runs_nothing() {
         let cfg = Config(json!({}));
         let mut asked = vec![];
-        let no = approve(&Call::Power("shutdown".into()), &cfg, &mut |q| { asked.push(q.to_string()); false });
+        let shutdown = Call::Power("shutdown".into());
+        let no = approve(&shutdown, &cfg, &mut |q| { asked.push(q.to_string()); false });
         assert_eq!(no, Err(DECLINED.into()));
         assert!(asked[0].contains("Shut down"), "{asked:?}");
         assert!(approve(&Call::Power("lock".into()), &cfg, &mut |_| panic!("lock asks nothing")).is_ok());

@@ -1065,18 +1065,19 @@ pub fn end_status(stop: &Stop) -> TaskStatus {
 }
 
 /// Starts a take-over the caller already got your yes for (`agent::take_over` or `agent::approve`), so the island isn't asked again.
-pub fn start_approved(cfg: &Config, goal: &str, on_done: Option<OnDone>) -> Result<String, String> { start_with(cfg, goal, None, None, true, on_done) }
+pub fn start_approved(permit: &crate::agent::policy::Cleared, cfg: &Config, goal: &str, on_done: Option<OnDone>) -> Result<String, String> { start_with(permit, cfg, goal, None, None, true, on_done) }
 
 /// `start_approved` for a take-over that still has to ask: the island asks on its worker thread, and a no ends the task as
 /// Declined. `shown` is the words the island card shows instead of the goal; `prep` is a step that runs once you said yes (opening
 /// the app the task needs, say) before the take-over begins. `Err` when it can't start.
-pub fn start_with(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>) -> Result<String, String> {
-    start_with_chat(cfg, goal, shown, prep, approved, on_done, None)
+pub fn start_with(permit: &crate::agent::policy::Cleared, cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>) -> Result<String, String> {
+    start_with_chat(permit, cfg, goal, shown, prep, approved, on_done, None)
 }
 
 /// `start_with` for a take-over that a chat started: its questions go to the chat, and its final line is sent there too (the PC
 /// still gets its bubble). With no chat it is the same as `start_with`.
-pub fn start_with_chat(cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>, chat: Option<crate::agent::Chat>) -> Result<String, String> {
+/// Every take-over starts here, and only with the `Cleared` permit of `policy::gate` or `policy::approve`.
+pub fn start_with_chat(_permit: &crate::agent::policy::Cleared, cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>, chat: Option<crate::agent::Chat>) -> Result<String, String> {
     check_ready(cfg)?;
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());

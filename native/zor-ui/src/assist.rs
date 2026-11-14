@@ -516,7 +516,14 @@ fn find_and_message(cfg: &Config, to: &str, text: &str, via: &str) -> Result<Str
     // a take-over that still asks in the island: saved as a task, ended as Declined on a no or as its end state when it finishes
     let task = crate::agent::tasks::begin(&shown);
     let done: crate::drive::OnDone = Box::new(move |status| crate::agent::tasks::set(task, status, &format!("{status:?}"), 0));
-    let r = crate::drive::start_with(cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))), false, Some(done));
+    // the take-over is a Consequential call, so it passes the gate like any other (the island's question is the same words as before)
+    let call = crate::agent::Call::TakeOver(shown.clone());
+    let permit = match crate::agent::policy::gate(&call, cfg, &mut crate::agent::ask_island_yes) {
+        Ok(p) => p,
+        Err(e) if e == crate::agent::DECLINED => { crate::agent::tasks::set(task, crate::agent::state::TaskStatus::Declined, "Declined", 0); return Ok("Okay, I won't.".into()); }
+        Err(e) => { crate::agent::tasks::set(task, crate::agent::state::TaskStatus::Failed, "Failed", 0); return Err(e); }
+    };
+    let r = crate::drive::start_with(&permit, cfg, &find_goal(to, text, via), Some(shown), Some(Box::new(move || open_for_find(&cfg2, &via2))), true, Some(done));
     if r.is_err() { crate::agent::tasks::set(task, crate::agent::state::TaskStatus::Failed, "Failed", 0); }
     r
 }
@@ -544,8 +551,45 @@ fn message_link(app: &str, value: &str, to: &str, text: &str) -> Result<(String,
     }
 }
 
-/// Does the action and returns what the buddy says about it: `Ok` when it worked, `Err` when it didn't.
-pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
+/// The agent call that an acting intent is the same as, so a fixed phrase passes the same gate as the AI's tool call. None for
+/// the intents that change nothing (`Screen` answers a question, `Chat` goes to the AI, whose tool calls are gated one by one) and
+/// for `Drive`, which `agent::take_over_with` gates itself.
+pub fn call_of(intent: &Intent) -> Option<crate::agent::Call> {
+    use crate::agent::Call;
+    match intent {
+        Intent::Search(q) => Some(Call::Search(q.clone())),
+        Intent::Open(n) => Some(Call::Open(n.clone())),
+        Intent::Play { query, service } => Some(Call::Play { query: query.clone(), service: service.clone() }),
+        Intent::Message { to, text, via } => Some(Call::Message { to: to.clone(), text: text.clone(), via: via.clone() }),
+        Intent::Screen(_) | Intent::Drive(_) | Intent::Chat(_) => None,
+    }
+}
+
+/// Does the action and returns what the buddy says about it: `Ok` when it worked, `Err` when it didn't. An acting phrase goes
+/// through `policy::gate` first (`confirm` answers its question), then `run_cleared`.
+pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> { run_with(intent, cfg, &mut crate::agent::ask_island_yes) }
+
+/// `run` with the answer to the island's question passed in, so a test can say no.
+pub fn run_with(intent: Intent, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+    if let Intent::Drive(g) = &intent { return crate::agent::take_over_with(cfg, g, confirm); }
+    if let Some(call) = call_of(&intent) {
+        let permit = crate::agent::policy::gate(&call, cfg, confirm)?;
+        return run_cleared(&permit, intent, cfg);
+    }
+    // Screen and Chat change nothing; a take-over or tool call that the AI makes from a chat is gated in `agent::run_exec`
+    match intent {
+        Intent::Screen(t) if !screen_on(cfg) && !mentions_screen(&t.to_lowercase()) => run_with(Intent::Chat(t), cfg, confirm),
+        Intent::Screen(_) if !screen_on(cfg) => Err(SCREEN_OFF.into()),
+        Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
+        Intent::Screen(t) => screen_help(cfg, &t),
+        Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
+        Intent::Chat(t) => crate::agent::ask(cfg, &t),
+        other => unreachable!("{other:?} is handled above"),
+    }
+}
+
+/// Does an acting intent. It takes the `Cleared` permit of `policy::gate`, so it can't be reached without the gate.
+pub fn run_cleared(_permit: &crate::agent::policy::Cleared, intent: Intent, cfg: &Config) -> Result<String, String> {
     match intent {
         Intent::Search(_) if !allowed(cfg, "search") => Err("Web search is turned off in Settings.".into()),
         Intent::Open(_) | Intent::Play { .. } if !allowed(cfg, "open") => Err("Opening apps is turned off in Settings.".into()),
@@ -580,14 +624,8 @@ pub fn run(intent: Intent, cfg: &Config) -> Result<String, String> {
                 }
             }
         }
-        // a question that only sounds like it is about the screen is a normal chat while screen help is off
-        Intent::Screen(t) if !screen_on(cfg) && !mentions_screen(&t.to_lowercase()) => run(Intent::Chat(t), cfg),
-        Intent::Screen(_) if !screen_on(cfg) => Err(SCREEN_OFF.into()),
-        Intent::Screen(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
-        Intent::Screen(t) => screen_help(cfg, &t),
-        Intent::Drive(g) => crate::agent::take_over(cfg, &g),
-        Intent::Chat(_) if !cfg.get("buddies.listenAi").as_bool().unwrap_or(true) => Err(AI_OFF.into()),
-        Intent::Chat(t) => crate::agent::ask(cfg, &t),
+        // the other intents never reach here: `run_with` handles them
+        other => Err(format!("{other:?} is not an action.")),
     }
 }
 
@@ -1123,6 +1161,33 @@ mod tests {
         let note = fallback_note(err);
         assert!(note.starts_with("(I first tried") && note.contains(err), "{note}");
         assert_eq!(parse("start a timer"), Intent::Open("a timer".into()), "the misfire the fallback catches");
+    }
+
+    #[test]
+    fn a_fixed_phrase_whose_switch_is_off_is_refused_before_any_question() {
+        let never = &mut |_: &str| -> bool { panic!("a refused phrase asks nothing") };
+        let off = |k: &str| cfg(json!({ "buddies": { "allow": { k: false }, "listenAi": false } }));
+        assert!(run_with(Intent::Open("x".into()), &off("open"), never).unwrap_err().contains("turned off"));
+        assert!(run_with(Intent::Play { query: "x".into(), service: String::new() }, &off("open"), never).unwrap_err().contains("turned off"));
+        assert!(run_with(Intent::Message { to: "a".into(), text: "b".into(), via: String::new() }, &off("message"), never).unwrap_err().contains("turned off"));
+        assert_eq!(run_with(Intent::Drive("click save".into()), &cfg(json!({})), never), Err(DRIVE_OFF.into()), "take-over is off by default");
+    }
+
+    #[test]
+    fn a_fixed_phrase_take_over_does_not_start_on_a_no_and_every_acting_phrase_has_a_call() {
+        use crate::agent::{policy, DECLINED};
+        // Drive is the one fixed phrase that is not Reversible: the call it stands for is Consequential and asks
+        let take = crate::agent::Call::TakeOver("click save".into());
+        assert_eq!(policy::risk_of(&take), policy::Risk::Consequential);
+        let mut asked = 0;
+        assert_eq!(policy::approve(&take, &cfg(json!({})), &mut |_| { asked += 1; false }).unwrap_err(), DECLINED);
+        assert_eq!(asked, 1);
+        // every other acting phrase maps to a call that the gate clears without a question, and Screen and Chat map to none
+        for i in [Intent::Search("x".into()), Intent::Open("x".into()), Intent::Play { query: "x".into(), service: String::new() }, Intent::Message { to: "a".into(), text: "b".into(), via: String::new() }] {
+            let c = call_of(&i).expect("an acting phrase has a call");
+            assert!(policy::gate(&c, &cfg(json!({})), &mut |_| panic!("{c:?} asks nothing")).is_ok(), "{c:?}");
+        }
+        assert!(call_of(&Intent::Screen("x".into())).is_none() && call_of(&Intent::Chat("x".into())).is_none() && call_of(&Intent::Drive("x".into())).is_none());
     }
 
     #[test]

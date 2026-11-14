@@ -231,7 +231,7 @@ pub fn page() -> String { PAGE.lock().map(|p| p.clone()).unwrap_or_default() }
 
 /// One browser step for the AI. `confirm` asks the user in the island. The step runs only with the `Permit` that
 /// `policy::check_browser` gives, and `exec` takes nothing else.
-pub fn run(cfg: &Config, tool: &str, args: &Value, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+pub fn run(_permit: &policy::Cleared, cfg: &Config, tool: &str, args: &Value, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
     if !enabled(cfg) { return Err(OFF.into()); }
     if stopped() { return Err(STOPPED.into()); } // Esc while the AI was thinking: the step it then picked is not run
     let permit = policy::check_browser(tool, args, &page(), approved(), confirm)?;
@@ -268,6 +268,12 @@ fn exec(permit: Permit) -> Result<String, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `run` with a permit built for the call, since these tests check the step's own rules, not the gate's.
+    fn run(cfg: &Config, tool: &str, args: &Value, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+        let call = crate::agent::Call::Browser { tool: tool.into(), args: args.clone() };
+        super::run(&policy::Cleared::for_test(&call), cfg, tool, args, confirm)
+    }
 
     const PAGE: &str = "- generic [ref=e1]:\n  - link \"Home\" [ref=e2]\n  - button \"Buy now\" [ref=e3]\n  - textbox \"Password\" [ref=e4]\n  - textbox \"Search\" [ref=e5]\n  - textbox \"Message\" [ref=e6]\n  - button \"Next\" [ref=e7]";
 

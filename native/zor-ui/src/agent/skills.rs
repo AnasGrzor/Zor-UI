@@ -30,6 +30,9 @@ pub struct Skill {
     pub tools: &'static [&'static str],
     /// Words in the request that point at this skill.
     pub words: &'static [&'static str],
+    /// The declared workflow: tools in the order the skill uses them, shown in the prompt as guidance. Empty when the skill
+    /// has no fixed order. Each must be one of `tools` (tested). A workflow adds no execution path.
+    pub steps: &'static [&'static str],
     pub guidance: &'static str,
     /// The highest `policy::Risk` any of `tools` reaches, by name: "ReadOnly", "Reversible" or "Consequential".
     pub permission: &'static str,
@@ -41,10 +44,11 @@ pub struct Skill {
 pub const SKILLS: [Skill; 7] = [
     Skill {
         name: "research",
-        version: 1,
+        version: 2,
         capability: "Looks things up on the web and reads the most useful page.",
         tools: &["web_search", "read_url", "search"],
         words: &["research", "compare", "find out", "look up", "search", "news", "price", "prices", "score", "scores", "review", "reviews"],
+        steps: &["web_search", "read_url"],
         guidance: "Search, then read the most useful page before answering. Compare sources, and say when they disagree. Keep the answer short.",
         permission: "ReadOnly",
         context: "none",
@@ -55,10 +59,11 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "desktop",
-        version: 1,
+        version: 2,
         capability: "Opens apps and changes the PC's settings, and looks at the screen when asked.",
         tools: &["open", "find_app", "volume", "brightness", "media", "wallpaper", "clipboard", "see_screen", "take_over"],
-        words: &["open", "close", "volume", "brightness", "screen", "wallpaper", "clipboard", "app", "window", "click", "fill"],
+        words: &["open", "close", "volume", "brightness", "screen", "wallpaper", "clipboard", "app", "window", "click", "fill", "take over"],
+        steps: &[],
         guidance: "Use the app or setting directly. Check the result it reports. Use take_over only for what no other tool reaches.",
         permission: "Consequential",
         context: "none",
@@ -73,6 +78,7 @@ pub const SKILLS: [Skill; 7] = [
         capability: "Keeps facts the user asks for, finds and opens their files, sends messages and plays music.",
         tools: &["remember", "forget", "find_file", "open_file", "message", "play"],
         words: &["remember", "forget", "message", "text", "tell", "file", "document", "song", "music", "play"],
+        steps: &[],
         guidance: "Facts the user asks you to keep go in memory. Messages use their own words. Files are found before they are opened.",
         permission: "Reversible",
         context: "none",
@@ -83,10 +89,11 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "developer",
-        version: 1,
+        version: 2,
         capability: "Looks through the developer workspace: its files, its code and its git status, and runs its build and tests.",
         tools: &["list_tree", "read_file", "search_code", "git_status", "run_check"],
-        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "git", "repo", "compile"],
+        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "errors", "git", "repo", "compile"],
+        steps: &["list_tree", "read_file", "search_code", "run_check"],
         guidance: "Look before you answer: list_tree to find the file, read_file for its text, search_code for the words. Run run_check only for a build or test, and quote its result. The user is asked once per workspace before a check runs. Say when a file is missing or secret.",
         permission: "Consequential",
         context: "developer workspace, set by hand in config.json (buddies.developerWorkspace)",
@@ -97,10 +104,11 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "project",
-        version: 1,
+        version: 2,
         capability: "Lists the active project's files and keeps track of its open work.",
         tools: &["list_tree", "remember", "forget"],
         words: &["project", "progress", "tracking", "todo", "backlog", "milestone", "tasks", "unfinished"],
+        steps: &["list_tree", "remember"],
         guidance: "List the project's files with list_tree when asked what is in it. Keep open work as one short fact with remember, and name the project in it, for example: Zor UI: the bar animation is unfinished. Forget the fact when the user says it is done. There is no tracker: the memory is the list.",
         permission: "Reversible",
         context: "active project",
@@ -111,13 +119,14 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "browser_research",
-        version: 1,
+        version: 2,
         capability: "Drives the browser to visit a website, read a page and act on it, with web search for facts.",
         tools: &[
             "browser_navigate", "browser_snapshot", "browser_find", "browser_click", "browser_type", "browser_press_key", "browser_select_option",
             "browser_navigate_back", "browser_wait_for", "browser_handle_dialog", "browser_close", "web_search", "read_url",
         ],
         words: &["website", "websites", "site", "browse", "browser", "web page", "webpage", "this page", "that page", "open the page", "read the page"],
+        steps: &["browser_navigate", "browser_snapshot", "browser_find", "browser_close"],
         guidance: "Open the page with browser_navigate and read it with browser_snapshot. Use browser_find on a long page. Close the browser page with browser_close when the task is done. The browser asks the user before it clicks or types on a risky element.",
         permission: "Consequential",
         context: "browser turned on in Settings",
@@ -132,6 +141,7 @@ pub const SKILLS: [Skill; 7] = [
         capability: "Chains several existing tools in order for one job, such as checking a project and then reporting.",
         tools: &["list_tree", "read_file", "search_code", "git_status", "web_search", "read_url", "remember"],
         words: &["prepare", "steps", "step by step", "workflow", "and then", "after that"],
+        steps: &[],
         guidance: "Name the steps, run them in order, and check each result before the next step. Stop at the first failed step and report it. Use only the tools listed for the job; a workflow adds no tool of its own.",
         permission: "Reversible",
         context: "developer workspace, for a job about a project",
@@ -142,16 +152,24 @@ pub const SKILLS: [Skill; 7] = [
     },
 ];
 
+/// Phrases that hold a skill word and never mean that skill: two products with "code" in the name, and "tell me". Taken out
+/// of the request before matching. Each came from a real request that selected the wrong skill (see the routing test).
+const NOT_SKILL_PHRASES: [&str; 3] = [" claude code ", " vs code ", " tell me "];
+
 /// The skills a request points at, in table order. Matching is on whole words, so "app" does not match "apparently".
 pub fn select(said: &str) -> Vec<&'static Skill> {
     let words: Vec<String> = said.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
-    let text = format!(" {} ", words.join(" "));
+    let mut text = format!(" {} ", words.join(" "));
+    for p in NOT_SKILL_PHRASES { text = text.replace(p, " "); }
     SKILLS.iter().filter(|s| s.words.iter().any(|w| text.contains(&format!(" {w} ")))).collect()
 }
 
 /// The guidance lines for the skills a request points at. Empty when none does.
 pub fn guidance_for(said: &str) -> String {
-    select(said).iter().map(|s| format!("Skill {}: {}", s.name, s.guidance)).collect::<Vec<_>>().join("\n")
+    select(said).iter().map(|s| {
+        let order = if s.steps.is_empty() { String::new() } else { format!(" Usual order: {}.", s.steps.join(", then ")) };
+        format!("Skill {}: {}{order}", s.name, s.guidance)
+    }).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -308,5 +326,100 @@ mod tests {
         assert_eq!(risk_of_tool("git_status"), Risk::ReadOnly);
         assert_eq!(risk_of_tool("take_over"), Risk::Consequential);
         assert_eq!(risk_of_tool("run_check"), Risk::Consequential, "a check asks once per workspace");
+    }
+
+    #[test]
+    fn every_workflow_step_names_a_tool_the_skill_has() {
+        for s in &SKILLS {
+            for step in s.steps {
+                assert!(s.tools.contains(step), "{} has a workflow step {step:?} that is not one of its tools", s.name);
+            }
+            let mut seen = s.steps.to_vec();
+            seen.dedup();
+            assert_eq!(seen.len(), s.steps.len(), "{} repeats a workflow step", s.name);
+        }
+        assert!(SKILLS.iter().filter(|s| !s.steps.is_empty()).count() >= 4, "the skills with a fixed order declare one");
+    }
+
+    #[test]
+    fn a_workflow_reaches_the_prompt_as_one_line_and_a_skill_without_one_adds_nothing() {
+        assert!(guidance_for("research the best budget laptop").contains("Usual order: web_search, then read_url."));
+        assert!(!guidance_for("turn the volume up").contains("Usual order"));
+    }
+
+    /// One row of `eval/skill-routing.json`: a request, the skills it should select, and where it came from.
+    struct Row { request: String, skills: Vec<String>, real: bool }
+
+    fn routing_rows() -> Vec<Row> {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../../eval/skill-routing.json")).expect("skill-routing.json is valid JSON");
+        v.as_array().unwrap().iter().map(|r| Row {
+            request: r["request"].as_str().unwrap().to_string(),
+            skills: r["skills"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect(),
+            real: r["source"] == "real",
+        }).collect()
+    }
+
+    /// (true positives, false positives, false negatives) per skill, over `rows`.
+    fn tally(rows: &[Row]) -> Vec<(&'static str, u32, u32, u32)> {
+        SKILLS.iter().map(|s| {
+            let (mut tp, mut fp, mut miss) = (0, 0, 0);
+            for r in rows {
+                let want = r.skills.iter().any(|n| n == s.name);
+                let got = select(&r.request).iter().any(|x| x.name == s.name);
+                match (want, got) { (true, true) => tp += 1, (false, true) => fp += 1, (true, false) => miss += 1, _ => {} }
+            }
+            (s.name, tp, fp, miss)
+        }).collect()
+    }
+
+    #[test]
+    fn the_routing_set_is_mostly_real_and_has_no_personal_text() {
+        let rows = routing_rows();
+        let real = rows.iter().filter(|r| r.real).count();
+        assert_eq!((real, rows.len() - real), (27, 14), "real and hand-written rows");
+        let mut seen: Vec<&str> = rows.iter().map(|r| r.request.as_str()).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), rows.len(), "a request appears once");
+        for r in &rows {
+            assert!(!r.request.contains('@') && !r.request.contains('\\') && !r.request.contains(":/"), "{:?} looks like an address or a path", r.request);
+            assert!(!r.request.chars().any(|c| c.is_ascii_digit()) || r.request.contains("example.com"), "{:?} holds a number", r.request);
+            for n in &r.skills { assert!(SKILLS.iter().any(|s| s.name == n), "{:?} expects an unknown skill {n}", r.request); }
+        }
+    }
+
+    /// Routing on the measured set. Prints the table with `--nocapture`. Each skill's precision and recall must stay at or above
+    /// the floor set from the last measurement, so a keyword change that makes routing worse fails here.
+    #[test]
+    fn routing_precision_and_recall_hold_on_the_measured_set() {
+        let rows = routing_rows();
+        // (skill, minimum precision %, minimum recall %), measured after the routing fixes
+        let floor: [(&str, u32, u32); 7] = [
+            ("research", 100, 50), ("desktop", 90, 90), ("personal", 100, 100), ("developer", 100, 75),
+            ("project", 0, 0), ("browser_research", 100, 100), ("workflow", 100, 100),
+        ];
+        let table = tally(&rows);
+        for (name, tp, fp, miss) in &table {
+            println!("routing {name}: tp {tp} fp {fp} fn {miss} precision {}% recall {}%", pct(*tp, tp + fp), pct(*tp, tp + miss));
+        }
+        for (name, tp, fp, miss) in table {
+            let (_, p, r) = floor.iter().find(|f| f.0 == name).unwrap();
+            assert!(pct(tp, tp + fp) >= *p, "{name} precision is under {p}%");
+            assert!(pct(tp, tp + miss) >= *r, "{name} recall is under {r}%");
+        }
+    }
+
+    /// A percentage; 100 when nothing could go wrong (an empty denominator).
+    fn pct(n: u32, of: u32) -> u32 { if of == 0 { 100 } else { n * 100 / of } }
+
+    /// Rows the routing failed on before the fixes, each now routed right.
+    #[test]
+    fn the_real_requests_that_were_misrouted_now_route_right() {
+        let names = |said: &str| select(said).iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names("Take over"), ["desktop"], "take_over is a desktop tool and 'take over' names it");
+        assert!(!names("Orca is running claude code sessions are they done?").contains(&"developer"), "Claude Code is a product, not source code");
+        assert!(names("how many errors does this project have").contains(&"developer"), "errors in a project are a build check");
+        assert!(names("find the cache function in the code").contains(&"developer"), "plain 'code' still selects developer");
+        assert!(!names("there was an error on my phone").contains(&"developer"), "one error on a phone is not a build");
     }
 }

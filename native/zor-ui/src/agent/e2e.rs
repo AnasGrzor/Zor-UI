@@ -541,3 +541,16 @@ fn an_assumed_request_never_reaches_a_consequential_or_destructive_step() {
         assert_eq!(r, Err(intent::ASSUMED_REFUSAL.to_string()), "{c:?}");
     }
 }
+
+#[test]
+fn simple_requests_never_make_a_summary_call() {
+    // a chat answer, and a tool answer that is short: neither has a long result, so no extra model call runs
+    for (said, script, result) in [("hi", &[SAY_DONE][..], ""), ("look up the news", &[SEARCH, SAY_DONE][..], "Headlines: one, two.")] {
+        let _db = fresh_db();
+        let rec = shared();
+        let _fake = install(scripted_sub(script, Ok("never used"), &rec), tools(&rec, move |_| Ok(result.to_string())));
+        assert_eq!(run(said, Start::New), Ok("Done.".into()), "{said}");
+        let r = rec.lock().unwrap();
+        assert!(!r.events.contains(&"sum"), "{said:?} made a summary call: {:?}", r.events);
+    }
+}

@@ -1,0 +1,247 @@
+[
+ {
+  "request": "open nonexistentapp",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "turn the volume up",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "turn the volume down",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "put the PC to sleep",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "turn the volume down, then open nonexistentapp",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "use the browser to go to example.com",
+  "skills": [
+   "browser_research"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "click the Save button on the screen",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "what files did I open recently",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "continue where we left off",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "how many errors does this project have",
+  "skills": [
+   "developer"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "What's my CPU usage",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "What can you do",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "What's my claude usage looking like",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "What's the capital of france",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "What's the current state of zor ui",
+  "skills": [
+   "developer"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "Hi",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Who are you",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Hey buddy",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "What's the update on claude. Is it running?",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "I meant on my machine",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Orca is running claude code sessions are they done?",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Yes",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Why can't you see the other tabs status",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Take over",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "Tell me",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Open new view.",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "Nu V N U V I O",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "open notepad",
+  "skills": [
+   "desktop"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "open the project in VS Code",
+  "skills": [
+   "desktop"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "send Sam a message",
+  "skills": [
+   "personal"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "play some lofi",
+  "skills": [
+   "personal"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "remember my favourite colour is blue",
+  "skills": [
+   "personal"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "search for news about the election",
+  "skills": [
+   "research"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "what's the weather in Oslo",
+  "skills": [
+   "research"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "Thanks, that's all.",
+  "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "it's cold",
+  "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "what time is it",
+  "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "fix the code",
+  "skills": [
+   "developer"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "Fix the bug in main.rs.",
+  "skills": [
+   "developer"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "what does this function do",
+  "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "is it raining",
+  "skills": [],
+  "source": "written"
+ }
+]

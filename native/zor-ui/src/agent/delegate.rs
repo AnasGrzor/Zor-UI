@@ -69,7 +69,7 @@ pub fn for_call(task: &str, call: &Call, result: &str, summarize: &mut impl FnMu
 
 /// The kinds whose result is read as exact text and never summarized.
 fn exact_text(call: &Call) -> bool {
-    matches!(call, Call::Browser { .. } | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::RunCheck(_))
+    matches!(call, Call::Browser { .. } | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::RunCheck(_) | Call::EditFile { .. })
 }
 
 /// What the model reads for one tool result. A long result gets its summary, when the call answers; anything else gets the result

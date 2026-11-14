@@ -89,16 +89,16 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "developer",
-        version: 2,
-        capability: "Looks through the developer workspace: its files, its code and its git status, and runs its build and tests.",
-        tools: &["list_tree", "read_file", "search_code", "git_status", "run_check"],
-        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "errors", "git", "repo", "compile"],
-        steps: &["list_tree", "read_file", "search_code", "run_check"],
-        guidance: "Look before you answer: list_tree to find the file, read_file for its text, search_code for the words. Run run_check only for a build or test, and quote its result. The user is asked once per workspace before a check runs. Say when a file is missing or secret.",
+        version: 3,
+        capability: "Looks through the developer workspace: its files, its code and its git status, runs its build and tests, and edits its files.",
+        tools: &["list_tree", "read_file", "search_code", "git_status", "run_check", "edit_file"],
+        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "errors", "git", "repo", "compile", "fix", "edit"],
+        steps: &["list_tree", "read_file", "search_code", "edit_file", "run_check"],
+        guidance: "Look before you answer: list_tree to find the file, read_file for its text, search_code for the words. Run run_check only for a build or test, and quote its result. The user is asked once per workspace before a check runs. To change code, read the file, then edit_file with old copied exactly so it matches once; read the diff it returns, then run_check, and say if no check passed after your last edit. The user is asked once per task before the first edit. Say when a file is missing or secret.",
         permission: "Consequential",
-        context: "developer workspace, set by hand in config.json (buddies.developerWorkspace)",
+        context: "developer workspace, set in Settings (buddies.developerWorkspace)",
         eval: Eval {
-            selects: &["run the tests on the code", "check the build", "there is a bug in the parser", "show me the error from the build", "what changed in git", "list the files in the codebase", "find the cache function in the code"],
+            selects: &["run the tests on the code", "check the build", "there is a bug in the parser", "show me the error from the build", "what changed in git", "list the files in the codebase", "find the cache function in the code", "fix the bug in the parser code", "edit the build file to add a test"],
             must_not: &["hi, how are you", "what is the capital of France", "remember that my sister is called Lina", "turn the volume up", "look up the score of the match", "play some music", "check my email", "there was an error on my phone"],
         },
     },
@@ -219,7 +219,7 @@ mod tests {
         if name.starts_with("browser_") {
             return risk_of(&Call::Browser { tool: name.into(), args: json!({}) });
         }
-        let input = json!({ "arg": "x", "query": "x", "to": "x", "text": "x", "which": "wifi" });
+        let input = json!({ "arg": "x", "query": "x", "to": "x", "text": "x", "which": "wifi", "path": "x", "old": "x", "new": "y" });
         match step_from_tool(name, &input) {
             Step::Call { call, .. } => risk_of(&call),
             _ => panic!("{name} does not build a call"),
@@ -326,6 +326,7 @@ mod tests {
         assert_eq!(risk_of_tool("git_status"), Risk::ReadOnly);
         assert_eq!(risk_of_tool("take_over"), Risk::Consequential);
         assert_eq!(risk_of_tool("run_check"), Risk::Consequential, "a check asks once per workspace");
+        assert_eq!(risk_of_tool("edit_file"), Risk::Consequential, "an edit asks once per task");
     }
 
     #[test]

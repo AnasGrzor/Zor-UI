@@ -45,6 +45,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("search_code", "Finds the lines in the developer workspace that contain the words.", &[("arg", "the words")], &["arg"]),
         tool("git_status", "Shows the git status and a diff summary of the developer workspace.", &[], &[]),
         tool("run_check", "Runs one fixed check in the developer workspace and says whether it passed. The user is asked once per workspace. Only when asked to build, test or check the project.", &[("arg", "cargo check, cargo test, cargo build, cargo build --release or cargo clippy")], &["arg"]),
+        tool("edit_file", "Replaces one exact text span in one file of the developer workspace and returns a diff. Read the file first and copy old exactly; it must match once. The user is asked once per task and the original is backed up. Run run_check afterwards, or the task is unverified.", &[("path", "file path inside the workspace"), ("old", "the exact text to replace"), ("new", "the replacement text")], &["path", "old", "new"]),
     ]
 }
 
@@ -120,7 +121,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 28, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 29, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -246,7 +247,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 28);
+        assert_eq!(names.len(), 29);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

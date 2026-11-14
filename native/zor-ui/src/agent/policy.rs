@@ -28,7 +28,8 @@ pub fn risk_of(call: &Call) -> Risk {
         // lock can be undone by signing in; every other power action ends the session
         Power(what) => if what.trim().eq_ignore_ascii_case("lock") { Risk::Reversible } else { Risk::Destructive },
         // a check builds and runs the project's code, so it asks once per workspace (agent::approve)
-        TakeOver(_) | RunCheck(_) => Risk::Consequential,
+        // an edit changes the user's files: it asks once per task (agent::approve_edit)
+        TakeOver(_) | RunCheck(_) | EditFile { .. } => Risk::Consequential,
         // each browser tool has its own level (`BROWSER_RISK`); an unknown name is Consequential here and refused by `check_browser`
         Browser { tool, .. } => browser_risk(tool).unwrap_or(Risk::Consequential),
     }
@@ -135,6 +136,8 @@ pub fn gate<'a>(call: &'a Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> b
         Call::Power(_) if !crate::assist::allowed(cfg, "system") => return Err("PC control is turned off in Settings.".into()),
         // the name is checked before the question, so a refused name asks nothing and starts nothing
         Call::RunCheck(name) => { super::developer::check_named(name)?; }
+        // the path and the text are checked before the question, so a refused edit asks nothing and writes nothing
+        Call::EditFile { path, old, new } => { super::developer::prepare_edit(&super::developer::workspace(cfg)?, path, old, new)?; }
         // the switches and the model check come before the question, so a take-over that can't run asks nothing
         Call::TakeOver(_) => { crate::assist::drive_switches(cfg)?; crate::drive::check_ready(cfg)?; }
         Call::Browser { .. } if !browse::enabled(cfg) => return Err(browse::OFF.into()),
@@ -177,6 +180,11 @@ fn decide(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> R
         if confirm(&q) { developer::remember_check_yes(&ws); return Ok(()); }
         return Err(DECLINED.into());
     }
+    // an edit asks once per task: a yes holds for that task only (agent::approve_edit)
+    if let Call::EditFile { path, .. } = call {
+        let task = *super::CURRENT_TASK.lock().unwrap_or_else(|e| e.into_inner());
+        return super::approve_edit(&developer::workspace(cfg)?, path, task, confirm);
+    }
     if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
 }
 
@@ -202,6 +210,8 @@ pub fn approval_for(call: &Call) -> Option<String> {
         Call::TakeOver(goal) => Some(crate::drive::question(goal)),
         Call::Browser { .. } => Some("The buddy wants to use its browser for this. Allow it?".into()),
         Call::RunCheck(name) => Some(format!("Run \"{}\" in the developer workspace? It builds or tests the project's code.", name.trim())),
+        // the real question also names the workspace (`developer::edit_question`); this one is the fallback the table needs
+        Call::EditFile { path, .. } => Some(format!("Change \"{}\" in the developer workspace? A yes covers edits in this task only.", path.trim())),
         _ => None,
     }
 }
@@ -262,7 +272,7 @@ mod tests {
             Call::Power("sleep".into()), Call::Power("restart".into()), Call::Power("shutdown".into()), Call::Power("logout".into()),
             Call::Power("lock".into()), Call::TakeOver("fill the form".into()), Call::Browser { tool: "browser_click".into(), args: json!({}) },
             Call::Open("Spotify".into()), Call::Volume("up".into()), Call::WebSearch("x".into()), Call::FindFile("cv".into()),
-            Call::RunCheck("cargo test".into()), Call::GitStatus,
+            Call::RunCheck("cargo test".into()), Call::GitStatus, Call::EditFile { path: "src/a.rs".into(), old: "a".into(), new: "b".into() },
         ];
         for c in &calls {
             assert_eq!(approval_for(c).is_some(), needs_approval(risk_of(c)), "{c:?}: the question and the level must agree");

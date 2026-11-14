@@ -1069,6 +1069,10 @@ impl Settings {
                 }
             }
             "cancel-task" => crate::agent::cancel_running(),
+            "dev-workspace" => match crate::agent::developer::create_test_workspace() {
+                Ok(dir) => { self.set("buddies.developerWorkspace", json!(dir.display().to_string())); self.toast("Test project ready and set as the workspace"); }
+                Err(e) => self.toast(&e),
+            },
             "forget-memory" => {
                 if let Err(e) = arg.parse::<i64>().map_err(|e| e.to_string()).and_then(crate::agent::memory::forget_id) { crate::log::line(&format!("could not forget a memory: {e}")); }
             }

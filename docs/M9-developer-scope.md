@@ -48,8 +48,9 @@ bypass the policy (brief section 3.2).
 | `edit_file` | replace text in one file in the workspace, written atomically, with a backup | Reversible | per task, see below |
 | `run_check` | run one allowed command (see Commands) in the workspace, with a timeout | Consequential | per workspace, see below |
 
-**Open** (for M9c): should `edit_file` ask each time, or once per task? Suggestion: once per task, with the list of files
-shown in the island before the first edit.
+**Decided (M9c):** `edit_file` asks once per task. The question names the workspace and the file of the first edit, and the yes
+holds for that task only: it is kept in memory by task id, never for the session, and a new task asks again. A no is a Declined
+task and nothing is written. A request with no task id asks every time.
 
 **Decided:** `run_check` asks once per workspace, and the question names the command. The yes is kept in memory for the
 rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no makes the task Declined.
@@ -105,12 +106,16 @@ rest of the app session only (not Settings, the DPAPI store or `buddy.db`). A no
 - **M9b (checks, built):** `run_check` with the command list, its approval, the limits, and the verifier change.
   Review fixes on top: junction/symlink workspace refused; latest check decides; timeout kills the process tree; the
   unverified-claim sentence in the answer.
-- **M9c (edits, not started):** `edit_file`, its approval, the backups, and the task-level verification.
+- **M9c (edits, built):** `edit_file`, its approval, the backups, and the task-level verification. One exact text span in one
+  file; the old text must match once; written through a temp file and a rename; the original is copied to
+  `%LOCALAPPDATA%zor-uidev-backups<task id><relative path>` before the first edit of that file in the task; files over 1 MB
+  and tasks past 20 edits are refused. The reply carries a short redacted diff. A task that edited a file is Completed only when
+  a `run_check` passed after the last edit.
 
 ## Open decisions, in one list
 
 1. Which folders are workspaces at first. **Decided:** a test folder Buddy creates; the Zor-UI repository is not a workspace.
-2. Whether `edit_file` asks once per task or every time. **Open** (decided with M9c; suggestion: once per task).
+2. Whether `edit_file` asks once per task or every time. **Decided:** once per task, naming the workspace and the first file.
 3. Whether `run_check` asks once per workspace or every time. **Decided:** once per workspace, for the app session.
 4. Which commands beyond cargo to allow. **Decided:** none; the five cargo entries only.
 5. Whether M9a ships before M9b and M9c. **Done:** M9a shipped first, then M9b.

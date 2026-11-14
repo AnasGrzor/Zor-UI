@@ -1,6 +1,7 @@
-﻿//! The developer tools (M9a): read-only access to one workspace folder set in Settings (`buddies.developerWorkspace`). Every path is
-//! resolved to its real location before it is used, so a junction or symlink inside the workspace cannot reach outside it. Secret
-//! files are never read, and secret-looking text is redacted from every result. Nothing here changes a file or runs a project.
+﻿//! The developer tools (M9): one workspace folder set in Settings (`buddies.developerWorkspace`). Every path is resolved to its
+//! real location before it is used, so a junction or symlink inside the workspace cannot reach outside it. Secret files are never
+//! read or edited, and secret-looking text is redacted from every result. M9a reads, M9b runs a fixed check, M9c (`edit_file`)
+//! replaces one exact text span in one file, after the user's yes, with a backup of the original.
 
 use crate::bridge::common::hidden;
 use crate::conf::Config;
@@ -282,10 +283,100 @@ pub fn cap_tail(text: &str, max: usize) -> String {
     format!("(cut short: the start of the output is not shown)\n{}", &text[start..])
 }
 
+/// The largest file `edit_file` will change, and the most edits one task may make.
+const EDIT_FILE_BYTES: u64 = 1_000_000;
+const EDITS_PER_TASK: u32 = 20;
+/// The most diff lines the model gets back.
+const DIFF_LINES: usize = 40;
+/// Edits made so far per task, and the tasks whose user said yes to editing. Memory only: a yes holds for one task, never the session.
+static EDIT_COUNT: Mutex<Vec<(i64, u32)>> = Mutex::new(Vec::new());
+static EDIT_YES: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+
+/// A checked edit that has not been written yet: the path is inside the workspace and the old text matched exactly once.
+#[derive(Debug)]
+pub struct Edit { pub rel: String, real: PathBuf, original: Vec<u8>, updated: String, line: usize, old: String, new: String }
+
+/// Whether the user already said yes to edits in this task. A request with no task id never remembers a yes.
+pub fn edit_allowed(task: Option<i64>) -> bool { task.is_some_and(|t| EDIT_YES.lock().is_ok_and(|v| v.contains(&t))) }
+
+pub fn remember_edit_yes(task: Option<i64>) {
+    if let (Some(t), Ok(mut v)) = (task, EDIT_YES.lock()) { if !v.contains(&t) { v.push(t); } }
+}
+
+/// The question for the first edit of a task: it names the workspace and the file, and says the yes covers this task only.
+pub fn edit_question(ws: &Path, rel: &str) -> String {
+    format!("Change \"{}\" in the developer workspace {}? The original is backed up. A yes covers edits in this task only.", rel.trim(), ws.display())
+}
+
+/// Checks one edit and prepares it, without writing. Refuses a path outside the workspace, a secret, a binary or large file, and an
+/// old text that is empty, missing or found more than once. The caller asks the user after this and before `apply_edit`.
+pub fn prepare_edit(ws: &Path, rel: &str, old: &str, new: &str) -> Result<Edit, String> {
+    let real = resolve(ws, rel)?;
+    if is_secret(&real) || is_secret(Path::new(rel)) { return Err("That file holds secrets, so I won't change it.".into()); }
+    if !real.is_file() { return Err(format!("\"{rel}\" is not a file.")); }
+    if std::fs::metadata(&real).map_err(|e| format!("Could not read \"{rel}\": {e}"))?.len() > EDIT_FILE_BYTES { return Err(format!("\"{rel}\" is larger than 1 MB, so I won't edit it.")); }
+    if old.is_empty() { return Err("The old text is empty. Give the exact text to replace.".into()); }
+    let original = std::fs::read(&real).map_err(|e| format!("Could not read \"{rel}\": {e}"))?;
+    let text = std::str::from_utf8(&original).ok().filter(|t| !t.contains('\0')).ok_or_else(|| format!("\"{rel}\" is not a UTF-8 text file."))?;
+    // the model writes \n; a file with Windows line ends keeps its own
+    let crlf = |s: &str| if text.contains("\r\n") && !s.contains('\r') { s.replace('\n', "\r\n") } else { s.to_string() };
+    let (old, new) = (crlf(old), crlf(new));
+    match text.matches(old.as_str()).count() {
+        0 => return Err(format!("The old text was not found in \"{rel}\". Read the file again and copy the text exactly, including spaces.")),
+        1 => {}
+        n => return Err(format!("The old text is in \"{rel}\" {n} times. Add surrounding lines so it matches once.")),
+    }
+    let at = text.find(old.as_str()).unwrap_or(0);
+    let updated = format!("{}{}{}", &text[..at], new, &text[at + old.len()..]);
+    let shown = real.strip_prefix(ws).map(|p| p.display().to_string()).unwrap_or_else(|_| rel.trim().to_string());
+    let line = text[..at].matches('\n').count() + 1;
+    Ok(Edit { rel: shown, real, original, updated, line, old, new })
+}
+
+/// Writes a prepared edit. The original goes to `%LOCALAPPDATA%\zor-ui\dev-backups\<task id>\<relative path>` first (once per file
+/// per task), then the new text goes to a temp file next to it and is renamed over it. The reply holds a short diff for the model.
+pub fn apply_edit(permit: &super::policy::Cleared, ws: &Path, e: Edit, task: Option<i64>) -> Result<String, String> {
+    let _ = permit;
+    apply_edit_in(&crate::conf::data_dir().join("dev-backups"), ws, e, task)
+}
+
+fn apply_edit_in(backups: &Path, ws: &Path, e: Edit, task: Option<i64>) -> Result<String, String> {
+    let key = task.unwrap_or(0);
+    {
+        let mut counts = EDIT_COUNT.lock().map_err(|_| "Edit state is unavailable.".to_string())?;
+        let at = match counts.iter().position(|c| c.0 == key) { Some(i) => i, None => { counts.push((key, 0)); counts.len() - 1 } };
+        if counts[at].1 >= EDITS_PER_TASK { return Err(format!("This task already made {EDITS_PER_TASK} edits, so I won't make more.")); }
+        counts[at].1 += 1;
+    }
+    let backup = backups.join(if task.is_some() { key.to_string() } else { "no-task".into() }).join(e.real.strip_prefix(ws).unwrap_or(Path::new(&e.rel)));
+    if !backup.exists() {
+        if let Some(dir) = backup.parent() { std::fs::create_dir_all(dir).map_err(|err| format!("Could not make the backup folder, so nothing changed: {err}"))?; }
+        std::fs::write(&backup, &e.original).map_err(|err| format!("Could not back up \"{}\", so nothing changed: {err}", e.rel))?;
+    }
+    let name = e.real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = e.real.with_file_name(format!(".{name}.zorui-tmp"));
+    if let Err(err) = std::fs::write(&tmp, &e.updated).and_then(|_| std::fs::rename(&tmp, &e.real)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Could not write \"{}\", so it is unchanged: {err}", e.rel));
+    }
+    Ok(format!("Changed {} at line {}. The original is backed up. Diff:\n{}", e.rel, e.line, diff_of(&e.old, &e.new)))
+}
+
+/// A short unified-style diff of one replaced span: removed lines with `-`, added lines with `+`, equal lines at both ends left
+/// out. Cut to `DIFF_LINES` lines and redacted.
+pub fn diff_of(old: &str, new: &str) -> String {
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..].iter().rev().zip(b[head..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let mut out: Vec<String> = a[head..a.len() - tail].iter().map(|l| format!("-{l}")).chain(b[head..b.len() - tail].iter().map(|l| format!("+{l}"))).collect();
+    if out.len() > DIFF_LINES { let more = out.len() - DIFF_LINES; out.truncate(DIFF_LINES); out.push(format!("(and {more} more lines)")); }
+    let text = out.iter().map(|l| l.chars().take(LINE_CHARS).collect::<String>()).collect::<Vec<_>>().join("\n");
+    if text.is_empty() { "(no visible change)".into() } else { redact(&text) }
+}
+
 /// The test folder for the developer tools: `%LOCALAPPDATA%\zor-ui\dev-workspace`, a small Cargo project written by hand (no
 /// `cargo new`, no network). Files already there are kept. Made only when asked, never at startup. The user then sets
 /// `buddies.developerWorkspace` to the folder.
-#[allow(dead_code)] // no caller yet: the Settings button that asks for it comes after M9b
 pub fn create_test_workspace() -> Result<PathBuf, String> { create_test_workspace_in(&crate::conf::data_dir()) }
 
 fn create_test_workspace_in(root: &Path) -> Result<PathBuf, String> {
@@ -558,6 +649,136 @@ mod tests {
         create_test_workspace_in(&root).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap(), "mine", "an existing file is kept");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn backups(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zorui-dev-backups-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn edit_ok(w: &Path, b: &Path, rel: &str, old: &str, new: &str, task: i64) -> Result<String, String> {
+        apply_edit_in(b, w, prepare_edit(w, rel, old, new)?, Some(task))
+    }
+
+    #[test]
+    fn an_edit_replaces_one_span_atomically_and_shows_a_diff() {
+        let (w, b) = (ws("edit"), backups("edit"));
+        std::fs::write(w.join("src").join("a.rs"), "fn a() {\n    1\n}\nfn b() {}\n").unwrap();
+        let r = edit_ok(&w, &b, "src/a.rs", "    1\n", "    2\n", 9001).unwrap();
+        assert_eq!(std::fs::read_to_string(w.join("src").join("a.rs")).unwrap(), "fn a() {\n    2\n}\nfn b() {}\n");
+        assert!(r.contains("line 2") && r.contains("-    1") && r.contains("+    2"), "{r}");
+        let leftovers: Vec<_> = std::fs::read_dir(w.join("src")).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(leftovers, vec!["a.rs".to_string()], "no temp file is left");
+    }
+
+    #[test]
+    fn a_file_with_windows_line_ends_keeps_them() {
+        let (w, b) = (ws("crlf"), backups("crlf"));
+        std::fs::write(w.join("c.txt"), "one\r\ntwo\r\n").unwrap();
+        edit_ok(&w, &b, "c.txt", "one\ntwo", "one\nthree", 9002).unwrap();
+        assert_eq!(std::fs::read_to_string(w.join("c.txt")).unwrap(), "one\r\nthree\r\n");
+    }
+
+    #[test]
+    fn an_edit_that_leaves_the_workspace_or_hits_a_secret_is_refused() {
+        let (w, b) = (ws("edit-refuse"), backups("edit-refuse"));
+        let outside = std::env::temp_dir().join(format!("zorui-dev-edit-out-{}.txt", std::process::id()));
+        std::fs::write(&outside, "keep").unwrap();
+        std::fs::write(w.join(".env"), "A=1").unwrap();
+        std::fs::write(w.join("k.pem"), "x").unwrap();
+        for bad in ["../x.txt", outside.to_str().unwrap(), "C:\\Windows\\win.ini", "\\Windows", ""] {
+            assert!(prepare_edit(&w, bad, "keep", "gone").is_err(), "{bad:?}");
+        }
+        for secret in [".env", "k.pem"] {
+            assert!(prepare_edit(&w, secret, "A", "B").unwrap_err().contains("secrets"), "{secret}");
+        }
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(!b.exists(), "a refused edit makes no backup");
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_edit_through_a_junction_cannot_reach_outside() {
+        let w = ws("edit-junction");
+        let outside = std::env::temp_dir().join(format!("zorui-dev-edit-jout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("n.txt"), "outside").unwrap();
+        let link = w.join("link");
+        let made = hidden("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&outside).output().expect("cmd");
+        assert!(made.status.success(), "mklink /J failed, so the junction case was NOT tested");
+        assert!(prepare_edit(&w, "link/n.txt", "outside", "inside").is_err());
+        assert_eq!(std::fs::read_to_string(outside.join("n.txt")).unwrap(), "outside");
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn old_text_must_match_exactly_once() {
+        let w = ws("edit-match");
+        std::fs::write(w.join("m.txt"), "foo bar\nfoo baz\n").unwrap();
+        assert!(prepare_edit(&w, "m.txt", "nothing here", "x").unwrap_err().contains("not found"));
+        assert!(prepare_edit(&w, "m.txt", "foo", "x").unwrap_err().contains("2 times"));
+        assert!(prepare_edit(&w, "m.txt", "", "x").is_err(), "empty old text is refused");
+        assert!(prepare_edit(&w, "m.txt", "foo bar", "x").is_ok());
+        std::fs::write(w.join("bin.dat"), [0u8, 1, 2]).unwrap();
+        assert!(prepare_edit(&w, "bin.dat", "a", "b").is_err(), "binary is refused");
+        std::fs::write(w.join("big.txt"), "a".repeat(EDIT_FILE_BYTES as usize + 1)).unwrap();
+        assert!(prepare_edit(&w, "big.txt", "a", "b").unwrap_err().contains("1 MB"));
+    }
+
+    #[test]
+    fn the_original_is_backed_up_once_per_file_per_task_and_can_be_restored() {
+        let (w, b) = (ws("edit-backup"), backups("edit-backup"));
+        let file = w.join("src").join("a.txt");
+        std::fs::write(&file, "v0 text").unwrap();
+        edit_ok(&w, &b, "src/a.txt", "v0", "v1", 9003).unwrap();
+        edit_ok(&w, &b, "src/a.txt", "v1", "v2", 9003).unwrap();
+        let saved = b.join("9003").join("src").join("a.txt");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "v0 text", "the second edit did not overwrite the backup");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v2 text");
+        std::fs::copy(&saved, &file).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v0 text", "the backup restores the original");
+        edit_ok(&w, &b, "src/a.txt", "v0", "v3", 9004).unwrap();
+        assert_eq!(std::fs::read_to_string(b.join("9004").join("src").join("a.txt")).unwrap(), "v0 text", "another task gets its own backup");
+    }
+
+    #[test]
+    fn a_task_has_a_cap_on_edits() {
+        let (w, b) = (ws("edit-cap"), backups("edit-cap"));
+        std::fs::write(w.join("c.txt"), "x").unwrap();
+        for i in 0..EDITS_PER_TASK { edit_ok(&w, &b, "c.txt", if i % 2 == 0 { "x" } else { "y" }, if i % 2 == 0 { "y" } else { "x" }, 9005).unwrap(); }
+        assert!(edit_ok(&w, &b, "c.txt", "x", "y", 9005).unwrap_err().contains("already made"));
+    }
+
+    #[test]
+    fn the_diff_is_short_and_redacted() {
+        assert_eq!(diff_of("a\nb\nc", "a\nB\nc"), "-b\n+B");
+        assert!(diff_of(&"l\n".repeat(100), &"m\n".repeat(100)).contains("more lines"));
+        assert!(!diff_of("x", "api_key = hunter2").contains("hunter2"));
+    }
+
+    #[test]
+    fn edit_approval_is_remembered_for_one_task_only() {
+        assert!(!edit_allowed(Some(9100)) && !edit_allowed(None));
+        remember_edit_yes(Some(9100));
+        remember_edit_yes(None);
+        assert!(edit_allowed(Some(9100)));
+        assert!(!edit_allowed(Some(9101)), "another task asks again");
+        assert!(!edit_allowed(None), "no task id means no remembered yes");
+        let q = edit_question(Path::new("C:\\proj"), "src/a.rs");
+        assert!(q.contains("C:\\proj") && q.contains("src/a.rs") && q.contains("this task only"), "{q}");
+    }
+
+    #[test]
+    fn the_model_reaches_edit_file_through_the_protocol_with_its_spaces() {
+        use crate::agent::{parse_step, Call, Step};
+        let r = parse_step(r#"{"do":"edit_file","path":"src/a.rs","old":"  x\n","new":""}"#);
+        assert_eq!(r, Step::Call { call: Call::EditFile { path: "src/a.rs".into(), old: "  x\n".into(), new: String::new() }, more: false });
+        assert!(matches!(parse_step(r#"{"do":"edit_file","path":"a"}"#), Step::Bad(_)), "an edit needs old text");
+        assert!(matches!(parse_step(r#"{"do":"edit_file","old":"a","new":"b"}"#), Step::Bad(_)), "an edit needs a path");
     }
 
     #[test]

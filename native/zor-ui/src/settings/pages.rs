@@ -1433,6 +1433,11 @@ impl Settings {
             self.sw(p, "ai.memory", "Remember things", "Buddy keeps the facts you ask it to remember, on this PC only, and recalls them when they fit. Passwords and account numbers are never kept", "psychology");
             if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) { self.memory_list(p); }
             self.task_list(p);
+            self.text_ph(p, "buddies.developerWorkspace", "Developer workspace", "A project folder the buddy may read, check and edit. Empty: developer tools off. Edits ask first and keep a backup", "folder_code", "C:\\path\\to\\project");
+            if let Some(r) = p.row(44.0) {
+                p.left(r, "science", "Make a test project", "Creates a small Rust project in Zor UI's data folder and uses it as the workspace", 80.0);
+                p.chip_right(r, None, "Create", Act::Do("dev-workspace", String::new()));
+            }
             self.sw(p, "ai.nativeTools","Native tool calling (Claude)", "Claude picks the buddy's tools through the API, and sees their results. Only with a Claude model and the browser off. Off keeps the JSON protocol", "build");
             let strong: Vec<(Value, String)> = std::iter::once((json!(""), "Off".to_string())).chain(models.iter().cloned()).collect();
             self.pick(p, "ai.model", models, "Default model", "Used by the sidebar and the buddies. Ollama models appear when Ollama is running", "model_training", 260.0);

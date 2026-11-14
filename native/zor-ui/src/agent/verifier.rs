@@ -21,6 +21,8 @@ pub enum Kind {
     Action,
     /// A project check (`run_check`): its exit code is the evidence.
     Check,
+    /// A file change (`edit_file`): not evidence of anything until a check passes after it.
+    Edit,
     /// The output level or mute is read back from the device after a volume change (`agent::readback`).
     Volume,
     /// An app launch is checked against the running processes for a while (`agent::readback`).
@@ -37,6 +39,8 @@ pub enum Check {
     Failed,
     /// The user said no to the tool. Not a failure of the tool: nothing was done, by choice.
     Declined,
+    /// A file was changed. The task is not Completed until a check passed after the last edit.
+    Edited,
     /// A project check ran and exited 0.
     Passed,
     /// A project check ran and did not pass (exit code, or time limit). It stays failed for the whole request.
@@ -74,6 +78,7 @@ pub fn kind_of(call: &Call) -> Kind {
         Volume(_) => Kind::Volume,
         Open(_) => Kind::AppOpen,
         RunCheck(_) => Kind::Check,
+        EditFile { .. } => Kind::Edit,
         // a page that loads or is read is evidence; the other browser tools report nothing back
         Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
         Browser { .. } | Search(_) | Url(_) | Media(_) | OpenFile(_) | Message { .. } | Power(_) | TakeOver(_) => Kind::Action,
@@ -106,6 +111,7 @@ pub fn check(kind: Kind, result: &Result<String, String>) -> Check {
     let t = text.trim();
     match kind {
         Kind::Check => Check::Passed,
+        Kind::Edit => Check::Edited,
         Kind::Play => if t.starts_with("Playing") { Check::Verified } else { Check::Unverified },
         // the saved or deleted row was checked in the database first (`readback::remember_reply`, `forget_reply`)
         Kind::Memory => if t.to_lowercase().contains("not confirmed") { Check::NotConfirmed } else if t.starts_with("Remembered") || t.starts_with("Updated what I remember") || t.starts_with("Forgot:") { Check::Verified } else { Check::Unverified },
@@ -128,7 +134,8 @@ pub fn judge(checks: &[Check]) -> Verdict {
     // the latest check decides: a failure that a later passing check followed is dropped, so it no longer counts
     let last_pass = checks.iter().rposition(|c| *c == Check::Passed);
     let ran: Vec<Check> = checks.iter().enumerate()
-        .filter(|(i, c)| **c != Check::Declined && !(**c == Check::CheckFailed && last_pass.is_some_and(|p| p > *i)))
+        // an edit is covered by a check that passed after it; a failure also stops counting once a later check passed
+        .filter(|(i, c)| **c != Check::Declined && !(matches!(**c, Check::CheckFailed | Check::Edited) && last_pass.is_some_and(|p| p > *i)))
         .map(|(_, c)| *c).collect();
     if ran.is_empty() { return if declined { Verdict::Declined } else { Verdict::Completed }; }
     if declined { return Verdict::Partial; }
@@ -166,6 +173,10 @@ pub fn unverified_claim_note(verdict: Verdict, answer: &Result<String, String>, 
     if verdict != Verdict::Unverified { return None; }
     // a volume change or an app open that the read-back could not confirm
     if checks.contains(&Check::NotConfirmed) { return Some("I couldn't confirm that on this PC."); }
+    // a file was changed and no check passed after the last change
+    if let Some(e) = checks.iter().rposition(|c| *c == Check::Edited) {
+        if !checks.iter().rposition(|c| *c == Check::Passed).is_some_and(|p| p > e) { return Some("I changed a file and no check passed after that, so this is unverified."); }
+    }
     let claimed = answer.as_ref().is_ok_and(|a| claims_code_result(a));
     (claimed && !checks.contains(&Check::Passed)).then_some("I did not run a check, so this is unverified.")
 }
@@ -202,6 +213,7 @@ mod tests {
             Media("pause".into()), Volume("up".into()), Brightness("50".into()), Radio { which: "wifi".into(), state: "on".into() },
             Clip("x".into()), OpenFile("a".into()), Wallpaper("random".into()), Message { to: "a".into(), text: "b".into(), via: "".into() },
             Remember("x".into()), Forget("x".into()), Power("lock".into()), Power("sleep".into()), TakeOver("x".into()), RunCheck("cargo test".into()),
+            EditFile { path: "a.rs".into(), old: "a".into(), new: "b".into() },
         ];
         v.extend(crate::browse::TOOLS.iter().map(|(t, _)| Browser { tool: t.to_string(), args: serde_json::json!({}) }));
         v
@@ -233,6 +245,8 @@ mod tests {
                 // a play that does not say "Playing" is unverified; a check needs its own exit code
                 Kind::Play => assert_eq!(check(kind, &ok), Check::Unverified, "{c:?}"),
                 Kind::Check => assert_eq!(check(kind, &Err("The check failed: x".into())), Check::CheckFailed, "{c:?}"),
+                // a change is never Completed from its own Ok: only a check that passed after it completes the task
+                Kind::Edit => assert_eq!(outcome(&ok, &[check(kind, &ok)]).1, TaskStatus::Unverified, "{c:?}"),
                 Kind::Lookup | Kind::FileSearch => {}
             }
         }
@@ -338,6 +352,26 @@ mod tests {
         assert_eq!(judge(&[Check::Passed, Check::CheckFailed]), Verdict::Partial, "passed then failed: not Completed");
         assert_eq!(judge(&[Check::Passed, Check::CheckFailed, Check::Passed]), Verdict::Completed);
         assert_eq!(judge(&[Check::CheckFailed, Check::Passed, Check::CheckFailed]), Verdict::Partial);
+    }
+
+    #[test]
+    fn an_edit_is_completed_only_by_a_check_that_passed_after_it() {
+        let call = Call::EditFile { path: "a.rs".into(), old: "a".into(), new: "b".into() };
+        assert_eq!(kind_of(&call), Kind::Edit);
+        assert_eq!(check(Kind::Edit, &ok("Changed a.rs at line 1.")), Check::Edited);
+        assert_eq!(check(Kind::Edit, &err()), Check::Failed, "a refused edit changed nothing");
+        use Check::{CheckFailed as F, Edited as E, Passed as P};
+        assert_eq!(judge(&[E, P]), Verdict::Completed, "edit then pass");
+        assert_eq!(judge(&[E]), Verdict::Unverified, "edit with no check");
+        assert_eq!(judge(&[P, E]), Verdict::Unverified, "pass then edit: the pass is stale");
+        assert_ne!(judge(&[E, F]), Verdict::Completed, "edit then fail");
+        assert_eq!(judge(&[E, F, P]), Verdict::Completed, "the latest check decides");
+        assert_eq!(judge(&[E, P, E]), Verdict::Unverified);
+        assert_eq!(judge(&[E, P, E, P]), Verdict::Completed);
+        let said = Ok("Fixed it.".to_string());
+        assert!(unverified_claim_note(Verdict::Unverified, &said, &[E]).unwrap().contains("unverified"), "the answer says so");
+        assert!(unverified_claim_note(Verdict::Unverified, &said, &[P, E]).is_some());
+        assert_eq!(unverified_claim_note(Verdict::Completed, &said, &[E, P]), None);
     }
 
     #[test]

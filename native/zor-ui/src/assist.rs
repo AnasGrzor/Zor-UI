@@ -651,7 +651,9 @@ fn screen_on(cfg: &Config) -> bool { cfg.get("buddies.screen").as_bool().unwrap_
 pub fn screen_model(cfg: &Config) -> String {
     let candidates: Vec<String> = [cfg.str("buddies.screenModel"), cfg.str("ai.model"), "gemini-2.5-flash"].into_iter()
         .filter(|m| !m.is_empty()).map(crate::bridge::current_model_id).collect();
-    candidates.iter().find(|m| crate::bridge::model_can_see(m)).or(candidates.first()).cloned().unwrap_or_default()
+    let pick = candidates.iter().find(|m| crate::bridge::model_can_see(m)).or(candidates.first()).cloned().unwrap_or_default();
+    crate::log::line(&format!("buddy route: {pick} ({})", crate::agent::routing::Reason::Vision.word()));
+    pick
 }
 
 /// A screen question from the agent. Nothing is captured while screen help or the AI is switched off.
@@ -715,6 +717,21 @@ pub fn stream_turn_raw(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn
 
 /// `stream_turn_raw`, and `live` gets the text so far after each delta.
 pub fn stream_turn_live(cfg: &Config, convo: &str, wait_secs: u64, live: impl FnMut(&str)) -> Result<Turn, String> {
+    // each model call's time to first text and total time, and whether it failed, go to the routing figures (provider.rs)
+    let model = serde_json::from_str::<Value>(convo).ok().and_then(|v| v["model"].as_str().map(String::from));
+    let started = std::time::Instant::now();
+    let first = std::cell::Cell::new(None::<u64>);
+    let mut live = live;
+    let r = stream_turn_timed(cfg, convo, wait_secs, |t| { if first.get().is_none() { first.set(Some(started.elapsed().as_millis() as u64)); } live(t) });
+    if let Some(m) = model {
+        // the user stopping a call is not the model's failure
+        let stopped = matches!(&r, Err(e) if e == crate::browse::STOPPED || e == crate::agent::CANCELLED);
+        if !stopped { provider::note_call(&m, r.is_ok(), first.get(), started.elapsed().as_millis() as u64); }
+    }
+    r
+}
+
+fn stream_turn_timed(cfg: &Config, convo: &str, wait_secs: u64, live: impl FnMut(&str)) -> Result<Turn, String> {
     let (tx, rx) = mpsc::channel::<Option<Value>>();
     let (tx2, tx3) = (tx.clone(), tx);
     let stream = proc::stream_stdin(cfg, "ai-chat", &[], convo, move |line| {

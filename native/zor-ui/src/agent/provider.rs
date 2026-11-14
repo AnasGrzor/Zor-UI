@@ -115,9 +115,179 @@ pub fn context_from_show(v: &Value) -> Option<u32> {
         .and_then(|(_, n)| n.as_u64()).and_then(|n| u32::try_from(n).ok())
 }
 
+// ---- latency, cooldown and cost (M7 routing inputs) ----
+
+/// How a model has been answering lately: a rolling figure per model id, saved in buddy.db so a restart keeps it. Only used to break
+/// ties and to rest a model that keeps failing (`routing::decide`); it never removes the user's own model.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Health {
+    /// Smoothed time to the first streamed text, in ms. None until a reply streamed text.
+    pub ttft_ms: Option<f64>,
+    /// Smoothed time for the whole reply, in ms, over successful calls.
+    pub total_ms: Option<f64>,
+    pub calls: u32,
+    /// Failures in a row since the last success.
+    pub fail_streak: u32,
+    /// When the last failure happened, in ms since the epoch.
+    pub last_fail_ms: u64,
+}
+
+/// Weight of the newest call in the smoothed figures.
+const EWMA: f64 = 0.3;
+/// A model rests after this many failures in a row, for `COOLDOWN_MS`; the next call after that tries it again.
+pub const FAILS_TO_COOL: u32 = 3;
+pub const COOLDOWN_MS: u64 = 120_000;
+
+impl Health {
+    /// Adds one finished model call. A failure counts toward the cooldown only; slow failures don't skew the latency figures.
+    pub fn record(&mut self, ok: bool, ttft_ms: Option<u64>, total_ms: u64, now_ms: u64) {
+        self.calls = self.calls.saturating_add(1);
+        if !ok { self.fail_streak = self.fail_streak.saturating_add(1); self.last_fail_ms = now_ms; return; }
+        self.fail_streak = 0;
+        let mix = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| o + EWMA * (new - o)));
+        self.total_ms = mix(self.total_ms, total_ms as f64);
+        if let Some(t) = ttft_ms { self.ttft_ms = mix(self.ttft_ms, t as f64); }
+    }
+
+    /// Whether the model is resting: its last calls all failed and the last failure is recent.
+    pub fn cooling(&self, now_ms: u64) -> bool {
+        self.fail_streak >= FAILS_TO_COOL && now_ms.saturating_sub(self.last_fail_ms) < COOLDOWN_MS
+    }
+
+    /// The figure used to compare speed: time to first text when known, else the whole reply.
+    pub fn latency_ms(&self) -> Option<f64> { self.ttft_ms.or(self.total_ms) }
+}
+
+fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64) }
+
+const HEALTH_TABLE: &str = "CREATE TABLE IF NOT EXISTS model_health (model TEXT PRIMARY KEY, ttft_ms REAL, total_ms REAL,
+    calls INTEGER NOT NULL DEFAULT 0, fail_streak INTEGER NOT NULL DEFAULT 0, last_fail_ms INTEGER NOT NULL DEFAULT 0);";
+
+fn load_health(c: &rusqlite::Connection) -> rusqlite::Result<BTreeMap<String, Health>> {
+    c.execute_batch(HEALTH_TABLE)?;
+    let mut q = c.prepare("SELECT model, ttft_ms, total_ms, calls, fail_streak, last_fail_ms FROM model_health")?;
+    let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, Health {
+        ttft_ms: r.get(1)?, total_ms: r.get(2)?, calls: r.get::<_, i64>(3)? as u32, fail_streak: r.get::<_, i64>(4)? as u32, last_fail_ms: r.get::<_, i64>(5)? as u64 })))?;
+    rows.collect()
+}
+
+fn save_health(c: &rusqlite::Connection, model: &str, h: &Health) -> rusqlite::Result<()> {
+    c.execute_batch(HEALTH_TABLE)?;
+    c.execute("INSERT INTO model_health (model, ttft_ms, total_ms, calls, fail_streak, last_fail_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+               ON CONFLICT(model) DO UPDATE SET ttft_ms = ?2, total_ms = ?3, calls = ?4, fail_streak = ?5, last_fail_ms = ?6",
+        rusqlite::params![model, h.ttft_ms, h.total_ms, h.calls as i64, h.fail_streak as i64, h.last_fail_ms as i64])?;
+    Ok(())
+}
+
+/// Every model's figures, loaded from buddy.db on first use and kept for the process.
+static HEALTH: Mutex<Option<BTreeMap<String, Health>>> = Mutex::new(None);
+
+fn with_health<T>(f: impl FnOnce(&mut BTreeMap<String, Health>) -> T) -> T {
+    let mut g = HEALTH.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(|| crate::agent::memory::with_app(|c| load_health(c)).ok().and_then(Result::ok).unwrap_or_default());
+    f(map)
+}
+
+/// Records one finished model call (`assist::stream_turn_live`). The write to buddy.db is one row; a failure is logged only.
+pub fn note_call(model: &str, ok: bool, ttft_ms: Option<u64>, total_ms: u64) {
+    let h = with_health(|m| { let h = m.entry(model.to_string()).or_default(); h.record(ok, ttft_ms, total_ms, now_ms()); h.clone() });
+    if let Ok(Err(e)) = crate::agent::memory::with_app(|c| save_health(c, model, &h)) { crate::log::line(&format!("buddy health: could not save: {e}")); }
+}
+
+/// The saved figures of one model.
+pub fn health_of(model: &str) -> Option<Health> { with_health(|m| m.get(model).cloned()) }
+
+/// Whether a model is resting after repeated failures.
+pub fn cooling(model: &str) -> bool { health_of(model).is_some_and(|h| h.cooling(now_ms())) }
+
+/// A model's price in US dollars per million tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Price { pub input: f64, pub output: f64 }
+
+impl Price {
+    /// One number to rank models by. Requests send more than they get back, so input counts three times.
+    pub fn score(&self) -> f64 { 3.0 * self.input + self.output }
+}
+
+/// Prices (input, output) per million tokens, standard tier, text. Only models whose price is on the provider's own pricing page
+/// are listed; an unknown price is `None` and can never be "the cheapest". All checked 2026-11-15.
+const PRICES: [(&str, f64, f64); 5] = [
+    // https://platform.claude.com/docs/en/about-claude/pricing ("Claude Sonnet 5.5 | $2 / MTok ... $10 / MTok")
+    ("claude-sonnet-5-5", 2.0, 10.0),
+    // same page, the "for prompts up to 100,000 tokens" row ($0.10 in, $0.50 out); longer prompts cost more
+    ("claude-haiku-5-5", 0.10, 0.50),
+    // https://aistudio.google.com/docs/pricing (Standard, paid, text/image/video input $0.30, output $2.50); deprecated by Google
+    ("gemini-2.5-flash", 0.30, 2.50),
+    // same page (Standard, paid, text/image/video input $0.50, output $3.00)
+    ("gemini-3-flash-preview", 0.50, 3.00),
+    // https://developers.openai.com/api/docs/models/gpt-4o-mini (Input $0.15, Output $0.6); OpenAI marks it deprecated
+    ("gpt-4o-mini", 0.15, 0.60),
+];
+
+pub fn price(model: &str) -> Option<Price> {
+    PRICES.iter().find(|(id, _, _)| *id == model).map(|&(_, input, output)| Price { input, output })
+}
+
+/// The context window known without any network call (the user's override, else the published table), for routing.
+pub fn known_window(model: &str, cfg: &Config) -> Option<u32> {
+    let custom = cfg.get("ai.customModels").as_array().into_iter().flatten()
+        .find(|m| m["id"].as_str() == Some(model)).and_then(|m| m["contextTokens"].as_u64()).and_then(|n| u32::try_from(n).ok());
+    custom.or_else(|| PUBLISHED.iter().find(|(id, _)| *id == model).map(|(_, n)| *n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_rests_after_three_failures_in_a_row_and_tries_again_after_the_cooldown() {
+        let mut h = Health::default();
+        h.record(false, None, 900, 1_000);
+        h.record(false, None, 900, 2_000);
+        assert!(!h.cooling(2_500), "two failures are not enough");
+        h.record(false, None, 900, 3_000);
+        assert!(h.cooling(3_001), "three in a row: resting");
+        assert!(h.cooling(3_000 + COOLDOWN_MS - 1));
+        assert!(!h.cooling(3_000 + COOLDOWN_MS), "the cooldown expired: tried again");
+        h.record(false, None, 900, 3_000 + COOLDOWN_MS);
+        assert!(h.cooling(3_001 + COOLDOWN_MS), "a failed retry rests it again");
+        h.record(true, Some(400), 800, 9_999_999);
+        assert!(!h.cooling(9_999_999) && h.fail_streak == 0, "one success clears it");
+    }
+
+    #[test]
+    fn latency_is_smoothed_over_successful_calls_only() {
+        let mut h = Health::default();
+        h.record(true, Some(1000), 2000, 1);
+        assert_eq!((h.ttft_ms, h.total_ms), (Some(1000.0), Some(2000.0)), "the first call sets the figure");
+        h.record(true, Some(500), 1000, 2);
+        assert_eq!(h.ttft_ms, Some(850.0), "1000 + 0.3 * (500 - 1000)");
+        h.record(false, None, 60_000, 3);
+        assert_eq!(h.total_ms, Some(1700.0), "a slow failure leaves the figure alone");
+        assert_eq!(h.latency_ms(), Some(850.0), "first-text time wins over total");
+        assert_eq!(Health { total_ms: Some(5.0), ..Default::default() }.latency_ms(), Some(5.0), "else the whole reply");
+    }
+
+    #[test]
+    fn health_survives_a_restart_through_the_database() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        let mut h = Health::default();
+        h.record(true, Some(300), 700, 5);
+        h.record(false, None, 1, 6);
+        save_health(&c, "m1", &h).unwrap();
+        h.record(false, None, 1, 7);
+        save_health(&c, "m1", &h).unwrap();
+        assert_eq!(load_health(&c).unwrap().get("m1"), Some(&h), "the upsert keeps one row with the newest figures");
+    }
+
+    #[test]
+    fn only_listed_models_have_a_price_and_unknown_is_none() {
+        assert_eq!(price("gpt-4o-mini"), Some(Price { input: 0.15, output: 0.60 }));
+        assert_eq!(price("mistral-medium-latest"), None, "not on the provider's pricing page");
+        assert_eq!(price("openrouter/auto"), None);
+        assert!(price("claude-haiku-5-5").unwrap().score() < price("gpt-4o-mini").unwrap().score());
+        assert!(price("claude-sonnet-5-5").unwrap().score() > price("gemini-3-flash-preview").unwrap().score());
+    }
 
     #[test]
     fn only_anthropic_takes_native_tools_and_vision_is_passed_through() {

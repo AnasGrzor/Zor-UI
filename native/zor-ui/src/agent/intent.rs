@@ -103,6 +103,12 @@ fn points_at(w: &[String], i: usize) -> bool {
     }
 }
 
+/// Whether the request has a word that points back at something on the table ("this", "that", "fix it"), as `classify` reads it.
+pub fn refers(said: &str) -> bool {
+    let w = words(said);
+    (0..w.len()).any(|i| points_at(&w, i))
+}
+
 /// What the request is and how sure the buddy is of it.
 pub fn classify(said: &str, ctx: &Context) -> Assessment {
     if ctx.answering { return Assessment { kind: Kind::Answer, confidence: Confidence::High }; }
@@ -152,7 +158,7 @@ pub fn decide(a: Assessment, ctx: &Context) -> Decision {
 pub const MAX_READS: usize = 2;
 
 /// The file name in a window title ("notes.txt - Notepad" gives "notes.txt"): a word with a short extension.
-fn file_in(title: &str) -> Option<&str> {
+pub fn file_in(title: &str) -> Option<&str> {
     title.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .find(|w| w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())))
 }

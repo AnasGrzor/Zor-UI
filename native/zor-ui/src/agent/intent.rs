@@ -3,6 +3,8 @@
 //! has nothing to point at gets one question instead, and the next request is read as the answer. The rules are measured by the
 //! table in `intent_table.rs`.
 
+use super::policy::{risk_of, Risk};
+use super::Call;
 use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +58,17 @@ pub enum Decision {
     Proceed,
     /// Go ahead, and say the assumption to the AI (and so to the user, in its answer).
     Assume(String),
+    /// Two objects are possible (the window in front and the last request): read first, with `investigate`, then go ahead or ask.
+    Investigate,
     /// Don't act: ask this one question.
     Ask(String),
+}
+
+impl Decision {
+    /// The label logged beside the confidence level.
+    pub fn label(&self) -> &'static str {
+        match self { Decision::Proceed => "proceed", Decision::Assume(_) => "assume", Decision::Investigate => "investigate", Decision::Ask(_) => "ask" }
+    }
 }
 
 /// Words that say "do the thing" without saying which thing.
@@ -120,11 +131,12 @@ pub fn classify(said: &str, ctx: &Context) -> Assessment {
     Assessment { kind, confidence: Confidence::High }
 }
 
-/// What to do with an assessment. A high-confidence request proceeds. A medium one proceeds with the assumption stated. A low
-/// one asks one question. Approval for risky actions is not decided here: the policy still asks before those run.
+/// What to do with an assessment. A high-confidence request proceeds. A medium one proceeds with the assumption stated, or
+/// investigates first when the window in front and the last request are both candidates. A low one asks one question. Approval for risky actions is not decided here: the policy still asks before those run.
 pub fn decide(a: Assessment, ctx: &Context) -> Decision {
     match a.confidence {
         Confidence::High => Decision::Proceed,
+        Confidence::Medium if a.kind == Kind::Unclear && !ctx.project && !ctx.window.is_empty() && (ctx.previous_request || ctx.conversation) => Decision::Investigate,
         Confidence::Medium => {
             let what = if a.kind == Kind::Followup { "the last thing we talked about".to_string() }
                 else if ctx.project { "the active project".to_string() }
@@ -134,6 +146,40 @@ pub fn decide(a: Assessment, ctx: &Context) -> Decision {
         }
         Confidence::Low => Decision::Ask("Which one do you mean? Tell me what should change, and I'll take it from there.".into()),
     }
+}
+
+/// The most reads `investigate` makes before it settles: one per candidate object.
+pub const MAX_READS: usize = 2;
+
+/// The file name in a window title ("notes.txt - Notepad" gives "notes.txt"): a word with a short extension.
+fn file_in(title: &str) -> Option<&str> {
+    title.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|w| w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())))
+}
+
+/// The app name in a window title ("notes.txt - Notepad" gives "Notepad"): the last part after " - ", or the whole title.
+fn app_in(title: &str) -> &str { title.rsplit(" - ").next().unwrap_or(title).trim() }
+
+/// M6, investigate first. Settles an `Investigate` decision with at most `MAX_READS` read-only calls, run by `run` (the agent
+/// passes the gated executor). Evidence for the window in front: read one, the file named in its title exists; read two (only
+/// when read one found nothing), a saved conversation mentions that file name, or the app's name when the title has no file.
+/// Either one makes the window the object. With neither, the last request is. With no last request, the window, so the
+/// window-first order holds when the evidence is equal. It never asks: the reads cannot point both ways, since the window
+/// wins on any evidence. A call that is not ReadOnly is never run. Limit: "holds" means found, not "is what the user meant".
+pub fn investigate(ctx: &Context, last: Option<&str>, run: &mut dyn FnMut(&Call) -> Result<String, String>) -> Decision {
+    let mut reads = 0;
+    let mut read = |c: Call| -> bool {
+        if reads >= MAX_READS || risk_of(&c) != Risk::ReadOnly { return false; }
+        reads += 1;
+        run(&c).is_ok_and(|t| !t.trim().is_empty() && !t.starts_with("No "))
+    };
+    let file = file_in(&ctx.window);
+    let window_holds = file.is_some_and(|f| read(Call::FindFile(f.to_string())))
+        || read(Call::SessionSearch(file.unwrap_or_else(|| app_in(&ctx.window)).to_string()));
+    if !window_holds && last.is_some() {
+        return Decision::Assume("Taking this request to mean the last thing we talked about.".into());
+    }
+    Decision::Assume(format!("Taking this request to mean the window in front, \"{}\".", ctx.window))
 }
 
 thread_local! {

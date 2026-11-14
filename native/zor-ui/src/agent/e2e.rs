@@ -481,3 +481,63 @@ fn live_replan_second_failure() {
     assert!(status == "Failed" || status == "Partial");
     assert!(ev.iter().filter(|e| **e == "plan").count() <= 2, "at most the plan and one re-plan");
 }
+
+// M6: investigate first. `settle` runs each read through `run_exec`, so the fake tool sees every call.
+
+fn two_candidates() -> intent::Context {
+    intent::Context { window: "notes.txt - Notepad".into(), previous_request: true, conversation: true, ..Default::default() }
+}
+
+/// A tool that fails the test on any call that is not ReadOnly.
+fn read_only_tools(rec: &Shared, answer: &'static str) -> Tool {
+    tools(rec, move |c| {
+        assert_eq!(policy::risk_of(c), policy::Risk::ReadOnly, "investigating ran a call that is not read-only: {c:?}");
+        Ok(answer.into())
+    })
+}
+
+#[test]
+fn a_medium_request_with_two_candidates_reads_only_and_never_more_than_the_cap() {
+    let rec = shared();
+    let _fake = install(scripted(&[], &rec), read_only_tools(&rec, "No match."));
+    let ctx = two_candidates();
+    let d = settle(intent::Decision::Investigate, &ctx, Some("open Spotify"), &cfg(), "desk", &mut |_| panic!("a read asks nothing"));
+    let r = rec.lock().unwrap();
+    assert!(r.tools.len() <= intent::MAX_READS && !r.tools.is_empty(), "reads: {:?}", r.tools);
+    assert!(r.events.iter().all(|e| *e == "tool"), "no model call while investigating: {:?}", r.events);
+    assert!(matches!(d, intent::Decision::Assume(_)), "the window is the object, and nothing is asked: {d:?}");
+}
+
+#[test]
+fn the_last_request_wins_when_the_window_has_no_evidence_and_is_stated() {
+    let rec = shared();
+    let _fake = install(scripted(&[], &rec), read_only_tools(&rec, "No match."));
+    let d = settle(intent::Decision::Investigate, &two_candidates(), Some("open Spotify"), &cfg(), "desk", &mut |_| false);
+    assert!(matches!(&d, intent::Decision::Assume(s) if s.contains("last thing we talked about")), "{d:?}");
+}
+
+#[test]
+fn a_low_request_asks_one_question_and_runs_no_tool_and_no_model() {
+    let rec = shared();
+    let _fake = install(scripted(&[], &rec), tools(&rec, |c| panic!("a question runs nothing: {c:?}")));
+    let ctx = intent::Context::default();
+    let a = intent::classify("fix this", &ctx);
+    assert_eq!(a.confidence, intent::Confidence::Low);
+    let d = settle(intent::decide(a, &ctx), &ctx, None, &cfg(), "desk", &mut |_| panic!("no approval"));
+    assert!(matches!(&d, intent::Decision::Ask(q) if q.matches('?').count() == 1), "{d:?}");
+    assert!(rec.lock().unwrap().events.is_empty());
+}
+
+#[test]
+fn an_assumed_request_never_reaches_a_consequential_or_destructive_step() {
+    let rec = shared();
+    let _fake = install(scripted(&[], &rec), read_only_tools(&rec, "No file matches."));
+    let d = settle(intent::Decision::Investigate, &two_candidates(), None, &cfg(), "desk", &mut |_| false);
+    assert!(matches!(d, intent::Decision::Assume(_)));
+    let _assumed = intent::Assumed::request(true);
+    for c in [Call::Power("shutdown".into()), Call::TakeOver("send it".into()), Call::RunCheck("build".into()), Call::Forget("x".into())] {
+        if policy::risk_of(&c) == policy::Risk::Reversible { continue; }
+        let r = policy::approve(&c, &cfg(), &mut |_| panic!("an assumed request is refused, not asked")).map(|_| ());
+        assert_eq!(r, Err(intent::ASSUMED_REFUSAL.to_string()), "{c:?}");
+    }
+}

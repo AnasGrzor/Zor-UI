@@ -9,7 +9,7 @@ use crate::conf::Config;
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug)]
-enum Around { Nothing, Window, Project, Previous }
+enum Around { Nothing, Window, Project, Previous, WindowAndPrevious }
 
 fn context(around: Around) -> Context {
     match around {
@@ -17,6 +17,7 @@ fn context(around: Around) -> Context {
         Around::Window => Context { window: "notes.txt - Notepad".into(), ..Context::default() },
         Around::Project => Context { project: true, window: "main.rs - zor-ui - Visual Studio Code".into(), ..Context::default() },
         Around::Previous => Context { previous_request: true, conversation: true, ..Context::default() },
+        Around::WindowAndPrevious => Context { previous_request: true, conversation: true, window: "notes.txt - Notepad".into(), ..Context::default() },
     }
 }
 
@@ -26,8 +27,17 @@ enum Want {
     Proceed(Option<Kind>),
     /// Goes ahead with an assumption, and the assumption names this objective.
     Assume(&'static str),
+    /// Reads first (M6): two objects are possible, so read-only calls decide which.
+    Investigate,
     /// Asks one question and does not act.
     Ask,
+}
+
+impl Want {
+    /// The confidence level the row must get (M4): clear is High, an object found or assumed is Medium, nothing to point at is Low.
+    fn confidence(self) -> intent::Confidence {
+        match self { Want::Proceed(_) => intent::Confidence::High, Want::Assume(_) | Want::Investigate => intent::Confidence::Medium, Want::Ask => intent::Confidence::Low }
+    }
 }
 
 const LAST: &str = "the last thing we talked about";
@@ -42,6 +52,8 @@ const TABLE: &[(&str, Around, Want)] = &[
     ("Fix this.", Around::Window, Want::Assume(WINDOW)),
     ("Fix this.", Around::Project, Want::Assume(PROJECT)),
     ("Fix this.", Around::Previous, Want::Assume(LAST)),
+    ("Fix this.", Around::WindowAndPrevious, Want::Investigate),
+    ("Make it better.", Around::WindowAndPrevious, Want::Investigate),
     ("Make it better.", Around::Nothing, Want::Ask),
     ("Make it better.", Around::Window, Want::Assume(WINDOW)),
     ("Continue where we left off.", Around::Nothing, Want::Ask),
@@ -139,10 +151,21 @@ fn check_row(said: &str, around: Around, want: Want) -> Result<(), String> {
     let ok = match (want, &d) {
         (Want::Proceed(kind), Decision::Proceed) => kind.is_none_or(|k| k == a.kind),
         (Want::Assume(objective), Decision::Assume(note)) => note.contains(objective),
+        (Want::Investigate, Decision::Investigate) => true,
         (Want::Ask, Decision::Ask(_)) => true,
         _ => false,
-    };
+    } && a.confidence == want.confidence();
     if ok { Ok(()) } else { Err(format!("\"{said}\" with {around:?}: want {want:?}, got {got}")) }
+}
+
+/// Rows that go ahead on their own, rows that read first and rows that ask: (proceed, investigate, ask) by what the rules decide.
+fn decision_counts() -> (usize, usize, usize, usize) {
+    let (mut p, mut i, mut a, mut s) = (0, 0, 0, 0);
+    for &(said, around, _) in TABLE {
+        let ctx = context(around);
+        match intent::decide(intent::classify(said, &ctx), &ctx) { Decision::Proceed => p += 1, Decision::Investigate => i += 1, Decision::Ask(_) => a += 1, Decision::Assume(_) => s += 1 }
+    }
+    (p, i, a, s)
 }
 
 /// Runs the intent table: (passed, total, the failing rows).
@@ -247,4 +270,62 @@ fn no_vague_row_of_the_table_proceeds_or_selects_a_consequential_or_destructive_
         }
     }
     assert!(vague_rows >= 10, "the table has vague rows to check: {vague_rows}");
+}
+
+/// The fast path: a row written as clear never reads, asks or assumes, and every vague row gets the level its context gives.
+#[test]
+fn every_row_gets_its_confidence_and_decision_and_no_clear_row_investigates_or_asks() {
+    let (proceed, investigate, ask, assume) = decision_counts();
+    assert_eq!(proceed + investigate + ask + assume, TABLE.len());
+    let clear = TABLE.iter().filter(|r| matches!(r.2, Want::Proceed(_))).count();
+    assert_eq!(proceed, clear, "only the clear rows proceed, and every one of them does");
+    assert!(investigate >= 2, "the table has rows that investigate: {investigate}");
+    eprintln!("table decisions: proceed {proceed}, assume {assume}, investigate {investigate}, ask {ask}, of {}", TABLE.len());
+}
+
+/// Runs `investigate` with a fake whose FindFile and SessionSearch answers are given; returns the decision and the calls made.
+fn investigated(window: &str, last: Option<&str>, file_exists: bool, discussed: bool) -> (Decision, Vec<String>) {
+    let ctx = Context { window: window.into(), previous_request: true, conversation: true, ..Context::default() };
+    let mut calls = vec![];
+    let d = intent::investigate(&ctx, last, &mut |c| {
+        assert_eq!(super::policy::risk_of(c), super::policy::Risk::ReadOnly, "a read-only call only: {c:?}");
+        calls.push(format!("{c:?}"));
+        let hit = match c { Call::FindFile(_) => file_exists, _ => discussed };
+        Ok(if hit { "found it".into() } else { "No match.".to_string() })
+    });
+    (d, calls)
+}
+
+#[test]
+fn a_document_in_front_that_exists_is_assumed_even_when_the_last_request_is_unrelated() {
+    let (d, calls) = investigated("notes.txt - Notepad", Some("open Spotify"), true, false);
+    assert!(matches!(&d, Decision::Assume(s) if s.contains("notes.txt - Notepad")), "{d:?}");
+    assert_eq!(calls, [r#"FindFile("notes.txt")"#], "one read was enough");
+}
+
+#[test]
+fn a_window_that_was_discussed_is_assumed_and_the_last_request_does_not_make_it_ask() {
+    let (d, calls) = investigated("notes.txt - Notepad", Some("open Spotify"), false, true);
+    assert!(matches!(&d, Decision::Assume(s) if s.contains("notes.txt")), "{d:?}");
+    assert_eq!(calls.len(), intent::MAX_READS);
+    let (d, _) = investigated("Visual Studio Code", Some("open Spotify"), false, true);
+    assert!(matches!(&d, Decision::Assume(s) if s.contains("Visual Studio Code")), "{d:?}");
+}
+
+#[test]
+fn an_unknown_undiscussed_window_with_a_last_request_assumes_the_last_request() {
+    let (d, calls) = investigated("notes.txt - Notepad", Some("open Spotify"), false, false);
+    assert!(matches!(&d, Decision::Assume(s) if s.contains(LAST)), "{d:?}");
+    assert!(calls.len() <= intent::MAX_READS);
+    // equal evidence (none) and no last request: the window, the old first choice
+    let (d, _) = investigated("notes.txt - Notepad", None, false, false);
+    assert!(matches!(&d, Decision::Assume(s) if s.contains("notes.txt - Notepad")), "{d:?}");
+}
+
+#[test]
+fn a_window_with_no_file_reads_once_for_its_app_name() {
+    let (_, calls) = investigated("Visual Studio Code", Some("play lofi"), false, false);
+    assert_eq!(calls, [r#"SessionSearch("Visual Studio Code")"#]);
+    let (_, calls) = investigated("main.rs - zor-ui - Visual Studio Code", Some("x"), false, false);
+    assert_eq!(calls[1], r#"SessionSearch("main.rs")"#, "the file name is searched when there is one");
 }

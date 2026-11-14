@@ -1022,9 +1022,9 @@ pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<S
         answering: pending.is_some(),
     };
     let a = intent::classify(said, &ctx);
-    crate::log::line(&format!("buddy intent: {:?} {:?}", a.kind, a.confidence));
     let mut note = note.to_string();
-    let d = intent::decide(a, &ctx);
+    let d = settle(intent::decide(a, &ctx), &ctx, tasks::latest_in(conv).map(|r| r.request).as_deref(), cfg, conv, &mut |q| (origin.confirm)(q));
+    crate::log::line(&format!("buddy intent: {:?} {:?} {}", a.kind, a.confidence, d.label()));
     // an object that was assumed, not named: approve refuses its consequential and destructive steps for this request
     let _assumed = intent::Assumed::request(matches!(d, intent::Decision::Assume(_)));
     match d {
@@ -1038,12 +1038,19 @@ pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<S
             return Ok(q);
         }
         intent::Decision::Assume(s) => note = format!("{s} {note}"),
-        intent::Decision::Proceed => {}
+        intent::Decision::Proceed | intent::Decision::Investigate => {}
     }
     if let Some(q) = pending { note = format!("(The buddy asked: \"{q}\". This request is the answer.) {note}"); }
     let framed = request_text_in(cfg, said, &note, conv);
     tasks::recover_once();
     run_task(cfg, said, &framed, &history, &timing, Start::New, origin)
+}
+
+/// Medium confidence with two candidate objects investigates first: `intent::investigate` makes at most `MAX_READS` read-only
+/// calls, each through `run_exec` and so through `policy::gate`. Any other decision passes through unchanged.
+fn settle(d: intent::Decision, ctx: &intent::Context, last: Option<&str>, cfg: &Config, conv: &str, confirm: &mut dyn FnMut(&str) -> bool) -> intent::Decision {
+    if d != intent::Decision::Investigate { return d; }
+    intent::investigate(ctx, last, &mut |c| run_exec(c, cfg, conv, confirm))
 }
 
 /// How a run of `run_task` starts: a new task (its row is made there), or an interrupted task resumed on its own row.

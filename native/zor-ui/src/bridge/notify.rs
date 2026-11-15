@@ -399,8 +399,9 @@ pub(super) fn agents_summary(dir: &Path, now: f64) -> Vec<Value> {
             "state": if !waiting.is_empty() { "waiting" } else if !working.is_empty() { "working" } else { "idle" },
             "message": waiting.first().map_or(json!(""), |s| or_empty(&s["message"])),
             // the newest prompt that asks for permission: the island offers Allow and Deny for it (permit.rs)
-            // only agents whose hook waits for the answer (permit.rs PERMIT_AGENTS) get Allow and Deny
-            "permit": waiting.iter().find(|s| s["ask"] == "permission").filter(|_| super::permit::PERMIT_AGENTS.contains(&id.as_str())).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]), "at": num(&s["at"]), "choice": s["choice"].clone() })),
+            // A recognized question hook can accept answers regardless of agent/model label.
+            // Plain permissions still require the existing permission integration.
+            "permit": waiting.iter().find(|s| s["ask"] == "permission" && (super::permit::PERMIT_AGENTS.contains(&id.as_str()) || s["question_hook"] == true)).map_or(Value::Null, |s| json!({ "session": or_empty(&s["id"]), "message": or_empty(&s["message"]), "at": num(&s["at"]), "choice": s["choice"].clone() })),
             "cwd": first.map_or(json!(""), |s| or_empty(&s["cwd"])),
             "waiting": waiting.len(), "working": working.len(),
             "sessions": ranked.into_iter().map(session_json).collect::<Vec<_>>(),

@@ -90,11 +90,11 @@ pub const SKILLS: [Skill; 7] = [
     Skill {
         name: "developer",
         version: 3,
-        capability: "Looks through the developer workspace: its files, its code and its git status, runs its build and tests, and edits its files.",
-        tools: &["list_tree", "read_file", "search_code", "git_status", "run_check", "edit_file"],
-        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "errors", "git", "repo", "compile", "fix", "edit"],
+        capability: "Looks through the developer workspace: its files, its code and its git status, runs its build and tests, edits its files, and starts a coding agent to change the code.",
+        tools: &["list_tree", "read_file", "search_code", "git_status", "run_check", "edit_file", "start_agent", "run_command", "write_file", "delete_file", "move_file"],
+        words: &["code", "codebase", "test", "tests", "build", "bug", "bugs", "errors", "git", "repo", "compile", "fix", "edit", "codex", "command", "powershell", "terminal"],
         steps: &["list_tree", "read_file", "search_code", "edit_file", "run_check"],
-        guidance: "Look before you answer: list_tree to find the file, read_file for its text, search_code for the words. Run run_check only for a build or test, and quote its result. The user is asked once per workspace before a check runs. To change code, read the file, then edit_file with old copied exactly so it matches once; read the diff it returns, then run_check, and say if no check passed after your last edit. The user is asked once per task before the first edit. Say when a file is missing or secret.",
+        guidance: "Look before you answer: list_tree to find the file, read_file for its text, search_code for the words. Run run_check only for a build or test, and quote its result. The user is asked once per workspace before a check runs. To write, fix or change code, use start_agent with the user's task in their words; name the agent only when they did. To change one small span yourself, read the file, then edit_file with old copied exactly so it matches once; read the diff it returns, then run_check, and say if no check passed after your last edit. The user is asked once per task before the first edit. Say when a file is missing or secret.",
         permission: "Consequential",
         context: "developer workspace, set in Settings (buddies.developerWorkspace)",
         eval: Eval {
@@ -219,7 +219,7 @@ mod tests {
         if name.starts_with("browser_") {
             return risk_of(&Call::Browser { tool: name.into(), args: json!({}) });
         }
-        let input = json!({ "arg": "x", "query": "x", "to": "x", "text": "x", "which": "wifi", "path": "x", "old": "x", "new": "y" });
+        let input = json!({ "arg": "x", "query": "x", "to": "x", "text": "x", "which": "wifi", "task": "x", "path": "x", "from": "x", "old": "x", "new": "y" });
         match step_from_tool(name, &input) {
             Step::Call { call, .. } => risk_of(&call),
             _ => panic!("{name} does not build a call"),

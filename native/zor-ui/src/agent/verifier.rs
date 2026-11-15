@@ -77,11 +77,14 @@ pub fn kind_of(call: &Call) -> Kind {
         Radio { .. } | Brightness(_) | Clip(_) | Wallpaper(_) => Kind::ReadBack,
         Volume(_) => Kind::Volume,
         Open(_) => Kind::AppOpen,
-        RunCheck(_) => Kind::Check,
+        // a command's exit code is its evidence, as a check's is
+        RunCheck(_) | RunCommand(_) => Kind::Check,
+        // each reads its result back: the written size, the moved path, the deleted path gone (`pc.rs`)
+        WriteFile { .. } | DeleteFile(_) | MoveFile { .. } => Kind::ReadBack,
         EditFile { .. } => Kind::Edit,
         // a page that loads or is read is evidence; the other browser tools report nothing back
         Browser { tool, .. } if matches!(tool.as_str(), "browser_navigate" | "browser_snapshot" | "browser_find") => Kind::Lookup,
-        Browser { .. } | Search(_) | Url(_) | Media(_) | OpenFile(_) | Message { .. } | Power(_) | TakeOver(_) => Kind::Action,
+        Browser { .. } | Search(_) | Url(_) | Media(_) | OpenFile(_) | Message { .. } | Power(_) | TakeOver(_) | StartAgent { .. } => Kind::Action,
     }
 }
 
@@ -95,6 +98,7 @@ pub fn unverified_reason(call: &Call) -> Option<&'static str> {
         OpenFile(_) => Some("the file is handed to its default app; Windows reports only that the handoff worked"),
         Message { .. } => Some("the chat opens in another app with the text ready; nothing on this PC reports whether it did"),
         Power(_) => Some("sleep, restart, shutdown and sign-out end this session, and lock has no cheap read of the lock state"),
+        StartAgent { .. } => Some("the agent runs in its own window; its hooks report its progress to the island, not to this request"),
         TakeOver(_) => Some("the take-over runs on its own thread; its end state is saved on the task when it finishes (`tasks::take_over_ended`)"),
         _ => None,
     }

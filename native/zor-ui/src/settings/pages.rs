@@ -1203,6 +1203,7 @@ impl Settings {
                 p.note("It asks before the first step of each request, and before anything that sends, buys or deletes. It has its own logins: log in to a site once in its window. Passwords are yours to type.", 12.0);
                 self.sw(p, "buddies.bypass", "Bypass permissions", "No yes needed before the first step. It still asks before anything that sends, buys, deletes or presses Enter, and never types passwords", "lock_open");
             }
+            self.sw(p, "buddies.autoMode", "Auto mode", "Commands, file changes, coding agents, checks and take-overs run without asking. Sleep, restart, shut down, a site's send or buy, and chats still ask", "bolt");
             self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
             let mut mics = vec![(json!(""), "Windows default".to_string())];
             mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));

@@ -30,6 +30,10 @@ pub fn risk_of(call: &Call) -> Risk {
         // a check builds and runs the project's code, so it asks once per workspace (agent::approve)
         // an edit changes the user's files: it asks once per task (agent::approve_edit)
         TakeOver(_) | RunCheck(_) | EditFile { .. } => Risk::Consequential,
+        // a coding agent edits files and runs commands, so every start asks
+        StartAgent { .. } => Risk::Consequential,
+        // a command can do anything, and a write, delete or move changes the user's files: each one asks
+        RunCommand(_) | WriteFile { .. } | DeleteFile(_) | MoveFile { .. } => Risk::Consequential,
         // each browser tool has its own level (`BROWSER_RISK`); an unknown name is Consequential here and refused by `check_browser`
         Browser { tool, .. } => browser_risk(tool).unwrap_or(Risk::Consequential),
     }
@@ -136,6 +140,9 @@ pub fn gate<'a>(call: &'a Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> b
         Call::Power(_) if !crate::assist::allowed(cfg, "system") => return Err("PC control is turned off in Settings.".into()),
         // the name is checked before the question, so a refused name asks nothing and starts nothing
         Call::RunCheck(name) => { super::developer::check_named(name)?; }
+        // the folder is checked before the question, so a start that can't happen asks nothing
+        Call::StartAgent { folder, .. } => { super::developer::agent_folder(cfg, folder)?; }
+        Call::RunCommand(_) | Call::WriteFile { .. } | Call::DeleteFile(_) | Call::MoveFile { .. } => { super::pc::precheck(cfg, call)?; }
         // the path and the text are checked before the question, so a refused edit asks nothing and writes nothing
         Call::EditFile { path, old, new } => { super::developer::prepare_edit(&super::developer::workspace(cfg)?, path, old, new)?; }
         // the switches and the model check come before the question, so a take-over that can't run asks nothing
@@ -164,15 +171,20 @@ fn decide(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> R
         if browser_risk(tool).is_none() { return Err(no_such_browser_tool(tool)); }
         if browse::approved() { return Ok(()); }
         let q = approval_for(call).unwrap_or_default();
-        let asks = browse::first_step_needs_yes(cfg);
+        let asks = browse::first_step_needs_yes(cfg) && !auto_here(cfg);
         if asks && !confirm(&q) { return Err(DECLINED.into()); }
-        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions is on" });
+        crate::log::line(if asks { "browser approval: allowed for this request" } else { "browser approval: skipped, bypass permissions or auto mode is on" });
         browse::approve_request();
         return Ok(());
     }
     if !needs_approval(risk_of(call)) { return Ok(()); }
     // a risky call with no question has no way to be approved, so it does not run
     let Some(q) = approval_for(call) else { return Err("I can't run that safely.".into()) };
+    if auto_skips(call, cfg.bool(AUTO_KEY), super::at_pc()) {
+        // the tool's name only: the question can hold the user's words
+        crate::log::line(&format!("auto mode: {} ran without asking", format!("{call:?}").split(['(', ' ', '{']).next().unwrap_or("")));
+        return Ok(());
+    }
     // a check asks once per workspace: a yes holds for the rest of this app session (developer::remember_check_yes)
     if matches!(call, Call::RunCheck(_)) {
         let ws = developer::workspace(cfg)?;
@@ -187,6 +199,16 @@ fn decide(call: &Call, cfg: &Config, confirm: &mut dyn FnMut(&str) -> bool) -> R
     }
     if confirm(&q) { Ok(()) } else { Err(DECLINED.into()) }
 }
+
+/// Settings, "Auto mode": consequential calls made at the PC run without their question.
+const AUTO_KEY: &str = "buddies.autoMode";
+
+/// Whether auto mode lets this call skip its question: auto mode is on, the request was made at the PC (a chat still asks), and
+/// the call is consequential. Destructive calls (sleep, restart, shut down, sign out) always ask.
+pub fn auto_skips(call: &Call, auto: bool, at_pc: bool) -> bool { auto && at_pc && risk_of(call) == Risk::Consequential }
+
+/// Auto mode for a request made at the PC, for the browser's first-step question.
+fn auto_here(cfg: &Config) -> bool { cfg.bool(AUTO_KEY) && super::at_pc() }
 
 /// Whether a failed call may be tried once more. Only read-only calls: a retry of anything that acts (open, play, save,
 /// power) could do it twice.
@@ -210,6 +232,13 @@ pub fn approval_for(call: &Call) -> Option<String> {
         Call::TakeOver(goal) => Some(crate::drive::question(goal)),
         Call::Browser { .. } => Some("The buddy wants to use its browser for this. Allow it?".into()),
         Call::RunCheck(name) => Some(format!("Run \"{}\" in the developer workspace? It builds or tests the project's code.", name.trim())),
+        Call::RunCommand(c) => Some(format!("Run this PowerShell command on the PC?\n{}", crate::assist::short(c, 300))),
+        Call::WriteFile { path, text } => Some(format!("Write {} characters to {}? If the file is there, the old one goes to the Recycle Bin.", text.chars().count(), path.trim())),
+        Call::DeleteFile(p) => Some(format!("Move {} to the Recycle Bin?", p.trim())),
+        Call::MoveFile { from, to } => Some(format!("Move {} to {}?", from.trim(), to.trim())),
+        Call::StartAgent { agent, task, folder } => Some(format!("Start {} in {} on: \"{}\"? It can change files there.",
+            if agent.trim().is_empty() { "your coding agent" } else { agent.trim() },
+            if folder.trim().is_empty() { "the workspace" } else { folder.trim() }, crate::assist::short(task, 120))),
         // the real question also names the workspace (`developer::edit_question`); this one is the fallback the table needs
         Call::EditFile { path, .. } => Some(format!("Change \"{}\" in the developer workspace? A yes covers edits in this task only.", path.trim())),
         _ => None,
@@ -229,6 +258,16 @@ mod tests {
         assert_eq!(risk_of(&Call::Open("Spotify".into())), Risk::Reversible);
         assert_eq!(risk_of(&Call::Volume("up".into())), Risk::Reversible);
         assert_eq!(risk_of(&Call::Remember("My sister is called Lina".into())), Risk::Reversible);
+    }
+
+    #[test]
+    fn auto_mode_skips_only_consequential_questions_at_the_pc() {
+        let cmd = Call::RunCommand("dir".into());
+        assert!(auto_skips(&cmd, true, true));
+        assert!(!auto_skips(&cmd, false, true), "off: asks");
+        assert!(!auto_skips(&cmd, true, false), "a chat still asks");
+        assert!(!auto_skips(&Call::Power("shutdown".into()), true, true), "destructive always asks");
+        assert!(auto_skips(&Call::TakeOver("x".into()), true, true));
     }
 
     #[test]

@@ -33,7 +33,8 @@ const CLAUDE_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse"
 const CODEX_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"];
 const GEMINI_EVENTS: &[&str] = &["BeforeAgent", "BeforeTool", "AfterTool", "Notification", "AfterAgent", "SessionEnd"];
 /// Cursor's own hook names (a flat hooks file, see add_flat_hooks).
-const CURSOR_EVENTS: &[&str] = &["beforeSubmitPrompt", "beforeShellExecution", "beforeMCPExecution", "afterFileEdit", "stop"];
+const CURSOR_EVENTS: &[&str] = &["beforeSubmitPrompt", "preToolUse", "postToolUse", "postToolUseFailure", "beforeShellExecution", "beforeMCPExecution", "afterFileEdit", "stop"];
+const AGY_EVENTS: &[&str] = &["SessionStart", "PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop"];
 /// Keys that name a session, in the order they are tried.
 const SESSION_KEYS: &[&str] = &["session_id", "session", "thread-id", "conversation_id"];
 
@@ -42,32 +43,35 @@ const SESSION_KEYS: &[&str] = &["session_id", "session", "thread-id", "conversat
 /// `flat`: its hooks file is Cursor's flat layout ({"version": 1, "hooks": {event: [{"command"}]}}), not the nested one.
 /// A new Claude-style agent is one more row, or an entry the user adds under "customAgents" in the settings.
 /// `resume` resumes session {id} (agent_restart.rs); `model_arg` adds the model the session last used, {model}.
-struct Known { id: String, name: String, dir: String, file: String, marks: Vec<String>, events: Vec<String>, status: bool, ms: bool, flat: bool, resume: String, model_arg: String }
+/// `start` starts a new interactive session on a task, {task} (agent_restart::start_agent); empty: the buddy can't start it.
+struct Known { id: String, name: String, dir: String, file: String, marks: Vec<String>, events: Vec<String>, status: bool, ms: bool, flat: bool, resume: String, model_arg: String, start: String }
 
 fn strs(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
 
 fn known(custom: &Value) -> Vec<Known> {
-    let row = |id: &str, name: &str, dir: &str, file: &str, marks: &[&str], events: &[&str], status, ms, flat, resume: &str, model_arg: &str| Known {
-        id: id.into(), name: name.into(), dir: dir.into(), file: file.into(), marks: strs(marks), events: strs(events), status, ms, flat, resume: resume.into(), model_arg: model_arg.into() };
+    let row = |id: &str, name: &str, dir: &str, file: &str, marks: &[&str], events: &[&str], status, ms, flat, resume: &str, model_arg: &str, start: &str| Known {
+        id: id.into(), name: name.into(), dir: dir.into(), file: file.into(), marks: strs(marks), events: strs(events), status, ms, flat, resume: resume.into(), model_arg: model_arg.into(), start: start.into() };
     let mut all = vec![
-        row("claude", "Claude Code", ".claude", "settings.json", &[], CLAUDE_EVENTS, true, false, false, "claude --resume {id}", "--model {model}"),
-        row("codex", "Codex", ".codex", "hooks.json", &[], CODEX_EVENTS, false, false, false, "codex resume {id}", "-m {model}"),
+        row("claude", "Claude Code", ".claude", "settings.json", &[], CLAUDE_EVENTS, true, false, false, "claude --resume {id}", "--model {model}", "claude {task}"),
+        row("codex", "Codex", ".codex", "hooks.json", &[], CODEX_EVENTS, false, false, false, "codex resume {id}", "-m {model}", "codex {task}"),
+        row("opencode", "OpenCode", ".config/opencode", "plugins/zor-ui-island.js", &[], &[], false, false, false, "opencode --session {id}", "--model {model}", "opencode --prompt {task}"),
+        row("antigravity", "Antigravity", ".gemini/config", "hooks.json", &[], AGY_EVENTS, false, false, false, "", "", ""),
         // ~/.gemini also holds other Google tools, so wait for a file only the Gemini CLI writes
-        row("gemini", "Gemini CLI", ".gemini", "settings.json", &["settings.json", "oauth_creds.json"], GEMINI_EVENTS, false, true, false, "gemini --resume {id}", "-m {model}"),
+        row("gemini", "Gemini CLI", ".gemini", "settings.json", &["settings.json", "oauth_creds.json"], GEMINI_EVENTS, false, true, false, "gemini --resume {id}", "-m {model}", "gemini -i {task}"),
         // Cursor also runs Claude Code's hooks; its payloads carry cursor_version, which cli() uses to file them under cursor
-        row("cursor", "Cursor", ".cursor", "hooks.json", &[], CURSOR_EVENTS, false, false, true, "", ""),
+        row("cursor", "Cursor", ".cursor", "hooks.json", &[], CURSOR_EVENTS, false, false, true, "", "", "cursor-agent {task}"),
         // same nested hook format as Claude Code, each in its own settings file (from CodeIsland's list of agents; not yet checked against each tool's docs)
-        row("qwen", "Qwen Code", ".qwen", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", ""),
-        row("qoder", "Qoder", ".qoder", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", ""),
-        row("factory", "Factory Droid", ".factory", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", ""),
-        row("codebuddy", "CodeBuddy", ".codebuddy", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", ""),
+        row("qwen", "Qwen Code", ".qwen", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", "", "qwen -i {task}"),
+        row("qoder", "Qoder", ".qoder", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", "", ""),
+        row("factory", "Factory Droid", ".factory", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", "", ""),
+        row("codebuddy", "CodeBuddy", ".codebuddy", "settings.json", &["settings.json"], CODEX_EVENTS, false, false, false, "", "", ""),
     ];
     for c in custom.as_array().into_iter().flatten() {
         let (name, dir, file) = (c["name"].as_str().unwrap_or("").trim(), c["dir"].as_str().unwrap_or("").trim(), c["file"].as_str().unwrap_or("").trim());
         let id = safe(&name.to_lowercase());
         if name.is_empty() || dir.is_empty() || file.is_empty() || all.iter().any(|k| k.id == id) { continue; } // a custom agent can't replace a built-in one
-        let (resume, model_arg) = (c["resume"].as_str().unwrap_or("").trim(), c["modelArg"].as_str().unwrap_or("").trim());
-        all.push(row(&id, name, dir, file, &[], CODEX_EVENTS, false, false, false, resume, model_arg));
+        let (resume, model_arg, start) = (c["resume"].as_str().unwrap_or("").trim(), c["modelArg"].as_str().unwrap_or("").trim(), c["start"].as_str().unwrap_or("").trim());
+        all.push(row(&id, name, dir, file, &[], CODEX_EVENTS, false, false, false, resume, model_arg, start));
     }
     all
 }
@@ -76,6 +80,11 @@ fn known(custom: &Value) -> Vec<Known> {
 /// without a resume command.
 pub(super) fn resume_of(agent: &str, custom: &Value) -> Option<(String, String)> {
     known(custom).into_iter().find(|k| k.id == agent && !k.resume.is_empty()).map(|k| (k.resume, k.model_arg))
+}
+
+/// Every agent the buddy can start: (id, display name, start template with {task}).
+pub(super) fn starters(custom: &Value) -> Vec<(String, String, String)> {
+    known(custom).into_iter().filter(|k| !k.start.is_empty()).map(|k| (k.id, k.name, k.start)).collect()
 }
 
 /// The agents' session folder, `agents\<agent>` under the data folder.
@@ -119,6 +128,10 @@ const ASK_TEXT_MAX: usize = 400;
 /// What the agent is asking for. Kept whole up to ASK_TEXT_MAX, so the island can show all of it.
 fn ask_text(p: &Value) -> String {
     if let Some(m) = p["message"].as_str().filter(|m| !m.is_empty()) { return short(m, ASK_TEXT_MAX); }
+    let choice = choice_of(p);
+    if let Some(q) = choice["questions"].as_array().and_then(|q| q.first()) {
+        return short(q["question"].as_str().unwrap_or("Has a question"), ASK_TEXT_MAX);
+    }
     let (tool, detail) = tool_of(p);
     if tool == "AskUserQuestion" {
         if let Some(q) = p["tool_input"]["questions"].as_array().and_then(|q| q.first()) { return short(q["question"].as_str().unwrap_or("Has a question"), ASK_TEXT_MAX); }
@@ -127,15 +140,69 @@ fn ask_text(p: &Value) -> String {
     short(&if !detail.is_empty() { format!("Allow {tool}: {detail}") } else if !tool.is_empty() { format!("Allow {tool}?") } else { "Needs your input".into() }, ASK_TEXT_MAX)
 }
 
-/// What Claude Code asks beyond a yes or no: the plan (ExitPlanMode) or the questions (AskUserQuestion), for the island
-/// to show and take answers to. Null for a tool permission.
+/// Translate supported agents' question tools into the island's common choice format.
+/// Null for ordinary tool calls; Claude plans retain their existing format.
 fn choice_of(p: &Value) -> Value {
     let inp = &p["tool_input"];
-    match p["tool_name"].as_str() {
-        Some("ExitPlanMode") => json!({ "kind": "plan", "plan": inp["plan"].as_str().unwrap_or("") }),
-        Some("AskUserQuestion") => inp["questions"].as_array().filter(|q| !q.is_empty()).map_or(Value::Null, |q| json!({ "kind": "question", "questions": q })),
+    let tool = p["tool_name"].as_str().unwrap_or("");
+    match tool.rsplit(['.', ':']).next().unwrap_or(tool) {
+        "ExitPlanMode" => json!({ "kind": "plan", "plan": inp["plan"].as_str().unwrap_or("") }),
+        "AskUserQuestion" | "AskQuestion" | "ask_question" | "ask_user_question" | "ask_user" | "question" | "request_user_input" | "request_user_input_async" => {
+            let questions: Vec<Value> = inp["questions"].as_array().into_iter().flatten().filter_map(|q| {
+                let text = q["question"].as_str().or_else(|| q["title"].as_str())?.trim();
+                if text.is_empty() { return None; }
+                let mut normalized = q.clone();
+                normalized["question"] = json!(text);
+                normalized["multiSelect"] = json!(q["multiSelect"] == true || q["multiple"] == true || q["is_multi_select"] == true);
+                normalized["options"] = json!(q["options"].as_array().into_iter().flatten().filter_map(|o| {
+                    if let Some(label) = o.as_str() { Some(json!({ "label": label })) }
+                    else { o["label"].as_str().map(|_| o.clone()) }
+                }).collect::<Vec<_>>());
+                Some(normalized)
+            }).collect();
+            if questions.is_empty() { Value::Null } else { json!({ "kind": "question", "questions": questions }) }
+        },
         _ => Value::Null,
     }
+}
+
+/// Question tools are intercepted before execution, independently of the model/provider.
+/// Claude's AskUserQuestion continues through its existing PermissionRequest contract.
+fn pre_tool_question(p: &Value) -> bool {
+    p["hook_event_name"] == "PreToolUse"
+        && choice_of(p)["kind"] == "question"
+        && !(p["question_transport"] == "claude" && p["tool_name"] == "AskUserQuestion")
+        && !first_str(p, SESSION_KEYS).is_empty()
+}
+
+fn direct_question(p: &Value) -> bool {
+    p["hook_event_name"] == "IslandQuestion" && choice_of(p)["kind"] == "question" && !first_str(p, SESSION_KEYS).is_empty()
+}
+
+/// Translate each host's documented hook envelope; question rendering stays independent of model/provider.
+fn normalize_payload(agent: &str, p: &Value, event: Option<&str>) -> Value {
+    if !p.is_object() { return json!({}); }
+    let mut p = p.clone();
+    if p["hook_event_name"].is_null() { if let Some(ev) = event { p["hook_event_name"] = json!(ev); } }
+    p["question_transport"] = json!(agent);
+    if agent == "antigravity" {
+        p["session_id"] = p["conversationId"].clone();
+        p["transcript_path"] = p["transcriptPath"].clone();
+        p["model"] = p["modelName"].clone();
+        p["cwd"] = p["workspacePaths"][0].clone();
+        p["tool_name"] = p["toolCall"]["name"].clone();
+        p["tool_input"] = p["toolCall"]["args"].clone();
+    }
+    let ev = match p["hook_event_name"].as_str().unwrap_or("") {
+        "preToolUse" => "PreToolUse", "postToolUse" | "postToolUseFailure" => "PostToolUse",
+        "sessionEnd" => "SessionEnd", "PreInvocation" => "UserPromptSubmit",
+        "sessionStart" => "SessionStart", other => other,
+    }.to_string();
+    if !ev.is_empty() { p["hook_event_name"] = json!(ev); }
+    if let Some(text) = p["tool_input"].as_str() {
+        if let Ok(input) = serde_json::from_str::<Value>(text) { p["tool_input"] = input; }
+    }
+    p
 }
 
 /// The tool a session runs now, in one line: "Bash: npm test". Cursor's shell hook has no tool name, only the command.
@@ -224,6 +291,7 @@ fn turn_fields(rec: &mut Value, old: &Value, p: &Value, state: &str) {
 
 /// (state, message) from a payload, or None if it carries no state.
 fn state_of(p: &Value) -> Option<(&'static str, String)> {
+    if pre_tool_question(p) || direct_question(p) { return Some(("waiting", ask_text(p))); }
     if let Some(s) = ["waiting", "working", "done", "ended"].into_iter().find(|s| p["state"] == *s) {
         return Some((s, short(p["message"].as_str().unwrap_or(""), 90)));
     }
@@ -324,11 +392,13 @@ fn record(agents: &Path, agent: &str, p: &Value) -> std::io::Result<()> {
     // Codex's tokens come from its rollout, not from the hook payload
     if let Some(s) = text.as_deref().and_then(codex_spend) { rec["spend"] = s; }
     // a permission prompt: the island offers Allow and Deny (permit.rs). Its permission_prompt Notification keeps the mark.
-    let permission = p["hook_event_name"] == "PermissionRequest" || (p["notification_type"] == "permission_prompt" && old["ask"] == "permission");
+    let question = pre_tool_question(p) || direct_question(p);
+    let permission = question || p["hook_event_name"] == "PermissionRequest" || (p["notification_type"] == "permission_prompt" && old["ask"] == "permission");
     if state == "waiting" && permission {
         rec["ask"] = json!("permission");
         // the plan or questions come with the PermissionRequest; its permission_prompt Notification carries them on
-        let choice = if p["hook_event_name"] == "PermissionRequest" { choice_of(p) } else { old["choice"].clone() };
+        let choice = if question || p["hook_event_name"] == "PermissionRequest" { choice_of(p) } else { old["choice"].clone() };
+        if question || choice["kind"] == "question" { rec["question_hook"] = json!(true); }
         if !choice.is_null() { rec["choice"] = choice; }
     }
     write(&f, &rec)
@@ -362,12 +432,28 @@ pub fn cli(args: &[String]) -> i32 {
     if let Ok(p) = serde_json::from_str::<Value>(if text.is_empty() { "{}" } else { &text }) {
         // Cursor runs Claude Code's hooks too, and its payloads say so: file those under cursor, not claude
         let who = if agent == "claude" && !p["cursor_version"].is_null() { "cursor" } else { agent.as_str() };
-        let asks = super::permit::PERMIT_AGENTS.contains(&who) && p["hook_event_name"] == "PermissionRequest";
+        let event = args.iter().position(|a| a == "--event").and_then(|i| args.get(i + 1)).map(String::as_str);
+        let p = normalize_payload(who, &p, event);
+        let direct = direct_question(&p);
+        let question = pre_tool_question(&p);
+        let asks = direct || question || (p["hook_event_name"] == "PermissionRequest"
+            && (super::permit::PERMIT_AGENTS.contains(&who) || choice_of(&p)["kind"] == "question"));
         let id = first_str(&p, SESSION_KEYS).to_string();
         if asks { super::permit::clear(&id); } // a decision left from an earlier prompt must not answer this one
         let _ = record(&agents, who, &p);
         // Claude Code shows its own prompt too: whichever answers first wins, and no answer leaves that prompt alone
-        if asks { if let Some(d) = super::permit::await_answer(&agents, who, &id) { println!("{}", super::permit::hook_reply(&d)); } }
+        if asks { if let Some(d) = super::permit::await_answer(&agents, who, &id) {
+            if direct {
+                if let Some(answers) = super::permit::question_answers(&d) { println!("{}", json!({ "answers": answers })); }
+            } else if question {
+                if let Some(mut reply) = super::permit::pre_tool_question_reply(&d) {
+                    let reason = reply["hookSpecificOutput"]["permissionDecisionReason"].clone();
+                    if who == "antigravity" { reply = json!({ "decision": "deny", "reason": reason }); }
+                    else if who == "cursor" { reply = json!({ "permission": "deny", "user_message": "Answered in the Zor UI island", "agent_message": reason }); }
+                    println!("{reply}");
+                }
+            } else { println!("{}", super::permit::hook_reply(&d)); }
+        } }
     }
     if let Some(cmd) = then {
         use std::{os::windows::process::CommandExt, process::Stdio};
@@ -407,18 +493,25 @@ fn add_hooks(path: &Path, cmd: &str, events: &[&str], status: bool, timeout: u32
     let hooks = data.as_object_mut().ok_or("settings is not an object")?.entry("hooks").or_insert_with(|| json!({}));
     for ev in events {
         // a permission hook waits for the island's answer (permit.rs), so it needs more time than the others
-        let t = if *ev == "PermissionRequest" { PERMIT_TIMEOUT } else { timeout };
+        let waits = *ev == "PermissionRequest" || *ev == "PreToolUse";
+        let t = if waits { PERMIT_TIMEOUT * if timeout >= 1000 { 1000 } else { 1 } } else { timeout };
         let groups = hooks.as_object_mut().ok_or("hooks is not an object")?.entry(*ev).or_insert_with(|| json!([])).as_array_mut().ok_or("hook list is not an array")?;
         let mut found = false;
         for h in groups.iter_mut().filter_map(|g| g["hooks"].as_array_mut()).flatten() {
             let Some(old) = h["command"].as_str().filter(|c| is_ours(c)).map(String::from) else { continue };
             found = true;
             let new = rewrap(cmd, &old);
+            // Codex executes Windows hooks through PowerShell, where a quoted path needs the call operator.
+            if cmd.ends_with(" --agent codex") {
+                let windows = format!("& {new}");
+                if h["commandWindows"] != json!(windows) { h["commandWindows"] = json!(windows); changed = true; }
+            }
             if new != old { h["command"] = json!(new); changed = true; }
-            if *ev == "PermissionRequest" && h["timeout"] != json!(t) { h["timeout"] = json!(t); changed = true; }
+            if waits && h["timeout"] != json!(t) { h["timeout"] = json!(t); changed = true; }
         }
         if !found {
             let mut h = json!({ "type": "command", "command": cmd, "timeout": t });
+            if cmd.ends_with(" --agent codex") { h["commandWindows"] = json!(format!("& {cmd}")); }
             if status { h["async"] = json!(true); }
             groups.push(json!({ "hooks": [h] }));
             changed = true;
@@ -462,15 +555,52 @@ fn add_flat_hooks(path: &Path, cmd: &str, events: &[&str], timeout: u32) -> Resu
     if obj.get("version").is_none() { obj.insert("version".into(), json!(1)); changed = true; }
     let hooks = obj.entry("hooks").or_insert_with(|| json!({})).as_object_mut().ok_or("hooks is not an object")?;
     for ev in events {
+        let t = if *ev == "preToolUse" { PERMIT_TIMEOUT } else { timeout };
         let list = hooks.entry(*ev).or_insert_with(|| json!([])).as_array_mut().ok_or("hook list is not an array")?;
         match list.iter_mut().find(|h| h["command"].as_str().is_some_and(is_ours)) {
-            Some(h) if h["command"] != json!(cmd) => { h["command"] = json!(cmd); changed = true; }
-            Some(_) => {}
-            None => { list.push(json!({ "command": cmd, "timeout": timeout })); changed = true; }
+            Some(h) => {
+                if h["command"] != json!(cmd) { h["command"] = json!(cmd); changed = true; }
+                if *ev == "preToolUse" && h["timeout"] != json!(t) { h["timeout"] = json!(t); changed = true; }
+            }
+            None => { list.push(json!({ "command": cmd, "timeout": t })); changed = true; }
         }
     }
     if changed { save(path, &data)?; }
     Ok(changed)
+}
+
+/// Antigravity groups handlers under a named customization, not a top-level "hooks" object.
+fn add_agy_hooks(path: &Path, cmd: &str) -> Result<bool, String> {
+    let mut data: Value = match std::fs::read_to_string(path) {
+        Ok(t) => serde_json::from_str(t.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(e.to_string()),
+    };
+    let obj = data.as_object_mut().ok_or("hooks file is not an object")?;
+    let mut ours = json!({});
+    for ev in AGY_EVENTS {
+        let h = json!({ "type": "command", "command": format!("{cmd} --event {ev}"), "timeout": if *ev == "PreToolUse" { PERMIT_TIMEOUT } else { 10 } });
+        ours[*ev] = if matches!(*ev, "PreToolUse" | "PostToolUse") { json!([{ "matcher": "*", "hooks": [h] }]) } else { json!([h]) };
+    }
+    // Respect the user's choice to disable this customization.
+    if let Some(enabled) = obj.get("zor-ui-island").and_then(|o| o.get("enabled")) { ours["enabled"] = enabled.clone(); }
+    if obj.get("zor-ui-island") == Some(&ours) { return Ok(false); }
+    obj.insert("zor-ui-island".into(), ours);
+    save(path, &data)?;
+    Ok(true)
+}
+
+fn add_opencode_plugin(path: &Path) -> Result<bool, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let content = include_str!("opencode_island.js").replace("__ZORUI_EXECUTABLE__", &json!(exe.to_string_lossy()).to_string());
+    if std::fs::read_to_string(path).ok().as_deref() == Some(&content) { return Ok(false); }
+    if path.is_file() {
+        let backup = path.with_extension(format!("js.bak-{}", now_s() as u64));
+        std::fs::copy(path, backup).map_err(|e| e.to_string())?;
+    }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    std::fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn command(agent: &str) -> String {
@@ -494,7 +624,10 @@ fn install_all(home: &Path, custom: &Value) -> Vec<(String, PathBuf, Result<bool
     known(custom).into_iter().flat_map(|k| dirs_of(&k, home).into_iter().map(|d| {
         let ev: Vec<&str> = k.events.iter().map(String::as_str).collect();
         let (file, cmd) = (d.join(&k.file), command(&k.id));
-        let r = if k.flat { add_flat_hooks(&file, &cmd, &ev, 10) } else { add_hooks(&file, &cmd, &ev, k.status, if k.ms { 10_000 } else { 10 }) };
+        let r = if k.id == "antigravity" { add_agy_hooks(&file, &cmd) }
+            else if k.id == "opencode" { add_opencode_plugin(&file) }
+            else if k.flat { add_flat_hooks(&file, &cmd, &ev, 10) }
+            else { add_hooks(&file, &cmd, &ev, k.status, if k.ms { 10_000 } else { 10 }) };
         (k.name.clone(), d, r)
     }).collect::<Vec<_>>()).collect()
 }
@@ -528,6 +661,26 @@ mod tests {
 
     fn summary(dir: &Path) -> std::collections::HashMap<String, Value> {
         super::super::notify::agents_summary(dir, now_s() + 1.0).into_iter().map(|a| (a["id"].as_str().unwrap().to_string(), a)).collect()
+    }
+
+    #[test]
+    fn codex_windows_hooks_repair_existing_commands_and_stay_idempotent() {
+        let d = tmp("codex-windows-command");
+        let p = d.join("hooks.json");
+        let cmd = "\"C:/Program Files/Zor/zorui.exe\" --agent codex";
+        std::fs::write(&p, json!({ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "command", "command": "\"C:/old/zorui.exe\" --agent codex" },
+            { "type": "command", "command": "other-hook" }
+        ] }] } }).to_string()).unwrap();
+        assert!(add_hooks(&p, cmd, &["PreToolUse", "Stop"], false, 10).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for ev in ["PreToolUse", "Stop"] {
+            assert_eq!(v["hooks"][ev][0]["hooks"][0]["command"], cmd);
+            assert_eq!(v["hooks"][ev][0]["hooks"][0]["commandWindows"], format!("& {cmd}"));
+        }
+        assert!(v["hooks"]["PreToolUse"][0]["hooks"][1]["commandWindows"].is_null());
+        assert!(!add_hooks(&p, cmd, &["PreToolUse", "Stop"], false, 10).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -574,6 +727,62 @@ mod tests {
         assert_eq!(session(&d, "claude", "s1")["choice"]["kind"], "plan", "the follow-up Notification keeps the plan");
         send(json!({ "hook_event_name": "PermissionRequest", "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "ls" } }));
         assert!(session(&d, "claude", "s1")["choice"].is_null(), "a tool permission has no choice");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn question_hosts_share_the_grid_without_a_provider_allowlist() {
+        let d = tmp("question-hosts");
+        let q = json!({ "id": "layout", "header": "Layout", "question": "Which layout?", "options": ["Grid", "List"], "is_multi_select": true });
+        let cases = [
+            ("codex", json!({ "session_id": "c1", "hook_event_name": "PreToolUse", "tool_name": "functions.request_user_input", "tool_input": { "questions": [q.clone()] } }), None),
+            ("qwen", json!({ "session_id": "q1", "hook_event_name": "PreToolUse", "tool_name": "ask_user", "tool_input": { "questions": [q.clone()] } }), None),
+            ("cursor", json!({ "conversation_id": "u1", "hook_event_name": "preToolUse", "tool_name": "AskQuestion", "tool_input": json!({ "questions": [q.clone()] }).to_string() }), None),
+            ("antigravity", json!({ "conversationId": "a1", "workspacePaths": ["D:/project"], "toolCall": { "name": "ask_question", "args": { "questions": [q.clone()] } } }), Some("PreToolUse")),
+            ("custom-agent", json!({ "session_id": "x1", "hook_event_name": "PreToolUse", "tool_name": "request_user_input_async", "tool_input": { "questions": [{ "title": "Which layout?", "options": ["Grid", "List"] }] } }), None),
+        ];
+        for (agent, raw, event) in cases {
+            let p = normalize_payload(agent, &raw, event);
+            assert!(pre_tool_question(&p), "{agent}");
+            record(&d, agent, &p).unwrap();
+            let a = summary(&d).remove(agent).unwrap();
+            assert_eq!(a["state"], "waiting", "{agent}");
+            assert_eq!(a["permit"]["choice"]["kind"], "question", "{agent}");
+            assert_eq!(a["permit"]["choice"]["questions"][0]["question"], "Which layout?");
+            assert_eq!(a["permit"]["choice"]["questions"][0]["options"][0]["label"], "Grid");
+            let mut done = p.clone();
+            done["hook_event_name"] = json!("PostToolUse");
+            record(&d, agent, &done).unwrap();
+            assert!(summary(&d)[agent]["permit"].is_null(), "completed question must leave the island");
+        }
+        let claude = normalize_payload("claude", &json!({ "session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": { "questions": [q] } }), None);
+        assert!(!pre_tool_question(&claude), "Claude retains its PermissionRequest answer contract");
+        assert!(!pre_tool_question(&json!({ "session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": { "questions": [{ "question": "Ignore this" }] } })), "ordinary tools never become question prompts");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn installed_agent_hooks_are_preserved_and_reinstallation_is_idempotent() {
+        let d = tmp("question-install");
+        for dir in [".claude", ".codex", ".cursor", ".qwen", ".gemini/config", ".config/opencode"] {
+            std::fs::create_dir_all(d.join(dir)).unwrap();
+        }
+        write(&d.join(".qwen/settings.json"), &json!({ "theme": "dark" })).unwrap();
+        write(&d.join(".gemini/config/hooks.json"), &json!({ "existing-hook": { "Stop": [{ "command": "keep-this" }] } })).unwrap();
+        let first = install_all(&d, &json!([]));
+        assert!(first.iter().all(|(_, _, r)| r.is_ok()));
+        assert!(first.iter().any(|(name, _, _)| name == "OpenCode"));
+        assert!(first.iter().any(|(name, _, _)| name == "Antigravity"));
+        let agy: Value = serde_json::from_str(&std::fs::read_to_string(d.join(".gemini/config/hooks.json")).unwrap()).unwrap();
+        assert_eq!(agy["existing-hook"]["Stop"][0]["command"], "keep-this");
+        assert!(agy["zor-ui-island"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("--event PreToolUse"));
+        assert_eq!(agy["zor-ui-island"]["PreToolUse"][0]["hooks"][0]["timeout"], PERMIT_TIMEOUT);
+        let cursor: Value = serde_json::from_str(&std::fs::read_to_string(d.join(".cursor/hooks.json")).unwrap()).unwrap();
+        assert_eq!(cursor["hooks"]["preToolUse"][0]["timeout"], PERMIT_TIMEOUT);
+        let plugin = std::fs::read_to_string(d.join(".config/opencode/plugins/zor-ui-island.js")).unwrap();
+        assert!(!plugin.contains("__ZORUI_EXECUTABLE__"));
+        assert!(plugin.contains("client.question.reply"));
+        assert!(install_all(&d, &json!([])).iter().all(|(_, _, r)| matches!(r, Ok(false))));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -711,7 +920,7 @@ mod tests {
         let h = tmp("custom");
         std::fs::create_dir_all(h.join(".myagent")).unwrap();
         let cfg = json!([{ "name": "My Agent", "dir": ".myagent", "file": "hooks.json" }, { "name": "Claude", "dir": ".x", "file": "a.json" }, { "name": "", "dir": ".y", "file": "b" }]);
-        assert_eq!(known(&cfg).len(), 9); // 8 built in + My Agent; "Claude" would take the built-in id and the empty name has no id
+        assert_eq!(known(&cfg).len(), known(&json!([])).len() + 1); // Only My Agent is added; built-in ids and empty names cannot replace an integration.
         let r = install_all(&h, &cfg);
         assert!(r.iter().any(|(n, _, r)| n == "My Agent" && matches!(r, Ok(true))));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".myagent").join("hooks.json")).unwrap()).unwrap();

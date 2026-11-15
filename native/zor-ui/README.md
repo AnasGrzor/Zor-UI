@@ -39,6 +39,16 @@ running instance (WM_COPYDATA to its message window) to open the popup, or close
 GlazeWM keys at it. With no instance running it does nothing. Popups sit on the clicked bar's
 monitor, else GlazeWM's focused one, take keyboard focus, and close on Esc or when they lose focus.
 
+## Agent questions in the island
+
+Run `zorui.exe --install-agents` to install or update integrations for detected agents. Existing settings and unrelated hooks are preserved; changed hook files are backed up. Restart the agent or reload its hooks after installation.
+
+Claude Code questions use its `PermissionRequest` contract. Codex and compatible question tools use `PreToolUse`; island answers return as blocking hook feedback so the model can continue without repeating the question. Cursor and Antigravity use their own hook envelopes and feedback formats. This integration depends on the agent's question tool and hook support, independently of its selected model or provider.
+
+OpenCode uses a global plugin at `~/.config/opencode/plugins/zor-ui-island.js`. It listens for native question events and replies through OpenCode's question API. Answering or dismissing a question in OpenCode clears the matching island request. If the island does not answer within 110 seconds, the original question UI remains available.
+
+Custom adapters can invoke `zorui.exe --agent <agent-id>` with a JSON payload on stdin containing `hook_event_name: "IslandQuestion"`, a unique `session_id` for the request, `tool_name: "question"`, and `tool_input.questions`. Each question has `question`, optional `header`, `options` containing labels and optional descriptions, and optional `multiple`. The bridge waits and writes `{"answers":[["selected label"]]}` to stdout. Empty output means no answer; keep the agent's own prompt available. Send a subsequent `state: "done"` or `state: "ended"` for the same request to clear it when the host answers or cancels.
+
 ## Checking drawing without windows
 
 `zorui.exe --render <part> <out.png> [w h scale]` paints one view offscreen (real config and theme, sample media)

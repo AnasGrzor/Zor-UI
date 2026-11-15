@@ -251,6 +251,58 @@ fn resume(agent: &str, s: &Value) -> Result<&'static str, String> {
     cmd.creation_flags(CREATE_NEW_CONSOLE).spawn().map(|_| "resumed").map_err(|e| format!("couldn't start it ({e}); run {line} yourself"))
 }
 
+// ------------------------------------------------------------------ starting
+
+/// The argv a start template means for `task`: split on spaces, with `{task}` replaced by the whole task as one argument, so
+/// the task never goes through a shell. Line breaks become spaces (a terminal prompt is one line). None when the template has
+/// no program or no `{task}`.
+fn start_argv(template: &str, task: &str) -> Option<Vec<String>> {
+    let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    let parts: Vec<&str> = template.split_whitespace().collect();
+    if parts.first().is_none_or(|p| p.contains("{task}")) || !parts.contains(&"{task}") || task.is_empty() { return None; }
+    Some(parts.iter().map(|p| if *p == "{task}" { task.clone() } else { p.to_string() }).collect())
+}
+
+/// The newest session file of `agent`, as seconds since 1970 (0 when it has none): the agent used most recently wins.
+fn last_used(agent: &str) -> u64 {
+    std::fs::read_dir(super::agent_hook::sessions_dir(agent)).into_iter().flatten().flatten()
+        .filter_map(|e| e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()))
+        .max().unwrap_or(0)
+}
+
+/// Which agent to start: the one named (by id or display name), else the installed one used most recently.
+/// `starters`: (id, name, template); `exe`: finds a program on the PC; `used`: when an agent last ran.
+fn pick_agent(asked: &str, starters: Vec<(String, String, String)>, exe: &dyn Fn(&str) -> Option<PathBuf>, used: &dyn Fn(&str) -> u64) -> Result<(String, String, PathBuf), String> {
+    let asked = asked.trim().to_lowercase();
+    let program = |t: &str| t.split_whitespace().next().unwrap_or("").to_string();
+    let names = starters.iter().map(|s| s.1.clone()).collect::<Vec<_>>().join(", ");
+    if !asked.is_empty() {
+        let found = starters.iter().find(|s| s.0 == asked || s.1.to_lowercase() == asked || s.1.to_lowercase().starts_with(&asked))
+            .ok_or_else(|| format!("I can't start \"{asked}\". I can start {names}, or one added under customAgents with a \"start\" command."))?;
+        let path = exe(&program(&found.2)).ok_or_else(|| format!("{} isn't installed: there is no {} command on this PC.", found.1, program(&found.2)))?;
+        return Ok((found.1.clone(), found.2.clone(), path));
+    }
+    starters.into_iter().filter_map(|s| exe(&program(&s.2)).map(|p| (used(&s.0), s.1, s.2, p)))
+        .max_by_key(|s| s.0).map(|s| (s.1, s.2, s.3))
+        .ok_or_else(|| format!("No coding agent is installed. I can start {names}."))
+}
+
+/// Starts a coding agent on `task` in `cwd`, in a new console the user can watch and type into. Any agent with a start
+/// template works (agent_hook::starters, including customAgents). Its hooks put it on the island like any other session.
+pub fn start_agent(agent: &str, task: &str, cwd: &Path) -> Result<String, String> {
+    let custom = crate::conf::Config::load().get("customAgents").clone();
+    let (name, template, agent_exe) = pick_agent(agent, super::agent_hook::starters(&custom), &|c| super::sub_cli::find(c), &last_used)?;
+    let argv = start_argv(&template, task).ok_or_else(|| format!("The start command for {name} needs a program and {{task}}."))?;
+    // visible on purpose: the user watches the agent and answers it in this window (headless_test VISIBLE_ON_PURPOSE)
+    let mut cmd = Command::new(&agent_exe);
+    cmd.args(&argv[1..]).current_dir(cwd);
+    for v in AGENT_SET { cmd.env_remove(v); }
+    // a .cmd shim with a task it can't quote safely is refused by std here, before anything runs
+    cmd.creation_flags(CREATE_NEW_CONSOLE).spawn().map_err(|e| format!("couldn't start {name} ({e})"))?;
+    crate::log::line(&format!("buddy started agent {name} in {}", cwd.display()));
+    Ok(format!("Started {name} in {} on the task. It runs in its own window; the island shows when it needs you.", cwd.display()))
+}
+
 // ------------------------------------------------------------------ restarting
 
 /// What to do with one recorded session.
@@ -369,6 +421,27 @@ pub fn summary(r: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_is_one_argument_and_never_a_shell_string() {
+        assert_eq!(start_argv("gemini -i {task}", "fix the build & run tests
+then stop"), Some(vec!["gemini".into(), "-i".into(), "fix the build & run tests then stop".into()]));
+        assert_eq!(start_argv("claude {task}", "  "), None, "an empty task starts nothing");
+        assert_eq!(start_argv("claude", "x"), None, "a template without {{task}}");
+        assert_eq!(start_argv("{task}", "x"), None, "the task is never the program");
+    }
+
+    #[test]
+    fn the_named_agent_or_else_the_one_used_last_is_started() {
+        let rows = || vec![("claude".into(), "Claude Code".into(), "claude {task}".into()), ("codex".into(), "Codex".into(), "codex {task}".into()), ("gemini".into(), "Gemini CLI".into(), "gemini -i {task}".into())];
+        let exe = |c: &str| (c != "gemini").then(|| PathBuf::from(format!("{c}.exe")));
+        let used = |id: &str| if id == "codex" { 20 } else { 10 };
+        assert_eq!(pick_agent("", rows(), &exe, &used).unwrap().0, "Codex", "most recent installed");
+        assert_eq!(pick_agent("claude", rows(), &exe, &used).unwrap().0, "Claude Code");
+        assert_eq!(pick_agent("Gemini", rows(), &exe, &used).unwrap_err(), "Gemini CLI isn't installed: there is no gemini command on this PC.");
+        assert!(pick_agent("aider", rows(), &exe, &used).unwrap_err().contains("Claude Code, Codex, Gemini CLI"));
+        assert!(pick_agent("", rows(), &|_| None, &used).is_err(), "nothing installed");
+    }
 
     fn tree() -> Vec<(u32, u32, String)> {
         vec![

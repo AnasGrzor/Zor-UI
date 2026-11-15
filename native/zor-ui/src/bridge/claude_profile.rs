@@ -281,22 +281,79 @@ pub fn select(root: &Root, n: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens a new terminal that runs `claude /login` in account n's folder.
+/// Opens a dedicated authentication command in account n's folder.
 pub fn open_login(root: &Root, n: u64) -> Result<(), String> {
-    let cmd = login_command(config_dir_value(root, n).as_deref());
-    // Windows Terminal first; plain cmd in its own console when it isn't installed
-    if Command::new("wt.exe").args(["-w", "new", "cmd", "/k"]).raw_arg(&cmd).spawn().is_ok() { return Ok(()); }
-    Command::new("cmd.exe")
-        .raw_arg(format!("/k {cmd}"))
+    crate::log::line(&format!("claude login profile={n}: resolving executable"));
+    let exe = super::claude_cli::find().ok_or_else(|| {
+        crate::log::line(&format!("claude login profile={n}: executable not found"));
+        "Claude Code wasn't found. Install it before adding an account."
+    })?;
+    fs::create_dir_all(&root.dir).map_err(|e| format!("can't create login log directory: {e}"))?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let log = root.dir.join(format!("login-{n}-{stamp}.log"));
+    fs::write(&log, format!("profile={n} executable={}\n", exe.display())).map_err(|e| format!("can't create login log: {e}"))?;
+    crate::log::line(&format!("claude login profile={n}: executable={} log={}", exe.display(), log.display()));
+    let script = login_command(config_dir_value(root, n).as_deref(), &exe, &log);
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = super::web::b64_encode(&bytes);
+    let args = ["-NoProfile", "-NoExit", "-EncodedCommand", encoded.as_str()];
+    // Pass an encoded script so spaces and shell metacharacters in paths stay literal.
+    match Command::new("wt.exe").args(["-w", "new", "powershell.exe"]).args(args).spawn() {
+        Ok(mut child) => {
+            crate::log::line(&format!("claude login profile={n}: Windows Terminal launcher pid={}", child.id()));
+            std::thread::spawn(move || crate::log::line(&format!("claude login profile={n}: Windows Terminal launcher exited {:?}; authentication status is in {}", child.wait(), log.display())));
+            return Ok(());
+        }
+        Err(e) => crate::log::line(&format!("claude login profile={n}: Windows Terminal launch failed: {e}; trying PowerShell console")),
+    }
+    let child = Command::new("powershell.exe")
+        .args(args)
         .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("can't open a terminal: {e}"))
+        .map_err(|e| {
+            crate::log::line(&format!("claude login profile={n}: PowerShell launch failed: {e}"));
+            format!("can't open a terminal: {e}")
+        })?;
+    crate::log::line(&format!("claude login profile={n}: PowerShell console pid={}", child.id()));
+    Ok(())
 }
 
-/// The command line a login terminal runs: sets CLAUDE_CONFIG_DIR (cleared when None), then `claude /login`.
-fn login_command(dir: Option<&Path>) -> String {
-    format!(r#"set "CLAUDE_CONFIG_DIR={}" && claude /login"#, dir.map(|d| d.display().to_string()).unwrap_or_default())
+/// Authenticate without starting an interactive session or inheriting nested-session markers.
+fn login_command(dir: Option<&Path>, exe: &Path, log: &Path) -> String {
+    let literal = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    let config = dir.map(|d| format!("$env:CLAUDE_CONFIG_DIR = {}", literal(d)))
+        .unwrap_or_else(|| "Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue".into());
+    let template = r#"$loginLog = __LOG__
+function Log-Login([string]$message) {
+    Add-Content -LiteralPath $loginLog -Encoding UTF8 -Value ('[' + [DateTime]::UtcNow.ToString('o') + '] ' + $message)
+}
+try {
+    Log-Login ('PowerShell started pid=' + $PID)
+    __CONFIG__
+    Log-Login ('config directory=' + $env:CLAUDE_CONFIG_DIR)
+    Remove-Item Env:CLAUDECODE,Env:CLAUDE_CODE_ENTRYPOINT,Env:CLAUDE_PROJECT_DIR,Env:CLAUDE_ENV_FILE -ErrorAction SilentlyContinue
+    Log-Login 'session markers cleared; starting auth login --claudeai'
+    $LASTEXITCODE = 0
+    & __EXE__ auth login --claudeai 2>&1 | ForEach-Object {
+        $message = $_.ToString()
+        Write-Host $message
+        # Never persist OAuth URLs, codes, credentials, or entire secret-bearing lines.
+        if ($message -match '(?i)https?://|token|secret|authorization|bearer|password|\bcode\b|sk-ant-|[A-Za-z0-9_+/=-]{40,}') {
+            Log-Login '[authentication detail redacted]'
+        } else {
+            Log-Login $message
+        }
+    }
+    Log-Login ('Claude exited code=' + $LASTEXITCODE)
+    if ($LASTEXITCODE -ne 0) { Write-Host 'Claude sign-in failed. Review the error above, then try Add account again.' -ForegroundColor Red }
+    else { Write-Host 'Sign-in complete. Return to Zor UI.' }
+} catch {
+    Log-Login ('PowerShell exception type=' + $_.Exception.GetType().FullName + ' id=' + $_.FullyQualifiedErrorId)
+    Write-Host $_ -ForegroundColor Red
+}
+Write-Host ('Sign-in log: ' + $loginLog)
+"#;
+    template.replace("__CONFIG__", &config).replace("__EXE__", &literal(exe)).replace("__LOG__", &literal(log))
 }
 
 // ------------------------------------------------------------------ the user environment variable
@@ -587,8 +644,15 @@ mod tests {
 
     #[test]
     fn login_command_line() {
-        assert_eq!(login_command(Some(Path::new(r"C:\Users\a\home"))), r#"set "CLAUDE_CONFIG_DIR=C:\Users\a\home" && claude /login"#);
-        assert_eq!(login_command(None), r#"set "CLAUDE_CONFIG_DIR=" && claude /login"#);
+        let exe = Path::new(r"C:\Program Files\Claude\claude.exe");
+        let log = Path::new(r"C:\temp\login.log");
+        let cmd = login_command(Some(Path::new(r"C:\Users\a's home")), exe, log);
+        assert!(cmd.contains("$env:CLAUDE_CONFIG_DIR = 'C:\\Users\\a''s home'"));
+        assert!(cmd.contains("& 'C:\\Program Files\\Claude\\claude.exe' auth login --claudeai"));
+        assert!(cmd.contains("Remove-Item Env:CLAUDECODE,"));
+        assert!(login_command(None, exe, log).contains("Remove-Item Env:CLAUDE_CONFIG_DIR "));
+        assert!(cmd.contains("Claude exited code="));
+        assert!(cmd.contains("[authentication detail redacted]"));
     }
 
     #[test]

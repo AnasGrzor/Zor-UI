@@ -6,28 +6,39 @@
   powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 #>
 $ErrorActionPreference = 'Stop'
-$Repo = Split-Path $PSScriptRoot
+$Repo = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot))
 $Out = Join-Path $Repo 'dist'
 $Stage = Join-Path $Out 'stage'
-Remove-Item $Out -Recurse -Force -ErrorAction SilentlyContinue
+$ReleaseTarget = Join-Path $Repo 'native\zor-ui\target\public-release'
+# Delete only this repository's real dist directory, never a redirected directory.
+if ([IO.Path]::GetFullPath($Out) -ne (Join-Path $Repo 'dist')) { throw 'Unexpected release output directory' }
+if (Test-Path -LiteralPath $Out) {
+  if ((Get-Item -LiteralPath $Out).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Release output must not be a redirected directory' }
+  Remove-Item -LiteralPath $Out -Recurse -Force
+}
 New-Item -ItemType Directory -Force $Stage | Out-Null
 
 $env:ZORUI_PUBLIC = '1'   # build.rs then leaves the private buddies (cast_personal.rs) out
-& cargo build --release --features discord --manifest-path (Join-Path $Repo 'native\zor-ui\Cargo.toml')
+& cargo build --release --locked --features discord --bins --target-dir $ReleaseTarget --manifest-path (Join-Path $Repo 'native\zor-ui\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
 $pay = Join-Path $Out 'app'
 New-Item -ItemType Directory -Force $pay | Out-Null
 foreach ($f in 'install.ps1', 'uninstall.ps1', 'LICENSE') { Copy-Item (Join-Path $Repo $f) $pay }
 foreach ($d in 'scripts', 'flowlauncher', 'glazewm', 'assets') { Copy-Item -Recurse (Join-Path $Repo $d) $pay }
-Copy-Item (Join-Path $Repo 'native\zor-ui\target\release\zorui.exe') $pay
+foreach ($bin in 'zorui.exe', 'zorui-svc.exe') { Copy-Item (Join-Path $ReleaseTarget "release\$bin") $pay }
 Compress-Archive -Path "$pay\*" -DestinationPath (Join-Path $Stage 'zorui-app.zip')
 Copy-Item (Join-Path $Stage 'zorui-app.zip') $Out   # upload this too: the in-app updater downloads it
 
 # The installer: a wizard window (native/zor-setup) with the app zip inside it. build.rs embeds the zip named here.
 $env:ZORSETUP_ZIP = Join-Path $Out 'zorui-app.zip'
-& cargo build --release --manifest-path (Join-Path $Repo 'native\zor-setup\Cargo.toml')
+& cargo build --release --locked --target-dir $ReleaseTarget --manifest-path (Join-Path $Repo 'native\zor-setup\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'cargo build (zor-setup) failed' }
 $exe = Join-Path $Out 'ZorUI-Setup.exe'
-Copy-Item (Join-Path $Repo 'native\zor-setup\target\release\ZorUI-Setup.exe') $exe
+Copy-Item (Join-Path $ReleaseTarget 'release\ZorUI-Setup.exe') $exe
+$checksums = foreach ($artifact in 'ZorUI-Setup.exe', 'zorui-app.zip') {
+  $hash = (Get-FileHash -LiteralPath (Join-Path $Out $artifact) -Algorithm SHA256).Hash.ToLowerInvariant()
+  "$hash  $artifact"
+}
+$checksums | Set-Content -LiteralPath (Join-Path $Out 'SHA256SUMS.txt') -Encoding ASCII
 Get-Item $exe | Select-Object FullName, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}

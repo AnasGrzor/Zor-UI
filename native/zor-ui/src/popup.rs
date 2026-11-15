@@ -53,7 +53,7 @@ pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
         "overview" => ((w * if portrait { 0.94 } else { 0.82 }).round(), (h * if portrait { 0.8 } else { 0.74 }).round()),
         // the pages need about 900 px; a narrow screen gets all it has
         "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).min(900.0).round()), // a portrait screen would stretch it into a tall empty column
-        "island-panel" => (crate::tokens::ISLAND_W + 24.0, 560.0), // the panel plus 12 px of shadow each side
+        "island-panel" => ((664.0_f32).min(w - bar_w - 24.0), (h - bar_h - 24.0).max(1.0)), // monitor bounds include the shadow and a margin below the bar
         _ => (400.0, 300.0),
     }
 }
@@ -78,8 +78,8 @@ pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)
         "island-panel" | "tray-flyout" => {
             let (ax, ay) = at.unwrap_or(((free.left + free.right) / 2, free.top));
             match edge {
-                Edge::Top => (within(ax - px.0 / 2, mon.left, mon.right - px.0), ay),
-                Edge::Bottom => (within(ax - px.0 / 2, mon.left, mon.right - px.0), ay - px.1),
+                Edge::Top => (within(ax - px.0 / 2, mon.left, mon.right - px.0), within(ay, free.top, free.bottom - px.1)),
+                Edge::Bottom => (within(ax - px.0 / 2, mon.left, mon.right - px.0), within(ay - px.1, free.top, free.bottom - px.1)),
                 Edge::Left => (ax, within(ay - px.1 / 2, mon.top, mon.bottom - px.1)),
                 Edge::Right => (ax - px.0, within(ay - px.1 / 2, mon.top, mon.bottom - px.1)),
             }
@@ -123,6 +123,17 @@ mod tests {
         assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-960, 1020)), Edge::Bottom), (-1172, 520));
         assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-1850, 400)), Edge::Left), (-1850, 150));
         assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-70, 100)), Edge::Right), (-494, 0));
+    }
+
+    #[test]
+    fn island_bounds_follow_the_monitor_and_keep_the_anchor_on_screen() {
+        let (w, h) = area("island-panel", 480.0, 640.0, Edge::Top);
+        assert!(w <= 480.0 && h <= 640.0 - Edge::Top.thick());
+        let (x, y) = spot("island-panel", MON, 1.0, (664, 1000), Some((-960, 100)), Edge::Top);
+        assert!(x >= MON.left && x + 664 <= MON.right);
+        assert!(y >= 56 && y + 1000 <= MON.bottom);
+        let (_, y) = spot("island-panel", MON, 1.0, (664, 1000), Some((-960, 800)), Edge::Bottom);
+        assert!(y >= MON.top && y + 1000 <= MON.bottom - 56);
     }
 
     #[test]

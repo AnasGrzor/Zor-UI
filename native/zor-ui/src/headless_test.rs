@@ -15,12 +15,13 @@ const WINDOW: usize = 12;
 
 /// Spawns that are visible on purpose. Matched by file name and a substring of the spawn line,
 /// so the list survives edits above them. Each entry says why the window is allowed.
-const VISIBLE_ON_PURPOSE: [(&str, &str, &str); 4] = [
+const VISIBLE_ON_PURPOSE: [(&str, &str, &str); 6] = [
     ("bridge\\claude_profile.rs", "wt.exe", "opens a terminal window that runs Claude, when the user asks for one"),
     ("bridge\\claude_profile.rs", "cmd.exe", "fallback for the same terminal window when wt.exe is missing"),
-    // PENDING the user's decision: resuming a session opens a visible console (CREATE_NEW_CONSOLE). Remove this entry
-    // and add the no-window flag if the user wants resumes to stay hidden.
-    ("bridge\\agent_restart.rs", "cmd.exe", "PENDING: opens a visible console to resume an agent session"),
+    ("bridge\\claude_profile.rs", "powershell.exe", "PowerShell console fallback for the same Claude login window when Windows Terminal fails to start"),
+    // the user chose visible terminals for coding agents (2026-11-15): they watch the agent and type to it there
+    ("bridge\\agent_restart.rs", "cmd.exe", "opens a visible console to resume an agent session"),
+    ("bridge\\agent_restart.rs", "agent_exe", "opens a visible console for a coding agent the buddy starts (start_agent)"),
     ("settings.rs", "explorer.exe", "opens a folder in Explorer, when the user asks to see it"),
 ];
 

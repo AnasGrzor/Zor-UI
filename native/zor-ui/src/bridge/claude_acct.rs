@@ -290,8 +290,12 @@ fn open(slot: &Value) -> Option<(Value, Value)> {
 /// Creates the next account folder and opens a terminal to sign in there. A watcher then keeps the login as a row.
 pub fn add(root: &Root) -> Result<(), String> {
     let n = root.next();
+    crate::log::line(&format!("claude login profile={n}: creating profile"));
     let made = prof::create(root, n).and_then(|_| prof::open_login(root, n));
-    if let Err(e) = made { let _ = prof::remove(root, n); return Err(e); }
+    if let Err(e) = made {
+        crate::log::line(&format!("claude login profile={n}: setup failed: {e}"));
+        let _ = prof::remove(root, n); return Err(e);
+    }
     std::thread::spawn(move || watch_login(n));
     Ok(())
 }
@@ -300,26 +304,54 @@ pub fn add(root: &Root) -> Result<(), String> {
 fn watch_login(n: u64) {
     let root = Root::live();
     let start = Instant::now();
+    crate::log::line(&format!("claude login profile={n}: watching for credentials, timeout=300s"));
+    let mut previous = String::new();
     while start.elapsed() < Duration::from_secs(300) {
         std::thread::sleep(Duration::from_secs(2));
+        let status = login_status(&Files::of(&root, n));
+        if status != previous {
+            crate::log::line(&format!("claude login profile={n}: elapsed={}s {status}", start.elapsed().as_secs()));
+            previous = status;
+        }
         if let Some((oauth, account)) = prof::login_of(&Files::of(&root, n)) {
+            crate::log::line(&format!("claude login profile={n}: login detected after {}s", start.elapsed().as_secs()));
             finish_add(&root, n, &oauth, &account);
             return;
         }
     }
-    let _ = prof::remove(&root, n);
+    crate::log::line(&format!("claude login profile={n}: timed out after {}s; {previous}; keeping profile for diagnosis", start.elapsed().as_secs()));
+    banner("Claude sign-in wasn't completed within five minutes. Check the sign-in terminal for an error, then try Add account again.".into(), "", 15);
+}
+
+/// Report structure and file errors only, never values or JSON parser snippets.
+fn login_status(files: &Files) -> String {
+    let describe = |path: &std::path::Path, outer: &str, inner: &str| {
+        match std::fs::read_to_string(path) {
+            Err(e) => format!("read_error={:?}", e.kind()),
+            Ok(s) => match serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')) {
+                Err(e) => format!("invalid_json line={} column={}", e.line(), e.column()),
+                Ok(v) => format!("valid_json field_present={}", v[outer][inner].as_str().is_some_and(|s| !s.is_empty())),
+            },
+        }
+    };
+    format!("credentials=[{}] identity=[{}]", describe(&files.creds, "claudeAiOauth", "accessToken"), describe(&files.config, "oauthAccount", "emailAddress"))
 }
 
 fn finish_add(root: &Root, n: u64, oauth: &Value, account: &Value) {
     let Some(id) = ident(account) else { return };
     if taken_by(&identities(root), &id, n).is_some() {
+        crate::log::line(&format!("claude login profile={n}: duplicate login, removing temporary profile"));
         let _ = prof::remove(root, n);
         banner("That account is already saved".into(), "", 8);
         return;
     }
     match prof::write_marker(root, n, &marker(n, &id, account, oauth)) {
-        Ok(()) => banner(format!("Claude account added: {}", id.email), "", 6),
+        Ok(()) => {
+            crate::log::line(&format!("claude login profile={n}: account marker saved, account ready"));
+            banner(format!("Claude account added: {}", id.email), "", 6);
+        }
         Err(e) => {
+            crate::log::line(&format!("claude login profile={n}: saving account marker failed: {e}"));
             let _ = prof::remove(root, n);
             banner(format!("Couldn't save that account: {e}"), "", 8);
         }
@@ -328,6 +360,7 @@ fn finish_add(root: &Root, n: u64, oauth: &Value, account: &Value) {
 
 /// Opens a terminal to sign in again in account `n`'s folder (0 = Default).
 pub fn relogin(root: &Root, n: u64) -> Result<(), String> {
+    crate::log::line(&format!("claude login profile={n}: sign in again requested"));
     if n != 0 && !root.numbers().contains(&n) { return Err("No such account".into()); }
     prof::open_login(root, n)
 }
@@ -342,9 +375,15 @@ fn switch_error(root: &Root, n: u64, dead: bool) -> Option<String> {
 
 /// Makes account `n` (0 = Default) the one new terminals get.
 pub fn switch(root: &Root, n: u64) -> Result<(), String> {
+    crate::log::line(&format!("claude switch: active={} requested={n}", prof::active(root)));
     let dead = { let _w = store_lock(); read_state(root)[n.to_string()]["dead"] == true };
-    if let Some(e) = switch_error(root, n, dead) { return Err(e); }
-    prof::select(root, n)
+    if let Some(e) = switch_error(root, n, dead) {
+        crate::log::line(&format!("claude switch profile={n}: refused: {e}"));
+        return Err(e);
+    }
+    let result = prof::select(root, n);
+    crate::log::line(&format!("claude switch profile={n}: result={result:?} active={}", prof::active(root)));
+    result
 }
 
 /// Deletes profile `n` (never Default). If it is the active account, Default is selected first.

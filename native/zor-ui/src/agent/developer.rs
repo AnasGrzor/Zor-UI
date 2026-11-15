@@ -55,6 +55,16 @@ pub fn resolve(ws: &Path, rel: &str) -> Result<PathBuf, String> {
     if real.starts_with(ws) { Ok(real) } else { Err(format!("\"{rel}\" leads outside the workspace, so I won't open it.")) }
 }
 
+/// The folder a coding agent starts in (`start_agent`): the workspace, or a folder inside it. Same checks as `resolve`.
+pub fn agent_folder(cfg: &Config, rel: &str) -> Result<PathBuf, String> {
+    // with full PC access a full path on any drive is taken too (`pc::base`)
+    let (ws, rel) = super::pc::base(cfg, rel)?;
+    let rel = rel.as_str();
+    if rel.trim().is_empty() { return Ok(ws); }
+    let dir = resolve(&ws, rel)?;
+    if dir.is_dir() { Ok(dir) } else { Err(format!("\"{}\" is a file, not a folder.", rel.trim())) }
+}
+
 /// Whether a file's contents are never read or searched: keys, certificates, credentials, and anything under `.git`.
 pub fn is_secret(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -786,5 +796,24 @@ mod tests {
         use crate::agent::{parse_step, Call, Step};
         assert_eq!(parse_step(r#"{"do":"run_check","arg":"cargo test"}"#), Step::Call { call: Call::RunCheck("cargo test".into()), more: false });
         assert!(matches!(parse_step(r#"{"do":"run_check"}"#), Step::Bad(_)), "a check needs its name");
+    }
+
+    #[test]
+    fn start_agent_runs_only_in_a_workspace_folder_and_always_asks() {
+        use crate::agent::{parse_step, policy, Call, Step};
+        let w = ws("start");
+        std::fs::write(w.join("src").join("lib.rs"), "").unwrap();
+        let cfg = Config::parse(&serde_json::json!({ "buddies": { "developerWorkspace": w } }).to_string());
+        assert_eq!(agent_folder(&cfg, "").unwrap(), w);
+        assert_eq!(agent_folder(&cfg, "src").unwrap(), w.join("src"));
+        assert!(agent_folder(&cfg, "src/lib.rs").is_err(), "a file is not a folder");
+        assert!(agent_folder(&cfg, "..").is_err(), "outside the workspace");
+        assert!(agent_folder(&Config::parse("{}"), "").is_err(), "no workspace set");
+
+        let call = || Call::StartAgent { agent: "codex".into(), task: "fix the parser".into(), folder: "src".into() };
+        assert_eq!(parse_step(r#"{"do":"start_agent","agent":"codex","task":"fix the parser","folder":"src"}"#), Step::Call { call: call(), more: false });
+        assert!(matches!(parse_step(r#"{"do":"start_agent","agent":"codex"}"#), Step::Bad(_)), "a start needs its task");
+        assert_eq!(policy::approval_for(&call()).unwrap(), "Start codex in src on: \"fix the parser\"? It can change files there.");
+        assert!(policy::gate(&call(), &cfg, &mut |_| false).is_err(), "a no starts nothing");
     }
 }

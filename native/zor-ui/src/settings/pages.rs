@@ -1176,7 +1176,7 @@ impl Settings {
     fn voice(&mut self, p: &mut Pen) {
         p.h2("mic", "Voice commands", "");
         p.card(|p| {
-            self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say", "mic");
+            self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say. Tap Right Alt twice to ask about your screen", "mic");
             self.seg(p, "buddies.listenMode", &[("auto", "Auto"), ("toggle", "Toggle"), ("hold", "Hold")], "Dictation mode", "keyboard_voice");
             p.note("Auto stops when you stop talking. Toggle records until you press the hotkey again. Hold records while you hold the hotkey.", 12.0);
             self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
@@ -1216,7 +1216,7 @@ impl Settings {
                 p.chip_right(r, Some("folder_open"), "Open folder", Act::Do("open-speech", String::new()));
             }
             p.note("The people you can message are on the Contacts page. Voice needs the hotkey in GlazeWM's config; re-run install.ps1 to add it.", 12.0);
-            p.note("Talk to the primary buddy with the hotkey (default Alt+B). Say \"search for ...\", \"open ...\" with an app or game name, or \"message ... saying ...\" with a contact name. Contact names come from buddies.contacts in config.json. The message opens in the app, and you press Enter to send it.", 12.0);
+            p.note("Talk to the primary buddy with the hotkey (default Alt+B), or tap Right Alt twice to ask about what is on your screen. Say \"search for ...\", \"open ...\" with an app or game name, or \"message ... saying ...\" with a contact name. Contact names come from buddies.contacts in config.json. The message opens in the app, and you press Enter to send it.", 12.0);
         });
         self.speech_output(p);
         self.voice_library(p);
@@ -1594,7 +1594,7 @@ impl Settings {
             });
         }
         for (n, (ic, group)) in keymap::GROUPS.iter().enumerate() {
-            p.h2(ic, group, if n == 0 { "Click a key, then press the new combo. Esc cancels" } else { "" });
+            p.h2(ic, group, if n == 0 { "Click a key, then press a combo or tap a modifier twice. Esc cancels" } else { "" });
             p.card(|p| {
                 for b in keymap::BINDS.iter().filter(|b| b.group == *group) {
                     let raw_keys = keymap::keys_of(&cfg, b);

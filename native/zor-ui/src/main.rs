@@ -21,6 +21,7 @@ mod gfx;
 mod glass;
 mod guides;
 mod glaze;
+mod highlight;
 mod buddy;
 mod hub;
 #[cfg(test)]

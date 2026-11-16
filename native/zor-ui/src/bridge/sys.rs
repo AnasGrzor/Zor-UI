@@ -52,7 +52,7 @@ fn truthy(v: &Value) -> bool {
 
 /// Sets a dotted key in config.json (value is JSON).
 fn config_set(config: &Path, key: &str, value_json: &str) -> Value {
-    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') { return err("bad key"); }
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') { return err("bad key"); } // '-': key ids like keybinds.buddy-look
     let Ok(value) = serde_json::from_str::<Value>(value_json) else { return err("bad value") };
     // A missing file starts empty; a file that exists but isn't an object is left alone, not overwritten.
     let mut cfg = match std::fs::read_to_string(config) {
@@ -374,6 +374,8 @@ mod tests {
         assert_eq!(config_set(&c, "ai.model", "\"gem\""), json!({ "ok": true }));
         assert_eq!(load_json(&c, json!(null)), json!({ "ai": { "model": "gem" } }));
         assert_eq!(config_set(&c, "bad key", "1")["ok"], false);
+        assert_eq!(config_set(&c, "keybinds.buddy-look", "[\"Double LAlt\"]"), json!({ "ok": true }), "key ids have hyphens");
+        assert_eq!(load_json(&c, json!(null))["keybinds"]["buddy-look"], json!(["Double LAlt"]));
         assert_eq!(config_set(&c, "a.b", "{oops")["ok"], false);
     }
 

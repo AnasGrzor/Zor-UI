@@ -1,4 +1,4 @@
-//! The listening pill: while the primary buddy records you (Alt+B), a small pill floats at the bottom
+//! The listening pill: while the primary buddy records you (Alt+B, or Right Alt tapped twice to ask about the screen), a small pill floats at the bottom
 //! of the screen with a waveform that follows your voice, then a calm wave while it works out what you
 //! said. The recorder (bridge/listen.rs) sends the loudness; assist.rs passes it here.
 
@@ -8,7 +8,7 @@ use crate::{
     win::{Btn, Input, View, Win, Z},
 };
 use std::{
-    sync::{atomic::{AtomicIsize, AtomicU32, AtomicU8, Ordering}, Mutex},
+    sync::{atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering}, Mutex},
     time::Instant,
 };
 use windows::Win32::{
@@ -26,6 +26,8 @@ static PEAK: AtomicU32 = AtomicU32::new(0);
 static FLOOR: AtomicU32 = AtomicU32::new(0);
 /// The listen mode: 0 auto, 1 toggle, 2 hold.
 static MODE: AtomicU8 = AtomicU8::new(0);
+/// The recording is a question about the screen (the look hotkey).
+static LOOK: AtomicBool = AtomicBool::new(false);
 /// Counts recordings, so a pill window that outlives one knows a new one began.
 static EPOCH: AtomicU32 = AtomicU32::new(0);
 /// What the recognizer has heard so far (the live line above the pill).
@@ -80,6 +82,8 @@ pub fn sample_partial() -> &'static str { "open the settings and turn the bar bl
 
 /// Remembers how this recording ends, for the hint under the label.
 pub fn set_mode(mode: &str) { MODE.store(mode_code(mode), Ordering::Relaxed); }
+/// Marks this recording as a question about the screen: the pill shows a screen instead of a mic.
+pub fn set_look(look: bool) { LOOK.store(look, Ordering::Relaxed); }
 pub fn mode_code(mode: &str) -> u8 { match mode { "toggle" => 1, "hold" => 2, _ => 0 } }
 
 /// Window size (CSS px): the pill plus room for its shadow.
@@ -125,8 +129,13 @@ pub fn label(state: u8) -> &'static str {
 }
 
 /// The word, with what the voice is doing while recording.
-pub fn status(state: u8, speaking: bool, clipping: bool) -> &'static str {
-    match (state, clipping, speaking) { (LISTENING, true, _) => "Too loud", (LISTENING, _, true) => "Speaking", _ => label(state) }
+pub fn status(state: u8, speaking: bool, clipping: bool, look: bool) -> &'static str {
+    match (state, clipping, speaking) {
+        (LISTENING, true, _) => "Too loud",
+        (LISTENING, _, true) => "Speaking",
+        (LISTENING, _, _) if look => "Ask about screen",
+        _ => label(state),
+    }
 }
 
 /// How the recording ends in a listen mode (0 auto, 1 toggle, 2 hold).
@@ -274,7 +283,8 @@ impl View for Pill {
         });
         let mid = p.y + p.h / 2.0;
         if listening { c.circle(p.x + 26.0, mid, 13.0 + self.smooth * 7.0, alpha(col, fade * (0.10 + 0.25 * self.smooth))); } // glow that follows the voice
-        c.icon("mic", R::new(p.x + 14.0, p.y, 24.0, p.h), ico(22.0, listening), alpha(col, fade));
+        let look = LOOK.load(Ordering::Relaxed);
+        c.icon(if look { "screenshot_monitor" } else { "mic" }, R::new(p.x + 14.0, p.y, 24.0, p.h), ico(22.0, listening), alpha(col, fade));
         let x0 = p.x + 50.0;
         // the bars glide left between shifts; the oldest fades out, the newest grows in
         let phase = if listening { ((t - self.shifted) / 0.06).clamp(0.0, 1.0) } else { 0.0 };
@@ -291,7 +301,7 @@ impl View for Pill {
         let stop = listening && out == 0.0;
         let w = p.x + p.w - lx - 12.0 - if stop { STOP_D + 6.0 } else { 0.0 };
         let secs = self.listen_since.map_or(0.0, |s| s.elapsed().as_secs_f32());
-        c.text(status(state, speaking, clipping), R::new(lx, p.y + 6.0, w, 22.0), txt(13.0, 500), alpha(col, fade), Align::Left);
+        c.text(status(state, speaking, clipping, look), R::new(lx, p.y + 6.0, w, 22.0), txt(13.0, 500), alpha(col, fade), Align::Left);
         if stop {
             let b = R::new(p.x + p.w - 12.0 - STOP_D, mid - STOP_D / 2.0, STOP_D, STOP_D);
             let hot = c.hit(b, STOP);
@@ -381,10 +391,13 @@ mod tests {
 
     #[test]
     fn the_word_tracks_what_the_voice_is_doing() {
-        assert_eq!(status(LISTENING, false, false), "Listening");
-        assert_eq!(status(LISTENING, true, false), "Speaking");
-        assert_eq!(status(LISTENING, true, true), "Too loud");
-        assert_eq!(status(THINKING, true, true), "Processing", "only recording reports the voice");
+        assert_eq!(status(LISTENING, false, false, false), "Listening");
+        assert_eq!(status(LISTENING, true, false, false), "Speaking");
+        assert_eq!(status(LISTENING, true, true, false), "Too loud");
+        assert_eq!(status(THINKING, true, true, false), "Processing", "only recording reports the voice");
+        assert_eq!(status(LISTENING, false, false, true), "Ask about screen", "the look hotkey says what it records for");
+        assert_eq!(status(LISTENING, true, false, true), "Speaking");
+        assert_eq!(status(THINKING, false, false, true), "Processing");
     }
 
     #[test]

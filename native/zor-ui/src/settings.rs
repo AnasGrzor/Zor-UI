@@ -352,12 +352,16 @@ impl Settings {
     /// Takes the combo the hook recorded for the waiting Keybinds row; gives up when the window loses focus or time runs out.
     fn rec_sync(&mut self, cx: &Ctx) {
         let got = crate::keymap::take_recorded();
-        if self.rec.is_some() && got.is_none() && (!self.active || !crate::keymap::recording()) { crate::keymap::record(false); self.rec = None; return; }
+        if self.rec.is_some() && got.is_none() && (!self.active || !crate::keymap::recording()) {
+            crate::log::line(if self.active { "settings: key recording timed out" } else { "settings: key recording stopped, the window lost focus" });
+            crate::keymap::record(false); self.rec = None; return;
+        }
         if let Some(got) = got { self.rec_done(cx, got); }
     }
 
     /// The combo for the waiting row: None is Esc. A key another bind uses is refused with a toast.
     fn rec_done(&mut self, cx: &Ctx, got: Option<String>) {
+        crate::log::line(&format!("settings: recorded {got:?} for {:?}", self.rec));
         let Some((id, i)) = self.rec.take() else { return };
         let Some(k) = got else { return };
         let cfg = self.keys_cfg(cx);

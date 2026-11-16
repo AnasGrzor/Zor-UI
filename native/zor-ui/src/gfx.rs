@@ -511,6 +511,9 @@ impl<'a> Canvas<'a> {
 
     pub fn rect(&mut self, r: R, radius: f32, c: Color) { if let Some(p) = round_rect(r, radius) { self.fill_path(&p, c); } }
 
+    /// The edge of a rounded rectangle, `width` wide, centred on its border.
+    pub fn outline(&mut self, r: R, radius: f32, width: f32, c: Color) { if let Some(p) = round_rect(r, radius) { self.stroke_path(&p, width, c); } }
+
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: Color) { if let Some(p) = PathBuilder::from_circle(cx, cy, r) { self.fill_path(&p, c); } }
 
     pub fn line(&mut self, (x1, y1): (f32, f32), (x2, y2): (f32, f32), width: f32, c: Color) {

@@ -760,10 +760,11 @@ impl App {
 
     /// A message from `zorui.exe --open <name>`.
     pub fn command(&mut self, text: &str) {
-        if text == "buddy listen" || text.starts_with("buddy ask ") {
+        if text == "buddy listen" || text == "buddy look" || text.starts_with("buddy ask ") {
             if !assist::enabled(&self.cx.cfg) { assist::say_later("Voice commands are off. Turn them on in Settings, Voice.", 5.0); return; }
-            if text == "buddy listen" && pill::active() { if !assist::press_again(&self.cx.cfg) { assist::cancel(); } return; } // the hotkey toggles
-            match text.strip_prefix("buddy ask ") { Some(said) => assist::ask(&self.cx.cfg, said), None => { pill::open(self); assist::listen(&self.cx.cfg) } }
+            let hotkey = text == "buddy listen" || text == "buddy look";
+            if hotkey && pill::active() { if !assist::press_again(&self.cx.cfg) { assist::cancel(); } return; } // the hotkey toggles
+            match text.strip_prefix("buddy ask ") { Some(said) => assist::ask(&self.cx.cfg, said), None => { pill::open(self); assist::listen_as(&self.cx.cfg, text == "buddy look") } }
             return;
         }
         if text == "restart" { glaze::command("wm-reload-config"); restart(); return; }
@@ -873,6 +874,7 @@ impl App {
                 (WM_APP, _) => {
                     while let Ok(job) = self.jobs.try_recv() { job(&mut self.cx); }
                     driveframe::sync(self); // the border while the buddy drives
+                    crate::highlight::sync(self); // the box around what screen help points at
                     self.cx.ver += 1;
                     // GlazeWM moved focus to another window: popups opened by a shortcut may never get a WM_ACTIVATE to lose
                     let focus = self.cx.wm.windows.iter().find(|w| w.focus).map(|w| w.id.clone());

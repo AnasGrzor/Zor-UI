@@ -8,6 +8,12 @@ pub const WIN: u32 = 1;
 pub const ALT: u32 = 2;
 pub const CTRL: u32 = 4;
 pub const SHIFT: u32 = 8;
+/// Not a modifier: a combo `(DOUBLE, vk)` is the modifier key `vk` tapped twice ("Double RAlt").
+pub const DOUBLE: u32 = 16;
+/// Longest gap between the two taps of a double tap, in ms.
+const TAP_MS: u64 = 400;
+/// The keys a double tap can use, by side: the hook tells left from right.
+const TAPS: &[(&str, u32)] = &[("LWin", 0x5B), ("RWin", 0x5C), ("LAlt", 0xA4), ("RAlt", 0xA5), ("LCtrl", 0xA2), ("RCtrl", 0xA3), ("LShift", 0xA0), ("RShift", 0xA1)];
 
 /// What a key does.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +55,7 @@ pub const BINDS: &[Bind] = &[
     b!("gamemode", "Shell", "Game mode: free RAM (press again to restore)", ["{m}+Shift+G"], Script, "toggles -Action gamemode"),
     b!("restart", "Shell", "Restart the bar and reload GlazeWM", ["{m}+Ctrl+R"], Zor, "restart"),
     b!("buddy", "Shell", "Talk to the primary buddy", ["{m}+B"], Zor, "buddy listen"),
+    b!("buddy-look", "Shell", "Talk to the buddy about your screen", ["Double RAlt"], Zor, "buddy look"),
     b!("terminal", "Apps", "Terminal", ["{m}+Enter", "{m}+T"], Exec, "wt"),
     b!("files", "Apps", "File Explorer", ["{m}+E"], Exec, "explorer"),
     b!("browser", "Apps", "Edge", ["{m}+W"], Exec, "msedge"),
@@ -162,8 +169,12 @@ fn vk_key(vk: u32) -> Option<String> {
     }
 }
 
-/// "Alt+Shift+Left" as (modifier bits, virtual key). A combo needs at least one modifier.
+/// "Alt+Shift+Left" as (modifier bits, virtual key). A combo needs at least one modifier. "Double RAlt" is `(DOUBLE, vk)`.
 pub fn parse(s: &str) -> Option<(u32, u32)> {
+    let t = s.trim();
+    if t.get(..7).is_some_and(|d| d.eq_ignore_ascii_case("double ")) {
+        return TAPS.iter().find(|(n, _)| n.eq_ignore_ascii_case(t[7..].trim())).map(|(_, vk)| (DOUBLE, *vk));
+    }
     let mut parts: Vec<&str> = s.split('+').map(str::trim).collect();
     let key = parts.pop().filter(|k| !k.is_empty())?;
     let mut mods = 0;
@@ -176,6 +187,7 @@ pub fn parse(s: &str) -> Option<(u32, u32)> {
 
 /// The text for a combo, the inverse of `parse`.
 pub fn format(mods: u32, vk: u32) -> Option<String> {
+    if mods == DOUBLE { return TAPS.iter().find(|(_, v)| *v == vk).map(|(n, _)| format!("Double {n}")); }
     let mut s = String::new();
     for (bit, n) in [(WIN, "Win"), (CTRL, "Ctrl"), (ALT, "Alt"), (SHIFT, "Shift")] { if mods & bit != 0 { s += n; s.push('+'); } }
     Some(s + &vk_key(vk)?)
@@ -195,14 +207,23 @@ pub enum Out {
     Fire(usize),
     /// Recording: the combo pressed, or None for Esc (cancel).
     Record(Option<(u32, u32)>),
+    /// Pass the key on, then tap an unused key: the first press of a double-tap key, so its release doesn't open a menu.
+    Quiet,
 }
 
 /// Which modifiers are down and which keys the hook ate (so their key-up and repeats are eaten too).
 #[derive(Default)]
-pub struct Tracker { held: Vec<u32>, eaten: Vec<u32> }
+pub struct Tracker {
+    held: Vec<u32>,
+    eaten: Vec<u32>,
+    /// The modifier pressed last, until another key goes down: its release is a tap.
+    alone: Option<u32>,
+    /// The last tap: its key and when it was released (ms).
+    tapped: Option<(u32, u64)>,
+}
 
 impl Tracker {
-    pub const fn new() -> Tracker { Tracker { held: Vec::new(), eaten: Vec::new() } }
+    pub const fn new() -> Tracker { Tracker { held: Vec::new(), eaten: Vec::new(), alone: None, tapped: None } }
 
     /// The keys the hook ate that are still down.
     pub fn eaten(&self) -> &[u32] { &self.eaten }
@@ -212,12 +233,31 @@ impl Tracker {
     /// Forgets the modifiers that are no longer down. Their key-up can be lost (secure desktop, a dropped event).
     pub fn drop_released(&mut self, is_down: impl Fn(u32) -> bool) { self.held.retain(|h| is_down(*h)); }
 
-    pub fn event(&mut self, down: bool, vk: u32, combos: &[(u32, u32)], recording: bool) -> Out {
+    #[cfg(test)]
+    pub fn event(&mut self, down: bool, vk: u32, combos: &[(u32, u32)], recording: bool) -> Out { self.event_at(down, vk, combos, recording, 0) }
+
+    /// One key event at `now` (ms). Modifiers always pass on, also when their double tap fires, so Hold dictation sees them down.
+    pub fn event_at(&mut self, down: bool, vk: u32, combos: &[(u32, u32)], recording: bool, now: u64) -> Out {
         if mod_bit(vk) != 0 {
+            let repeat = down && self.held.contains(&vk);
             self.held.retain(|h| *h != vk);
             if down { self.held.push(vk); }
-            return Out::Pass;
+            if repeat { return Out::Pass; }
+            if !down {
+                if self.alone == Some(vk) { self.alone = None; self.tapped = Some((vk, now)); }
+                return Out::Pass;
+            }
+            // another modifier between the taps doesn't count: AltGr sends a Ctrl with every Right Alt
+            let second = self.tapped.is_some_and(|(k, t)| k == vk && now.wrapping_sub(t) <= TAP_MS);
+            if second {
+                self.tapped = None; // a third tap starts over
+                if recording { return Out::Record(Some((DOUBLE, vk))); }
+                if let Some(i) = combos.iter().position(|c| *c == (DOUBLE, vk)) { return Out::Fire(i); }
+            }
+            self.alone = Some(vk);
+            return if combos.contains(&(DOUBLE, vk)) { Out::Quiet } else { Out::Pass };
         }
+        if down { self.alone = None; self.tapped = None; }
         if !down { return match self.eaten.iter().position(|e| *e == vk) { Some(i) => { self.eaten.remove(i); Out::Swallow } None => Out::Pass }; }
         if self.eaten.contains(&vk) { return Out::Swallow; } // auto-repeat
         let mods = self.mods();
@@ -312,15 +352,17 @@ unsafe extern "system" fn hook(code: i32, wp: windows::Win32::Foundation::WPARAM
                 let combos: Vec<(u32, u32)> = s.combos.iter().map(|c| (c.0, c.1)).collect();
                 let mods = s.tracker.mods();
                 let before = s.tracker.eaten().len();
-                let out = s.tracker.event(down, k.vkCode, &combos, recording());
+                let out = s.tracker.event_at(down, k.vkCode, &combos, recording(), k.time as u64);
+                let bit = mod_bit(k.vkCode); // a modifier is never eaten: Windows must see it go down and up
                 if s.tracker.eaten().len() != before { if let Some(Ok(tx)) = HELD_TX.get().map(|t| t.lock()) { let _ = tx.send(s.tracker.eaten().to_vec()); } }
                 match out {
                     Out::Pass => {}
                     Out::Swallow => return LRESULT(1),
+                    Out::Quiet => quiet(bit),
                     Out::Fire(i) => {
                         if let Some(Ok(tx)) = TX.get().map(|t| t.lock()) { let _ = tx.send(s.combos[i].2.clone()); }
-                        quiet(mods);
-                        return LRESULT(1);
+                        quiet(mods | bit);
+                        if bit == 0 { return LRESULT(1); }
                     }
                     Out::Record(r) => {
                         // a key with no name (a media key) counts as a cancel
@@ -328,8 +370,8 @@ unsafe extern "system" fn hook(code: i32, wp: windows::Win32::Foundation::WPARAM
                         if let Ok(mut o) = RECORDED.lock() { *o = Some(text); }
                         RECORDING.store(false, Ordering::SeqCst);
                         crate::app::post(Box::new(|_| {})); // wakes the app so Settings sees it
-                        quiet(mods);
-                        return LRESULT(1);
+                        quiet(mods | bit);
+                        if bit == 0 { return LRESULT(1); }
                     }
                 }
             }
@@ -348,6 +390,7 @@ fn quiet(mods: u32) {
 }
 
 fn run(d: Do) {
+    crate::log::line(&format!("hotkey: {d:?}"));
     use std::os::windows::process::CommandExt;
     const NO_WINDOW: u32 = 0x0800_0000;
     match d {
@@ -559,6 +602,78 @@ mod tests {
         t.event(false, 0x1B, &combos, true);
         t.event(true, 0xA4, &combos, true);
         assert_eq!(t.event(true, I, &combos, true), Out::Record(Some((ALT, I))), "a taken combo records too; the page rejects it");
+    }
+
+    #[test]
+    fn double_taps_parse_and_format_back() {
+        assert_eq!(parse("Double RAlt"), Some((DOUBLE, 0xA5)));
+        assert_eq!(parse("double rctrl"), Some((DOUBLE, 0xA3)), "case does not matter");
+        assert_eq!(format(DOUBLE, 0xA5).as_deref(), Some("Double RAlt"));
+        for k in ["Double Alt", "Double B", "Double ", "Double"] { assert_eq!(parse(k), None, "{k}"); }
+    }
+
+    #[test]
+    fn two_quick_taps_fire_and_slow_or_broken_ones_do_not() {
+        let combos = [parse("Double RAlt").unwrap()];
+        let k = b'K' as u32;
+        let mut t = Tracker::default();
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 0), Out::Quiet, "the first press only quiets the menu");
+        t.event_at(false, 0xA5, &combos, false, 80);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 300), Out::Fire(0));
+        t.event_at(false, 0xA5, &combos, false, 350);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 400), Out::Quiet, "a third tap starts over");
+        t.event_at(false, 0xA5, &combos, false, 450);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 451 + TAP_MS), Out::Quiet, "too slow");
+        t.event_at(false, 0xA5, &combos, false, 1000);
+        t.event_at(true, k, &combos, false, 1050);
+        t.event_at(false, k, &combos, false, 1060);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 1100), Out::Quiet, "a key between the taps breaks it");
+        t.event_at(true, k, &combos, false, 1150);
+        t.event_at(false, k, &combos, false, 1160);
+        t.event_at(false, 0xA5, &combos, false, 1200);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 1250), Out::Quiet, "Right Alt used in a combo is not a tap");
+    }
+
+    #[test]
+    fn a_double_tap_needs_the_same_side_and_works_with_altgr() {
+        let combos = [parse("Double RAlt").unwrap()];
+        let mut t = Tracker::default();
+        t.event_at(true, 0xA4, &combos, false, 0);
+        t.event_at(false, 0xA4, &combos, false, 50);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 100), Out::Quiet, "left then right is not a double tap");
+        t.event_at(false, 0xA5, &combos, false, 150);
+        // AltGr: Windows sends Left Ctrl with each Right Alt
+        t.event_at(true, 0xA2, &combos, false, 200);
+        assert_eq!(t.event_at(true, 0xA5, &combos, false, 200), Out::Fire(0));
+    }
+
+    #[test]
+    fn holding_after_the_second_tap_fires_once() {
+        let combos = [parse("Double RCtrl").unwrap()];
+        let mut t = Tracker::default();
+        t.event_at(true, 0xA3, &combos, false, 0);
+        t.event_at(false, 0xA3, &combos, false, 60);
+        assert_eq!(t.event_at(true, 0xA3, &combos, false, 200), Out::Fire(0));
+        assert_eq!(t.event_at(true, 0xA3, &combos, false, 700), Out::Pass, "auto-repeat while held");
+        assert_eq!(t.mods(), CTRL, "the key stays down for Hold dictation");
+    }
+
+    #[test]
+    fn recording_takes_a_double_tap_of_any_modifier() {
+        let mut t = Tracker::default();
+        assert_eq!(t.event_at(true, 0xA1, &[], true, 0), Out::Pass);
+        t.event_at(false, 0xA1, &[], true, 50);
+        assert_eq!(t.event_at(true, 0xA1, &[], true, 120), Out::Record(Some((DOUBLE, 0xA1))));
+        assert_eq!(format(DOUBLE, 0xA1).as_deref(), Some("Double RShift"));
+    }
+
+    #[test]
+    fn a_double_right_alt_talks_about_the_screen_by_default() {
+        let c = cfg("{}");
+        let b = BINDS.iter().find(|b| b.id == "buddy-look").unwrap();
+        assert_eq!(keys_of(&c, b), ["Double RAlt"]);
+        assert!(resolve(&c).iter().any(|(m, v, d)| (*m, *v) == (DOUBLE, 0xA5) && *d == Do::Zor("buddy look".into())));
+        assert_eq!(taken_by(&c, "settings", "Double RAlt").as_deref(), Some("Talk to the buddy about your screen"));
     }
 
     #[test]

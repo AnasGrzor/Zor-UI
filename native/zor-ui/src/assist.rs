@@ -787,19 +787,21 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     if reply.trim().is_empty() { return Err("I got no answer from the AI.".into()); }
     let (spoken, point) = screen::parse_point(&reply);
     let mut said = if spoken.is_empty() { "Here.".to_string() } else { short(&spoken, 160) }; // the bubble is small
-    if let Some(p) = point {
-        match point_target(&caps, &p) {
-            Some(_) if !crate::buddy::on() => said.push_str(" (Turn on a buddy to see where.)"),
-            Some((x, y)) => point_later(x, y, &p.label),
-            None => {}
-        }
+    if let Some((x, y)) = point.as_ref().and_then(|p| point_target(&caps, p)) {
+        // a box around the control there, when UI Automation knows it; the buddy flies over too
+        let boxed = crate::highlight::snap(x, y).map(crate::highlight::show).is_some();
+        if crate::buddy::on() { point_later(x, y, point.as_ref().map_or("", |p| &p.label)); }
+        else if !boxed { said.push_str(" (Turn on a buddy to see where.)"); }
     }
     Ok(said)
 }
 
 /// Runs `said` on a worker thread and shows the result in the primary buddy's bubble. A request that comes while another
 /// runs is refused at once, so two never share the cancel flag and the token total.
-pub fn ask(cfg: &Config, said: &str) {
+pub fn ask(cfg: &Config, said: &str) { ask_as(cfg, said, false) }
+
+/// `ask`, or with `look` the words go to screen help whatever they say (the look hotkey).
+fn ask_as(cfg: &Config, said: &str, look: bool) {
     let Some(busy) = try_busy() else { say_later("I'm still working on the last request.", 3.0); return; };
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
@@ -808,10 +810,10 @@ pub fn ask(cfg: &Config, said: &str) {
         say_later("On it…", 3.0);
         // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
         let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
-        let r = match run(parse(&said), &cfg) {
+        let r = if look { see_screen(&cfg, said.trim()) } else { match run(parse(&said), &cfg) {
             Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask_with_note(&cfg, said.trim(), &fallback_note(&e)),
             r => r,
-        };
+        } };
         report(r);
     });
 }
@@ -834,8 +836,9 @@ fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
     [("--model", model), ("--mic", mic), ("--mode", mode)].iter().filter(|(_, v)| !v.trim().is_empty()).flat_map(|(k, v)| [k.to_string(), v.trim().to_string()]).collect()
 }
 
-/// Starts recording: the bridge prints states and then the text, which goes to `ask`.
-pub fn listen(cfg: &Config) {
+/// Starts recording: the bridge prints states and then the text, which goes to `ask`. With `look` what you say is a
+/// question about the screen (the look hotkey).
+pub fn listen_as(cfg: &Config, look: bool) {
     // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
     let answering = crate::drive::waiting() || crate::bridge::permit::waiting();
     if !answering { crate::drive::request_stop(); crate::browse::request_stop(); }
@@ -843,6 +846,7 @@ pub fn listen(cfg: &Config) {
     let model = cfg.str("buddies.model").to_string();
     let mic = cfg.str("buddies.mic").to_string();
     crate::pill::set_mode(cfg.str("buddies.listenMode"));
+    crate::pill::set_look(look);
     let args = listen_args(&model, &mic, cfg.str("buddies.listenMode"));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let s = proc::stream(cfg, "buddy-listen", &args, move |line| {
@@ -859,7 +863,7 @@ pub fn listen(cfg: &Config) {
             crate::pill::set(0);
             if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); }
             else if answering && (crate::drive::reply_spoken(t) || crate::bridge::permit::answer_with(t)) {} // the take-over or a Claude Code permission heard you
-            else { ask(&cfg2, t); }
+            else { ask_as(&cfg2, t, look); }
         }
     });
     if s.is_none() { crate::pill::set(0); fail_later("I can't start listening."); }

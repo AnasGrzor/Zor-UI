@@ -1296,6 +1296,7 @@ impl View for Settings {
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         self.sync(cx);
         match ev {
+            Input::Files(..) => {}
             Input::Hover(_) => {}
             Input::Wheel(_, d) => match &mut self.menu {
                 Some(m) => { let (ch, vh) = menu_dims(m, self.area.1); m.scroll.wheel(d, ch, vh); }

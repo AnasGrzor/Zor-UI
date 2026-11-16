@@ -7,6 +7,10 @@ the same widgets in Zebar used about 1 GB.
 It reads `~/.glzr/zor-ui/config.json`, `theme.json` and the fonts in `assets/fonts`.
 Card positions live in `%LOCALAPPDATA%\zor-ui\state.json`.
 
+Drag files from Explorer over the Dynamic Island to expand it and pulse its upload icon with "Release to send to your phone". Moving away restores the previous activity. Dropping onto the pill or its expanded panel sends through LocalSend. Open LocalSend on your phone on the same Wi-Fi. The island remembers your phone; when several phones are nearby, choose yours in the inline LocalSend section. Use **Find phone** there to change the receiver. A remembered phone being offline never redirects files to another phone. The hover pulse follows the reduced-motion setting.
+
+For automatic receiving, enable Quick Save in LocalSend on the phone, or favorite **Zor UI** there and allow Quick Save from favorites. Otherwise the phone asks you to accept each transfer. Transfers show their status in the island. Files and multiple-file drops are supported; folders and receiver PINs are not supported. No LocalSend desktop app or new island tab is needed. Discovery uses UDP multicast on port 53317 and an HTTP registration callback; uploads use the phone's advertised HTTP or HTTPS endpoint.
+
 ## What it draws
 
 `config.json` → `"native"` turns a part on or off. Every part is on by default except the buddy.

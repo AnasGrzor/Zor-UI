@@ -14,6 +14,10 @@ path = "src/svc.rs"
 
 [dependencies]
 serde_json = "1"
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio-util = { version = "0.7", features = ["io"] }
+socket2 = { version = "0.6", features = ["all"] }
 # no "std": it pulls getrandom 0.3, which needs dlltool on this gnu toolchain
 material-colors = { version = "0.5", default-features = false, features = ["quantize", "libm"] }
 systray-util = "0.2"
@@ -53,6 +57,8 @@ windows = { version = "0.58", features = [
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_SystemServices",
   "Win32_System_Com_StructuredStorage",
   "Win32_System_DataExchange",
   "Win32_System_Memory",

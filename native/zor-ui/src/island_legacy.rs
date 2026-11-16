@@ -49,7 +49,7 @@ const ASK_BOX_H: f32 = 36.0;
 const NOTIF: u32 = 100;
 
 /// Ask: the buddy's question. Permit: what Claude Code wants to do (the answer finds its session itself).
-enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value) }
+enum Sec { Ask(String), Permit(String, String),Media, Rec, Timer, Idle, Agents(Vec<Value>), Notifs(Vec<Value>), NotifDetail(Value), Send(crate::localsend_panel::Panel) }
 
 pub struct Island {
     notifs: Arc<Mutex<Vec<Value>>>,
@@ -194,6 +194,9 @@ impl Island {
                 v.push((Sec::Notifs(n), h));
             }
         }
+        let send = crate::localsend_panel::Panel::new(cx);
+        let height = send.height(g, W - 2.0 * PAD);
+        v.push((Sec::Send(send), height));
         v
     }
 
@@ -410,14 +413,14 @@ impl Island {
                 y += 6.0;
                 let used = u["used_percentage"].as_f64().unwrap_or(0.0);
                 let rs = resets(cx, u["resets_at"].as_f64().unwrap_or(0.0));
-                let rw = c.g.measure(&rs, txt(11.0, 400)).0.ceil();
+                let percent = format!("{}%", used.round());
                 let h = lh(12.0);
-                c.text(usage_name(k), R::new(x, y, 56.0, h), txt(12.0, 400), t.c("onSurface"), Align::Left);
-                let bar = R::new(x + 64.0, y + (h - 6.0) / 2.0, (w - 64.0 - 38.0 - rw - 24.0).max(10.0), 6.0);
+                let (name_r, bar, percent_r, reset_r) = crate::island::usage_rects(c.g, x, y, w, usage_name(k), &percent, &rs);
+                c.text(usage_name(k), name_r, txt(12.0, 400), t.c("onSurface"), Align::Left);
                 c.rect(bar, 3.0, alpha(t.c("primary"), 0.18));
                 c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), 3.0, t.c("primary"));
-                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + 8.0, y, 38.0, h), txt(12.0, 500), t.c("onSurface"), Align::Right);
-                c.text(&rs, R::new(x + w - rw - 2.0, y, rw + 4.0, h), txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
+                c.text(&percent, percent_r, txt(12.0, 500), t.c("onSurface"), Align::Right);
+                c.text(&rs, reset_r, txt(11.0, 400), t.c("onSurfaceVariant"), Align::Right);
                 y += h;
             }
             y += 10.0;
@@ -518,6 +521,7 @@ impl Island {
 }
 
 impl View for Island {
+    fn accepts_files(&self) -> bool { true }
     fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
         (W + 24.0, Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 24.0)
     }
@@ -555,6 +559,7 @@ impl View for Island {
                 Sec::Agents(l) => self.agents(c, cx, x, y, l),
                 Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
                 Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
+                Sec::Send(send) => send.paint(c, cx, x, y, W - 2.0 * PAD),
             }
             y += sh + SEP;
         }
@@ -562,8 +567,12 @@ impl View for Island {
 
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         let id = cx.media.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+        use crate::localsend_panel::{SEND_REFRESH, SEND_PHONE, SEND_PHONE_MAX};
         match ev {
+            Input::Files(_, paths) => crate::localsend::drop_files(paths, cx),
             Input::Click(i, Btn::Left) => match i {
+                SEND_REFRESH => crate::localsend::refresh(),
+                i if (SEND_PHONE..SEND_PHONE + SEND_PHONE_MAX as u32).contains(&i) => crate::localsend::choose((i - SEND_PHONE) as usize, cx),
                 ALLOW | DENY => {
                     crate::drive::answer(i == ALLOW);
                     cx.actions.push(Action::Close("island-panel".into()));

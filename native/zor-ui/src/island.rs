@@ -92,13 +92,15 @@ const SESSION: u32 = 280;
 /// Ask: the buddy's question. Permit: what Claude Code wants to do, and the plan or questions it asks (Null for a plain
 /// permission); the answer finds its session itself.
 /// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
-enum Sec { Ask(String), Permit(String, String, Value), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value), Clips(Vec<Value>, String) }
+enum Sec { Ask(String), Permit(String, String, Value), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value), Clips(Vec<Value>, String), Send(crate::localsend_panel::Panel) }
 
 const PANEL_SCROLL: u32 = 400;
 const CHOICE_SCROLL: u32 = 401;
+use crate::localsend_panel::{SEND_REFRESH, SEND_PHONE, SEND_PHONE_MAX};
 
 pub struct Island {
-    width: f32,
+    width: Cell<f32>,
+    max_width: f32,
     max_h: f32,
     panel_scroll: ui::Scroll,
     panel_full: f32,
@@ -153,7 +155,8 @@ pub struct Island {
 impl Island {
     /// `area` bounds the self-sizing panel to the monitor space available.
     pub fn new(area: (f32, f32)) -> Island {
-        Island { width: if area.0 > 0.0 { (area.0 - 24.0).min(W).max(1.0) } else { W },
+        let max_width = if area.0 > 0.0 { (area.0 - 24.0).min(W).max(1.0) } else { W };
+        Island { width: Cell::new(max_width), max_width,
             max_h: if area.1 > 0.0 { area.1 } else { 720.0 },
             panel_scroll: Default::default(), panel_full: 0.0, panel_view: 0.0,
             choice_scroll: Default::default(), choice_full: 0.0, choice_view: 0.0,
@@ -194,32 +197,51 @@ fn questions_of(choice: &Value) -> &[Value] { let q = items(choice, "questions")
 fn options_of(q: &Value) -> &[Value] { let o = items(q, "options"); &o[..o.len().min(PERMIT_MAX)] }
 /// Several questions, or one that takes several picks: the Send chip gives the answers, a tap does not.
 fn needs_send(qs: &[Value]) -> bool { qs.len() > 1 || qs.iter().any(|q| q["multiSelect"] == true) }
-/// Width of an option's text: the row less CARD_PAD on each side.
-fn option_columns(width: f32) -> usize { if width >= 560.0 { 2 } else { 1 } }
-fn option_row_w(width: f32) -> f32 { (width - 2.0 * PAD - SESS_GAP * (option_columns(width) - 1) as f32) / option_columns(width) as f32 }
-fn option_w(width: f32) -> f32 { option_row_w(width) - 2.0 * CARD_PAD }
-/// Height of an option row: CARD_PAD above and below the label, and the wrapped description under it (4 px gap).
-fn option_h(g: &Gfx, o: &Value, width: f32) -> f32 {
-    let label = g.measure_wrapped(o["label"].as_str().unwrap_or(""), txt(13.0, 500), option_w(width));
+/// Width of one option at the selected column count, including its padding.
+fn option_row_w(width: f32, columns: usize) -> f32 { (width - 2.0 * PAD - SESS_GAP * (columns - 1) as f32) / columns as f32 }
+fn option_w(width: f32, columns: usize) -> f32 { option_row_w(width, columns) - 2.0 * CARD_PAD }
+/// Height of an option, measured at the same column width used to draw it.
+fn option_h(g: &Gfx, o: &Value, width: f32, columns: usize) -> f32 {
+    let label = g.measure_wrapped(o["label"].as_str().unwrap_or(""), txt(13.0, 500), option_w(width, columns));
     let desc = o["description"].as_str().unwrap_or("");
-    let desc_h = if desc.is_empty() { 0.0 } else { crate::tokens::SP_XS + g.measure_wrapped(desc, txt(12.0, 400), option_w(width)) };
+    let desc_h = if desc.is_empty() { 0.0 } else { crate::tokens::SP_XS + g.measure_wrapped(desc, txt(12.0, 400), option_w(width, columns)) };
     2.0 * CARD_PAD + label + desc_h
 }
-/// Height of one question: its header (if any), the wrapped text, 8 px, then its option rows with SESS_GAP between them.
-fn question_h(g: &Gfx, q: &Value, width: f32) -> f32 {
+/// Height of a question and its option rows; a grid row reserves its tallest option.
+fn question_h(g: &Gfx, q: &Value, width: f32, columns: usize) -> f32 {
     let header = if q["header"].as_str().is_some_and(|h| !h.is_empty()) { lh(12.0) + crate::tokens::SP_XS } else { 0.0 };
     let text = g.measure_wrapped(q["question"].as_str().unwrap_or(""), txt(13.0, 400), question_width(width));
     let opts = options_of(q);
-    header + text + crate::tokens::SP_S + opts.chunks(option_columns(width)).map(|row| row.iter().map(|o| option_h(g, o, width)).fold(0.0, f32::max)).sum::<f32>() + SESS_GAP * opts.len().div_ceil(option_columns(width)).saturating_sub(1) as f32
+    header + text + crate::tokens::SP_S + opts.chunks(columns).map(|row| row.iter().map(|o| option_h(g, o, width, columns)).fold(0.0, f32::max)).sum::<f32>() + SESS_GAP * opts.len().div_ceil(columns).saturating_sub(1) as f32
 }
+fn choice_body_h(g: &Gfx, choice: &Value, width: f32, columns: usize) -> f32 {
+    (questions_of(choice).iter().map(|q| question_h(g, q, width, columns) + PERMIT_GAP).sum::<f32>() - PERMIT_GAP).max(0.0)
+}
+/// Prefer a column. Use a grid only when the column would scroll and a grid is shorter.
+fn choice_layout(g: &Gfx, choice: &Value, width: f32, body_limit: f32) -> (usize, f32) {
+    let column = choice_body_h(g, choice, width, 1);
+    if column <= body_limit || width < 560.0 { return (1, column); }
+    let grid = choice_body_h(g, choice, width, 2);
+    if grid < column { (2, grid) } else { (1, column) }
+}
+/// Keep the normal width until extra horizontal room makes an overflowing question shorter.
+fn choice_panel_width(g: &Gfx, choice: &Value, max_width: f32, body_limit: f32) -> f32 {
+    let compact = max_width.min(crate::tokens::ISLAND_W);
+    if choice["kind"] != "question" { return compact; }
+    let column = choice_body_h(g, choice, compact, 1);
+    if column <= body_limit { return compact; }
+    let (_, height) = choice_layout(g, choice, max_width, body_limit);
+    if height < column { max_width } else { compact }
+}
+
 /// Height of a plan or question permit as permit_choice draws it: the head, the body, the reply box and the chips row.
 fn permit_choice_h(g: &Gfx, choice: &Value, width: f32, body_limit: f32) -> f32 {
     let body = if choice["kind"] == "plan" {
         ask_h(g.measure_wrapped(choice["plan"].as_str().unwrap_or(""), txt(13.0, 400), question_width(width))) + PERMIT_GAP + ASK_BOX_H + crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H
     } else {
         let qs = questions_of(choice);
-        let blocks: f32 = qs.iter().map(|q| question_h(g, q, width) + PERMIT_GAP).sum();
-        (blocks - PERMIT_GAP).max(0.0).min(body_limit) + PERMIT_GAP + ASK_BOX_H + if needs_send(qs) { crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H } else { 0.0 }
+        let (_, height) = choice_layout(g, choice, width, body_limit);
+        height.min(body_limit) + PERMIT_GAP + ASK_BOX_H + if needs_send(qs) { crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H } else { 0.0 }
     };
     crate::tokens::ISLAND_HEAD_H + body
 }
@@ -400,6 +422,24 @@ fn resets(cx: &Ctx, at: f64) -> String {
 
 fn usage_name(k: &str) -> &str { match k { "five_hour" => "5-hour", "seven_day" => "Weekly", "spend_limit" => "Spend", o => o } }
 
+/// Reserve measured text columns before assigning the usage bar its remaining space.
+/// The reset text stays inside the content clip and clear of the panel scrollbar.
+pub(crate) fn usage_rects(g: &Gfx, x: f32, y: f32, width: f32, label: &str, percent: &str, reset: &str) -> (R, R, R, R) {
+    let h = lh(12.0);
+    let gap = crate::tokens::SP_S;
+    let text_room = crate::tokens::SP_XS;
+    let right = x + width - CARD_PAD;
+    let rw = g.measure(reset, txt(11.0, 400)).0.ceil() + text_room;
+    let pw = g.measure(percent, txt(12.0, 500)).0.ceil() + text_room;
+    let reset = R::new(right - rw, y, rw, h);
+    let percent = R::new(reset.x - gap - pw, y, pw, h);
+    let lw = (g.measure(label, txt(12.0, 400)).0.ceil() + text_room).max(56.0).min((percent.x - x - gap).max(0.0));
+    let label = R::new(x, y, lw, h);
+    let bar_x = label.x + label.w + gap;
+    let bar = R::new(bar_x, y + (h - 6.0) / 2.0, (percent.x - gap - bar_x).max(0.0), 6.0);
+    (label, bar, percent, reset)
+}
+
 fn phase_name(p: &str) -> &'static str { match p { "short" => "Short break", "long" => "Long break", _ => "Focus" } }
 
 /// timer.pomo.toggle: pause with the time left, or run until now + left.
@@ -442,12 +482,17 @@ fn add_secs(st: &SYSTEMTIME, secs: i64) -> SYSTEMTIME {
 fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { crate::tokens::CHIP_PAD + if icon { crate::tokens::CHIP_ICON + crate::tokens::CHIP_ICON_GAP } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + crate::tokens::CHIP_PAD }
 
 impl Island {
+    fn adapt_width(&self, g: &Gfx) {
+        let choice = crate::bridge::permit::pending().map(|p| p.3).unwrap_or(Value::Null);
+        self.width.set(choice_panel_width(g, &choice, self.max_width, self.max_h * 0.45));
+    }
+
     fn plan(&self, g: &Gfx, cx: &Ctx) -> Vec<(Sec, f32)> {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
-        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width(self.width))); v.push((Sec::Ask(q), h)); }
+        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width(self.width.get()))); v.push((Sec::Ask(q), h)); }
         if let Some((label, _, q, choice)) = crate::bridge::permit::pending() {
-            let h = if choice.is_null() { ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width(self.width))) } else { permit_choice_h(g, &choice, self.width, self.max_h * 0.45) };
+            let h = if choice.is_null() { ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), question_width(self.width.get()))) } else { permit_choice_h(g, &choice, self.width.get(), self.max_h * 0.45) };
             v.push((Sec::Permit(format!("{label} is asking"), q, choice), h));
         }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
@@ -497,7 +542,7 @@ impl Island {
                     }
                 },
             };
-            let h = if items.is_empty() { crate::tokens::ISLAND_HEAD_H + g.measure_wrapped(&note, txt(12.5, 400), self.width - 2.0 * PAD) } else {
+            let h = if items.is_empty() { crate::tokens::ISLAND_HEAD_H + g.measure_wrapped(&note, txt(12.5, 400), self.width.get() - 2.0 * PAD) } else {
                 22.0 + items.iter().map(|x| crate::tokens::ISLAND_GAP + clip_row_h(x["image"].as_bool() == Some(true))).sum::<f32>()
             };
             v.push((Sec::Clips(items, note), h));
@@ -514,6 +559,9 @@ impl Island {
         } else {
             out.extend(shown);
         }
+        let send = crate::localsend_panel::Panel::new(cx);
+        let height = send.height(g, self.width.get() - 2.0 * PAD);
+        out.push((Sec::Send(send), height));
         out
     }
 
@@ -544,7 +592,7 @@ impl Island {
 
     fn now_playing(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, lyr: f32) {
         let (t, Some(m)) = (&cx.theme, cx.media.as_ref()) else { return };
-        let (w, pos) = (self.width - 2.0 * PAD, self.scrub.get().filter(|_| m.duration > 0.0).map_or(m.now(), |v| v as f64 * m.duration));
+        let (w, pos) = (self.width.get() - 2.0 * PAD, self.scrub.get().filter(|_| m.duration > 0.0).map_or(m.now(), |v| v as f64 * m.duration));
         let art = R::new(x, y, 92.0, 92.0);
         c.rect(art, crate::tokens::ISLAND_ART_R, t.c("secondaryContainer"));
         match self.art(c.g, m, (92.0 * c.scale).round() as u32) {
@@ -629,13 +677,13 @@ impl Island {
     /// The buddy's question, or a Claude Code permission (`permit`), with Allow, Deny and a box to answer in words.
     /// Answering is the only way a take-over starts or a risky click goes through.
     fn ask(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, q: &str, permit: Option<&str>) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let (icon, head) = match permit { Some(h) => ("terminal", h), None => ("smart_toy", "The buddy is asking") };
         c.icon(icon, R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
         c.text(head, R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         let y = y + crate::tokens::ISLAND_HEAD_H;
         let f = txt(13.0, 400);
-        self.ask_full = c.g.measure_wrapped(q, f, question_width(self.width));
+        self.ask_full = c.g.measure_wrapped(q, f, question_width(self.width.get()));
         let qr = R::new(x, y, w, ask_h(self.ask_full));
         c.hit(qr, ASK_Q);
         let full = self.ask_full;
@@ -659,7 +707,7 @@ impl Island {
     /// A plan (its text, then Approve or Keep planning) or questions (each option a row to tap, then the reply box, and
     /// Send when several answers are due). Plans answer through permit::decide, questions through permit::answer.
     fn permit_choice(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, head: &str, choice: &Value) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let plan = choice["kind"] == "plan";
         let qs = questions_of(choice);
         c.icon("terminal", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("tertiary"));
@@ -668,7 +716,7 @@ impl Island {
         let f = txt(13.0, 400);
         if plan {
             let text = choice["plan"].as_str().unwrap_or("");
-            self.ask_full = c.g.measure_wrapped(text, f, question_width(self.width));
+            self.ask_full = c.g.measure_wrapped(text, f, question_width(self.width.get()));
             let qr = R::new(x, y, w, ask_h(self.ask_full));
             c.hit(qr, ASK_Q);
             let full = self.ask_full;
@@ -676,7 +724,8 @@ impl Island {
             y += qr.h + PERMIT_GAP;
         }
         if !plan {
-            self.choice_full = (qs.iter().map(|q| question_h(c.g, q, self.width) + PERMIT_GAP).sum::<f32>() - PERMIT_GAP).max(0.0);
+            let (cols, full) = choice_layout(c.g, choice, self.width.get(), self.max_h * 0.45);
+            self.choice_full = full;
             self.choice_view = self.choice_full.min(self.max_h * 0.45);
             let qr = R::new(x, y, w, self.choice_view);
             c.hit(qr, CHOICE_SCROLL);
@@ -690,27 +739,26 @@ impl Island {
                         y += lh(12.0) + crate::tokens::SP_XS;
                     }
                     let text = q["question"].as_str().unwrap_or("");
-                    let th = c.g.measure_wrapped(text, f, question_width(self.width));
-                    c.para(text, R::new(x, y, question_width(self.width), th), f, t.c("onSurface"), Align::Left);
+                    let th = c.g.measure_wrapped(text, f, question_width(self.width.get()));
+                    c.para(text, R::new(x, y, question_width(self.width.get()), th), f, t.c("onSurface"), Align::Left);
                     y += th + crate::tokens::SP_S;
-                    let cols = option_columns(self.width);
                     for (ri, row) in options_of(q).chunks(cols).enumerate() {
                         if ri > 0 { y += SESS_GAP; }
-                        let row_h = row.iter().map(|o| option_h(c.g, o, self.width)).fold(0.0, f32::max);
+                        let row_h = row.iter().map(|o| option_h(c.g, o, self.width.get(), cols)).fold(0.0, f32::max);
                         for (ci, o) in row.iter().enumerate() {
                             let oi = ri * cols + ci;
-                            let r = R::new(x + ci as f32 * (option_row_w(self.width) + SESS_GAP), y, option_row_w(self.width), row_h);
+                            let r = R::new(x + ci as f32 * (option_row_w(self.width.get(), cols) + SESS_GAP), y, option_row_w(self.width.get(), cols), row_h);
                             let over = c.hit(r, PERMIT_OPT + (qi * PERMIT_MAX + oi) as u32);
                             let picked = self.picks.get(qi).is_some_and(|p| p.contains(&oi));
                             c.rect(r, crate::tokens::ISLAND_ROW_R, cx.theme.c(if picked { "secondaryContainer" } else { "surfaceContainer" }));
                             if over { c.rect(r, crate::tokens::ISLAND_ROW_R, alpha(t.c("onSurface"), crate::tokens::HOVER_A)); }
                             let (fg, fgv) = if picked { (t.c("onSecondaryContainer"), t.c("onSecondaryContainer")) } else { (t.c("onSurface"), t.c("onSurfaceVariant")) };
                             let lab = o["label"].as_str().unwrap_or("");
-                            let label_h = c.g.measure_wrapped(lab, txt(13.0, 500), option_w(self.width));
-                            c.para(lab, R::new(r.x + CARD_PAD, r.y + CARD_PAD, option_w(self.width), label_h), txt(13.0, 500), fg, Align::Left);
+                            let label_h = c.g.measure_wrapped(lab, txt(13.0, 500), option_w(self.width.get(), cols));
+                            c.para(lab, R::new(r.x + CARD_PAD, r.y + CARD_PAD, option_w(self.width.get(), cols), label_h), txt(13.0, 500), fg, Align::Left);
                             if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
-                                let dh = c.g.measure_wrapped(d, txt(12.0, 400), option_w(self.width));
-                                c.para(d, R::new(r.x + CARD_PAD, r.y + CARD_PAD + label_h + crate::tokens::SP_XS, option_w(self.width), dh), txt(12.0, 400), fgv, Align::Left);
+                                let dh = c.g.measure_wrapped(d, txt(12.0, 400), option_w(self.width.get(), cols));
+                                c.para(d, R::new(r.x + CARD_PAD, r.y + CARD_PAD + label_h + crate::tokens::SP_XS, option_w(self.width.get(), cols), dh), txt(12.0, 400), fgv, Align::Left);
                             }
                         }
                         y += row_h;
@@ -784,7 +832,7 @@ impl Island {
     }
 
     fn rec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let since = hub::get("zor-ui.rec").and_then(|r| r.parse::<f64>().ok()).unwrap_or(0.0);
         let pulse = 0.25 + 0.75 * (0.5 + 0.5 * (hub::now_ms() / 900.0 * std::f64::consts::PI).cos()) as f32;
         c.circle(x + 5.0, y + 28.0, 5.0, alpha(t.c("error"), pulse));
@@ -794,7 +842,7 @@ impl Island {
     }
 
     fn timer(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let (tm, done) = (hub::timer(), hub::get("zor-ui.timerDone").unwrap_or_default());
         let running = tm["running"].as_bool() == Some(true);
         let sw = done.is_empty() && !running && tm["sw"]["running"].as_bool() == Some(true);
@@ -818,7 +866,7 @@ impl Island {
     }
 
     fn idle(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let now = util::now();
         c.text(&util::clock(now.wHour, now.wMinute, cx.cfg.bool("use24h")), R::new(x, y + 6.0, 220.0, 44.0), txt(44.0, 500), t.c("onSurface"), Align::Left);
         c.text(&util::date_fmt(&now, "dddd, d MMMM"), R::new(x, y + 50.0, 220.0, lh(13.0)), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left);
@@ -833,7 +881,7 @@ impl Island {
     }
 
     fn agents(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], counts: (usize, usize, usize)) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         c.icon("smart_toy", R::new(x, y, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
         c.text("AI agents", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, 16.0), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
         if list.iter().any(|a| a["state"] == "waiting") {
@@ -878,14 +926,14 @@ impl Island {
                 y += USAGE_GAP;
                 let used = u["used_percentage"].as_f64().unwrap_or(0.0);
                 let rs = resets(cx, u["resets_at"].as_f64().unwrap_or(0.0));
-                let rw = c.g.measure(&rs, txt(11.0, 400)).0.ceil();
+                let percent = format!("{}%", used.round());
                 let h = lh(12.0);
-                c.text(usage_name(k), R::new(x, y, 56.0, h), txt(12.0, 400), fade(t.c("onSurface")), Align::Left);
-                let bar = R::new(x + 64.0, y + (h - 6.0) / 2.0, (w - 64.0 - 38.0 - rw - 24.0).max(10.0), 6.0);
+                let (name_r, bar, percent_r, reset_r) = usage_rects(c.g, x, y, w, usage_name(k), &percent, &rs);
+                c.text(usage_name(k), name_r, txt(12.0, 400), fade(t.c("onSurface")), Align::Left);
                 c.rect(bar, crate::tokens::ISLAND_BAR_R, fade(alpha(t.c("primary"), 0.18)));
                 c.rect(R::new(bar.x, bar.y, bar.w * (used.min(100.0) / 100.0) as f32, 6.0), crate::tokens::ISLAND_BAR_R, fade(t.c("primary")));
-                c.text(&format!("{}%", used.round()), R::new(bar.x + bar.w + crate::tokens::SP_S, y, 38.0, h), txt(12.0, 500), fade(t.c("onSurface")), Align::Right);
-                c.text(&rs, R::new(x + w - rw - 2.0, y, rw + 4.0, h), txt(11.0, 400), fade(t.c("onSurfaceVariant")), Align::Right);
+                c.text(&percent, percent_r, txt(12.0, 500), fade(t.c("onSurface")), Align::Right);
+                c.text(&rs, reset_r, txt(11.0, 400), fade(t.c("onSurfaceVariant")), Align::Right);
                 y += h;
             }
             let all = a["sessions"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -917,7 +965,7 @@ impl Island {
 
     /// The tab row: Now, Agents, Inbox and Clipboard. The open one is filled; a count badge shows what is waiting in it.
     fn tabs(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, running: usize, inbox: usize) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let gap = crate::tokens::SP_XS;
         let items = [("Now", "music_note", 0), ("Agents", "smart_toy", running), ("Inbox", "notifications", inbox), ("Clipboard", "content_paste", 0)];
         let icon_gap = crate::tokens::CHIP_ICON_GAP;
@@ -956,7 +1004,7 @@ impl Island {
     /// second, and its subagents indented under it. Returns the y below it.
     /// The filter chips: Needs you, Working and Idle, each with its count. The one on filters the sessions; a second tap clears it.
     fn chips(&self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, counts: (usize, usize, usize)) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let gap = crate::tokens::CHIP_EDGE_PAD;
         let cw = (w - 2.0 * gap) / 3.0;
         let items = [("Needs you", "waiting", counts.0), ("Working", "working", counts.1), ("Idle", "idle", counts.2)];
@@ -1044,7 +1092,7 @@ impl Island {
     }
 
     fn notifs(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value]) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let hh = if list.is_empty() { 16.0 } else { 22.0 };
         c.icon("notifications", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
         c.text("Notifications", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
@@ -1076,7 +1124,7 @@ impl Island {
 
     /// An opened notification: its app and age, the title, the body (scrolls past a few lines), then Back, Open and Dismiss.
     fn notif_detail(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, n: &Value) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let (title, body) = (s(n, "title"), s(n, "body"));
         let (title_h, body_full) = self.notif_text_h(c.g, n);
         self.body_full = body_full;
@@ -1110,7 +1158,7 @@ impl Island {
 
     /// Height of a notification's title and body when they wrap to the panel width.
     fn notif_text_h(&self, g: &Gfx, n: &Value) -> (f32, f32) {
-        let w = self.width - 2.0 * PAD;
+        let w = self.width.get() - 2.0 * PAD;
         (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - 8.0))
     }
 
@@ -1126,7 +1174,7 @@ impl Island {
 
     /// The clipboard history: Win+V items as rows (text, or a thumbnail for an image), a click copies one back.
     fn clips_sec(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], note: &str) {
-        let (t, w) = (&cx.theme, self.width - 2.0 * PAD);
+        let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let hh = if list.is_empty() { 16.0 } else { 22.0 };
         c.icon("content_paste", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
         c.text("Clipboard", R::new(x + crate::tokens::ISLAND_TITLE_X, y, w - crate::tokens::ISLAND_TITLE_X, hh), txt(12.0, 500), t.c("onSurfaceVariant"), Align::Left);
@@ -1197,8 +1245,10 @@ impl Island {
 }
 
 impl View for Island {
+    fn accepts_files(&self) -> bool { true }
     fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
-        (self.width + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM, (Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM).min(self.max_h))
+        self.adapt_width(g);
+        (self.width.get() + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM, (Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM).min(self.max_h))
     }
     fn key(&self, _: &Ctx) -> String { format!("{}", (hub::now_ms() / 1000.0) as u64) }
     fn frame_ms(&self) -> u32 {
@@ -1206,6 +1256,7 @@ impl View for Island {
     }
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
+        self.adapt_width(c.g);
         self.take_banner_notif();
         self.fetch_notifs(cx);
         self.fetch_clips(cx);
@@ -1214,7 +1265,7 @@ impl View for Island {
         if sess != self.picks_for { self.picks.clear(); self.picks_for = sess; self.choice_scroll = Default::default(); self.panel_scroll = Default::default(); }
         let plan = self.plan(c.g, cx);
         let (h, x) = ((Self::content_h(&plan) + 2.0 * PAD).min(self.max_h - 24.0), crate::tokens::ISLAND_SHADOW_ROOM + PAD);
-        ui::panel(c, cx, R::new(crate::tokens::ISLAND_SHADOW_ROOM, crate::tokens::ISLAND_SHADOW_ROOM, self.width, h), crate::tokens::ISLAND_PANEL_R);
+        ui::panel(c, cx, R::new(crate::tokens::ISLAND_SHADOW_ROOM, crate::tokens::ISLAND_SHADOW_ROOM, self.width.get(), h), crate::tokens::ISLAND_PANEL_R);
         let lyr = Self::lyrics_h(cx);
         let mut y = crate::tokens::ISLAND_SHADOW_ROOM + PAD;
         let asking = |p: &(Sec, f32)| matches!(p.0, Sec::Ask(_) | Sec::Permit(..));
@@ -1222,11 +1273,11 @@ impl View for Island {
         self.frames.set(if plan.iter().any(|p| matches!(p.0, Sec::Media)) && cx.media.as_ref().is_some_and(|m| m.playing) { 50 } else if plan.iter().any(|p| matches!(p.0, Sec::Rec)) { 100 }
             else if (self.reply_focus || crate::pill::active()) && plan.iter().any(asking) { 500 } else { 0 }); // the reply caret blinks, the mic fills while listening
         if plan.is_empty() {
-            c.text("Nothing to show. Pick sections in Settings > Dynamic Island", R::new(x, y, self.width - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left);
+            c.text("Nothing to show. Pick sections in Settings > Dynamic Island", R::new(x, y, self.width.get() - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left);
         }
         self.panel_full = Self::content_h(&plan);
         self.panel_view = (h - 2.0 * PAD).max(1.0);
-        let viewport = R::new(x, y, self.width - 2.0 * PAD, self.panel_view);
+        let viewport = R::new(x, y, self.width.get() - 2.0 * PAD, self.panel_view);
         c.hit(viewport, PANEL_SCROLL);
         let mut scroll = std::mem::take(&mut self.panel_scroll);
         let hit_start = c.hits.len();
@@ -1234,7 +1285,7 @@ impl View for Island {
             y = top;
             for (i, (sec, sh)) in plan.iter().enumerate() {
                 if i > 0 {
-                    c.rect(R::new(x, y - SEP / 2.0, self.width - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
+                    c.rect(R::new(x, y - SEP / 2.0, self.width.get() - 2.0 * PAD, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.4));
                 }
                 match sec {
                     Sec::Ask(q) => self.ask(c, cx, x, y, q, None),
@@ -1245,11 +1296,12 @@ impl View for Island {
                     Sec::Timer => self.timer(c, cx, x, y),
                     Sec::Idle => self.idle(c, cx, x, y),
                     Sec::Tabs(running, inbox) => self.tabs(c, cx, x, y, *running, *inbox),
-                    Sec::Empty(msg) => c.text(*msg, R::new(x, y, self.width - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left),
+                    Sec::Empty(msg) => c.text(*msg, R::new(x, y, self.width.get() - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left),
                     Sec::Agents(l, counts) => self.agents(c, cx, x, y, l, *counts),
                     Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
                     Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
                     Sec::Clips(l, note) => self.clips_sec(c, cx, x, y, l, note),
+                    Sec::Send(send) => send.paint(c, cx, x, y, self.width.get() - 2.0 * PAD),
                 }
                 y += sh + SEP;
             }
@@ -1261,7 +1313,10 @@ impl View for Island {
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         let id = cx.media.as_ref().map(|m| m.id.clone()).unwrap_or_default();
         match ev {
+            Input::Files(_, paths) => crate::localsend::drop_files(paths, cx),
             Input::Click(i, Btn::Left) => match i {
+                SEND_REFRESH => crate::localsend::refresh(),
+                i if (SEND_PHONE..SEND_PHONE + SEND_PHONE_MAX as u32).contains(&i) => crate::localsend::choose((i - SEND_PHONE) as usize, cx),
                 ALLOW | DENY => {
                     crate::drive::answer(i == ALLOW);
                     cx.actions.push(Action::Close("island-panel".into()));
@@ -1423,6 +1478,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_reset_times_stay_inside_the_panel_at_compact_and_wide_sizes() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        for width in [330.0, 390.0, crate::tokens::ISLAND_W - 2.0 * PAD, 610.0] {
+            for reset_text in ["resets 04:59", "resets Wed 17:39"] {
+                let x = 27.0;
+                let (label, bar, percent, reset) = usage_rects(&g, x, 40.0, width, "5-hour", "100%", reset_text);
+                assert!(reset.x + reset.w <= x + width - CARD_PAD, "reset column must clear the clipped edge at width {width}");
+                assert!(percent.x + percent.w + crate::tokens::SP_S <= reset.x, "percentage and reset columns must not overlap");
+                assert!(bar.x + bar.w + crate::tokens::SP_S <= percent.x, "bar and percentage columns must not overlap");
+                assert!(bar.x >= label.x + label.w + crate::tokens::SP_S, "label and bar must not overlap");
+                assert!(bar.w > 0.0, "the usage bar should remain visible at width {width}");
+                assert!(reset.w >= g.measure(reset_text, txt(11.0, 400)).0.ceil());
+            }
+        }
+    }
+
+    #[test]
     fn the_volume_row_pushes_the_lyrics_down_by_its_height() {
         assert_eq!(lyrics_top(false), 70.0);
         assert_eq!(lyrics_top(true), 70.0 + crate::tokens::ISLAND_VOL_GAP + VOL_H);
@@ -1576,13 +1649,77 @@ mod tests {
         assert!(permit_choice_h(&g, &described, W, 10000.0) > permit_choice_h(&g, &one, W, 10000.0), "a description adds height");
         // head, the question block, the reply box: one single-select question has no Send row
         let q0 = &one["questions"][0];
-        assert_eq!(permit_choice_h(&g, &one, W, 10000.0), 26.0 + question_h(&g, q0, W) + PERMIT_GAP + ASK_BOX_H);
+        assert_eq!(permit_choice_h(&g, &one, W, 10000.0), 26.0 + question_h(&g, q0, W, 1) + PERMIT_GAP + ASK_BOX_H);
         // two questions: each block with its gap, the box, then the Send row (10 px gap and the chip)
         let (q1, q2) = (&two["questions"][0], &two["questions"][1]);
-        assert_eq!(permit_choice_h(&g, &two, W, 10000.0), 26.0 + question_h(&g, q1, W) + PERMIT_GAP + question_h(&g, q2, W) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0);
+        assert_eq!(permit_choice_h(&g, &two, W, 10000.0), 26.0 + question_h(&g, q1, W, 1) + PERMIT_GAP + question_h(&g, q2, W, 1) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0);
         let plan = json!({ "kind": "plan", "plan": "Step one." });
         assert_eq!(permit_choice_h(&g, &plan, W, 10000.0), 26.0 + ask_h(g.measure_wrapped("Step one.", txt(13.0, 400), question_width(W))) + PERMIT_GAP + ASK_BOX_H + 10.0 + 32.0);
         assert_eq!(questions_of(&json!({ "questions": vec![json!({}); 6] })).len(), PERMIT_MAX, "at most PERMIT_MAX questions are drawn");
+    }
+
+    #[test]
+    fn questions_use_a_grid_only_when_the_column_overflows_and_a_grid_is_shorter() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let short = json!({ "kind": "question", "questions": [{
+            "question": "Which layout do you prefer?", "options": [{ "label": "Column" }, { "label": "Grid" }]
+        }] });
+        let compact = crate::tokens::ISLAND_W;
+        assert_eq!(choice_panel_width(&g, &Value::Null, W, 270.0), compact);
+        assert_eq!(choice_panel_width(&g, &short, W, 270.0), compact);
+        assert_eq!(choice_layout(&g, &short, W, 270.0).0, 1, "extra width alone does not enable a grid");
+        let q = json!({ "question": "Which implementation should the agent use?", "options": [
+            { "label": "Implement", "description": "Update the layout and check the result at different screen sizes before proceeding." },
+            { "label": "Review", "description": "Inspect the current behavior and compare the available options before proceeding." },
+            { "label": "Verify", "description": "Check long prompts, wrapped descriptions, scrolling and option selection carefully." },
+            { "label": "Keep", "description": "Continue with the existing implementation and retain the current settings for now." }
+        ] });
+        let long = json!({ "kind": "question", "questions": vec![q.clone(); 4] });
+        assert_eq!(choice_panel_width(&g, &long, W, 270.0), W);
+        let (cols, grid) = choice_layout(&g, &long, W, 270.0);
+        assert_eq!(cols, 2);
+        assert!(grid < choice_body_h(&g, &long, W, 1));
+        assert_eq!(choice_layout(&g, &long, 360.0, 270.0).0, 1, "narrow screens retain readable option widths");
+        assert_eq!(choice_panel_width(&g, &long, W, 10000.0), compact, "roomy screens do not need expansion");
+        let medium = json!({ "kind": "question", "questions": [q] });
+        let a = choice_body_h(&g, &medium, compact, 1);
+        let b = choice_body_h(&g, &medium, W, 1);
+        assert!(b < a);
+        let limit = (a + b) / 2.0;
+        assert_eq!(choice_panel_width(&g, &medium, W, limit), W);
+        assert_eq!(choice_layout(&g, &medium, W, limit).0, 1, "widening can be enough without enabling a grid");
+        let single = json!({ "kind": "question", "questions": [{ "question": "Explain?", "options": [{ "label": "Continue", "description": "Long description. ".repeat(80) }] }] });
+        assert_eq!(choice_layout(&g, &single, W, 20.0).0, 1, "a grid must actually save height");
+    }
+
+    #[test]
+    fn short_choices_render_as_a_compact_column() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let cx = Ctx::new(false);
+        let choice = json!({ "kind": "question", "questions": [{ "question": "Which layout do you prefer?", "options": [
+            { "label": "Keep the column", "description": "Use the compact layout for short prompts." },
+            { "label": "Expand when needed", "description": "Use a grid when it helps a long prompt fit." }
+        ] }] });
+        let width = choice_panel_width(&g, &choice, W, 270.0);
+        let mut island = Island::new((width + 24.0, 600.0));
+        let h = permit_choice_h(&g, &choice, width, 270.0);
+        let mut px = vec![0u8; ((width + 24.0) as usize) * 600 * 4];
+        let mut c = Canvas::new(&g, &mut px, (width + 24.0) as u32, 600, 1.0, 0).unwrap();
+        ui::panel(&mut c, &cx, R::new(12.0, 12.0, width, h + 30.0), crate::tokens::ISLAND_PANEL_R);
+        island.permit_choice(&mut c, &cx, 27.0, 27.0, "Claude is asking", &choice);
+        let first = c.hits.iter().find(|(_, id)| *id == PERMIT_OPT).unwrap().0;
+        let second = c.hits.iter().find(|(_, id)| *id == PERMIT_OPT + 1).unwrap().0;
+        assert_eq!(first.x, second.x);
+        assert!(second.y >= first.y + first.h + SESS_GAP);
+        drop(c);
+        for pixel in px.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        let path = std::env::temp_dir().join("zor-island-adaptive-column.png");
+        let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), (width + 24.0) as u32, 600);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&px).unwrap();
     }
 
     #[test]
@@ -1610,7 +1747,7 @@ mod tests {
             island.permit_choice(&mut c, &cx, 27.0, 27.0, "Claude is asking", &choice);
             assert!(island.choice_full > island.choice_view);
             let option = |id| c.hits.iter().find(|(_, i)| *i == id).unwrap().0;
-            if option_columns(width) == 2 {
+            if choice_layout(&g, &choice, width, island.max_h * 0.45).0 == 2 {
                 assert_eq!(option(PERMIT_OPT).y, option(PERMIT_OPT + 1).y);
                 assert!(option(PERMIT_OPT + 1).x > option(PERMIT_OPT).x);
             } else {

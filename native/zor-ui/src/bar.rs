@@ -355,6 +355,7 @@ pub struct Bar {
     di_fade: Option<(Instant, Option<Color>)>,
     di_hover: bool,
     island_cap: Option<f32>, // the most width the island may take on a narrow bar (from the last frame)
+    drop_width: Option<f32>, // hold the width chosen on drag entry until the file leaves
     di_focus: String,
     di_track: String,
     di_track_until: f64,
@@ -401,7 +402,7 @@ impl Bar {
     }
 
     pub fn new(mon: (i32, i32, i32, i32), edge: Edge, origin: (i32, i32)) -> Bar {
-        Bar { mon, edge, origin, island: Motion::default(), di_state: "", di_bg: None, di_fade: None, di_hover: false, island_cap: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
+        Bar { mon, edge, origin, island: Motion::default(), di_state: "", di_bg: None, di_fade: None, di_hover: false, island_cap: None, drop_width: None, di_focus: String::new(), di_track: String::new(), di_track_until: 0.0, di_scroll_at: 0.0,
             di_scroll: Default::default(), media_scroll: Default::default(), scrolling: false, art: None, tray_px: HashMap::new(), pills: vec![], hover: 0, ws_names: vec![], wm_cmds: vec![], tray_ids: vec![], tray_tips: vec![], utils: vec![], pulsing: false, eq: false, mic_live: false,
             viz: Default::default(), viz_stream: None, viz_loud: false }
     }
@@ -620,6 +621,9 @@ impl Bar {
         let asks = di("agents") && agents.iter().any(|a| a["state"] == "waiting" && !(permit_key(a).is_some() && permit_key(a) == seen));
         let now = hub::now_ms();
         let mut l = vec![];
+        if crate::localsend::drag_hover() { l.push(("localsend-drop", true)); }
+        let transfer = crate::localsend::status();
+        if !transfer.message.is_empty() && (transfer.busy || transfer.until > now) { l.push(("localsend", true)); }
         if cx.notif.as_ref().is_some_and(|n| n.until > now) { l.push(("notification", true)); }
         if cx.osd.as_ref().is_some_and(|o| o.until > now) { l.push(("osd", true)); }
         if asks { l.push(("agent", true)); } // a waiting prompt wins outright, so a badge focus can't hide it
@@ -650,6 +654,19 @@ impl Bar {
         let mut els = vec![];
         self.pulsing = state == "recording";
         match state {
+            "localsend-drop" => {
+                (bg, fg) = (Some(t.c("primaryContainer")), t.c("onPrimaryContainer"));
+                let pulse = if cx.motion { 0.65 + 0.35 * (0.5 + 0.5 * (hub::now_ms() as f32 / 600.0 * std::f32::consts::PI).cos()) } else { 1.0 };
+                self.pulsing = cx.motion;
+                els.push(El::Ico("upload", 20.0, true, alpha(fg, pulse)));
+                els.push(El::Txt("Release to send to your phone".into(), txt(13.0, 500), fg, wide_w));
+            }
+            "localsend" => {
+                let status = crate::localsend::status();
+                (bg, fg) = (Some(t.c("secondaryContainer")), t.c("onSecondaryContainer"));
+                els.push(El::Ico("send", 18.0, true, fg));
+                els.push(El::Txt(status.message, txt(13.0, 400), fg, wide_w));
+            }
             "notification" => {
                 let n = cx.notif.as_ref()?;
                 (bg, fg) = (Some(t.c("secondaryContainer")), t.c("onSecondaryContainer"));
@@ -790,7 +807,12 @@ impl Bar {
                 *m = (*m - 10.0).max(60.0);
             }
         }
-        p.fixed = Some(self.island_width(pill_w(c.g, &p), now, cx.motion));
+        let natural = pill_w(c.g, &p);
+        let target = if state == "localsend-drop" {
+            let width = *self.drop_width.get_or_insert_with(|| self.island.value().max(wide_w).max(natural));
+            width.min(self.island_cap.unwrap_or(width))
+        } else { self.drop_width = None; natural };
+        p.fixed = Some(self.island_width(target, now, cx.motion));
         Some(p)
     }
 
@@ -1041,6 +1063,10 @@ fn group_look_for(cx: &Ctx, p: &Pill, style: &str, groups: &str) -> (Option<Colo
 }
 
 impl View for Bar {
+    fn accepts_files(&self) -> bool { true }
+    fn file_regions(&self, hits: &[(R, u32)], _: f32, _: f32) -> Vec<R> {
+        hits.iter().filter(|(_, id)| *id == ISLAND || (BADGE..CTL + CTL_N).contains(id)).map(|(r, _)| *r).collect()
+    }
     fn size(&self, _g: &Gfx, _cx: &Ctx, scale: f32) -> (f32, f32) {
         if self.edge.vertical() { (BAR_W, self.mon.3 as f32 / scale) } else { (self.mon.2 as f32 / scale, BAR_H) }
     }
@@ -1177,6 +1203,7 @@ impl View for Bar {
 
     fn input(&mut self, ev: Input, cx: &mut Ctx) {
         match ev {
+            Input::Files(id, paths) if id == ISLAND || (BADGE..CTL + CTL_N).contains(&id) => crate::localsend::drop_files(paths, cx),
             Input::Hover(id) => {
                 self.hover = id;
                 let over = id == ISLAND || (BADGE..CTL + CTL_N).contains(&id);
@@ -1250,6 +1277,7 @@ impl Bar {
                 if let Some(p) = Self::island_list(cx).get((i - BADGE) as usize) { self.di_focus = p.0.into(); }
             }
             // a click on the notification banner goes to that notification
+            (ISLAND, Btn::Left) if { let s = crate::localsend::status(); !s.message.is_empty() && (s.busy || s.until > hub::now_ms()) } => self.open_island_panel(cx),
             (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
                 match crate::app::Notif::target(&cx.notif, hub::now_ms()) {
                     Some(crate::bridge::claude_acct::CANCEL) => crate::bridge::claude_acct::cancel(), // the auto-switch banner

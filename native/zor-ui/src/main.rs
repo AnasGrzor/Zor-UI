@@ -17,16 +17,19 @@ mod drive;
 mod driveframe;
 mod dock;
 mod frame;
+mod filedrop;
 mod gfx;
 mod glass;
 mod guides;
-mod glaze;
 mod highlight;
+mod glaze;
 mod buddy;
 mod hub;
 #[cfg(test)]
 mod headless_test;
 mod island;
+mod localsend;
+mod localsend_panel;
 mod island_legacy;
 mod mixer_app;
 mod keymap;
@@ -110,6 +113,7 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
         // `--buddy listen` records your voice for the primary buddy; `--buddy "open steam"` hands it text
         if let Some(i) = arg("--buddy") {
             let what = args[i + 1..].join(" ");

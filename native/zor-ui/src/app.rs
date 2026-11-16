@@ -1020,7 +1020,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             return LRESULT(1);
         }
     }
-    const MOUSE: [u32; 10] = [WM_MOUSEMOVE, win::WM_MOUSELEAVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_LBUTTONDBLCLK, WM_MOUSEWHEEL];
+    const MOUSE: [u32; 11] = [WM_DROPFILES, WM_MOUSEMOVE, win::WM_MOUSELEAVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_LBUTTONDBLCLK, WM_MOUSEWHEEL];
     let ours = |m: u32| MOUSE.contains(&m) || matches!(m, WM_TIMER | WM_APP | WM_CLIPBOARDUPDATE | win::WM_APPBAR | crate::appicon::CALLBACK | WM_KEYDOWN | WM_CHAR);
     if ours(msg) || matches!(msg, WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SYSKEYDOWN | WM_ACTIVATE) {
         // try_borrow: a call made while handling a message (SetWindowPos, DestroyWindow) can re-enter here

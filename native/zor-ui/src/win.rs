@@ -30,12 +30,19 @@ pub enum Input {
     Drag(u32, f32, f32, Phase),
     /// The window gained or lost keyboard focus.
     Focus(bool),
+    /// Files dropped from Explorer, at the painted hit target.
+    Files(u32, Vec<std::path::PathBuf>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase { Start, Move, End }
 
 pub trait View {
+    fn accepts_files(&self) -> bool { false }
+    /// CSS rectangles that accept file drags. Popups exclude their transparent shadow.
+    fn file_regions(&self, _hits: &[(R, u32)], w: f32, h: f32) -> Vec<R> {
+        vec![R::new(12.0, 12.0, (w - 24.0).max(0.0), (h - 24.0).max(0.0))]
+    }
     /// Size in CSS px.
     fn size(&self, g: &Gfx, cx: &Ctx, scale: f32) -> (f32, f32);
     /// Anything time-based the picture depends on; the window repaints when it changes.
@@ -142,6 +149,7 @@ pub struct Win {
     /// What Settings > Usage calls this window (see perf::group).
     part: String,
     pub view: Box<dyn View>,
+    file_drop: Option<crate::filedrop::Registration>,
     /// Desk cards: drag anywhere that isn't a control, and remember the spot under this name.
     pub drag_key: Option<String>,
     appbar: bool,
@@ -205,8 +213,15 @@ impl Win {
             if click_through { ex |= WS_EX_TRANSPARENT; }
             let hwnd = CreateWindowExW(ex, CLASS, &windows::core::HSTRING::from(title), WS_POPUP, x, y, 1, 1, None, None, GetModuleHandleW(None)?, None)?;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, z as isize); // read by wndproc without borrowing the app
+            if view.accepts_files() { DragAcceptFiles(hwnd, true); }
+            let file_drop = if view.accepts_files() {
+                match crate::filedrop::Registration::new(hwnd) {
+                    Ok(target) => Some(target),
+                    Err(e) => { crate::log::line(&format!("file drag registration failed: {e}")); None }
+                }
+            } else { None };
             let dc = CreateCompatibleDC(None);
-            Ok(Win { hwnd, part: crate::perf::group(title), view, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
+            Ok(Win { hwnd, part: crate::perf::group(title), view, file_drop, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
                 hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None, shrink: None })
         }
     }
@@ -357,6 +372,7 @@ impl Win {
             crate::perf::paint(&self.part, t0.elapsed().as_nanos() as u64);
             self.gliding = crate::ui::MOVING.with(|m| m.get());
             self.hits = std::mem::take(&mut c.hits);
+            if let Some(drop) = &self.file_drop { drop.update(self.view.file_regions(&self.hits, w, h)); }
             self.bars = crate::ui::BARS.with(|b| std::mem::take(&mut *b.borrow_mut()));
             drop(c);
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
@@ -411,6 +427,27 @@ impl Win {
     pub fn mouse(&mut self, msg: u32, wp: WPARAM, lp: LPARAM, cx: &mut Ctx) -> bool {
         unsafe {
             match msg {
+                WM_DROPFILES => {
+                    let drop = HDROP(wp.0 as *mut _);
+                    let mut point = POINT::default();
+                    let client = DragQueryPoint(drop, &mut point).as_bool();
+                    let mut paths = Vec::new();
+                    if client {
+                        for i in 0..DragQueryFileW(drop, u32::MAX, None) {
+                            let n = DragQueryFileW(drop, i, None);
+                            let mut buf = vec![0u16; n as usize + 1];
+                            DragQueryFileW(drop, i, Some(&mut buf));
+                            use std::os::windows::ffi::OsStringExt;
+                            paths.push(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..n as usize])));
+                        }
+                    }
+                    DragFinish(drop);
+                    if !paths.is_empty() {
+                        let scale = self.scale();
+                        let hit = self.hit_at(point.x as f32 / scale, point.y as f32 / scale);
+                        self.view.input(Input::Files(hit, paths), cx);
+                    }
+                }
                 WM_MOUSEMOVE => {
                     if let Some(d) = &mut self.drag {
                         let mut p = POINT::default();
@@ -544,6 +581,7 @@ impl Win {
 
 impl Drop for Win {
     fn drop(&mut self) {
+        self.file_drop.take(); // Revoke OLE before destroying its window.
         crate::perf::forget(self.hwnd.0 as isize);
         unsafe {
             if self.appbar {

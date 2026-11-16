@@ -38,6 +38,8 @@ pub fn run(args: &[String]) {
     cx.theme = Theme::parse(&std::fs::read_to_string(pack.join("theme.json")).unwrap_or_default());
     g.set_font(cx.cfg.str("font.family"), cx.cfg.get("font.size").as_f64().unwrap_or(1.0) as f32, cx.cfg.get("font.weight").as_i64().unwrap_or(0) as i32);
     sample(&mut cx);
+    // Preview the drag target without moving the user's pointer or starting a transfer.
+    if std::env::var_os("ZORUI_RENDER_DROP").is_some() { crate::localsend::set_drag_hover(true); }
     // settings pages that load from the network draw spinners without sample data
     if part.starts_with("settings") { std::env::set_var("ZORUI_RENDER_DEMO", "1"); }
     let scale = num(4).unwrap_or(1.0);

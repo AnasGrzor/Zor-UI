@@ -9,7 +9,7 @@ use crate::{agent::provider, conf::Config, proc, screen, util};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex},
+    sync::{atomic::Ordering, mpsc, Mutex},
 };
 
 /// What the buddy was asked to do.
@@ -760,16 +760,49 @@ fn collect_events(rx: &mpsc::Receiver<Option<Value>>, wait: std::time::Duration,
     }
 }
 
-/// The conversation for a screen question: the question with one picture per monitor, each introduced by its label.
-fn screen_convo(cfg: &Config, model: &str, said: &str, caps: &[screen::Cap]) -> String { convo_at(model, screen::SYSTEM, said, caps, crate::agent::temperature(cfg)) }
+/// The conversation for a screen question: the recent screen questions and answers as text (`recent_looks`), then the
+/// question with one picture per monitor, each introduced by its label.
+fn screen_convo(cfg: &Config, model: &str, history: &[(String, String)], said: &str, caps: &[screen::Cap]) -> String {
+    convo_at(model, screen::SYSTEM, history, said, caps, crate::agent::temperature(cfg))
+}
 
 /// One question with a labeled picture per monitor, under the given system prompt. Take-over uses this at 0.2, so its clicks stay precise.
-pub fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String { convo_at(model, system, said, caps, 0.2) }
+pub fn convo_with(model: &str, system: &str, said: &str, caps: &[screen::Cap]) -> String { convo_at(model, system, &[], said, caps, 0.2) }
 
-fn convo_at(model: &str, system: &str, said: &str, caps: &[screen::Cap], temp: f64) -> String {
+fn convo_at(model: &str, system: &str, history: &[(String, String)], said: &str, caps: &[screen::Cap], temp: f64) -> String {
     let images: Vec<Value> = caps.iter().enumerate()
         .map(|(i, c)| json!({ "mime": "image/jpeg", "data": crate::bridge::base64(&c.jpeg), "label": c.label(i, caps.len(), caps.first()) })).collect();
-    json!({ "model": model, "messages": [{ "role": "user", "content": said, "images": images }], "system": system, "temperature": temp }).to_string()
+    let mut messages: Vec<Value> = history.iter().flat_map(|(q, a)| [json!({ "role": "user", "content": q }), json!({ "role": "assistant", "content": a })]).collect();
+    messages.push(json!({ "role": "user", "content": said, "images": images }));
+    json!({ "model": model, "messages": messages, "system": system, "temperature": temp }).to_string()
+}
+
+/// Screen questions asked within `FOLLOW_S` of the one before go out with the last `FOLLOW_MAX` questions and answers, so
+/// "and then?" or "the other one" make sense. Text only: the old pictures and control numbers would mislead next to new ones.
+const FOLLOW_S: u64 = 120;
+const FOLLOW_MAX: usize = 3;
+/// Recent screen questions: when, what you asked, what the buddy answered (with what it pointed at).
+static LOOKS: Mutex<Vec<(std::time::Instant, String, String)>> = Mutex::new(Vec::new());
+
+/// Drops what is too old or too many: a gap of more than `FOLLOW_S` since the newest ends the conversation.
+fn keep_recent(v: &mut Vec<(std::time::Instant, String, String)>, now: std::time::Instant) {
+    if v.last().is_some_and(|l| now.duration_since(l.0).as_secs() > FOLLOW_S) { v.clear(); }
+    let extra = v.len().saturating_sub(FOLLOW_MAX);
+    v.drain(..extra);
+}
+
+/// The screen questions and answers a new screen question follows on from.
+fn recent_looks() -> Vec<(String, String)> {
+    let Ok(mut v) = LOOKS.lock() else { return vec![] };
+    keep_recent(&mut v, std::time::Instant::now());
+    v.iter().map(|(_, q, a)| (q.clone(), a.clone())).collect()
+}
+
+fn remember_look(asked: &str, answer: &str) {
+    if let Ok(mut v) = LOOKS.lock() {
+        v.push((std::time::Instant::now(), asked.to_string(), answer.to_string()));
+        keep_recent(&mut v, std::time::Instant::now());
+    }
 }
 
 /// Where the buddy should fly for a point the model gave: screen pixels, or None when the model named a screen that isn't there.
@@ -809,19 +842,92 @@ fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     let els = crate::drive::tidy_elements(crate::drive::walk_front_window());
     crate::log::line(&format!("screen help: {} controls in {} ms", els.len(), t.elapsed().as_millis()));
     let asked = format!("{said}{}", screen_elements(&caps, &els));
-    let reply = chat(cfg, &screen_convo(cfg, &model, &asked, &caps), 60).map_err(|e| short(&e, 110))?;
+    let reply = chat(cfg, &screen_convo(cfg, &model, &recent_looks(), &asked, &caps), 60).map_err(|e| short(&e, 110))?;
     if reply.trim().is_empty() { return Err("I got no answer from the AI.".into()); }
     let (spoken, point) = screen::parse_point(&reply);
+    let (spoken, more, done) = screen::cut_marks(&spoken);
+    let pointed = point.as_ref().filter(|p| !p.label.is_empty()).map(|p| format!(" (I pointed at: {})", p.label)).unwrap_or_default();
+    remember_look(said, &format!("{spoken}{pointed}"));
+    let step = walk_step(STEPPING.swap(false, Ordering::SeqCst), said);
     let mut said = if spoken.is_empty() { "Here.".to_string() } else { short(&spoken, 160) }; // the bubble is small
     if let Some(p) = &point {
         if let Some(((x, y), rect)) = spot(&caps, &els, p) {
             // a listed control has its own box; for a pixel, UI Automation is asked what is there
-            let boxed = match rect { Some(r) => crate::highlight::show_fit(r, (x, y)), None => crate::highlight::snap(x, y).map(crate::highlight::show).is_some() };
+            let walk = keep_walking(more, done, GOAL.lock().is_ok_and(|g| screen::how_to(&g)), step);
+            let hold = if walk { WALK_WAIT_S as f32 } else { crate::highlight::HOLD_S }; // a step stays up until it is clicked
+            let boxed = match rect { Some(r) => Some(r).filter(|r| crate::highlight::show_fit(*r, (x, y), hold)), None => crate::highlight::snap(x, y).inspect(|r| crate::highlight::show_for(*r, hold)) };
             if crate::buddy::on() { point_later(x, y, &p.label); }
-            else if !boxed { said.push_str(" (Turn on a buddy to see where.)"); }
+            else if boxed.is_none() { said.push_str(" (Turn on a buddy to see where.)"); }
+            // one step of several: the next is asked for once you click what it points at
+            if walk { watch_step(cfg, boxed.unwrap_or([x - WALK_NEAR, y - WALK_NEAR, x + WALK_NEAR, y + WALK_NEAR])); }
         }
     }
     Ok(said)
+}
+
+/// A walkthrough: screen help gives one step at a time (`[MORE]`), and a click on what it pointed at asks for the next.
+/// Stops after `WALK_MAX` steps, when nothing is clicked for `WALK_WAIT_S`, or when another request or a cancel comes.
+const WALK_MAX: u32 = 8;
+const WALK_WAIT_S: u64 = 60;
+/// How near (screen px) to a spot with no box a click must land.
+const WALK_NEAR: i32 = 40;
+/// Bumped by every request and cancel: a step watcher whose number is old stops.
+static WALK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The step of the walkthrough running, and the request it is for.
+static STEP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GOAL: Mutex<String> = Mutex::new(String::new());
+/// Set by the step watcher just before it asks, so screen help counts the question as the next step.
+static STEPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The step number of this screen question: the next one when the step watcher asked it, else 1 with `said` as the goal.
+fn walk_step(stepping: bool, said: &str) -> u32 {
+    if !stepping { if let Ok(mut g) = GOAL.lock() { *g = said.trim().to_string(); } }
+    let n = if stepping { STEP.load(Ordering::SeqCst) + 1 } else { 1 };
+    STEP.store(n, Ordering::SeqCst);
+    n
+}
+
+/// Whether to wait for a click on this step and then ask for the next: the model said more steps follow, or the question
+/// asks how to do something and the model didn't say this step is the last. A pointless extra look costs one AI call;
+/// a walkthrough that stops early because the model forgot `[MORE]` leaves you stuck.
+fn keep_walking(more: bool, done: bool, how_to: bool, step: u32) -> bool { step < WALK_MAX && !done && (more || how_to) }
+
+/// What the step watcher says once you clicked: the goal goes with it, since older steps drop out of the follow-ups.
+pub fn next_step_question(goal: &str) -> String { format!("I did that. What is the next step to: {goal}") }
+
+/// Whether the button went down this poll (it was up the last) at a point inside `area` (left, top, right, bottom).
+pub fn clicked_in(was: bool, down: bool, at: (i32, i32), area: [i32; 4]) -> bool {
+    down && !was && (area[0]..=area[2]).contains(&at.0) && (area[1]..=area[3]).contains(&at.1)
+}
+
+/// Waits on a worker thread for a click inside `area`, then asks screen help for the next step.
+fn watch_step(cfg: &Config, area: [i32; 4]) {
+    use windows::Win32::UI::{Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON}, WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_SWAPBUTTON}};
+    let id = WALK.load(Ordering::SeqCst);
+    let cfg = Config(cfg.0.clone());
+    std::thread::spawn(move || {
+        // the key state is of the physical button: with buttons swapped the primary click is the right one
+        let vk = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        let t0 = std::time::Instant::now();
+        let mut was = true; // a button already down when the watch starts is not the click
+        // shortcut: polls every 20 ms, so a click shorter than that is missed; a mouse hook would catch every one
+        loop {
+            if WALK.load(Ordering::SeqCst) != id || t0.elapsed().as_secs() >= WALK_WAIT_S { return; }
+            let down = unsafe { GetAsyncKeyState(vk.0 as i32) } < 0;
+            let mut at = windows::Win32::Foundation::POINT::default();
+            let _ = unsafe { GetCursorPos(&mut at) };
+            if clicked_in(was, down, (at.x, at.y), area) { break; }
+            was = down;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        crate::highlight::hide();
+        std::thread::sleep(std::time::Duration::from_millis(900)); // the app opens the menu or dialog the click asked for
+        if WALK.load(Ordering::SeqCst) != id || busy() { return; }
+        let goal = GOAL.lock().map(|g| g.clone()).unwrap_or_default();
+        crate::log::line(&format!("walkthrough: step {} clicked", STEP.load(Ordering::SeqCst)));
+        STEPPING.store(true, Ordering::SeqCst);
+        ask_as(&cfg, &next_step_question(&goal), true);
+    });
 }
 
 /// Runs `said` on a worker thread and shows the result in the primary buddy's bubble. A request that comes while another
@@ -831,6 +937,8 @@ pub fn ask(cfg: &Config, said: &str) { ask_as(cfg, said, false) }
 /// `ask`, or with `look` the words go to screen help whatever they say (the look hotkey).
 fn ask_as(cfg: &Config, said: &str, look: bool) {
     let Some(busy) = try_busy() else { say_later("I'm still working on the last request.", 3.0); return; };
+    WALK.fetch_add(1, Ordering::SeqCst); // a new request ends a walkthrough's wait for a click, and its box
+    crate::highlight::hide();
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
         let _busy = busy; // held until this request ends, also when it panics
@@ -908,6 +1016,8 @@ pub fn press_again(cfg: &Config) -> bool {
 /// Stops a recording in progress and hides the pill (the hotkey pressed a second time).
 pub fn cancel() {
     crate::pill::set(0);
+    WALK.fetch_add(1, Ordering::SeqCst);
+    crate::highlight::hide();
     if let Ok(mut l) = LISTENER.lock() { *l = None; } // dropping the stream kills the recorder
 }
 
@@ -1350,7 +1460,7 @@ mod tests {
     #[test]
     fn the_question_goes_out_with_one_labeled_picture_per_monitor() {
         let cap = |x, cursor| screen::Cap { jpeg: vec![0xFF, 0xD8, 0xFF], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
-        let v: Value = serde_json::from_str(&screen_convo(&cfg(json!({ "ai": { "temperature": 0.8 } })), "m", "where is save?", &[cap(0, true), cap(1920, false)])).unwrap();
+        let v: Value = serde_json::from_str(&screen_convo(&cfg(json!({ "ai": { "temperature": 0.8 } })), "m", &[], "where is save?", &[cap(0, true), cap(1920, false)])).unwrap();
         assert_eq!(v["model"], "m");
         assert_eq!(v["system"], screen::SYSTEM);
         assert_eq!(v["temperature"], 0.8, "a screen question uses the Settings temperature");
@@ -1365,16 +1475,57 @@ mod tests {
     }
 
     #[test]
-    fn a_point_maps_to_its_own_monitor_or_nowhere() {
-        let cap = |x, cursor| screen::Cap { jpeg: vec![], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
-        let caps = [cap(0, true), cap(1920, false)];
-        let p = |screen| screen::Point { x: 640.0, y: 360.0, label: String::new(), screen, el: None };
-        assert_eq!(point_target(&caps, &p(None)), Some((960, 540)));
-        assert_eq!(point_target(&caps, &p(Some(2))), Some((1920 + 960, 540)));
-        assert_eq!(point_target(&caps, &p(Some(3))), None, "a screen the model made up points nowhere");
+    fn a_follow_up_screen_question_carries_the_last_answers_as_text() {
+        let cap = screen::Cap { jpeg: vec![0xFF, 0xD8, 0xFF], x: 0, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor: true };
+        let history = [("where is export?".to_string(), "Under File. (I pointed at: File)".to_string())];
+        let v: Value = serde_json::from_str(&screen_convo(&cfg(json!({})), "m", &history, "and then?", &[cap])).unwrap();
+        let m = v["messages"].as_array().unwrap();
+        assert_eq!((m.len(), &m[0]["role"], &m[1]["role"], &m[2]["role"]), (3, &json!("user"), &json!("assistant"), &json!("user")));
+        assert_eq!(m[1]["content"], "Under File. (I pointed at: File)");
+        assert!(m[0]["images"].is_null() && m[2]["images"].as_array().is_some_and(|a| a.len() == 1), "only the new question has a picture");
     }
 
     #[test]
+    fn a_walkthrough_counts_its_steps_and_keeps_the_goal() {
+        assert_eq!(walk_step(false, " export this as pdf "), 1);
+        assert_eq!(walk_step(true, &next_step_question("x")), 2, "the watcher's question is the next step");
+        assert_eq!(walk_step(true, "anything"), 3);
+        assert_eq!(*GOAL.lock().unwrap(), "export this as pdf", "the goal is the question that started it");
+        assert_eq!(next_step_question("export this as pdf"), "I did that. What is the next step to: export this as pdf");
+        assert_eq!(walk_step(false, "where is undo?"), 1, "a question of your own starts over");
+    }
+
+    #[test]
+    fn a_how_to_question_walks_on_without_more_until_the_model_says_done() {
+        assert!(keep_walking(true, false, false, 1), "the model said more steps follow");
+        assert!(keep_walking(false, false, true, 1), "a how-to question goes on though [MORE] was left out");
+        assert!(!keep_walking(false, true, true, 1), "[DONE] ends it");
+        assert!(!keep_walking(false, false, false, 1), "a plain question gets one answer");
+        assert!(!keep_walking(true, false, true, WALK_MAX), "never past the step cap");
+    }
+
+    #[test]
+    fn a_step_is_done_by_a_fresh_click_inside_its_box() {
+        let area = [100, 100, 200, 140];
+        assert!(clicked_in(false, true, (150, 120), area));
+        assert!(!clicked_in(true, true, (150, 120), area), "held down since before: not a new click");
+        assert!(!clicked_in(false, false, (150, 120), area));
+        assert!(!clicked_in(false, true, (250, 120), area), "a click elsewhere");
+    }
+
+    #[test]
+    fn follow_ups_keep_the_last_few_and_end_after_a_long_gap() {
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        let mut v: Vec<_> = (0..5).map(|i| (at(i * 10), format!("q{i}"), "a".to_string())).collect();
+        keep_recent(&mut v, at(50));
+        assert_eq!(v.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["q2", "q3", "q4"]);
+        keep_recent(&mut v, at(40 + FOLLOW_S));
+        assert_eq!(v.len(), 3, "within the gap of the newest");
+        keep_recent(&mut v, at(41 + FOLLOW_S));
+        assert!(v.is_empty(), "a long pause starts a new conversation");
+    }
+
     #[test]
     fn screen_help_lists_controls_in_picture_pixels_and_points_at_them_by_number() {
         let cap = |x, cursor| screen::Cap { jpeg: vec![], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
@@ -1393,6 +1544,17 @@ mod tests {
         assert_eq!(spot(&caps, &els, &p(None)), Some(((960, 540), None)));
     }
 
+    #[test]
+    fn a_point_maps_to_its_own_monitor_or_nowhere() {
+        let cap = |x, cursor| screen::Cap { jpeg: vec![], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
+        let caps = [cap(0, true), cap(1920, false)];
+        let p = |screen| screen::Point { x: 640.0, y: 360.0, label: String::new(), screen, el: None };
+        assert_eq!(point_target(&caps, &p(None)), Some((960, 540)));
+        assert_eq!(point_target(&caps, &p(Some(2))), Some((1920 + 960, 540)));
+        assert_eq!(point_target(&caps, &p(Some(3))), None, "a screen the model made up points nowhere");
+    }
+
+    #[test]
     fn the_buddy_is_sent_to_one_spot_at_a_time() {
         let _ = next_point();
         assert_eq!(next_point(), None);

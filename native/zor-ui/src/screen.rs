@@ -170,6 +170,22 @@ pub fn target(caps: &[Cap], screen: Option<usize>) -> Option<&Cap> {
     match screen { Some(n) => caps.get(n.checked_sub(1)?), None => caps.first() }
 }
 
+/// Cuts the `[MORE]` and `[DONE]` marks from the words: (the words, more steps follow this one, this is the last step).
+pub fn cut_marks(spoken: &str) -> (String, bool, bool) {
+    let words = spoken.replace("[MORE]", "").replace("[DONE]", "").split_whitespace().collect::<Vec<_>>().join(" ");
+    (words, spoken.contains("[MORE]"), spoken.contains("[DONE]"))
+}
+
+/// Phrases that ask how to do something, which usually takes several clicks.
+const HOW_TO: [&str; 8] = ["how do i", "how can i", "how to", "how would i", "show me how", "walk me through", "help me", "step by step"];
+
+/// Whether a screen question asks how to do something. Such a walkthrough goes on after each click even when the model
+/// forgets `[MORE]`, and ends on `[DONE]` or when the model points at nothing.
+pub fn how_to(said: &str) -> bool {
+    let words = said.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    HOW_TO.iter().any(|p| format!(" {words} ").contains(&format!(" {p} ")))
+}
+
 /// A screen position as (picture index, x, y in that picture): the inverse of `to_screen`. None when no monitor holds it.
 pub fn to_picture(caps: &[Cap], x: i32, y: i32) -> Option<(usize, i32, i32)> {
     let i = caps.iter().position(|c| x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)?;
@@ -194,7 +210,10 @@ is labeled with its size) and label is 1 to 3 words naming it. When you are show
 with the number of the screen the spot is on, like [POINT:x,y:label:screen1], using the numbers in the picture labels (they \
 say where each screen sits, so \"the left monitor\" is the one marked left of screen 1). You may also get a numbered list of the \
 buttons, fields and links in the window in front: when the spot is one of them, point with its number instead of pixels, like \
-[POINT:#3:label], since its number is exact. If pointing would not help, end with [POINT:none].";
+[POINT:#3:label], since its number is exact. When what they want takes several steps, say only the next step, point at \
+what to click for it and put [MORE] just before the tag: you are shown the screen again once they click it. On the last \
+step put [DONE] there instead. When you are told a step was done and nothing is left to do, say so in a few words and end \
+with [POINT:none]. If pointing would not help, end with [POINT:none].";
 
 #[cfg(test)]
 mod tests {
@@ -286,6 +305,14 @@ mod tests {
         assert_eq!(parse_point("Here. [POINT: #12 ]").1.and_then(|p| p.el), Some(12));
         assert_eq!(parse_point("Here. [POINT:#0:x]"), ("Here.".into(), None), "controls count from 1");
         assert_eq!(parse_point("Here. [POINT:#two:x]"), ("Here.".into(), None));
+        assert_eq!(cut_marks("Open the File menu. [MORE]"), ("Open the File menu.".into(), true, false));
+        assert_eq!(cut_marks("Click  [MORE] Export."), ("Click Export.".into(), true, false));
+        assert_eq!(cut_marks("Click Export. [DONE]"), ("Click Export.".into(), false, true));
+        assert_eq!(cut_marks("Click Export."), ("Click Export.".into(), false, false));
+        assert!(how_to("How do I export this as a PDF?"));
+        assert!(how_to("walk me through turning on dark mode"));
+        assert!(!how_to("what is this button?"));
+        assert!(!how_to("show me the photos"), "a phrase must match whole words");
     }
 
     #[test]

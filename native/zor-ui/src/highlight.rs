@@ -19,14 +19,14 @@ use windows::Win32::{
 };
 
 /// Seconds the box stays: the buddy's flight (at most 1.4 s) and his stay at the spot (`buddy::POINT_HOLD`, 8 s), rounded down.
-const HOLD_S: f32 = 9.0;
+pub const HOLD_S: f32 = 9.0;
 /// Room around the control for the box's strokes and glow (CSS px).
 const PAD: f32 = 8.0;
 /// Ancestors checked above the control under the spot: a button's text or icon is often what the point lands on.
 const CLIMB: usize = 4;
 
 /// The box to show (screen px: left, top, right, bottom) and when it was asked for.
-static SPOT: Mutex<Option<([i32; 4], Instant)>> = Mutex::new(None);
+static SPOT: Mutex<Option<([i32; 4], Instant, f32)>> = Mutex::new(None);
 /// The box window's handle and the request it draws.
 static CUR: Mutex<Option<(isize, [i32; 4], Instant)>> = Mutex::new(None);
 
@@ -75,22 +75,31 @@ fn monitor(at: (i32, i32)) -> [i32; 4] {
 }
 
 /// Shows a box around a control already known (screen help's list) if it `fits`; false when it doesn't.
-pub fn show_fit(r: [i32; 4], at: (i32, i32)) -> bool {
+pub fn show_fit(r: [i32; 4], at: (i32, i32), secs: f32) -> bool {
     let ok = fits(r, at, monitor(at));
-    if ok { show(r); }
+    if ok { show_for(r, secs); }
     ok
 }
 
 /// Shows a box around `r` (screen px), replacing any box still up.
-pub fn show(r: [i32; 4]) {
-    if let Ok(mut s) = SPOT.lock() { *s = Some((r, Instant::now())); }
+pub fn show(r: [i32; 4]) { show_for(r, HOLD_S) }
+
+/// `show` for `secs` (a walkthrough step stays until it is clicked).
+pub fn show_for(r: [i32; 4], secs: f32) {
+    if let Ok(mut s) = SPOT.lock() { *s = Some((r, Instant::now(), secs)); }
     crate::app::post(Box::new(|_| {})); // the app makes the window in `sync`
 }
 
-/// The box's opacity `el` seconds after it was asked for: in over 0.25 s, out over the last 0.4 s.
-pub fn fade(el: f32) -> f32 { (el / 0.25).min(1.0).min((HOLD_S - el) / 0.4).max(0.0) }
+/// Takes the box down at once (its step was clicked).
+pub fn hide() {
+    if let Ok(mut s) = SPOT.lock() { *s = None; }
+    crate::app::post(Box::new(|_| {}));
+}
 
-struct Outline { r: [i32; 4], t0: Instant, gone: bool }
+/// The box's opacity `el` seconds after it was asked for, for a box up `hold` seconds: in over 0.25 s, out over the last 0.4 s.
+pub fn fade(el: f32, hold: f32) -> f32 { (el / 0.25).min(1.0).min((hold - el) / 0.4).max(0.0) }
+
+struct Outline { r: [i32; 4], t0: Instant, hold: f32, gone: bool }
 
 impl View for Outline {
     fn size(&self, _: &Gfx, _: &Ctx, scale: f32) -> (f32, f32) {
@@ -101,8 +110,8 @@ impl View for Outline {
 
     fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
         let el = self.t0.elapsed().as_secs_f32();
-        let a = fade(el);
-        if el > HOLD_S && !std::mem::replace(&mut self.gone, true) { crate::app::post(Box::new(|_| {})); } // `sync` closes it
+        let a = fade(el, self.hold);
+        if el > self.hold && !std::mem::replace(&mut self.gone, true) { crate::app::post(Box::new(|_| {})); } // `sync` closes it
         if a <= 0.0 { return; }
         let (col, pulse) = (cx.theme.c("primary"), (el * 4.0).sin() * 0.5 + 0.5);
         let g = 1.0 + 1.5 * pulse;
@@ -118,12 +127,12 @@ impl View for Outline {
 
 /// Opens, replaces or closes the box window to match the last request. Cheap when nothing changed.
 pub fn sync(app: &mut App) {
-    let want = SPOT.lock().ok().and_then(|s| *s).filter(|(_, t0)| t0.elapsed().as_secs_f32() <= HOLD_S);
+    let want = SPOT.lock().ok().and_then(|s| *s).filter(|(_, t0, hold)| t0.elapsed().as_secs_f32() <= *hold);
     let mut cur = CUR.lock().unwrap_or_else(|e| e.into_inner());
-    if cur.map(|c| (c.1, c.2)) == want { return; }
+    if cur.map(|c| (c.1, c.2)) == want.map(|w| (w.0, w.1)) { return; }
     if let Some((h, ..)) = cur.take() { app.wins.retain(|w| w.hwnd.0 as isize != h); }
-    let Some((r, t0)) = want else { return };
-    let Ok(mut w) = Win::new(Box::new(Outline { r, t0, gone: false }), "Zor UI / highlight", r[0], r[1], Z::Top, true) else { return };
+    let Some((r, t0, hold)) = want else { return };
+    let Ok(mut w) = Win::new(Box::new(Outline { r, t0, hold, gone: false }), "Zor UI / highlight", r[0], r[1], Z::Top, true) else { return };
     crate::drive::hide_from_capture(w.hwnd); // the next screen question sees the app, not the box
     w.update(&app.g, &app.cx, true);
     let pad = (PAD * w.scale()).round() as i32;
@@ -165,9 +174,10 @@ mod tests {
 
     #[test]
     fn the_box_fades_in_and_out_within_its_time() {
-        assert_eq!(fade(0.0), 0.0);
-        assert_eq!(fade(1.0), 1.0);
-        assert!(fade(HOLD_S - 0.2) < 1.0 && fade(HOLD_S - 0.2) > 0.0);
-        assert_eq!(fade(HOLD_S + 1.0), 0.0);
+        assert_eq!(fade(0.0, HOLD_S), 0.0);
+        assert_eq!(fade(1.0, HOLD_S), 1.0);
+        assert!(fade(HOLD_S - 0.2, HOLD_S) < 1.0 && fade(HOLD_S - 0.2, HOLD_S) > 0.0);
+        assert_eq!(fade(HOLD_S + 1.0, HOLD_S), 0.0);
+        assert_eq!(fade(30.0, 60.0), 1.0, "a walkthrough step stays up");
     }
 }

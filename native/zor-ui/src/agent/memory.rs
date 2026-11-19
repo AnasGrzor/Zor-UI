@@ -8,7 +8,12 @@ use serde_json::Value;
 use std::{collections::BTreeSet, path::{Path, PathBuf}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Memory { pub id: i64, pub text: String, pub created: i64, pub updated: i64, pub kind: Option<String>, pub project: Option<String> }
+pub struct Memory { pub id: i64, pub text: String, pub created: i64, pub updated: i64, pub kind: Option<String>, pub project: Option<String>, pub source: Option<String> }
+
+/// Where a fact came from, stored in `source`. None: the user asked for it to be kept. Heard: picked up from something the user
+/// said (`learn.rs`). Seen: a project the window in front showed when the user named it.
+pub const SOURCE_HEARD: &str = "heard";
+pub const SOURCE_SEEN: &str = "seen";
 
 /// What a fact is for, stored in `kind` when it is saved. A row with no kind (saved before the column existed) is read by its text.
 pub const KIND_PREFERENCE: &str = "preference";
@@ -76,7 +81,8 @@ fn setup(conn: &Connection) -> Result<(), String> {
          CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text);",
     ).map_err(|e| format!("could not set up memory: {e}"))?;
     // nullable and additive: rows saved before these columns keep NULL and are classified by their text
-    add_column(conn, "kind", "TEXT").and_then(|_| add_column(conn, "project", "TEXT")).map_err(|e| format!("could not set up memory: {e}"))
+    add_column(conn, "kind", "TEXT").and_then(|_| add_column(conn, "project", "TEXT")).and_then(|_| add_column(conn, "source", "TEXT"))
+        .map_err(|e| format!("could not set up memory: {e}"))
 }
 
 /// Adds `col` to `memories` when the table lacks it. Existing rows are left as they are.
@@ -87,12 +93,12 @@ fn add_column(conn: &Connection, col: &str, decl: &str) -> rusqlite::Result<()> 
 }
 
 fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
-    Ok(Memory { id: r.get(0)?, text: r.get(1)?, created: r.get(2)?, updated: r.get(3)?, kind: r.get(4)?, project: r.get(5)? })
+    Ok(Memory { id: r.get(0)?, text: r.get(1)?, created: r.get(2)?, updated: r.get(3)?, kind: r.get(4)?, project: r.get(5)?, source: r.get(6)? })
 }
 
 /// Every stored fact, oldest first.
 pub fn all(conn: &Connection) -> rusqlite::Result<Vec<Memory>> {
-    let mut stmt = conn.prepare("SELECT id, text, created, updated, kind, project FROM memories ORDER BY id")?;
+    let mut stmt = conn.prepare("SELECT id, text, created, updated, kind, project, source FROM memories ORDER BY id")?;
     let rows = stmt.query_map([], from_row)?;
     rows.collect()
 }
@@ -114,15 +120,55 @@ pub fn add_as(conn: &Connection, text: &str, kind: Option<&str>, project: Option
             tx.execute("UPDATE memory_fts SET text = ?1 WHERE rowid = ?2", params![text, m.id]).map_err(db)?;
             Outcome::Updated(m.id)
         }
-        None => {
-            tx.execute("INSERT INTO memories (text, created, updated, kind, project) VALUES (?1, ?2, ?2, ?3, ?4)", params![text, now, kind, project]).map_err(db)?;
-            let id = tx.last_insert_rowid();
-            tx.execute("INSERT INTO memory_fts (rowid, text) VALUES (?1, ?2)", params![id, text]).map_err(db)?;
-            Outcome::Added(id)
-        }
+        None => Outcome::Added(insert(&tx, text, kind, project, None, now).map_err(db)?),
     };
     tx.commit().map_err(db)?;
     Ok(outcome)
+}
+
+/// Adds one row and its search entry, with no duplicate check. Returns the new id.
+fn insert(conn: &Connection, text: &str, kind: Option<&str>, project: Option<&str>, source: Option<&str>, now: i64) -> rusqlite::Result<i64> {
+    conn.execute("INSERT INTO memories (text, created, updated, kind, project, source) VALUES (?1, ?2, ?2, ?3, ?4, ?5)", params![text, now, kind, project, source])?;
+    let id = conn.last_insert_rowid();
+    conn.execute("INSERT INTO memory_fts (rowid, text) VALUES (?1, ?2)", params![id, text])?;
+    Ok(id)
+}
+
+/// Keeps a fact picked up from what the user said (`learn.rs`), marked heard. Same rules as `add_as`: secrets are refused, and a
+/// fact matching a stored one updates it (a fact the user asked to keep stays marked as asked).
+pub fn add_heard(conn: &Connection, text: &str, kind: Option<&str>, now: i64) -> Result<Outcome, String> {
+    let outcome = add_as(conn, text, kind, None, now)?;
+    if let Outcome::Added(id) = outcome {
+        conn.execute("UPDATE memories SET source = ?1 WHERE id = ?2", params![SOURCE_HEARD, id]).map_err(|e| format!("could not save memory: {e}"))?;
+    }
+    Ok(outcome)
+}
+
+/// Keeps the active project's name as a project fact, marked seen, unless a fact for that project is already kept. Inserted with
+/// no duplicate check, so it can never overwrite a fact whose words happen to match. True when it was added.
+pub fn learn_project_in(conn: &Connection, project: &str, now: i64) -> Result<bool, String> {
+    let db = |e: rusqlite::Error| format!("could not save memory: {e}");
+    let project = project.to_lowercase();
+    if all(conn).map_err(db)?.iter().any(|m| m.project.as_deref().is_some_and(|p| p.to_lowercase() == project)) { return Ok(false); }
+    insert(conn, &format!("Project: {project}"), Some(KIND_PROJECT), Some(&project), Some(SOURCE_SEEN), now).map_err(db)?;
+    Ok(true)
+}
+
+/// `learn_project_in` on the app's memory. A failure is logged; the request goes on.
+pub fn learn_project(project: &str) {
+    match with_app(|c| learn_project_in(c, project, now())).and_then(|r| r) {
+        Ok(true) => { changed(); crate::log::line(&format!("buddy learned the project {project}")); }
+        Ok(false) => {}
+        Err(e) => crate::log::line(&format!("buddy could not keep the project: {e}")),
+    }
+}
+
+/// `add_heard` on the app's memory. A failure or a refused fact is logged; the request goes on.
+pub fn heard(text: &str, kind: Option<&str>) {
+    match with_app(|c| add_heard(c, text, kind, now())).and_then(|r| r) {
+        Ok(_) => { changed(); crate::log::line(&format!("buddy kept a fact it heard ({} characters)", text.chars().count())); }
+        Err(e) => crate::log::line(&format!("buddy did not keep a heard fact: {e}")),
+    }
 }
 
 /// A fact saved with no kind and no project, as the tests and the earlier code saved them.
@@ -164,7 +210,7 @@ pub(crate) fn quote(t: &str) -> String { format!("\"{t}\"") }
 
 fn ranked(conn: &Connection, expr: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.text, m.created, m.updated, m.kind, m.project FROM memory_fts
+        "SELECT m.id, m.text, m.created, m.updated, m.kind, m.project, m.source FROM memory_fts
          JOIN memories m ON m.id = memory_fts.rowid
          WHERE memory_fts MATCH ?1
          ORDER BY bm25(memory_fts), m.updated DESC LIMIT ?2")?;
@@ -515,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_write_clears_the_list_the_settings_page_reads() {
-        *CACHE.lock().unwrap() = Some(vec![Memory { id: 1, text: "old".into(), created: 0, updated: 0, kind: None, project: None }]);
+        *CACHE.lock().unwrap() = Some(vec![Memory { id: 1, text: "old".into(), created: 0, updated: 0, kind: None, project: None, source: None }]);
         changed();
         assert!(CACHE.lock().unwrap().is_none(), "the next listing reads the database again");
     }
@@ -530,6 +576,29 @@ mod tests {
             with_conn(&slot, &path, &legacy, |c| for_context(c, request, None).unwrap()).unwrap();
         }
         assert_eq!(slot.lock().unwrap().opens, 1, "two lookups and a write, one open");
+    }
+
+    #[test]
+    fn a_heard_fact_is_marked_heard_and_a_restated_asked_fact_stays_asked() {
+        let c = mem();
+        let Outcome::Added(id) = add_heard(&c, "my sister is called Lina", None, 1).unwrap() else { panic!("a new fact is added") };
+        assert_eq!(all(&c).unwrap()[0].source.as_deref(), Some(SOURCE_HEARD), "row {id}");
+        add(&c, "I prefer short answers", 2).unwrap();
+        assert!(matches!(add_heard(&c, "I prefer short answers", None, 3).unwrap(), Outcome::Updated(_)));
+        assert_eq!(all(&c).unwrap()[1].source, None, "what the user asked to keep stays asked");
+        assert!(add_heard(&c, "my password is called hunter2", None, 4).is_err(), "a secret is refused");
+    }
+
+    #[test]
+    fn a_project_is_learned_once_and_never_overwrites_a_fact() {
+        let c = mem();
+        add(&c, "zor-ui project", 1).unwrap();
+        assert!(learn_project_in(&c, "Zor-UI", 2).unwrap());
+        assert!(!learn_project_in(&c, "zor-ui", 3).unwrap(), "already known");
+        let rows = all(&c).unwrap();
+        assert_eq!(rows[0].text, "zor-ui project", "a fact with the same words is left alone");
+        assert_eq!((rows[1].text.as_str(), rows[1].project.as_deref(), rows[1].source.as_deref()), ("Project: zor-ui", Some("zor-ui"), Some(SOURCE_SEEN)));
+        assert!(names_a_project_in(&c, "what's the current state of zor ui"), "the learned project is known by name");
     }
 
     #[test]
@@ -645,7 +714,7 @@ mod tests {
         let cols: Vec<String> = c.prepare("PRAGMA table_info(memories)").unwrap().query_map([], |r| r.get::<_, String>(1)).unwrap().map(Result::unwrap).collect();
         assert!(cols.contains(&"kind".to_string()) && cols.contains(&"project".to_string()), "{cols:?}");
         let rows = all(&c).unwrap();
-        assert_eq!(rows, vec![Memory { id: 1, text: "I prefer short answers".into(), created: 3, updated: 4, kind: None, project: None }]);
+        assert_eq!(rows, vec![Memory { id: 1, text: "I prefer short answers".into(), created: 3, updated: 4, kind: None, project: None, source: None }]);
         assert_eq!(search(&c, "short", 5).unwrap().len(), 1, "the search index still finds it");
     }
 

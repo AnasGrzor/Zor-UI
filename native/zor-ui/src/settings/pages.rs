@@ -104,6 +104,15 @@ const CARD_SIZES: [(&str, &str); 9] = [("", "Default"), ("1x1", "1 × 1"), ("1x2
     ("2x3", "2 × 3"), ("3x2", "3 × 2"), ("3x3", "3 × 3")];
 /// The most remembered facts the Settings list shows; the rest are kept, just not listed.
 const MEMORY_ROWS: usize = 30;
+
+/// The line under a kept fact that says where it came from. A fact the user asked to keep has none.
+fn source_label(source: Option<&str>) -> &'static str {
+    match source {
+        Some(crate::agent::memory::SOURCE_HEARD) => "Heard you say it",
+        Some(crate::agent::memory::SOURCE_SEEN) => "A project you named",
+        _ => "",
+    }
+}
 const KEY_PROVIDERS: [(&str, &str); 8] = [("gemini", "Google Gemini"), ("anthropic", "Anthropic (Claude)"), ("openai", "OpenAI"), ("mistral", "Mistral"),
     ("openrouter", "OpenRouter"), ("elevenlabs", "ElevenLabs (voices)"), ("endpoint", "Custom voice endpoint"), ("wallhaven", "Wallhaven (for NSFW search)")];
 const ISLAND_ACTIONS: [(&str, &str); 6] = [("panel", "Expand the island"), ("sidebar-left", "Left sidebar"), ("sidebar-right", "Right sidebar"),
@@ -206,7 +215,7 @@ impl Settings {
         p.note(&format!("{} remembered. Delete any you don't want kept.", facts.len()), 12.0);
         for m in facts.iter().rev().take(MEMORY_ROWS) {
             let Some(r) = p.row(44.0) else { continue };
-            p.left(r, "psychology", &m.text, "", 40.0);
+            p.left(r, "psychology", &m.text, source_label(m.source.as_deref()), 40.0);
             let id = p.act(Act::Do("forget-memory", m.id.to_string()));
             ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "delete", IconKind::Plain, 20.0, false);
         }
@@ -1432,7 +1441,10 @@ impl Settings {
         p.card(|p| {
             self.sw(p, "ai.claudeCli", "Use my Claude subscription", "Adds Claude Haiku, Sonnet and Opus through Claude Code, no API key. Needs the claude command, signed in. Counts against your plan", "workspace_premium");
             self.sw(p, "ai.memory", "Remember things", "Buddy keeps the facts you ask it to remember, on this PC only, and recalls them when they fit. Passwords and account numbers are never kept", "psychology");
-            if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) { self.memory_list(p); }
+            if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) {
+                self.sw(p, "ai.learn", "Learn from what I say", "Also keeps facts you mention, like \"my sister is called Lina\", and the projects you name. Only from this PC, never from remote chats", "hearing");
+                self.memory_list(p);
+            }
             self.task_list(p);
             self.text_ph(p, "buddies.developerWorkspace", "Developer workspace", "A project folder the buddy may read, check and edit. Empty: developer tools off. Edits ask first and keep a backup", "folder_code", "C:\\path\\to\\project");
             if let Some(r) = p.row(44.0) {
@@ -1859,6 +1871,14 @@ fn monitor_caption(name: &str, i: usize, w: i32, h: i32, custom: bool) -> (Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_kept_fact_says_where_it_came_from() {
+        use crate::agent::memory::{SOURCE_HEARD, SOURCE_SEEN};
+        assert_eq!(super::source_label(Some(SOURCE_HEARD)), "Heard you say it");
+        assert_eq!(super::source_label(Some(SOURCE_SEEN)), "A project you named");
+        assert_eq!(super::source_label(None), "", "a fact the user asked to keep has no label");
+    }
+
     #[test]
     fn a_failed_picture_decode_is_retried_not_cached() {
         use crate::gfx::Gfx;

@@ -12,6 +12,7 @@ pub mod e2e;
 #[cfg(test)]
 pub mod eval;
 pub mod history;
+pub mod learn;
 pub mod memory;
 pub mod metrics;
 pub mod native;
@@ -229,6 +230,8 @@ impl AgentContext {
         let has_turns = with_turns(conversation, |t| !t.is_empty()).unwrap_or(false);
         let unresolved = back && previous_task.is_none() && !has_turns;
         let says_active = project_name.as_deref().is_some_and(|n| project::says_name(said, n));
+        // a project found for this request is kept, so a later request that names it is known when its window is away
+        if learn_on(cfg) { if let Some(n) = &project_name { memory::learn_project(n); } }
         let names_project = says_active || (memory_on(cfg) && memory::names_a_project(said));
         let project = if project::wants_project(said) || says_active { active.as_deref().map(project::describe) } else { None };
         // "it", "this", "that", "the last one" point at the newest turn, which is already in memory: no database read
@@ -911,6 +914,9 @@ pub fn partial_say(text: &str) -> Option<String> {
 /// Whether the buddy keeps and recalls facts. On by default: facts stay on this PC and secrets are refused.
 pub fn memory_on(cfg: &Config) -> bool { cfg.get("ai.memory").as_bool().unwrap_or(true) }
 
+/// Whether the buddy also keeps facts it was not asked to (`learn.rs`) and the projects the user names. Needs memory on.
+pub fn learn_on(cfg: &Config) -> bool { memory_on(cfg) && cfg.get("ai.learn").as_bool().unwrap_or(true) }
+
 /// The facts block for the system prompt. Empty when there is nothing to recall.
 pub fn memory_section(facts: &[String]) -> String {
     if facts.is_empty() { return String::new(); }
@@ -1299,6 +1305,8 @@ fn run_task(cfg: &Config, said: &str, framed: &str, history: &[Value], timing: &
     if let Ok(answer) = &r {
         with_turns(origin.conversation, |t| remember(t, said, answer, Instant::now()));
         history::save(origin.conversation, said, answer);
+        // only the PC's own conversation: in a remote chat someone else may be talking
+        if origin.conversation == DESKTOP && learn_on(cfg) { learn::keep(said); }
     }
     r
 }

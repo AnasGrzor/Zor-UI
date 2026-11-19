@@ -10,7 +10,7 @@ fn defaults() -> Value {
         "scriptsDir": "", "userName": "", "workspaces": 10, "workspacesMain": 5, "workspacesRebind": true, "clockFormat": "EEE, dd/MM '•' HH:mm", "use24h": true,
         "tempUnit": "C", "showKeyboardLayout": false, "showNetSpeed": false, "lyrics": true, "autoGameMode": true, "autoTrackAgents": true, "runOnStartup": true, "customAgents": [],
         "workspaceLabels": [], "alwaysShowNumbers": false, "transparency": 0, "desktopWidgets": true, "syncLockScreen": true,
-        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true, "nativeTools": false, "memory": true },
+        "ai": { "model": "gemini-2.5-flash", "temperature": 0.5, "systemPrompt": "", "claudeCli": true, "nativeTools": false, "memory": true, "learn": true },
         "claude": { "autoSwitch": false, "threshold": 95 },
         "translator": { "source": "auto", "target": "en" },
         "booru": { "source": "yandere", "allowNsfw": false },

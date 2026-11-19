@@ -777,21 +777,49 @@ fn point_target(caps: &[screen::Cap], p: &screen::Point) -> Option<(i32, i32)> {
     screen::target(caps, p.screen).map(|c| screen::to_screen(c, p.x, p.y))
 }
 
-/// Answers a question about the screen: looks at every monitor, asks the model, and sends the buddy to the spot it named.
+/// The front window's controls for a screen question, numbered as `[POINT:#n]` takes them, at their centres in picture
+/// pixels (and the screen, when there are several). Controls on no captured monitor are left out of the text but keep
+/// their number, so `n` always names the same control. Empty when there are none.
+pub fn screen_elements(caps: &[screen::Cap], els: &[crate::drive::El]) -> String {
+    let lines: Vec<String> = els.iter().enumerate().filter_map(|(i, e)| {
+        let (c, x, y) = screen::to_picture(caps, e.centre().0, e.centre().1)?;
+        let on = if caps.len() > 1 { format!(" on screen{}", c + 1) } else { String::new() };
+        Some(format!("[{}] {} \"{}\" at {x},{y}{on}", i + 1, e.role, short(e.name.trim(), 40)))
+    }).collect();
+    if lines.is_empty() { String::new() } else { format!("\n\nButtons, fields and links in the window in front:\n{}", lines.join("\n")) }
+}
+
+/// Where to point and what to outline for the model's point: a listed control's centre and box, or the picture pixel on its
+/// monitor with no box. None for a control number that isn't in the list or a screen that isn't there.
+fn spot(caps: &[screen::Cap], els: &[crate::drive::El], p: &screen::Point) -> Option<((i32, i32), Option<[i32; 4]>)> {
+    match p.el {
+        Some(n) => els.get(n - 1).map(|e| (e.centre(), Some([e.rect.0, e.rect.1, e.rect.2, e.rect.3]))),
+        None => point_target(caps, p).map(|at| (at, None)),
+    }
+}
+
+/// Answers a question about the screen: looks at every monitor and the controls of the window in front, asks the model,
+/// outlines the control it names and sends the buddy there.
 fn screen_help(cfg: &Config, said: &str) -> Result<String, String> {
     let model = screen_model(cfg);
     // checked first, so nothing is captured or sent for a model that can't use it
     if !crate::bridge::model_can_see(&model) { return Err("This model can't see images. Pick another one under Settings, Voice.".into()); }
     let caps = screen::capture_all().map_err(|e| short(&e, 110))?;
-    let reply = chat(cfg, &screen_convo(cfg, &model, said, &caps), 60).map_err(|e| short(&e, 110))?;
+    let t = std::time::Instant::now();
+    let els = crate::drive::tidy_elements(crate::drive::walk_front_window());
+    crate::log::line(&format!("screen help: {} controls in {} ms", els.len(), t.elapsed().as_millis()));
+    let asked = format!("{said}{}", screen_elements(&caps, &els));
+    let reply = chat(cfg, &screen_convo(cfg, &model, &asked, &caps), 60).map_err(|e| short(&e, 110))?;
     if reply.trim().is_empty() { return Err("I got no answer from the AI.".into()); }
     let (spoken, point) = screen::parse_point(&reply);
     let mut said = if spoken.is_empty() { "Here.".to_string() } else { short(&spoken, 160) }; // the bubble is small
-    if let Some((x, y)) = point.as_ref().and_then(|p| point_target(&caps, p)) {
-        // a box around the control there, when UI Automation knows it; the buddy flies over too
-        let boxed = crate::highlight::snap(x, y).map(crate::highlight::show).is_some();
-        if crate::buddy::on() { point_later(x, y, point.as_ref().map_or("", |p| &p.label)); }
-        else if !boxed { said.push_str(" (Turn on a buddy to see where.)"); }
+    if let Some(p) = &point {
+        if let Some(((x, y), rect)) = spot(&caps, &els, p) {
+            // a listed control has its own box; for a pixel, UI Automation is asked what is there
+            let boxed = match rect { Some(r) => crate::highlight::show_fit(r, (x, y)), None => crate::highlight::snap(x, y).map(crate::highlight::show).is_some() };
+            if crate::buddy::on() { point_later(x, y, &p.label); }
+            else if !boxed { said.push_str(" (Turn on a buddy to see where.)"); }
+        }
     }
     Ok(said)
 }
@@ -1340,13 +1368,31 @@ mod tests {
     fn a_point_maps_to_its_own_monitor_or_nowhere() {
         let cap = |x, cursor| screen::Cap { jpeg: vec![], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
         let caps = [cap(0, true), cap(1920, false)];
-        let p = |screen| screen::Point { x: 640.0, y: 360.0, label: String::new(), screen };
+        let p = |screen| screen::Point { x: 640.0, y: 360.0, label: String::new(), screen, el: None };
         assert_eq!(point_target(&caps, &p(None)), Some((960, 540)));
         assert_eq!(point_target(&caps, &p(Some(2))), Some((1920 + 960, 540)));
         assert_eq!(point_target(&caps, &p(Some(3))), None, "a screen the model made up points nowhere");
     }
 
     #[test]
+    #[test]
+    fn screen_help_lists_controls_in_picture_pixels_and_points_at_them_by_number() {
+        let cap = |x, cursor| screen::Cap { jpeg: vec![], x, y: 0, w: 1920, h: 1080, sw: 1280, sh: 720, cursor };
+        let el = |name: &str, rect| crate::drive::El { name: name.into(), role: "button", rect };
+        let els = [el("Save", (90, 90, 210, 150)), el("Lost", (-500, 0, -400, 40)), el("Send", (1920 + 300, 600, 1920 + 420, 660))];
+        let one = screen_elements(&[cap(0, true)], &els);
+        assert!(one.contains("[1] button \"Save\" at 100,80") && !one.contains("screen"), "{one}");
+        assert!(!one.contains("Lost") && !one.contains("Send"), "off every captured screen: left out");
+        let two = screen_elements(&[cap(0, true), cap(1920, false)], &els);
+        assert!(two.contains("[3] button \"Send\" at 240,420 on screen2"), "numbers stay put when one is left out: {two}");
+        assert_eq!(screen_elements(&[cap(0, true)], &[]), "");
+        let caps = [cap(0, true)];
+        let p = |el| screen::Point { x: 640.0, y: 360.0, label: String::new(), screen: None, el };
+        assert_eq!(spot(&caps, &els, &p(Some(1))), Some(((150, 120), Some([90, 90, 210, 150]))));
+        assert_eq!(spot(&caps, &els, &p(Some(9))), None, "a number that isn't listed points nowhere");
+        assert_eq!(spot(&caps, &els, &p(None)), Some(((960, 540), None)));
+    }
+
     fn the_buddy_is_sent_to_one_spot_at_a_time() {
         let _ = next_point();
         assert_eq!(next_point(), None);

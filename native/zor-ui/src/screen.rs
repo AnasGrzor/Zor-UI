@@ -141,11 +141,12 @@ pub fn capture_all() -> Result<Vec<Cap>, String> {
     Ok(out)
 }
 
-/// Where the model said to point, in the coordinates of the picture it was shown.
+/// Where the model said to point, in the coordinates of the picture it was shown, or the number of a listed control (`el`,
+/// counted from 1; x and y are 0 then).
 #[derive(Debug, PartialEq)]
-pub struct Point { pub x: f32, pub y: f32, pub label: String, pub screen: Option<usize> }
+pub struct Point { pub x: f32, pub y: f32, pub label: String, pub screen: Option<usize>, pub el: Option<usize> }
 
-/// Splits an answer into the words to show and the `[POINT:x,y:label:screenN]` tag at its end. `[POINT:none]`,
+/// Splits an answer into the words to show and the `[POINT:x,y:label:screenN]` or `[POINT:#n:label]` tag at its end. `[POINT:none]`,
 /// no tag, or a tag that doesn't parse gives no point; a tag that is there is always cut from the words.
 pub fn parse_point(reply: &str) -> (String, Option<Point>) {
     let t = reply.trim_end();
@@ -153,15 +154,27 @@ pub fn parse_point(reply: &str) -> (String, Option<Point>) {
     let spoken = t[..start].trim().to_string();
     let parts: Vec<&str> = t[start + 7..t.len() - 1].split(':').map(str::trim).collect();
     let screen_of = |s: &str| s.to_lowercase().strip_prefix("screen").and_then(|n| n.parse::<usize>().ok()).filter(|n| *n > 0);
+    if let Some(n) = parts[0].strip_prefix('#') {
+        let el = n.trim().parse::<usize>().ok().filter(|n| *n > 0);
+        let label = parts.get(1).filter(|p| screen_of(p).is_none()).map(|p| p.to_string()).unwrap_or_default();
+        return (spoken, el.map(|el| Point { x: 0.0, y: 0.0, label, screen: None, el: Some(el) }));
+    }
     let Some((x, y)) = parts[0].split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))) else { return (spoken, None) };
     let screen = parts.iter().skip(1).rev().find_map(|p| screen_of(p));
     let label = parts.get(1).filter(|p| screen_of(p).is_none()).map(|p| p.to_string()).unwrap_or_default();
-    (spoken, Some(Point { x, y, label, screen }))
+    (spoken, Some(Point { x, y, label, screen, el: None }))
 }
 
 /// The picture a point belongs to: screen N (counted as in the labels, 1 first) or the pointer's screen.
 pub fn target(caps: &[Cap], screen: Option<usize>) -> Option<&Cap> {
     match screen { Some(n) => caps.get(n.checked_sub(1)?), None => caps.first() }
+}
+
+/// A screen position as (picture index, x, y in that picture): the inverse of `to_screen`. None when no monitor holds it.
+pub fn to_picture(caps: &[Cap], x: i32, y: i32) -> Option<(usize, i32, i32)> {
+    let i = caps.iter().position(|c| x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)?;
+    let c = &caps[i];
+    Some((i, ((x - c.x) as f32 * c.sw as f32 / c.w as f32).round() as i32, ((y - c.y) as f32 * c.sh as f32 / c.h as f32).round() as i32))
 }
 
 /// A point in the picture as a position on the real screen (pixels). Points outside the picture are held to its edge.
@@ -179,7 +192,9 @@ When a button, menu, field or area on the screen would help them, point at it by
 [POINT:x,y:label] where x,y are pixel coordinates in the picture (origin top-left, x to the right, y down; each picture \
 is labeled with its size) and label is 1 to 3 words naming it. When you are shown more than one screen, always end the tag \
 with the number of the screen the spot is on, like [POINT:x,y:label:screen1], using the numbers in the picture labels (they \
-say where each screen sits, so \"the left monitor\" is the one marked left of screen 1). If pointing would not help, end with [POINT:none].";
+say where each screen sits, so \"the left monitor\" is the one marked left of screen 1). You may also get a numbered list of the \
+buttons, fields and links in the window in front: when the spot is one of them, point with its number instead of pixels, like \
+[POINT:#3:label], since its number is exact. If pointing would not help, end with [POINT:none].";
 
 #[cfg(test)]
 mod tests {
@@ -250,23 +265,27 @@ mod tests {
     fn the_tag_is_cut_from_the_words() {
         let (said, p) = parse_point("It's up in the toolbar. [POINT:1100,42:color inspector]");
         assert_eq!(said, "It's up in the toolbar.");
-        assert_eq!(p, Some(Point { x: 1100.0, y: 42.0, label: "color inspector".into(), screen: None }));
+        assert_eq!(p, Some(Point { x: 1100.0, y: 42.0, label: "color inspector".into(), screen: None, el: None }));
         let (said, p) = parse_point("It's on your other monitor. [POINT:400,300:terminal:screen2]\n");
         assert_eq!(said, "It's on your other monitor.");
-        assert_eq!(p, Some(Point { x: 400.0, y: 300.0, label: "terminal".into(), screen: Some(2) }));
+        assert_eq!(p, Some(Point { x: 400.0, y: 300.0, label: "terminal".into(), screen: Some(2), el: None }));
         assert_eq!(parse_point("Hypertext markup language. [POINT:none]"), ("Hypertext markup language.".into(), None));
         assert_eq!(parse_point("No tag at all."), ("No tag at all.".into(), None));
     }
 
     #[test]
     fn odd_tags_never_break_the_answer() {
-        assert_eq!(parse_point("Here. [POINT:10, 20]").1, Some(Point { x: 10.0, y: 20.0, label: String::new(), screen: None }));
+        assert_eq!(parse_point("Here. [POINT:10, 20]").1, Some(Point { x: 10.0, y: 20.0, label: String::new(), screen: None, el: None }));
         assert_eq!(parse_point("Here. [POINT:10.5,20.5:save button:Screen3]").1.map(|p| (p.x, p.screen)), Some((10.5, Some(3))));
-        assert_eq!(parse_point("Here. [POINT:10,20:screen2]").1, Some(Point { x: 10.0, y: 20.0, label: String::new(), screen: Some(2) }));
+        assert_eq!(parse_point("Here. [POINT:10,20:screen2]").1, Some(Point { x: 10.0, y: 20.0, label: String::new(), screen: Some(2), el: None }));
         assert_eq!(parse_point("Here. [POINT:left,top:x]"), ("Here.".into(), None), "a tag that doesn't parse is cut, with no point");
         assert_eq!(parse_point("[POINT:5,5:a]").0, "");
         assert_eq!(parse_point("Mid [POINT:1,2:a] text").1, None, "a tag that is not at the end is just words");
         assert_eq!(parse_point("Here. [POINT:1,2:a:screen0]").1.map(|p| p.screen), Some(None), "screen 0 does not exist");
+        assert_eq!(parse_point("Up top. [POINT:#3:Save]"), ("Up top.".into(), Some(Point { x: 0.0, y: 0.0, label: "Save".into(), screen: None, el: Some(3) })));
+        assert_eq!(parse_point("Here. [POINT: #12 ]").1.and_then(|p| p.el), Some(12));
+        assert_eq!(parse_point("Here. [POINT:#0:x]"), ("Here.".into(), None), "controls count from 1");
+        assert_eq!(parse_point("Here. [POINT:#two:x]"), ("Here.".into(), None));
     }
 
     #[test]

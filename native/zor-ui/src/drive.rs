@@ -880,7 +880,7 @@ pub fn front_title() -> String {
 
 /// The clickable and typeable things in the front window, through UI Automation. Slow or empty for some apps (games, some
 /// Electron ones): then the list is short or empty and the model uses the picture. It stops after `WALK_MS`.
-fn walk_front_window() -> Vec<El> {
+pub fn walk_front_window() -> Vec<El> {
     use windows::Win32::UI::Accessibility::TreeScope_Descendants;
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

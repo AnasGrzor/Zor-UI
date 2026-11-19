@@ -62,11 +62,23 @@ pub fn snap(x: i32, y: i32) -> Option<[i32; 4]> {
             let Ok(up) = walker.GetParentElement(&e) else { break };
             e = up;
         }
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST), &mut mi);
-        let m = mi.rcMonitor;
-        pick(&chain, (x, y), [m.left, m.top, m.right, m.bottom])
+        pick(&chain, (x, y), monitor((x, y)))
     }
+}
+
+/// The monitor nearest a screen point (left, top, right, bottom).
+fn monitor(at: (i32, i32)) -> [i32; 4] {
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    unsafe { let _ = GetMonitorInfoW(MonitorFromPoint(POINT { x: at.0, y: at.1 }, MONITOR_DEFAULTTONEAREST), &mut mi); }
+    let m = mi.rcMonitor;
+    [m.left, m.top, m.right, m.bottom]
+}
+
+/// Shows a box around a control already known (screen help's list) if it `fits`; false when it doesn't.
+pub fn show_fit(r: [i32; 4], at: (i32, i32)) -> bool {
+    let ok = fits(r, at, monitor(at));
+    if ok { show(r); }
+    ok
 }
 
 /// Shows a box around `r` (screen px), replacing any box still up.

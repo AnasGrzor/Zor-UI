@@ -299,6 +299,16 @@ impl Recall for Keyword {
     fn find(&self, conn: &Connection, query: &str, k: usize) -> rusqlite::Result<Vec<Memory>> { search(conn, query, k) }
 }
 
+/// Whether the request says the name of a project a stored fact was kept for ("zor ui" for a fact kept for zor-ui). A memory
+/// that can't be read names none.
+pub fn names_a_project(said: &str) -> bool {
+    with_app(|c| names_a_project_in(c, said)).unwrap_or(false)
+}
+
+fn names_a_project_in(conn: &Connection, said: &str) -> bool {
+    all(conn).unwrap_or_default().iter().any(|m| m.project.as_deref().is_some_and(|p| crate::agent::project::says_name(said, p)))
+}
+
 /// Up to `k` facts that match `query`, for the system prompt. A memory that can't be read recalls nothing, and the request goes on.
 /// A sensitive-looking fact is never recalled, even one stored before the save check existed.
 pub fn recall(query: &str, k: usize) -> Vec<String> {
@@ -520,6 +530,17 @@ mod tests {
             with_conn(&slot, &path, &legacy, |c| for_context(c, request, None).unwrap()).unwrap();
         }
         assert_eq!(slot.lock().unwrap().opens, 1, "two lookups and a write, one open");
+    }
+
+    #[test]
+    fn a_request_names_a_project_only_when_a_fact_was_kept_for_it() {
+        let c = mem();
+        assert!(!names_a_project_in(&c, "what's the current state of zor ui"), "no facts, no project");
+        add_as(&c, "the bar animation is unfinished", Some(KIND_PROJECT), Some("zor-ui"), 1).unwrap();
+        assert!(names_a_project_in(&c, "what's the current state of zor ui"));
+        assert!(names_a_project_in(&c, "how is Zor-UI doing"));
+        assert!(!names_a_project_in(&c, "what's the current state of the economy"));
+        assert!(!names_a_project_in(&c, "make the ui bigger"), "one word of the name is not the name");
     }
 
     #[test]

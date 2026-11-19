@@ -151,9 +151,7 @@
  },
  {
   "request": "Nu V N U V I O",
-  "skills": [
-   "desktop"
-  ],
+  "skills": [],
   "source": "real"
  },
  {
@@ -242,6 +240,56 @@
  {
   "request": "is it raining",
   "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "But I",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Let's what if I",
+  "skills": [],
+  "source": "real"
+ },
+ {
+  "request": "Open Discord and",
+  "skills": [
+   "desktop"
+  ],
+  "source": "real"
+ },
+ {
+  "request": "what's the forecast for tomorrow",
+  "skills": [
+   "research"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "what apps did I open today",
+  "skills": [],
+  "source": "written"
+ },
+ {
+  "request": "what is left on the project",
+  "skills": [
+   "project"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "add a todo for the login form",
+  "skills": [
+   "project"
+  ],
+  "source": "written"
+ },
+ {
+  "request": "pause the music",
+  "skills": [
+   "personal"
+  ],
   "source": "written"
  }
 ]

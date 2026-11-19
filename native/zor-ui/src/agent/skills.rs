@@ -44,22 +44,22 @@ pub struct Skill {
 pub const SKILLS: [Skill; 7] = [
     Skill {
         name: "research",
-        version: 2,
+        version: 3,
         capability: "Looks things up on the web and reads the most useful page.",
         tools: &["web_search", "read_url", "search"],
-        words: &["research", "compare", "find out", "look up", "search", "news", "price", "prices", "score", "scores", "review", "reviews"],
+        words: &["research", "compare", "find out", "look up", "search", "news", "price", "prices", "score", "scores", "review", "reviews", "weather", "forecast"],
         steps: &["web_search", "read_url"],
         guidance: "Search, then read the most useful page before answering. Compare sources, and say when they disagree. Keep the answer short.",
         permission: "ReadOnly",
         context: "none",
         eval: Eval {
-            selects: &["research the best budget laptop", "compare the prices of two laptops", "look up the score of the match", "find out when the next eclipse is", "what is the news about the election", "search for cheap flights to Rome", "any reviews of that restaurant"],
+            selects: &["research the best budget laptop", "compare the prices of two laptops", "look up the score of the match", "find out when the next eclipse is", "what's the weather in Oslo tomorrow", "what is the news about the election", "search for cheap flights to Rome", "any reviews of that restaurant"],
             must_not: &["hi, how are you", "what is the capital of France", "turn the volume up", "remember that my sister is called Lina", "check my email", "play the next track"],
         },
     },
     Skill {
         name: "desktop",
-        version: 2,
+        version: 3,
         capability: "Opens apps and changes the PC's settings, and looks at the screen when asked.",
         tools: &["open", "find_app", "volume", "brightness", "media", "wallpaper", "clipboard", "see_screen", "take_over"],
         words: &["open", "close", "volume", "brightness", "screen", "wallpaper", "clipboard", "app", "window", "click", "fill", "take over"],
@@ -69,7 +69,7 @@ pub const SKILLS: [Skill; 7] = [
         context: "none",
         eval: Eval {
             selects: &["turn the volume up", "open Spotify", "set the brightness to 50", "what is on my screen", "close this window", "put this picture on the wallpaper", "copy this to the clipboard"],
-            must_not: &["hi, how are you", "what is the capital of France", "compare the prices of two laptops", "remember that my sister is called Lina", "find out when the next eclipse is", "run the tests on the code", "I'm ready for lunch", "go to sleep"],
+            must_not: &["hi, how are you", "what is the capital of France", "compare the prices of two laptops", "remember that my sister is called Lina", "find out when the next eclipse is", "run the tests on the code", "I'm ready for lunch", "go to sleep", "what apps did I open today"],
         },
     },
     Skill {
@@ -104,17 +104,17 @@ pub const SKILLS: [Skill; 7] = [
     },
     Skill {
         name: "project",
-        version: 2,
+        version: 3,
         capability: "Lists the active project's files and keeps track of its open work.",
         tools: &["list_tree", "remember", "forget"],
-        words: &["project", "progress", "tracking", "todo", "backlog", "milestone", "tasks", "unfinished"],
+        words: &["progress", "tracking", "todo", "backlog", "milestone", "tasks", "unfinished"],
         steps: &["list_tree", "remember"],
         guidance: "List the project's files with list_tree when asked what is in it. Keep open work as one short fact with remember, and name the project in it, for example: Zor UI: the bar animation is unfinished. Forget the fact when the user says it is done. There is no tracker: the memory is the list.",
         permission: "Reversible",
         context: "active project",
         eval: Eval {
             selects: &["what is left on the project", "track my progress on the redesign", "add a todo for the login screen", "what is on the backlog", "list the tasks for this project", "what milestone are we on", "where is my project at"],
-            must_not: &["hi, how are you", "what is the capital of France", "remember that my sister is called Lina", "turn the volume up", "compare the prices of two laptops", "run the tests on the code", "play the next track", "what time is it then"],
+            must_not: &["hi, how are you", "what is the capital of France", "remember that my sister is called Lina", "turn the volume up", "compare the prices of two laptops", "run the tests on the code", "play the next track", "what time is it then", "how many errors does this project have", "open the project in VS Code"],
         },
     },
     Skill {
@@ -152,21 +152,34 @@ pub const SKILLS: [Skill; 7] = [
     },
 ];
 
-/// Phrases that hold a skill word and never mean that skill: two products with "code" in the name, and "tell me". Taken out
-/// of the request before matching. Each came from a real request that selected the wrong skill (see the routing test).
-const NOT_SKILL_PHRASES: [&str; 3] = [" claude code ", " vs code ", " tell me "];
+/// Phrases that hold a skill word and never mean that skill: two products with "code" in the name, "tell me", and a question
+/// about what was opened before (not a request to open it). Taken out of the request before matching. Each came from a real
+/// request that selected the wrong skill (see the routing test).
+const NOT_SKILL_PHRASES: [&str; 5] = [" claude code ", " vs code ", " tell me ", " did i open ", " did you open "];
+
+/// (skill, word) pairs that select their skill only when no skill's own words matched. "project" alone is too loose: in "how
+/// many errors does this project have" or "open the project in VS Code" the other word says what the request is for.
+const WEAK_WORDS: [(&str, &str); 1] = [("project", "project")];
 
 /// The skills a request points at, in table order. Matching is on whole words, so "app" does not match "apparently".
-pub fn select(said: &str) -> Vec<&'static Skill> {
+pub fn select(said: &str) -> Vec<&'static Skill> { select_in(said, false) }
+
+/// `select` with what the request's context found: `names_project` is true when the request says the name of a project
+/// (`AgentContext::names_project`). Like a weak word, it selects developer and project only when no skill's own words matched,
+/// so "what's the current state of zor ui" gets them and "open zor ui" stays desktop.
+pub fn select_in(said: &str, names_project: bool) -> Vec<&'static Skill> {
     let words: Vec<String> = said.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
     let mut text = format!(" {} ", words.join(" "));
     for p in NOT_SKILL_PHRASES { text = text.replace(p, " "); }
-    SKILLS.iter().filter(|s| s.words.iter().any(|w| text.contains(&format!(" {w} ")))).collect()
+    let has = |w: &str| text.contains(&format!(" {w} "));
+    let strong: Vec<&Skill> = SKILLS.iter().filter(|s| s.words.iter().any(|w| has(w))).collect();
+    if !strong.is_empty() { return strong; }
+    SKILLS.iter().filter(|s| WEAK_WORDS.iter().any(|(n, w)| *n == s.name && has(w)) || (names_project && matches!(s.name, "developer" | "project"))).collect()
 }
 
-/// The guidance lines for the skills a request points at. Empty when none does.
-pub fn guidance_for(said: &str) -> String {
-    select(said).iter().map(|s| {
+/// The guidance lines for the skills a request points at. Empty when none does. `names_project` as in `select_in`.
+pub fn guidance_for(said: &str, names_project: bool) -> String {
+    select_in(said, names_project).iter().map(|s| {
         let order = if s.steps.is_empty() { String::new() } else { format!(" Usual order: {}.", s.steps.join(", then ")) };
         format!("Skill {}: {}{order}", s.name, s.guidance)
     }).collect::<Vec<_>>().join("\n")
@@ -259,13 +272,13 @@ mod tests {
 
     #[test]
     fn a_word_only_matches_as_a_whole_word() {
-        assert!(select("apparently the weather is fine").is_empty(), "'app' inside 'apparently' is not the desktop skill");
+        assert!(select("apparently the day went fine").is_empty(), "'app' inside 'apparently' is not the desktop skill");
     }
 
     #[test]
     fn the_guidance_is_empty_when_no_skill_applies() {
-        assert_eq!(guidance_for("hi there"), "");
-        assert!(guidance_for("turn the volume up").starts_with("Skill desktop:"));
+        assert_eq!(guidance_for("hi there", false), "");
+        assert!(guidance_for("turn the volume up", false).starts_with("Skill desktop:"));
     }
 
     #[test]
@@ -344,8 +357,8 @@ mod tests {
 
     #[test]
     fn a_workflow_reaches_the_prompt_as_one_line_and_a_skill_without_one_adds_nothing() {
-        assert!(guidance_for("research the best budget laptop").contains("Usual order: web_search, then read_url."));
-        assert!(!guidance_for("turn the volume up").contains("Usual order"));
+        assert!(guidance_for("research the best budget laptop", false).contains("Usual order: web_search, then read_url."));
+        assert!(!guidance_for("turn the volume up", false).contains("Usual order"));
     }
 
     /// One row of `eval/skill-routing.json`: a request, the skills it should select, and where it came from.
@@ -377,7 +390,7 @@ mod tests {
     fn the_routing_set_is_mostly_real_and_has_no_personal_text() {
         let rows = routing_rows();
         let real = rows.iter().filter(|r| r.real).count();
-        assert_eq!((real, rows.len() - real), (27, 14), "real and hand-written rows");
+        assert_eq!((real, rows.len() - real), (30, 19), "real and hand-written rows");
         let mut seen: Vec<&str> = rows.iter().map(|r| r.request.as_str()).collect();
         seen.sort();
         seen.dedup();
@@ -396,8 +409,8 @@ mod tests {
         let rows = routing_rows();
         // (skill, minimum precision %, minimum recall %), measured after the routing fixes
         let floor: [(&str, u32, u32); 7] = [
-            ("research", 100, 50), ("desktop", 90, 90), ("personal", 100, 100), ("developer", 100, 75),
-            ("project", 0, 0), ("browser_research", 100, 100), ("workflow", 100, 100),
+            ("research", 100, 100), ("desktop", 100, 100), ("personal", 100, 100), ("developer", 100, 75),
+            ("project", 100, 100), ("browser_research", 100, 100), ("workflow", 100, 100),
         ];
         let table = tally(&rows);
         for (name, tp, fp, miss) in &table {
@@ -422,5 +435,26 @@ mod tests {
         assert!(names("how many errors does this project have").contains(&"developer"), "errors in a project are a build check");
         assert!(names("find the cache function in the code").contains(&"developer"), "plain 'code' still selects developer");
         assert!(!names("there was an error on my phone").contains(&"developer"), "one error on a phone is not a build");
+        assert_eq!(names("how many errors does this project have"), ["developer"], "errors say what the project question is for");
+        assert_eq!(names("open the project in VS Code"), ["desktop"], "opening it is a desktop job");
+        assert!(names("what files did I open recently").is_empty(), "a question about past opens opens nothing");
+        assert_eq!(names("what's the weather in Oslo"), ["research"], "weather is looked up");
+    }
+
+    #[test]
+    fn a_weak_word_selects_only_when_nothing_stronger_does() {
+        let names = |said: &str| select(said).iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names("where is my project at"), ["project"]);
+        assert_eq!(names("run the tests on this project"), ["developer"]);
+        assert_eq!(names("list the tasks for this project"), ["project"], "a project word of its own still selects it");
+    }
+
+    #[test]
+    fn a_request_that_names_a_project_gets_developer_and_project_unless_its_words_say_more() {
+        let names = |said: &str, named: bool| select_in(said, named).iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names("What's the current state of zor ui", true), ["developer", "project"]);
+        assert!(names("What's the current state of zor ui", false).is_empty(), "without the context, the words alone say nothing");
+        assert_eq!(names("open zor ui", true), ["desktop"], "a skill word wins over the name");
+        assert!(guidance_for("What's the current state of zor ui", true).contains("Skill developer:"));
     }
 }

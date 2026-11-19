@@ -49,7 +49,16 @@ pub fn names_project(said: &str, title: &str) -> bool {
     let tokens: Vec<String> = said.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect();
     if tokens.iter().any(|t| crate::agent::intent::PROJECT_WORDS.contains(&t.as_str())) { return true; }
     let parts = title_parts(title);
-    tokens.iter().any(|t| parts.iter().any(|p| p == t || p.split_whitespace().any(|w| w == t)))
+    tokens.iter().any(|t| parts.iter().any(|p| p == t || p.split_whitespace().any(|w| w == t))) || parts.iter().any(|p| says_name(said, p))
+}
+
+/// Whether the request says `name`, ignoring case, spaces and dashes: "zor ui", "Zor-UI" and "zorui" all say zor-ui. The name
+/// must be one to three whole words of the request side by side, so "ui" alone does not say zor-ui.
+pub fn says_name(said: &str, name: &str) -> bool {
+    let want: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    if want.is_empty() { return false; }
+    let w: Vec<String> = said.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    (1..=3).any(|n| w.windows(n).any(|run| run.concat() == want))
 }
 
 /// The project a window title names: a part of the title ("main.rs", "zor-ui", "Visual Studio Code") equal to the name of a
@@ -104,6 +113,19 @@ mod tests {
     }
 
     fn no_list(_: &Path) -> Vec<PathBuf> { panic!("no folder should be listed") }
+
+    #[test]
+    fn a_name_is_said_with_any_spacing_or_dashes_but_not_in_part() {
+        assert!(says_name("what's the current state of zor ui", "zor-ui"));
+        assert!(says_name("is ZorUI done", "zor-ui"));
+        assert!(says_name("open zor-ui", "zor-ui"));
+        assert!(!says_name("make the ui bigger", "zor-ui"), "one word of the name is not the name");
+        assert!(!says_name("anything", ""), "an empty name is never said");
+        let root = temp("spaced");
+        let found = lookup("what's the current state of zor ui", "main.rs - zor-ui - Visual Studio Code", &[root.clone()], &list_dirs);
+        assert_eq!(found, Some(root.join("zor-ui")), "the spoken name finds the project the title shows");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_title_names_the_project_and_a_folder_without_a_marker_is_not_one() {

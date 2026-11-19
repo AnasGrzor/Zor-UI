@@ -191,8 +191,11 @@ pub struct AgentContext {
     pub sources: String,
     /// The request points back, but nothing before it matches: the AI asks one short question instead of guessing.
     pub unresolved: bool,
-    /// The project the window in front belongs to, when the request asks about the project or the code.
+    /// The project the window in front belongs to, when the request asks about the project or the code, or says its name.
     pub project: Option<String>,
+    /// The request says the name of a project: the one the window in front shows, or one a stored fact was kept for. The skill
+    /// router reads it (`skills::guidance_for`).
+    pub names_project: bool,
     /// Preferences that match the request and facts about the active project (memory.rs `context_for`), capped there.
     pub memory_context: Vec<String>,
     /// CPU, memory and battery (`pc_stats`): the numbers the AI would otherwise open Task Manager for.
@@ -225,7 +228,9 @@ impl AgentContext {
         // the conversation's own turns count as something to point at
         let has_turns = with_turns(conversation, |t| !t.is_empty()).unwrap_or(false);
         let unresolved = back && previous_task.is_none() && !has_turns;
-        let project = if project::wants_project(said) { active.as_deref().map(project::describe) } else { None };
+        let says_active = project_name.as_deref().is_some_and(|n| project::says_name(said, n));
+        let names_project = says_active || (memory_on(cfg) && memory::names_a_project(said));
+        let project = if project::wants_project(said) || says_active { active.as_deref().map(project::describe) } else { None };
         // "it", "this", "that", "the last one" point at the newest turn, which is already in memory: no database read
         let last = with_turns(conversation, |t| t.back().map(|(s, a, _)| (s.clone(), a.clone()))).flatten();
         let reference = intent::resolve_reference(said, last.as_ref().map(|(s, a)| (s.as_str(), a.as_str())));
@@ -233,7 +238,7 @@ impl AgentContext {
             let battery = crate::sys::battery().map(|b| (b.percent, b.charging));
             pc_stats(crate::util::cpu_now(), Some(crate::util::memory_usage()), battery)
         } else { String::new() };
-        AgentContext { clock, active_window, active_application, media, relevant_memories, previous_task, sources, unresolved, project, memory_context, reference, pc }
+        AgentContext { clock, active_window, active_application, media, relevant_memories, previous_task, sources, unresolved, project, names_project, memory_context, reference, pc }
     }
 
     /// The text the model reads before the user's words. Empty when there is nothing to add.
@@ -931,10 +936,11 @@ pub fn request_text_with(cfg: &Config, said: &str, note: &str) -> String { reque
 /// `request_text_with` for a request from `conversation`: the context reads that conversation's last turn.
 pub fn request_text_in(cfg: &Config, said: &str, note: &str, conversation: &str) -> String {
     let mut parts = vec![];
-    let ctx = AgentContext::for_request(cfg, said, conversation).render();
+    let context = AgentContext::for_request(cfg, said, conversation);
+    let ctx = context.render();
     if !ctx.is_empty() { parts.push(ctx); }
     // the skill guidance this request points at (empty for most requests)
-    let skills = skills::guidance_for(said);
+    let skills = skills::guidance_for(said, context.names_project);
     if !skills.is_empty() { parts.push(skills); }
     parts.push(format!("User says: {said}"));
     if !note.is_empty() { parts.push(note.to_string()); }

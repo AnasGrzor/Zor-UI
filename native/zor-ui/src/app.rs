@@ -70,11 +70,14 @@ pub struct Ctx {
 /// A request from a view (or the bar) to the app.
 pub enum Action {
     /// Open the popup `name` (a second call closes it). `mon`: a point (physical px) on the monitor to open on,
-    /// else GlazeWM's focused monitor. `at`: where the island panel hangs from (physical px).
-    Open { name: String, mon: Option<(i32, i32)>, at: Option<(i32, i32)> },
+    /// else GlazeWM's focused monitor. `at`: where the island panel hangs from (physical px). `pill`: the size of
+    /// the island pill it grows out of (physical px).
+    Open { name: String, mon: Option<(i32, i32)>, at: Option<(i32, i32)>, pill: Option<(i32, i32)> },
     Close(String),
     /// Pinned popups stay open when focus moves elsewhere.
     TogglePin(String),
+    /// Keeps popup `.0` above every window (true) or not (the buddy chat's pin).
+    OnTop(String, bool),
     /// A right-click menu at a point (physical px).
     Menu(Vec<menu::Item>, (i32, i32)),
     CloseMenu,
@@ -83,7 +86,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn open(name: &str) -> Action { Action::Open { name: name.into(), mon: None, at: None } }
+    pub fn open(name: &str) -> Action { Action::Open { name: name.into(), mon: None, at: None, pill: None } }
 }
 
 /// Written to the app's message window by `zorui.exe --open <name>` (WM_COPYDATA dwData).
@@ -207,7 +210,7 @@ fn pace_set(on: bool, msg: HWND) {
 
 fn lock_pace() -> std::sync::MutexGuard<'static, bool> { PACE.0.lock().unwrap_or_else(|e| e.into_inner()) }
 
-// TEMP frametrace: per-second FRAME rate, handler time and per-window update counts into zorui.log. Remove with the measurement.
+// TEMP frametrace: per-second FRAME rate, handler time and per-window update counts into zorui.frametrace.log. Remove with the measurement.
 #[derive(Default)]
 struct Trace { ticks: u32, busy_ns: u128, max_ns: u128, since: Option<std::time::Instant>, ms16: u32, parts: std::collections::BTreeMap<String, (u32, u32, u128)> }
 static TRACE: Mutex<Option<Trace>> = Mutex::new(None);
@@ -241,7 +244,7 @@ fn trace_frame(busy: std::time::Duration, frame_ms: u32) {
     if secs >= 1.0 {
         let n = t.ticks as f64;
         let parts: Vec<String> = t.parts.iter().map(|(k, (due, idle, ns))| format!("{k}: paint {due} check {idle} {:.2}ms", *ns as f64 / 1e6)).collect();
-        crate::log::line(&format!("[frametrace] {:.1} fps (16 ms views {}/{} ticks), handler avg {:.2} ms, max {:.2} ms over {:.2} s | {}",
+        crate::log::trace(&format!("[frametrace] {:.1} fps (16 ms views {}/{} ticks), handler avg {:.2} ms, max {:.2} ms over {:.2} s | {}",
             n / secs, t.ms16, t.ticks, t.busy_ns as f64 / n / 1e6, t.max_ns as f64 / 1e6, secs, parts.join("; ")));
         *t = Trace::default();
     }
@@ -497,7 +500,9 @@ impl App {
     /// Hides the shell while a game (any full-screen app) is in front, and restores it after.
     fn game_check(&mut self) {
         // With a second monitor only the bar on the covered one hides (bars_for_fullscreen); the other keeps working.
-        let want = self.cx.cfg.bool("autoGameMode") && buddy::fullscreen_monitor().is_some() && util::monitors().0.len() < 2;
+        let full = buddy::fullscreen_monitor().is_some();
+        if full { crate::lastgame::note(); } // remembered for "open last game", whether or not game mode is on
+        let want = self.cx.cfg.bool("autoGameMode") && full && util::monitors().0.len() < 2;
         let (flip, votes) = game_vote(self.game.is_some(), want, self.game_votes);
         self.game_votes = votes;
         if !flip { return; }
@@ -542,6 +547,7 @@ impl App {
             // hand freed pages back to Windows, so Task Manager shows what is really in use
             unsafe { let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(windows::Win32::System::Threading::GetCurrentProcess(), usize::MAX, usize::MAX); }
         }
+        if n.is_multiple_of(60) { crate::social::tick(&self.cx.cfg); } // the daily dev log and release posts
         if n.is_multiple_of(30) { crate::appicon::add(self.msg); } // Explorer forgets it when it restarts
         // hook up coding agents found on the PC: at start (after 2 s), then every 5 minutes for ones installed later
         if (n == 2 || n.is_multiple_of(300)) && self.cx.cfg.get("autoTrackAgents").as_bool() != Some(false) {
@@ -655,9 +661,11 @@ impl App {
     // ---- popups
 
     /// Opens the popup `name` natively open again closes it.
-    pub fn open(&mut self, name: &str, mon: Option<(i32, i32)>, at: Option<(i32, i32)>) {
+    /// `pill` is the island pill's size (physical px) the island panel grows out of.
+    pub fn open(&mut self, name: &str, mon: Option<(i32, i32)>, at: Option<(i32, i32)>, pill: Option<(i32, i32)>) {
         // "keybinds" is the Settings window on its Keybinds page
-        let is_settings = name == "settings" || name == "keybinds";
+        // the buddy chat is a window like Settings: not on top, and it stays open when focus moves away
+        let is_settings = name == "settings" || name == "keybinds" || name == crate::buddy_chat::NAME;
         if self.pops.iter().any(|p| p.name == name) {
             // a desk card asking Settings for a section while it's open: go there instead of closing it
             if !(is_settings && hub::get(crate::settings::GOTO).is_some()) { self.close(name); }
@@ -676,12 +684,18 @@ impl App {
         self.closing.clear(); // a reopen mid-shrink replaces the closing panel, never stacks on it
         let Ok(mut w) = Win::new(view, &format!("Zor UI / {name}"), rect.left, rect.top, if is_settings { Z::Normal } else { Z::Top }, false) else { return };
         w.set_focusable(true);
-        if name == "island-panel" { w.grow = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom)); }
         w.update(&self.g, &self.cx, true);
         let px = w.size_px();
         let (x, y) = popup::spot(name, rect, s, px, at, self.cx.bar_edge());
         w.move_to(x, y);
+        if name == "island-panel" {
+            let pill = pill.unwrap_or(((crate::anim::PILL_FALLBACK.0 * s).round() as i32, (crate::anim::PILL_FALLBACK.1 * s).round() as i32));
+            w.grow = Some((std::time::Instant::now(), popup::grow_from(self.cx.bar_edge(), at, (x, y), px, pill)));
+            w.update(&self.g, &self.cx, true); // the first frame shown is the pill-sized one, not the full panel
+        }
         w.show();
+        // the clock starts when it shows: the paints and placing before it took ~60 ms of the 260
+        if let Some(g) = &mut w.grow { g.0 = std::time::Instant::now(); }
         w.focus();
         w.view.input(Input::Focus(true), &mut self.cx);
         w.update(&self.g, &self.cx, true);
@@ -699,12 +713,16 @@ impl App {
             if name == "island-panel" && self.cx.motion {
                 // the panel shrinks back into the island, then FRAME drops it
                 let mut w = p.win;
-                w.grow = None;
-                w.shrink = Some((std::time::Instant::now(), self.cx.bar_edge() == bar::Edge::Bottom));
-                w.set_focusable(false);
-                w.pass_mouse();
-                w.gliding = true; // 16 ms frames from the first shrink frame
-                self.closing.push(w);
+                if let Some((t0, from)) = w.grow.take() {
+                    // closed mid-grow: shrink from the size it reached, not from the full card
+                    let left = crate::anim::GROW_SECS - t0.elapsed().as_secs_f32().min(crate::anim::GROW_SECS);
+                    let now = std::time::Instant::now();
+                    w.shrink = Some((now.checked_sub(std::time::Duration::from_secs_f32(left)).unwrap_or(now), from));
+                    w.set_focusable(false);
+                    w.pass_mouse();
+                    w.gliding = true; // 16 ms frames from the first shrink frame
+                    self.closing.push(w);
+                }
             }
             self.frames();
         }
@@ -714,9 +732,10 @@ impl App {
         while !self.cx.actions.is_empty() {
             for a in std::mem::take(&mut self.cx.actions) {
                 match a {
-                    Action::Open { name, mon, at } => self.open(&name, mon, at),
+                    Action::Open { name, mon, at, pill } => self.open(&name, mon, at, pill),
                     Action::Close(n) => self.close(&n),
                     Action::TogglePin(n) => if let Some(p) = self.pops.iter_mut().find(|p| p.name == n) { p.pinned = !p.pinned; },
+                    Action::OnTop(n, on) => if let Some(p) = self.pops.iter().find(|p| p.name == n) { p.win.set_topmost(on); },
                     Action::Menu(items, at) => self.show_menu(items, at),
                     Action::CloseMenu => { self.menu = None; self.frames(); }
                     Action::Command(t) => self.command(&t),
@@ -760,16 +779,20 @@ impl App {
 
     /// A message from `zorui.exe --open <name>`.
     pub fn command(&mut self, text: &str) {
-        if text == "buddy listen" || text == "buddy look" || text.starts_with("buddy ask ") {
+        // Live mode in the buddy chat: the hotkey taps its orb (cuts the voice and listens) instead of starting a new request
+        if text == "buddy listen" && crate::buddy_chat::live_tap() { return; }
+        if text == "buddy listen" || text == "buddy look" || text.starts_with("buddy ask ") || text.starts_with("buddy listen-in ") {
             if !assist::enabled(&self.cx.cfg) { assist::say_later("Voice commands are off. Turn them on in Settings, Voice.", 5.0); return; }
-            let hotkey = text == "buddy listen" || text == "buddy look";
+            let hotkey = text == "buddy listen" || text == "buddy look" || text.starts_with("buddy listen-in ");
             if hotkey && pill::active() { if !assist::press_again(&self.cx.cfg) { assist::cancel(); } return; } // the hotkey toggles
+            // the chat window's mic: what is said goes to that chat
+            if let Some(conv) = text.strip_prefix("buddy listen-in ") { pill::open(self); assist::listen_into(&self.cx.cfg, false, Some(conv.to_string())); return; }
             match text.strip_prefix("buddy ask ") { Some(said) => assist::ask(&self.cx.cfg, said), None => { pill::open(self); assist::listen_as(&self.cx.cfg, text == "buddy look") } }
             return;
         }
         if text == "restart" { glaze::command("wm-reload-config"); restart(); return; }
         if let Some(n) = text.strip_prefix("open ").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')) {
-            self.open(n, None, None);
+            self.open(n, None, None, None);
             self.run_actions();
         }
     }
@@ -792,7 +815,7 @@ impl App {
             _ => return false,
         };
         let w = match (i, pop) { (Some(i), _) => &mut self.wins[i], (_, Some(p)) => &mut self.pops[p].win, _ => return true };
-        w.view.input(ev, &mut self.cx);
+        if !w.selection_key(&ev) { w.view.input(ev, &mut self.cx); }
         w.update(&self.g, &self.cx, true);
         true
     }
@@ -857,7 +880,7 @@ impl App {
                 (WM_TIMER, OUTSIDE) => self.outside_check(),
                 (WM_CLIPBOARDUPDATE, _) => self.clip_changed(),
                 (crate::appicon::CALLBACK, _) => match lp.0 as u32 & 0xFFFF {
-                    WM_LBUTTONUP => self.open("settings", None, None),
+                    WM_LBUTTONUP => self.open("settings", None, None, None),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
                         let mut p = POINT::default();
                         unsafe { let _ = GetCursorPos(&mut p); }

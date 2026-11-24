@@ -397,7 +397,10 @@ fn record(agents: &Path, agent: &str, p: &Value) -> std::io::Result<()> {
     if state == "waiting" && permission {
         rec["ask"] = json!("permission");
         // the plan or questions come with the PermissionRequest; its permission_prompt Notification carries them on
-        let choice = if question || p["hook_event_name"] == "PermissionRequest" { choice_of(p) } else { old["choice"].clone() };
+        let fresh = question || p["hook_event_name"] == "PermissionRequest";
+        // which prompt this is: the Notification refreshes "at", and the waiting hook (permit.rs) must still know its prompt
+        rec["permit_at"] = if fresh { rec["at"].clone() } else { old["permit_at"].clone() };
+        let choice = if fresh { choice_of(p) } else { old["choice"].clone() };
         if question || choice["kind"] == "question" { rec["question_hook"] = json!(true); }
         if !choice.is_null() { rec["choice"] = choice; }
     }
@@ -710,9 +713,15 @@ mod tests {
         let d = tmp("perm");
         let send = |p: Value| record(&d, "claude", &p).unwrap();
         send(json!({ "hook_event_name": "PermissionRequest", "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "npm test" } }));
+        let prompt_at = session(&d, "claude", "s1")["permit_at"].clone();
+        assert!(prompt_at.is_number(), "the prompt is marked for the waiting hook");
+        std::thread::sleep(std::time::Duration::from_millis(20));
         send(json!({ "hook_event_name": "Notification", "session_id": "s1", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash" }));
         assert_eq!(summary(&d)["claude"]["message"], "Allow Bash: npm test");
         assert_eq!(summary(&d)["claude"]["state"], "waiting");
+        let s = session(&d, "claude", "s1");
+        assert_ne!(s["at"], prompt_at, "the Notification refreshes at");
+        assert_eq!(s["permit_at"], prompt_at, "but keeps the prompt's mark, so the timeout still drops the buttons");
         let _ = std::fs::remove_dir_all(&d);
     }
 

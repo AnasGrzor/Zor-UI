@@ -204,11 +204,14 @@ $cfg = [ordered]@{
 }
 $paths = @('scriptsDir', 'pythonPath', 'bridgePath', 'modKey')   # the Python paths are dropped from old configs
 if (Test-Path $cfgPath) {   # keep the user's edits, only refresh paths and add new options
-  $old = Get-Content $cfgPath -Raw | ConvertFrom-Json
+  # -Encoding UTF8: without it 5.1 reads the BOM-less file as ANSI and turns the clock's bullet into mojibake
+  $old = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
   foreach ($p in $old.PSObject.Properties) {
     if ($paths -contains $p.Name -or ($p.Name -eq 'userName' -and $UserName)) { continue }
     $cfg[$p.Name] = $p.Value
   }
+  # repair the bullet that older installs double-encoded
+  if ($cfg.clockFormat -is [string]) { $cfg.clockFormat = $cfg.clockFormat.Replace("$([char]0xE2)$([char]0x20AC)$([char]0xA2)", "$([char]0x2022)") }
 }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
 
@@ -337,6 +340,12 @@ if (-not $glaze) {
     }
   } elseif (-not $isAdmin) {
     Info 'not running as admin: re-run install.ps1 from an elevated PowerShell to start at boot through a service. Using a logon task.'
+  }
+  if (-not $svcOk -and (Get-Service ZorShell -ErrorAction SilentlyContinue)) {
+    # An earlier admin install left the service, which still starts GlazeWM; a logon task too gives a second copy that fails.
+    if (Get-ScheduledTask -TaskName 'GlazeWM' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'GlazeWM' -Confirm:$false -ErrorAction SilentlyContinue }
+    $svcOk = $true
+    Info 'zorui and GlazeWM start at boot (existing ZorShell service)'
   }
   if (-not $svcOk) {
     # A logon task starts GlazeWM at login. The Startup folder waits for every Run-key app first (about 80 s here).

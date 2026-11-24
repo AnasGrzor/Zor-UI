@@ -160,8 +160,8 @@ impl Island {
     fn plan(&self, g: &Gfx, cx: &Ctx) -> Vec<(Sec, f32)> {
         let mut v = vec![];
         // the buddy wants an answer before he drives (drive.rs): first, always
-        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Ask(q), h)); }
-        if let Some((label, _, q, _)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
+        if let Some(q) = crate::drive::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD - crate::tokens::BAR_ROOM)); v.push((Sec::Ask(q), h)); }
+        if let Some((label, _, q, _)) = crate::bridge::permit::pending() { let h = ask_section_h(g.measure_wrapped(&q, txt(13.0, 400), W - 2.0 * PAD - crate::tokens::BAR_ROOM)); v.push((Sec::Permit(format!("{label} is asking"), q), h)); }
         let m = cx.media.as_ref().filter(|m| !m.title.is_empty());
         let ly = Self::lyrics_h(cx);
         if dp(cx, "media") && m.is_some() { v.push((Sec::Media, 92.0 + 22.0 + 60.0 + 20.0 + if ly > 0.0 { 10.0 + ly } else { 0.0 })); }
@@ -275,7 +275,7 @@ impl Island {
                 self.scroll.region(c, cx, r, self.plain_h, |c, top| {
                     for (i, l) in lines.iter().enumerate() {
                         let y = top + i as f32 * ROW;
-                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + 8.0, y, r.w - 16.0, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
+                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + 8.0, y, r.w - 8.0 - crate::tokens::BAR_ROOM, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
                     }
                 });
             }
@@ -307,11 +307,11 @@ impl Island {
         c.text(head, R::new(x + 22.0, y, w - 22.0, 16.0), txt(12.0, 500), t.c("tertiary"), Align::Left);
         let y = y + 26.0;
         let f = txt(13.0, 400);
-        self.ask_full = c.g.measure_wrapped(q, f, w);
+        self.ask_full = c.g.measure_wrapped(q, f, w - crate::tokens::BAR_ROOM);
         let qr = R::new(x, y, w, ask_h(self.ask_full));
         c.hit(qr, ASK_Q);
         let full = self.ask_full;
-        self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
+        self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - crate::tokens::BAR_ROOM, full), f, t.c("onSurface"), Align::Left));
         let y = y + qr.h + 12.0;
         let br = R::new(x, y, w, ASK_BOX_H);
         c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
@@ -478,7 +478,7 @@ impl Island {
             let br = R::new(x, y, w, ask_h(body_full));
             c.hit(br, NOTIF_BODY);
             let f = txt(13.0, 400);
-            self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - 8.0, body_full), f, t.c("onSurface"), Align::Left));
+            self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - crate::tokens::BAR_ROOM, body_full), f, t.c("onSurface"), Align::Left));
             y += br.h + 12.0;
         }
         // Back on the left; Open (the app that sent it, if it names one) and Dismiss on the right
@@ -495,7 +495,7 @@ impl Island {
     /// Height of a notification's title and body when they wrap to the panel width.
     fn notif_text_h(g: &Gfx, n: &Value) -> (f32, f32) {
         let w = W - 2.0 * PAD;
-        (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - 8.0))
+        (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - crate::tokens::BAR_ROOM))
     }
 
     /// The app target of the open notification (what Open launches), "" if none.
@@ -522,6 +522,8 @@ impl Island {
 
 impl View for Island {
     fn accepts_files(&self) -> bool { true }
+    /// The scroll areas only take the wheel, so they keep the arrow.
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | LYRICS | ASK_Q | NOTIF_BODY) }
     fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
         (W + 24.0, Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 24.0)
     }

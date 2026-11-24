@@ -151,7 +151,8 @@ fn clear_in(dir: &Path, session: &str) { let _ = std::fs::remove_file(decision_f
 
 fn await_in(agents: &Path, dir: &Path, agent: &str, session: &str, wait: Duration) -> Option<Value> {
     let (start, df, sf) = (Instant::now(), decision_file(dir, session), session_file(agents, agent, session));
-    let prompt_at = load_json(&sf, json!({}))["at"].clone();
+    // permit_at, not at: the permission_prompt Notification rewrites at while this waits
+    let prompt_at = load_json(&sf, json!({}))["permit_at"].clone();
     loop {
         let d = load_json(&df, Value::Null);
         if d.is_object() {
@@ -165,7 +166,7 @@ fn await_in(agents: &Path, dir: &Path, agent: &str, session: &str, wait: Duratio
             // The hook is gone, so Allow and Deny would answer nothing. The agent still waits in its own terminal.
             let _ = std::fs::remove_file(&df);
             let mut s = load_json(&sf, json!({}));
-            if s.is_object() && s["at"] == prompt_at && s["ask"] == "permission" {
+            if s.is_object() && s["permit_at"] == prompt_at && s["ask"] == "permission" {
                 s["ask"] = json!("terminal");
                 s["message"] = json!("Answer in the terminal");
                 let _ = write(&sf, &s);
@@ -283,10 +284,25 @@ mod tests {
         let d = tmp("timeout");
         let (agents, permits) = (d.join("agents"), d.join("permits"));
         let sf = session_file(&agents, "codex", "t1");
-        write(&sf, &json!({ "state": "waiting", "ask": "permission", "message": "Allow Bash: a", "at": 5.0 })).unwrap();
-        assert!(await_in(&agents, &permits, "codex", "t1", Duration::from_millis(300)).is_none());
+        write(&sf, &json!({ "state": "waiting", "ask": "permission", "message": "Allow Bash: a", "at": 5.0, "permit_at": 5.0 })).unwrap();
+        // Claude Code's permission_prompt Notification lands mid-wait and refreshes "at"; the prompt is the same one
+        let refresh = { let sf = sf.clone(); std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            write(&sf, &json!({ "state": "waiting", "ask": "permission", "message": "Allow Bash: a", "at": 11.0, "permit_at": 5.0 })).unwrap();
+        }) };
+        assert!(await_in(&agents, &permits, "codex", "t1", Duration::from_millis(400)).is_none());
+        refresh.join().unwrap();
         let s = load_json(&sf, json!({}));
         assert_eq!((s["state"].clone(), s["ask"].clone()), (json!("waiting"), json!("terminal")), "still waiting, but no Allow or Deny");
+        // a newer prompt of the session keeps its buttons: its own hook waits for it
+        write(&sf, &json!({ "state": "waiting", "ask": "permission", "at": 20.0, "permit_at": 20.0 })).unwrap();
+        let newer = { let sf = sf.clone(); std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            write(&sf, &json!({ "state": "waiting", "ask": "permission", "at": 30.0, "permit_at": 30.0 })).unwrap();
+        }) };
+        assert!(await_in(&agents, &permits, "codex", "t1", Duration::from_millis(400)).is_none());
+        newer.join().unwrap();
+        assert_eq!(load_json(&sf, json!({}))["ask"], "permission");
         let _ = std::fs::remove_dir_all(&d);
     }
 

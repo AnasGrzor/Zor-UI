@@ -110,8 +110,10 @@ impl Action {
 pub const MAX_TARGET: usize = 300;
 
 /// File types `open` refuses: they run code, so they are not "opening" anything. (The Start Menu is what `launch` uses.)
-const NO_OPEN: [&str; 30] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "scr", "lnk", "reg", "hta", "jar", "cpl",
-    "dll", "pif", "url", "docm", "xlsm", "pptm", "appx", "msix", "py", "sh"];
+const NO_OPEN: [&str; 44] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "scr", "lnk", "reg", "hta", "jar", "cpl",
+    "dll", "pif", "url", "docm", "xlsm", "pptm", "appx", "msix", "py", "sh",
+    // also run code: snap-ins, help files with script, ClickOnce, settings shortcuts, add-ins, and disk images that mount and autoplay
+    "msc", "chm", "application", "appref-ms", "settingcontent-ms", "inf", "gadget", "xll", "xlam", "diagcab", "iso", "img", "vhd", "vhdx"];
 
 /// A web address or a path that `open` may hand to Windows. Only http(s) links and plain local paths pass: no other protocol
 /// (`ms-settings:`, `file:`, `javascript:`), no network shares (they send your login), no `%VARS%`, no programs.
@@ -129,7 +131,10 @@ pub fn open_target(arg: &str) -> Result<String, String> {
         };
     }
     if t.starts_with("\\\\") || t.starts_with("//") { return Err("I don't open network shares".into()); }
-    let ext = t.rsplit(['\\', '/']).next().unwrap_or("").rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    // a colon past the drive letter names a stream (`a.exe::$DATA`), which hides the real extension
+    if t.match_indices(':').any(|(i, _)| i != 1) { return Err("that is not something I can open".into()); }
+    // Windows drops trailing dots and spaces, so `a.exe.` runs a.exe: the extension is read without them
+    let ext = t.rsplit(['\\', '/']).next().unwrap_or("").trim_end_matches(['.', ' ']).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
     if NO_OPEN.contains(&ext.as_str()) { return Err(format!("I don't open .{ext} files, they run code; use launch for apps")); }
     Ok(t.to_string())
 }
@@ -298,6 +303,17 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
         actions: v["actions"].as_array().map(|a| a.iter().filter_map(parse_action).take(MAX_ACTIONS).collect()).unwrap_or_default(),
         done: v["done"].as_bool().unwrap_or(false),
     })
+}
+
+/// Auto mode for the take-over running now (set when it starts, `start_with_chat`): its risky clicks and app opens don't ask,
+/// unless they spend money (`policy::auto_answers`).
+static AUTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the take-over may skip question `q` because auto mode answers it.
+fn auto_yes(q: &str) -> bool {
+    let yes = crate::agent::policy::auto_answers(AUTO.load(std::sync::atomic::Ordering::Relaxed), q);
+    if yes { crate::log::line("auto mode: a take-over step ran without asking"); }
+    yes
 }
 
 /// A click on something that sends, deletes or pays gets its own yes, even if the model forgot to ask.
@@ -555,8 +571,10 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
         let arg = if *tool == Tool::Open { open_target(arg).map_err(Stop::Error)? } else { arg.clone() };
         if tool.asks() {
             let q = if *tool == Tool::Open { format!("The buddy wants to open {}. Allow it?", assist::short(&arg, 200)) } else { format!("The buddy wants to start the app \"{}\". Allow it?", assist::short(&arg, 80)) };
-            if !g.h.confirm(&q) { return Err(Stop::Refused(g.h.refusal().into())); }
-            g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
+            if !auto_yes(&q) {
+                if !g.h.confirm(&q) { return Err(Stop::Refused(g.h.refusal().into())); }
+                g.watch.expect(g.h.cursor()); // your hand was on the mouse to answer
+            }
         }
         let out = g.h.tool(*tool, &arg).map_err(Stop::Error)?;
         if let Some(s) = g.pause(if tool.asks() { 1200 } else { SETTLE_MS }) { return Err(s); } // an opened app needs a moment to appear
@@ -565,8 +583,9 @@ fn step<H: Host>(g: &mut Guard<H>, caps: &[screen::Cap], els: &[El], a: &Action,
     let at = target(caps, els, a).map_err(Stop::Error)?;
     // a drag lets go on the same screen the picture names
     let to = match a.act { Act::Drag(x, y) => resolve(caps, &Action { act: Act::Move, pos: Some((x, y)), el: None, ..a.clone() }).map_err(Stop::Error)?, _ => None };
-    if matches!(a.act, Act::Click(..) | Act::Drag(..)) && risky(&a.label) && !std::mem::take(approved) && !g.h.confirm(&format!("The buddy wants to click \"{}\". Allow it?", a.label)) {
-        return Err(Stop::Refused(g.h.refusal().into()));
+    if matches!(a.act, Act::Click(..) | Act::Drag(..)) && risky(&a.label) && !std::mem::take(approved) {
+        let q = format!("The buddy wants to click \"{}\". Allow it?", a.label);
+        if !auto_yes(&q) && !g.h.confirm(&q) { return Err(Stop::Refused(g.h.refusal().into())); }
     }
     if matches!(a.act, Act::Type(_) | Act::Hold(..)) && g.h.password_focused() {
         return Err(Stop::Refused("That's a password field, so type that one yourself.".into()));
@@ -678,6 +697,9 @@ static ANSWERED_BY: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
 
 /// Why the last island question did not get a yes: 0 you said no, 1 no answer in time, 2 you stopped it (Esc or voice).
 static LAST_NO: AtomicU32 = AtomicU32::new(0);
+
+/// The last island question ended because nobody answered in time.
+pub fn last_ask_timed_out() -> bool { LAST_NO.load(Ordering::Relaxed) == 1 }
 
 /// What a take-over says when a step it asked about was not allowed, by the reason `LAST_NO` holds.
 pub fn refusal_text(code: u32) -> &'static str {
@@ -1079,6 +1101,7 @@ pub fn start_with(permit: &crate::agent::policy::Cleared, cfg: &Config, goal: &s
 /// Every take-over starts here, and only with the `Cleared` permit of `policy::gate` or `policy::approve`.
 pub fn start_with_chat(_permit: &crate::agent::policy::Cleared, cfg: &Config, goal: &str, shown: Option<String>, prep: Option<Box<dyn FnOnce() + Send>>, approved: bool, on_done: Option<OnDone>, chat: Option<crate::agent::Chat>) -> Result<String, String> {
     check_ready(cfg)?;
+    AUTO.store(crate::agent::policy::auto_at_pc(cfg), std::sync::atomic::Ordering::Relaxed);
     if ACTIVE.swap(true, Ordering::Relaxed) { return Err("I'm already driving. Press Esc to stop me.".into()); }
     let (cfg, goal) = (Config(cfg.0.clone()), goal.to_string());
     std::thread::spawn(move || {
@@ -1486,7 +1509,9 @@ mod tests {
             assert_eq!(open_target(ok).as_deref(), Ok(ok), "{ok}");
         }
         for bad in ["", "   ", "ms-settings:network", "file:///C:/a.txt", "javascript:alert(1)", "https:/x.com", "https://", "ftp://x.com", r"\\server\share\a.txt", "//server/a",
-                    r"C:\tools\setup.exe", r"C:\a\RUN.BAT", "x.ps1", "mail.docm", "a.LNK", "%USERPROFILE%", "a\"b", "a|b", "line\nbreak"] {
+                    r"C:\tools\setup.exe", r"C:\a\RUN.BAT", "x.ps1", "mail.docm", "a.LNK", "%USERPROFILE%", "a\"b", "a|b", "line\nbreak",
+                    r"C:\x\evil.exe.", r"C:\x\evil.exe. . ", r"C:\x\evil.exe::$DATA", r"C:\x\a.txt:hidden.exe", r"C:\x\console.msc", r"C:\x\help.CHM",
+                    r"C:\x\app.appref-ms", r"C:\x\s.settingcontent-ms", r"C:\x\disk.iso"] {
             assert!(open_target(bad).is_err(), "{bad:?} must be refused");
         }
         assert!(open_target(&"a".repeat(MAX_TARGET + 1)).is_err());

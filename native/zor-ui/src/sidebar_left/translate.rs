@@ -137,10 +137,10 @@ impl Tab for Translate {
             Out::Empty => c.text("Translation", R::new(body.x, body.y, body.w, 24.0), f, t.c("onSurfaceVariant"), Align::Left),
             Out::Err(e) => { err_box(c, cx, R::new(body.x, body.y, body.w, 0.0), e); }
             Out::Text(s) => {
-                let h = c.g.measure_wrapped(s, f, body.w - 6.0);
+                let h = c.g.measure_wrapped(s, f, body.w - crate::tokens::BAR_ROOM);
                 self.out_dims = (h, body.h);
                 let col = alpha(t.c("onSurface"), if self.loading { 0.5 } else { 1.0 });
-                self.scroll.region(c, cx, body, h, |c, top| c.para(s, R::new(body.x, top, body.w - 6.0, h), f, col, Align::Left));
+                self.scroll.region(c, cx, body, h, |c, top| c.para(s, R::new(body.x, top, body.w - crate::tokens::BAR_ROOM, h), f, col, Align::Left));
             }
         }
         if self.loading && matches!(self.out, Out::Empty) { dots(c, cx, outr.x + outr.w / 2.0, outr.y + outr.h / 2.0); }
@@ -170,7 +170,7 @@ impl Tab for Translate {
             let cur = if which == 0 { self.src.clone() } else { self.tgt.clone() };
             self.menu_scroll.region(c, cx, inner, content, |c, top| {
                 for (i, l) in rows.iter().enumerate() {
-                    let rr = R::new(inner.x, top + i as f32 * ROW, inner.w - 6.0, ROW);
+                    let rr = R::new(inner.x, top + i as f32 * ROW, inner.w - ui::bar_room(content, inner.h), ROW);
                     if rr.y + ROW < inner.y || rr.y > inner.y + inner.h { continue; }
                     let sel = l.0 == cur;
                     if sel { c.rect(rr, 12.0, t.c("secondaryContainer")); }

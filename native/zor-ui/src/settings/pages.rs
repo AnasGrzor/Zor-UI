@@ -149,6 +149,10 @@ fn screen_model_choices(models: &[(String, String)], current: &str) -> Vec<(Valu
     v.extend(models.iter().filter(|(id, _)| id == current || crate::bridge::model_id_can_see(id)).map(|(id, name)| (json!(id), name.clone())));
     v
 }
+/// Fewest sections that get jump chips; a page with fewer fits on screen or nearly.
+const JUMP_MIN: usize = 3;
+fn shows_jump(sections: usize) -> bool { sections >= JUMP_MIN }
+
 fn px(min: f64, max: f64, step: f64) -> Sl { Sl { min, max, step, fmt: Fmt::Px } }
 
 /// One tile of the wallpaper / preset galleries.
@@ -159,8 +163,27 @@ impl Settings {
         if self.query().is_empty() {
             let d = registry::def_of(self.current_page());
             p.title_cat(d.title, d.blurb, category_of_page(self.page));
+            self.jump_chips(p);
             self.body(p)
         } else { self.results(p) }
+    }
+
+    /// The current page's section titles, from a measuring pass over its body. The chips under the title need
+    /// them before the page itself is measured, so they come from their own pass.
+    pub fn section_names(&mut self, c: &mut crate::gfx::Canvas, cx: &crate::app::Ctx, w: f32) -> Vec<String> {
+        let mut dry = Pen::new(c, cx, 0.0, 0.0, w, 0.0, 0.0);
+        dry.dry = true;
+        self.body(&mut dry);
+        dry.heads.into_iter().map(|h| h.0).collect()
+    }
+
+    /// One chip per section under the page title, each scrolling to its section. Short pages get none.
+    fn jump_chips(&mut self, p: &mut Pen) {
+        if !shows_jump(self.sections.len()) { return; }
+        let items = self.sections.iter().map(|s| (s.clone(), None, false, Act::Goto(self.page, s.clone(), String::new()))).collect();
+        p.lead_gap(crate::tokens::JUMP_PAD);
+        p.chips(items);
+        p.lead_gap(crate::tokens::JUMP_PAD);
     }
 
     /// The page being shown.
@@ -179,6 +202,7 @@ impl Settings {
             Page::Sidebar => self.sidebar(p),
             Page::Buddies => self.buddies(p),
             Page::Contacts => self.contacts_page(p),
+            Page::Commands => self.commands_page(p),
             Page::Creator => self.creator_page(p),
             Page::Voice => self.voice(p),
             Page::Services => self.services(p),
@@ -303,17 +327,66 @@ impl Settings {
         }
     }
 
+    /// The Commands page: your own phrases that make the buddy do several things (`buddies.commands`).
+    fn commands_page(&mut self, p: &mut Pen) {
+        p.h2("commands", "Your own commands", "");
+        p.card(|p| {
+            self.commands(p);
+            p.note("Say the words anywhere in a sentence, like \"hey buddy, it's game time\". Each step runs as if you said it, in order: \"open ...\", \"play ... on spotify\", \"search for ...\", \"message ... saying ...\", or anything you would ask the buddy. \"open last game\" starts the game you last played full screen.", 12.0);
+        });
+    }
+
+    /// One row per command with edit and delete buttons, then the form that adds one or, after the pencil, saves that one.
+    fn commands(&mut self, p: &mut Pen) {
+        let list = self.garr(p.cx, "buddies.commands");
+        let editing = self.fields.get("cmd-edit").map(|f| f.tb.text.clone()).unwrap_or_default();
+        let cmds: Vec<(String, (String, Vec<String>))> = list.into_iter().filter_map(|e| crate::commands::parse_command(&e).map(|c| (e, c))).collect();
+        if cmds.is_empty() { p.note("No commands yet. Add one below.", 12.0); }
+        for (entry, (words, steps)) in cmds {
+            let Some(r) = p.row(44.0) else { continue };
+            p.left(r, "bolt", &words, &steps.join("  \u{2022}  "), 80.0);
+            let id = p.act(Act::Do("edit-cmd", entry.clone()));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 76.0, r.y + 4.0, 36.0, 36.0), id, "edit", IconKind::Plain, 20.0, entry == editing);
+            let id = p.act(Act::Do("del-cmd", entry));
+            ui::icon_btn(p.c, p.cx, R::new(r.x + r.w - 36.0, r.y + 4.0, 36.0, 36.0), id, "delete", IconKind::Plain, 20.0, false);
+        }
+        if !editing.is_empty() {
+            if let Some(r) = p.row(44.0) {
+                let words = crate::commands::parse_command(&editing).map(|c| c.0).unwrap_or_default();
+                p.left(r, "edit", &format!("Editing {words}"), "Change anything below, then save", 100.0);
+                p.chip_right(r, None, "Cancel", Act::Do("cancel-cmd", String::new()));
+            }
+        }
+        if let Some(r) = p.row(44.0) {
+            p.left(r, "record_voice_over", "When I say", "Words anywhere in what you say", 240.0);
+            self.field_ui(p, "cmd-words", None, super::Kind::Plain, R::new(r.x + r.w - 240.0, r.y + 2.0, 240.0, 40.0), "game time", 17.0, false);
+        }
+        if let Some(r) = p.row(44.0) {
+            let w = (r.w * 0.6).max(240.0);
+            p.left(r, "list", "Do", "Steps, split by ;", w);
+            self.field_ui(p, "cmd-steps", None, super::Kind::Plain, R::new(r.x + r.w - w, r.y + 2.0, w, 40.0), "play gaming playlist on spotify; open discord; open last game", 17.0, false);
+        }
+        if let Some(r) = p.row(44.0) {
+            let (ic, title, button) = if editing.is_empty() { ("add_circle", "Add this command", "Add") } else { ("save", "Save changes", "Save") };
+            p.left(r, ic, title, "", 80.0);
+            p.chip_right(r, None, button, Act::Do("add-cmd", String::new()));
+        }
+    }
+
     /// The island version setting, live: each version's agent pill text, from the same functions the pill uses
     /// (bar::agent_pill_parts, bar::draw_scroll), with sample data (bar::island_version_sample). The chosen version is marked. The panel
     /// itself is not drawn here: it needs live data, so only the pill text differs in the preview.
     fn island_version_preview(&mut self, p: &mut Pen) {
-        const H: f32 = 64.0;
+        // title, pill, then one caption line (11 px text + 4 px) and 8 px under it
+        const H: f32 = 28.0 + 24.0 + 6.0 + 11.0 * crate::ui::LH + 4.0 + 8.0;
         let Some(r) = p.row(H + 12.0) else { return };
         let selected = self.gs(p.cx, "island.version");
         let (label, tool, pct) = crate::bar::island_version_sample();
         let gap = 10.0;
         let w = (r.w - 24.0 - gap) / 2.0;
-        for (i, (name, version)) in [("New island", "new"), ("Current island", "current")].into_iter().enumerate() {
+        // The pill is the same in both; they differ in the expanded panel, which needs a live session to draw,
+        // so each box says in words what its version adds.
+        for (i, (name, version, has)) in [("New island", "new", "Pill, session cards and permission prompts"), ("Current island", "current", "Pill only")].into_iter().enumerate() {
             let b = R::new(r.x + 12.0 + i as f32 * (w + gap), r.y + 6.0, w, H);
             p.c.rect(b, 12.0, p.col("surfaceContainer"));
             let title = if selected == version { p.col("primary") } else { p.col("onSurfaceVariant") };
@@ -327,15 +400,15 @@ impl Settings {
             // the pill's 7 px gap between its texts; since 0 keeps the sample scrolling on the wall clock
             let tx = pill.x + 12.0 + head_w + 7.0;
             crate::bar::draw_scroll(p.c, &tool, R::new(tx, pill.y, (pill.x + pill.w - 12.0 - tx).max(0.0), pill.h), f, fg, 0.0);
+            p.c.text(has, R::new(b.x + 10.0, pill.y + pill.h + 6.0, b.w - 20.0, 11.0 * crate::ui::LH + 4.0), txt(11.0, 400), p.col("onSurfaceVariant"), Align::Left);
         }
     }
 
     fn island(&mut self, p: &mut Pen) {
         p.h2("pill", "What the island shows", "");
         p.card(|p| {
-            self.seg(p, "island.version", &[("new", "New island"), ("current", "Current island")], "Island version", "swap_horiz");
+            self.seg_sub(p, "island.version", &[("new", "New island"), ("current", "Current island")], "Island version", "Takes effect after you restart zor-ui", "swap_horiz");
             self.island_version_preview(p);
-            p.note("Switch takes effect after you restart zor-ui. The current island is the committed version, without session cards or the new permission handling.", 12.0);
             p.note("The island picks the most important of these. Move it or hide it in Bar & desktop > Bar layout. Anything turned off here shows on the bar as usual.", 12.0);
             self.sw(p, "island.notifications", "New notifications", "The app and title, for a few seconds", "notifications");
             self.num(p, "island.notifySeconds", "Notification seconds", 1, 30, "timer");
@@ -750,13 +823,17 @@ impl Settings {
 
     /// Real-time live studio preview showing the bar layout, styles, spacing and Dynamic Island together.
     fn bar_island_studio(&mut self, p: &mut Pen) {
-        const H: f32 = 120.0;
-        let Some(r) = p.studio_box(H, "Bar & Island Studio", "Live Preview") else { return };
         let pos = self.gs(p.cx, "bar.position");
+        // a side bar needs the tall box; a top or bottom bar needs the 36 px header, the 32 px bar with 4 px
+        // around it, a 12 px strip of desktop and the box's 8 px bottom edge
+        let tall = matches!(pos.as_str(), "left" | "right");
+        let h: f32 = if tall { 120.0 } else { 36.0 + 4.0 + 32.0 + 4.0 + 12.0 + 8.0 };
+        // no title: the section heading above already names the studio
+        let Some(r) = p.studio_box(h, "", "Live Preview") else { return };
         let style = self.gs(p.cx, "bar.style");
         let groups = self.gs(p.cx, "bar.groups");
         let spacing = self.gs(p.cx, "bar.spacing");
-        let preview_area = R::new(r.x + 12.0, r.y + 36.0, r.w - 24.0, H - 44.0);
+        let preview_area = R::new(r.x + 12.0, r.y + 36.0, r.w - 24.0, h - 44.0);
         
         // Desktop wallpaper simulation backdrop
         p.c.rect(preview_area, 10.0, p.col("surfaceContainer"));
@@ -1186,8 +1263,7 @@ impl Settings {
         p.h2("mic", "Voice commands", "");
         p.card(|p| {
             self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say. Tap Right Alt twice to ask about your screen", "mic");
-            self.seg(p, "buddies.listenMode", &[("auto", "Auto"), ("toggle", "Toggle"), ("hold", "Hold")], "Dictation mode", "keyboard_voice");
-            p.note("Auto stops when you stop talking. Toggle records until you press the hotkey again. Hold records while you hold the hotkey.", 12.0);
+            self.seg_sub(p, "buddies.listenMode", &[("auto", "Auto"), ("toggle", "Toggle"), ("hold", "Hold")], "Dictation mode", "Auto stops when you stop talking. Toggle records until you press the hotkey again. Hold records while you hold the hotkey.", "keyboard_voice");
             self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
             self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
             self.sw(p, "buddies.allow.message", "Start messages", "\"message <name> saying ...\" opens the chat with the text ready. You press Enter to send", "chat");
@@ -1212,7 +1288,7 @@ impl Settings {
                 p.note("It asks before the first step of each request, and before anything that sends, buys or deletes. It has its own logins: log in to a site once in its window. Passwords are yours to type.", 12.0);
                 self.sw(p, "buddies.bypass", "Bypass permissions", "No yes needed before the first step. It still asks before anything that sends, buys, deletes or presses Enter, and never types passwords", "lock_open");
             }
-            self.sw(p, "buddies.autoMode", "Auto mode", "Commands, file changes, coding agents, checks and take-overs run without asking. Sleep, restart, shut down, a site's send or buy, and chats still ask", "bolt");
+            self.sw(p, "buddies.autoMode", "Auto mode", "Commands, file changes, coding agents, checks, take-overs and a site's send, post or Enter run without asking. Anything that spends money, sleep, restart, shut down, and remote chats still ask", "bolt");
             self.sw(p, "native.gojoVoice", "Speak replies aloud", "Uses Windows' own voice", "volume_up");
             let mut mics = vec![(json!(""), "Windows default".to_string())];
             mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
@@ -1396,9 +1472,11 @@ impl Settings {
             ];
             self.pick(p, "voice.provider", opts, "Voice provider", "Piper and OpenAI need the steps below first", "record_voice_over", 260.0);
             let mb = crate::voice::download_bytes("piper").map(|b| (b as f64 / 1_048_576.0).round() as u64).unwrap_or(0);
-            let busy = self.busy == "voice-install:piper";
-            let (sub, chip) = if busy { ("Downloading and unpacking. This takes a few minutes".to_string(), None) }
-                else if crate::voice::installed("piper") { ("Installed. Voice: en_US-lessac-medium".to_string(), Some(("delete", "Remove", Act::Do("voice-remove", "piper".into())))) }
+            let progress = crate::voice::download::progress();
+            let busy = progress.running;
+            let (sub, chip) = if busy { (progress.label(), None) }
+                else if crate::voice::installed("piper") && !crate::voice::jarvis_installed() { (format!("JARVIS available. {mb} MB download"), Some(("download", "Update voices", Act::Do("voice-install", "piper".into())))) }
+                else if crate::voice::installed("piper") { ("Installed. Voices: Lessac and JARVIS".to_string(), Some(("delete", "Remove", Act::Do("voice-remove", "piper".into())))) }
                 else { (format!("Not installed. {mb} MB download"), Some(("download", "Install", Act::Do("voice-install", "piper".into())))) };
             match chip {
                 Some((ic, label, act)) => {
@@ -1411,6 +1489,14 @@ impl Settings {
                 None => {
                     if let Some(r) = p.row_sub(44.0, "storage", &sub, 0.0) { p.left(r, "storage", "Piper files", &sub, 0.0); }
                 }
+            }
+            if busy {
+                if let Some(r) = p.row(8.0) {
+                    p.c.rect(R::new(r.x, r.y + 2.0, r.w, 4.0), 2.0, p.col("secondaryContainer"));
+                    p.c.rect(R::new(r.x, r.y + 2.0, r.w * progress.fraction(), 4.0), 2.0, p.col("primary"));
+                }
+            } else if !progress.message.is_empty() {
+                p.note(&progress.message, 12.0);
             }
             let (sub, ic) = if crate::voice::openai_key_saved() { ("Key saved. Billed per character by OpenAI", "key") }
                 else { ("Add an OpenAI API key under Services first", "key_off") };
@@ -1440,6 +1526,7 @@ impl Settings {
         p.h2("neurology", "AI", "");
         p.card(|p| {
             self.sw(p, "ai.claudeCli", "Use my Claude subscription", "Adds Claude Haiku, Sonnet and Opus through Claude Code, no API key. Needs the claude command, signed in. Counts against your plan", "workspace_premium");
+            self.sw(p, "ai.verify", "Check its work", "When a step can't report whether it worked (a click, a link, a message, a code edit), the buddy checks with read-only tools before it answers: it looks at the screen, reads the file or runs the project's check", "fact_check");
             self.sw(p, "ai.memory", "Remember things", "Buddy keeps the facts you ask it to remember, on this PC only, and recalls them when they fit. Passwords and account numbers are never kept", "psychology");
             if self.get(p.cx, "ai.memory").as_bool().unwrap_or(true) {
                 self.sw(p, "ai.learn", "Learn from what I say", "Also keeps facts you mention, like \"my sister is called Lina\", and the projects you name. Only from this PC, never from remote chats", "hearing");
@@ -1954,7 +2041,7 @@ mod tests {
 
     #[test]
     fn every_page_has_its_id() {
-        assert_eq!(registry::PAGES.iter().map(|p| p.key).collect::<Vec<_>>(), ["quick", "wallpapers", "presets", "bar", "island", "sidebar", "keys", "buddies", "contacts", "creator", "voice", "services", "usage", "about"]);
+        assert_eq!(registry::PAGES.iter().map(|p| p.key).collect::<Vec<_>>(), ["quick", "wallpapers", "presets", "bar", "island", "sidebar", "keys", "buddies", "contacts", "commands", "creator", "voice", "services", "usage", "about"]);
         assert!(crate::settings::layout::BAR_MODULES.iter().all(|m| !m.2.is_empty()));
         assert_eq!(LANGS.len(), 49);
     }
@@ -2016,6 +2103,21 @@ mod page_header_tests {
         p.dry = true;
         st.creator_page(&mut p);
         p.y
+    }
+
+    #[test]
+    fn long_pages_list_their_sections_for_the_jump_chips() {
+        use crate::{app::Ctx, gfx::{Canvas, Gfx}};
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&conf::pack_dir().join(r"assetsonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0u8; 800 * 800 * 4];
+        let mut c = Canvas::new(&g, &mut px, 800, 800, 1.0, 0).unwrap();
+        let cx = Ctx::new(false);
+        let mut st = Settings::new((800.0, 800.0)).on_page("bar");
+        let names = st.section_names(&mut c, &cx, 600.0);
+        assert!(shows_jump(names.len()), "the Bar page has many sections: {names:?}");
+        assert!(names.iter().any(|n| n == "Bar"), "{names:?}");
+        assert!(!shows_jump(2) && shows_jump(3));
     }
 
     #[test]

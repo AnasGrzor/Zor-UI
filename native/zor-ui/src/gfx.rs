@@ -448,16 +448,52 @@ impl IDWriteTextRenderer_Impl for Sink_Impl {
 
 enum Surface<'a> { Pix(PixmapMut<'a>), Mask(&'a mut Mask) }
 
+/// A rendered text run, with its actual DirectWrite layout and visible hit bounds.
+#[derive(Clone)]
+pub struct TextRun {
+    pub text: String,
+    pub rect: R,
+    visible: R,
+    layout: IDWriteTextLayout,
+    clip: Option<std::rc::Rc<Mask>>,
+    scale: f32,
+}
+impl TextRun {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        if !self.visible.contains(x, y) { return false; }
+        if let Some(m) = &self.clip {
+            let (x, y) = ((x * self.scale) as u32, (y * self.scale) as u32);
+            if x >= m.width() || y >= m.height() || m.data()[(y * m.width() + x) as usize] == 0 { return false; }
+        }
+        let (mut trailing, mut inside, mut metrics) = (FALSE, FALSE, DWRITE_HIT_TEST_METRICS::default());
+        unsafe { self.layout.HitTestPoint(x - self.rect.x, y - self.rect.y, &mut trailing, &mut inside, &mut metrics).is_ok() && inside.as_bool() }
+    }
+    pub fn index(&self, x: f32, y: f32) -> usize {
+        let (mut trailing, mut inside, mut m) = (FALSE, FALSE, DWRITE_HIT_TEST_METRICS::default());
+        unsafe { let _ = self.layout.HitTestPoint(x - self.rect.x, y - self.rect.y, &mut trailing, &mut inside, &mut m); }
+        let target = m.textPosition + if trailing.as_bool() { m.length } else { 0 };
+        let mut units = 0;
+        for (b, ch) in self.text.char_indices() {
+            if units >= target { return b; }
+            units += ch.len_utf16() as u32;
+        }
+        self.text.len()
+    }
+}
+
 /// One paint pass. Records clickable spots (`hit`) so the window can route clicks and hover.
 pub struct Canvas<'a> {
     pub g: &'a Gfx,
     surf: Surface<'a>,
-    clip: Option<Mask>,
+    clip: Option<std::rc::Rc<Mask>>,
     /// Physical px per CSS px.
     pub scale: f32,
     /// Vertical offset (CSS px) of everything drawn; the shadow pass uses it.
     dy: f32,
     pub hits: Vec<(R, u32)>,
+    pub texts: Vec<TextRun>,
+    pub selectable: bool,
+    pub selection: Option<((usize, usize), (usize, usize))>,
     pub hover: u32,
     pub w: f32,
     pub h: f32,
@@ -467,7 +503,7 @@ impl<'a> Canvas<'a> {
     /// `px`: premultiplied BGRA pixels, `pw` x `ph`. Cleared to transparent.
     pub fn new(g: &'a Gfx, px: &'a mut [u8], pw: u32, ph: u32, scale: f32, hover: u32) -> Option<Canvas<'a>> {
         px.fill(0);
-        Some(Canvas { g, surf: Surface::Pix(PixmapMut::from_bytes(px, pw, ph)?), clip: None, scale, dy: 0.0, hits: vec![], hover,
+        Some(Canvas { g, surf: Surface::Pix(PixmapMut::from_bytes(px, pw, ph)?), clip: None, scale, dy: 0.0, hits: vec![], texts: vec![], selectable: true, selection: None, hover,
             w: pw as f32 / scale, h: ph as f32 / scale })
     }
 
@@ -489,7 +525,7 @@ impl<'a> Canvas<'a> {
         KEPT.with(|k| if let (Some((_, pm)), Surface::Pix(px)) = (k.borrow().iter().find(|e| e.0 == key), &mut self.surf) {
             // a backdrop goes on a fresh (cleared) canvas, so a plain copy equals source-over and skips the blend pipeline
             if self.clip.is_none() && px.data_mut().len() == pm.data().len() { px.data_mut().copy_from_slice(pm.data()); }
-            else { px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_ref()); }
+            else { px.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), self.clip.as_deref()); }
         });
     }
 
@@ -499,7 +535,7 @@ impl<'a> Canvas<'a> {
     pub fn fill_path(&mut self, p: &Geom, c: Color) {
         let ts = self.ts();
         match &mut self.surf {
-            Surface::Pix(px) => px.fill_path(p, &paint(c), FillRule::Winding, ts, self.clip.as_ref()),
+            Surface::Pix(px) => px.fill_path(p, &paint(c), FillRule::Winding, ts, self.clip.as_deref()),
             Surface::Mask(m) => m.fill_path(p, FillRule::Winding, true, ts),
         }
     }
@@ -555,12 +591,35 @@ impl<'a> Canvas<'a> {
 
     /// One line of text, vertically centred in `r`, cut with an ellipsis if it doesn't fit.
     pub fn text(&mut self, s: &str, r: R, f: Font, c: Color, align: Align) {
-        if let Some(l) = self.g.layout(s, f, r.w, r.h, align, false) { self.draw_layout(&l, r.x, r.y, c); }
+        if let Some(l) = self.g.layout(s, f, r.w, r.h, align, false) { self.record_text(s, r, f, &l); self.draw_layout(&l, r.x, r.y, c); }
     }
 
     /// Wrapped paragraph from the top of `r`.
     pub fn para(&mut self, s: &str, r: R, f: Font, c: Color, align: Align) {
-        if let Some(l) = self.g.layout(s, f, r.w, r.h, align, true) { self.draw_layout(&l, r.x, r.y, c); }
+        if let Some(l) = self.g.layout(s, f, r.w, r.h, align, true) { self.record_text(s, r, f, &l); self.draw_layout(&l, r.x, r.y, c); }
+    }
+
+    fn record_text(&mut self, s: &str, r: R, f: Font, l: &IDWriteTextLayout) {
+        if !self.selectable || f.icon || s.is_empty() || !matches!(self.surf, Surface::Pix(_)) { return; }
+        let id = self.texts.len();
+        if let Some((a, b)) = self.selection {
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            if id >= a.0 && id <= b.0 {
+                let start = if id == a.0 { a.1 } else { 0 };
+                let end = if id == b.0 { b.1 } else { s.len() };
+                if let (Some(prefix), Some(selected)) = (s.get(..start), s.get(start..end)) {
+                    let mut count = 0;
+                    unsafe {
+                        let _ = l.HitTestTextRange(prefix.encode_utf16().count() as u32, selected.encode_utf16().count() as u32, r.x, r.y, None, &mut count);
+                        let mut boxes = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+                        if count > 0 && l.HitTestTextRange(prefix.encode_utf16().count() as u32, selected.encode_utf16().count() as u32, r.x, r.y, Some(&mut boxes), &mut count).is_ok() {
+                            for b in boxes { self.rect(R::new(b.left, b.top, b.width, b.height), 1.0, 0x665A9CFF); }
+                        }
+                    }
+                }
+            }
+        }
+        self.texts.push(TextRun { text: s.into(), rect: R::new(r.x, r.y + self.dy, r.w, r.h), visible: r, layout: l.clone(), clip: self.clip.clone(), scale: self.scale });
     }
 
     pub fn icon(&mut self, name: &str, r: R, f: Font, c: Color) { self.text(name, r, f, c, Align::Center); }
@@ -608,7 +667,7 @@ impl<'a> Canvas<'a> {
             }),
             None => Mask::new(pw, ph).map(|mut m| { m.fill_path(&p, FillRule::Winding, true, ts); m }),
         };
-        let old = std::mem::replace(&mut self.clip, m);
+        let old = std::mem::replace(&mut self.clip, m.map(std::rc::Rc::new));
         draw(self);
         self.clip = old;
     }
@@ -632,7 +691,7 @@ impl<'a> Canvas<'a> {
             let a = (ramp(c - x0, left * s).min(ramp(x1 - c, right * s)).clamp(0.0, 1.0) * 255.0) as u32;
             for y in y0..y1 { let i = y * pw + px; d[i] = old.map_or(a, |o| a * o[i] as u32 / 255) as u8; }
         }
-        let old = std::mem::replace(&mut self.clip, Some(m));
+        let old = std::mem::replace(&mut self.clip, Some(std::rc::Rc::new(m)));
         draw(self);
         self.clip = old;
     }
@@ -656,7 +715,13 @@ impl<'a> Canvas<'a> {
             (y..y + h).flat_map(|row| d[(row * pw + x) * 4..(row * pw + x + w) * 4].iter().copied()).collect()
         };
         let saved: Vec<Vec<u8>> = match &mut self.surf { Surface::Pix(px) => strips.iter().map(|&st| copy(px.data_mut(), st)).collect(), _ => vec![] };
+        let first_text = self.texts.len();
         draw(self);
+        for t in &mut self.texts[first_text..] {
+            let left = t.visible.x.max(r.x);
+            let top = t.visible.y.max(r.y);
+            t.visible = R::new(left, top, (t.visible.x + t.visible.w).min(r.x + r.w).max(left) - left, (t.visible.y + t.visible.h).min(r.y + r.h).max(top) - top);
+        }
         let Surface::Pix(px) = &mut self.surf else { return };
         let d = px.data_mut();
         for (&(x, y, w, h), bytes) in strips.iter().zip(&saved) {
@@ -668,7 +733,7 @@ impl<'a> Canvas<'a> {
     pub fn image(&mut self, img: &Pixmap, r: R, opacity: f32) {
         let (x, y) = ((r.x * self.scale).round() as i32, ((r.y + self.dy) * self.scale).round() as i32);
         let p = PixmapPaint { opacity, ..Default::default() };
-        if let Surface::Pix(px) = &mut self.surf { px.draw_pixmap(x, y, img.as_ref(), &p, Transform::identity(), self.clip.as_ref()); }
+        if let Surface::Pix(px) = &mut self.surf { px.draw_pixmap(x, y, img.as_ref(), &p, Transform::identity(), self.clip.as_deref()); }
     }
 
     /// A picture decoded at its drawn size, standing with its bottom centre on (x, y): mirrored when `dir` is
@@ -678,7 +743,7 @@ impl<'a> Canvas<'a> {
     pub fn sprite_scaled(&mut self, img: &Pixmap, x: f32, y: f32, dir: f32, rot: f32, sx: f32, sy: f32) {
         let (w, h) = (img.width() as f32, img.height() as f32);
         let t = Transform::from_translate(x * self.scale, (y + self.dy) * self.scale).pre_rotate(rot.to_degrees()).pre_scale(dir.signum() * sx, sy).pre_translate(-w / 2.0, -h);
-        if let Surface::Pix(px) = &mut self.surf { px.draw_pixmap(0, 0, img.as_ref(), &PixmapPaint::default(), t, self.clip.as_ref()); }
+        if let Surface::Pix(px) = &mut self.surf { px.draw_pixmap(0, 0, img.as_ref(), &PixmapPaint::default(), t, self.clip.as_deref()); }
     }
 
     /// Soft shadow under what `draw` paints (CSS drop-shadow / text-shadow `0 dy blur`): `draw`
@@ -689,7 +754,7 @@ impl<'a> Canvas<'a> {
         if let Some(mut m) = Mask::new(pw, ph) {
             {
                 let mut sc = Canvas { g: self.g, surf: Surface::Mask(&mut m), clip: None, scale: self.scale, dy: self.dy + dy,
-                    hits: vec![], hover: 0, w: self.w, h: self.h };
+                    hits: vec![], texts: vec![], selectable: false, selection: None, hover: 0, w: self.w, h: self.h };
                 draw(&mut sc, Some(0xFF00_0000));
             }
             box_blur(m.data_mut(), pw as usize, ph as usize, (blur / 2.0 * self.scale).round() as usize); // CSS blur = 2 sigma
@@ -783,6 +848,29 @@ mod tests {
         assert!(y > h);
         let i = g.hit_index(s, f, 60.0, true, 1.0, y + 2.0);
         assert!(s.is_char_boundary(i) && i > 0);
+    }
+
+    #[test]
+    fn displayed_text_selection_uses_layout_and_clipping() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let g = Gfx::new(&crate::conf::pack_dir().join(r"assets\fonts"), &std::env::temp_dir()).unwrap();
+        let mut px = vec![0; 300 * 160 * 4];
+        let mut c = Canvas::new(&g, &mut px, 300, 160, 1.0, 0).unwrap();
+        let text = "hello ?? caf? wrapped text";
+        c.para(text, R::new(10.0, 10.0, 100.0, 140.0), txt(18.0, 400), 0xFFFFFFFF, Align::Left);
+        assert_eq!(c.texts.len(), 1);
+        for x in 0..120 { for y in 0..150 {
+            assert!(text.is_char_boundary(c.texts[0].index(x as f32, y as f32)));
+        } }
+        c.icon("close", R::new(200.0, 0.0, 30.0, 30.0), ico(20.0, false), 0xFFFFFFFF);
+        assert_eq!(c.texts.len(), 1, "icons must not be copied as text");
+        c.scissor(R::new(150.0, 50.0, 100.0, 30.0), |c| {
+            c.text("hidden", R::new(150.0, 0.0, 100.0, 30.0), txt(18.0, 400), 0xFFFFFFFF, Align::Left);
+        });
+        assert!(!c.texts[1].contains(155.0, 15.0));
+        c.selection = Some(((0, 0), (0, text.len())));
+        c.texts.clear();
+        c.para(text, R::new(10.0, 10.0, 100.0, 140.0), txt(18.0, 400), 0xFFFFFFFF, Align::Left);
     }
 
     /// Text lands where it's asked to at 1x and 2x (the glyph-run origin is in DIPs, scaled by the transform).

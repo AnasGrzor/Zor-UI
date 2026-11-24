@@ -33,6 +33,8 @@ pub fn routes(service: &str, spotify_app: bool, youtube_tab: bool) -> Vec<Route>
     if spotify && spotify_app { v.push(Route::SpotifyApp); }
     // always tried for Spotify: an open Spotify tab is used (your login is in it), otherwise a new one opens
     if spotify { v.push(Route::SpotifyTab); }
+    // A named service is a constraint, not permission to switch providers.
+    if s.contains("spotify") { return v; }
     if youtube_tab { v.push(Route::YoutubeTab); }
     v.push(Route::YoutubeNew);
     v
@@ -331,7 +333,8 @@ mod tests {
     fn routes_follow_what_is_live() {
         use Route::*;
         assert_eq!(routes("", true, true), [SpotifyApp, SpotifyTab, YoutubeTab, YoutubeNew], "the app first, then the web");
-        assert_eq!(routes("Spotify", false, false), [SpotifyTab, YoutubeNew], "nothing open: Spotify still opens its page before YouTube");
+        assert_eq!(routes("Spotify", false, false), [SpotifyTab], "a named service never switches to YouTube");
+        assert_eq!(routes("spotify", true, true), [SpotifyApp, SpotifyTab]);
         assert_eq!(routes("youtube", true, true), [YoutubeTab, YoutubeNew], "asking for YouTube skips Spotify");
         assert_eq!(routes("YouTube Music", true, false), [YoutubeNew]);
         assert_eq!(routes("", false, true), [SpotifyTab, YoutubeTab, YoutubeNew], "no service tries Spotify first");

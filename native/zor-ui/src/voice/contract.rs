@@ -49,6 +49,8 @@ impl Cancel {
     pub fn new() -> Cancel { Cancel::default() }
     pub fn cancel(&self) { self.0.store(true, Ordering::Relaxed); }
     pub fn is_cancelled(&self) -> bool { self.0.load(Ordering::Relaxed) }
+    /// Whether `other` is a clone of this one (the same line), not merely in the same state.
+    pub fn same(&self, other: &Cancel) -> bool { Arc::ptr_eq(&self.0, &other.0) }
 }
 
 /// Voice-level features. A provider reports which ones its voices honour.
@@ -165,6 +167,8 @@ pub trait TtsProvider: Send + Sync {
     fn design_voice(&self, _description: &str) -> Result<VoiceInfo, ProviderError> {
         Err(ProviderError::Unsupported("voice design"))
     }
+    /// Gets ready to speak `req` soon (Piper loads its model), so the first line starts sooner. Does nothing by default.
+    fn warm(&self, _req: &SynthesisRequest) {}
     fn shutdown(&self) {}
 }
 

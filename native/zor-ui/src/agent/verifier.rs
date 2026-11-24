@@ -71,7 +71,7 @@ pub fn kind_of(call: &Call) -> Kind {
     match call {
         Play { .. } => Kind::Play,
         Remember(_) | Forget(_) => Kind::Memory,
-        WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) => Kind::Lookup,
+        WebSearch(_) | ReadUrl(_) | FindApp(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) | SearchMemory(_) => Kind::Lookup,
         FindFile(_) => Kind::FileSearch,
         // brightness, radio, clipboard and wallpaper read the state back (`brightness_reply`, `readback::radio_reply`, `clip_reply`, `wallpaper_reply`)
         Radio { .. } | Brightness(_) | Clip(_) | Wallpaper(_) => Kind::ReadBack,
@@ -213,7 +213,7 @@ mod tests {
         let mut v = vec![
             Search("x".into()), WebSearch("x".into()), ReadUrl("https://a.com".into()), FindApp("x".into()), FindFile("x".into()),
             SeeScreen("x".into()), ListTree("".into()), ReadFile("a".into()), SearchCode("x".into()), GitStatus, Metrics("".into()),
-            SessionSearch("x".into()), Open("x".into()), Url("https://a.com".into()), Play { query: "x".into(), service: "".into() },
+            SessionSearch("x".into()), SearchMemory("x".into()), Open("x".into()), Url("https://a.com".into()), Play { query: "x".into(), service: "".into() },
             Media("pause".into()), Volume("up".into()), Brightness("50".into()), Radio { which: "wifi".into(), state: "on".into() },
             Clip("x".into()), OpenFile("a".into()), Wallpaper("random".into()), Message { to: "a".into(), text: "b".into(), via: "".into() },
             Remember("x".into()), Forget("x".into()), Power("lock".into()), Power("sleep".into()), TakeOver("x".into()), RunCheck("cargo test".into()),

@@ -48,6 +48,8 @@ const NOTIF_BACK: u32 = 130;
 const NOTIF_OPEN: u32 = 131;
 const NOTIF_DISMISS: u32 = 132;
 const NOTIF_BODY: u32 = 133;
+/// "+N more" under a cut-short list: opens the right sidebar, which lists them all.
+const NOTIF_MORE: u32 = 134;
 const ASK_Q: u32 = 13;
 const ASK_BOX: u32 = 14;
 const ASK_SEND: u32 = 15;
@@ -91,8 +93,9 @@ const SESSION: u32 = 280;
 /// Agents carries the sessions the filter shows and (needs you, working, idle) counted over all of them.
 /// Ask: the buddy's question. Permit: what Claude Code wants to do, and the plan or questions it asks (Null for a plain
 /// permission); the answer finds its session itself.
+/// Notifs carries the rows shown and how many more the notifCount setting hides.
 /// Tabs(agents running or waiting, notifications) is the tab row; Empty is the note for a tab with nothing in it.
-enum Sec { Ask(String), Permit(String, String, Value), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>), NotifDetail(Value), Clips(Vec<Value>, String), Send(crate::localsend_panel::Panel) }
+enum Sec { Ask(String), Permit(String, String, Value), Tabs(usize, usize), Empty(&'static str), Media, Rec, Timer, Idle, Agents(Vec<Value>, (usize, usize, usize)), Notifs(Vec<Value>, usize), NotifDetail(Value), Clips(Vec<Value>, String), Send(crate::localsend_panel::Panel) }
 
 const PANEL_SCROLL: u32 = 400;
 const CHOICE_SCROLL: u32 = 401;
@@ -168,7 +171,7 @@ impl Island {
 
     /// Whether a section belongs to the open tab (asks and permission prompts are handled before this).
     fn in_tab(&self, sec: &Sec) -> bool {
-        matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(_) | Sec::NotifDetail(_)) | (3, Sec::Clips(..)))
+        matches!((self.tab, sec), (0, Sec::Media | Sec::Rec | Sec::Timer | Sec::Idle) | (1, Sec::Agents(..)) | (2, Sec::Notifs(..) | Sec::NotifDetail(_)) | (3, Sec::Clips(..)))
     }
 }
 
@@ -176,7 +179,7 @@ impl Island {
 fn lyrics_top(volume: bool) -> f32 { 70.0 + if volume { crate::tokens::ISLAND_VOL_GAP + VOL_H } else { 0.0 } }
 
 /// Width the question wraps to. The text is drawn 8 px narrower than the row, so the height is measured at the same width.
-fn question_width(width: f32) -> f32 { width - 2.0 * PAD - crate::tokens::ISLAND_TEXT_INSET }
+fn question_width(width: f32) -> f32 { width - 2.0 * PAD - crate::tokens::BAR_ROOM }
 
 /// Height the question gets: all of it, from one line up to `ASK_MAX_LINES` (it scrolls past that).
 fn ask_h(full: f32) -> f32 { full.clamp(lh(13.0), lh(13.0) * ASK_MAX_LINES) }
@@ -198,7 +201,7 @@ fn options_of(q: &Value) -> &[Value] { let o = items(q, "options"); &o[..o.len()
 /// Several questions, or one that takes several picks: the Send chip gives the answers, a tap does not.
 fn needs_send(qs: &[Value]) -> bool { qs.len() > 1 || qs.iter().any(|q| q["multiSelect"] == true) }
 /// Width of one option at the selected column count, including its padding.
-fn option_row_w(width: f32, columns: usize) -> f32 { (width - 2.0 * PAD - SESS_GAP * (columns - 1) as f32) / columns as f32 }
+fn option_row_w(width: f32, columns: usize) -> f32 { (width - 2.0 * PAD - crate::tokens::BAR_ROOM - SESS_GAP * (columns - 1) as f32) / columns as f32 }
 fn option_w(width: f32, columns: usize) -> f32 { option_row_w(width, columns) - 2.0 * CARD_PAD }
 /// Height of an option, measured at the same column width used to draw it.
 fn option_h(g: &Gfx, o: &Value, width: f32, columns: usize) -> f32 {
@@ -479,6 +482,13 @@ fn add_secs(st: &SYSTEMTIME, secs: i64) -> SYSTEMTIME {
     }
 }
 
+/// Height of the notifications list: its title, the rows, and the "+N more" chip when the list is cut short.
+fn notifs_h(list: &[Value], more: usize) -> f32 {
+    if list.is_empty() { return crate::tokens::ISLAND_HEAD_H + lh(12.5); }
+    let rows: f32 = list.iter().map(|x| crate::tokens::ISLAND_GAP + 2.0 * crate::tokens::SP_S + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum();
+    22.0 + rows + if more > 0 { crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H } else { 0.0 }
+}
+
 fn chip_w(c: &Canvas, label: &str, icon: bool) -> f32 { crate::tokens::CHIP_PAD + if icon { crate::tokens::CHIP_ICON + crate::tokens::CHIP_ICON_GAP } else { 0.0 } + c.g.measure(label, txt(13.0, 400)).0.ceil() + crate::tokens::CHIP_PAD }
 
 impl Island {
@@ -522,11 +532,10 @@ impl Island {
             } else {
                 let n = self.notifs.lock().map(|n| n.clone()).unwrap_or_default();
                 let count = cx.cfg.get("island.panel.notifCount").as_u64().unwrap_or(3) as usize;
+                let more = n.len().saturating_sub(count);
                 let n: Vec<Value> = n.into_iter().take(count).collect();
-                let h = if n.is_empty() { crate::tokens::ISLAND_HEAD_H + lh(12.5) } else {
-                    22.0 + n.iter().map(|x| crate::tokens::ISLAND_GAP + 2.0 * crate::tokens::SP_S + lh(13.0) * if s(x, "body").is_empty() { 1.0 } else { 2.0 }).sum::<f32>()
-                };
-                v.push((Sec::Notifs(n), h));
+                let h = notifs_h(&n, more);
+                v.push((Sec::Notifs(n, more), h));
             }
         }
         if dp(cx, "clipboard") {
@@ -651,7 +660,7 @@ impl Island {
                 self.scroll.region(c, cx, r, self.plain_h, |c, top| {
                     for (i, l) in lines.iter().enumerate() {
                         let y = top + i as f32 * ROW;
-                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + crate::tokens::ISLAND_TEXT_INSET, y, r.w - 2.0 * crate::tokens::ISLAND_TEXT_INSET, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
+                        if y + ROW >= r.y && y <= r.y + r.h { c.text(l, R::new(r.x + crate::tokens::ISLAND_TEXT_INSET, y, r.w - crate::tokens::ISLAND_TEXT_INSET - crate::tokens::BAR_ROOM, ROW), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Center); }
                     }
                 });
             }
@@ -687,7 +696,7 @@ impl Island {
         let qr = R::new(x, y, w, ask_h(self.ask_full));
         c.hit(qr, ASK_Q);
         let full = self.ask_full;
-        self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
+        self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(q, R::new(qr.x, top, qr.w - crate::tokens::BAR_ROOM, full), f, t.c("onSurface"), Align::Left));
         let y = y + qr.h + crate::tokens::SP_M;
         let br = R::new(x, y, w, ASK_BOX_H);
         c.rect(br, ASK_BOX_H / 2.0, t.c("surfaceContainer"));
@@ -720,7 +729,7 @@ impl Island {
             let qr = R::new(x, y, w, ask_h(self.ask_full));
             c.hit(qr, ASK_Q);
             let full = self.ask_full;
-            self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(text, R::new(qr.x, top, qr.w - 8.0, full), f, t.c("onSurface"), Align::Left));
+            self.ask_scroll.region(c, cx, qr, full, |c, top| c.para(text, R::new(qr.x, top, qr.w - crate::tokens::BAR_ROOM, full), f, t.c("onSurface"), Align::Left));
             y += qr.h + PERMIT_GAP;
         }
         if !plan {
@@ -735,7 +744,7 @@ impl Island {
                 let mut y = top;
                 for (qi, q) in qs.iter().enumerate() {
                     if let Some(hd) = q["header"].as_str().filter(|h| !h.is_empty()) {
-                        c.text(hd, R::new(x, y, w, lh(12.0)), txt(12.0, 500), t.c("tertiary"), Align::Left);
+                        c.text(hd, R::new(x, y, w - crate::tokens::BAR_ROOM, lh(12.0)), txt(12.0, 500), t.c("tertiary"), Align::Left);
                         y += lh(12.0) + crate::tokens::SP_XS;
                     }
                     let text = q["question"].as_str().unwrap_or("");
@@ -1091,7 +1100,7 @@ impl Island {
         y + SESS_GAP
     }
 
-    fn notifs(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value]) {
+    fn notifs(&mut self, c: &mut Canvas, cx: &Ctx, x: f32, y: f32, list: &[Value], more: usize) {
         let (t, w) = (&cx.theme, self.width.get() - 2.0 * PAD);
         let hh = if list.is_empty() { 16.0 } else { 22.0 };
         c.icon("notifications", R::new(x, y + (hh - 16.0) / 2.0, 16.0, 16.0), ico(16.0, false), t.c("onSurfaceVariant"));
@@ -1120,6 +1129,8 @@ impl Island {
             if !body.is_empty() { c.text(&body, R::new(r.x + crate::tokens::ISLAND_ROW_PAD, r.y + crate::tokens::SP_S + lh(13.0), tw, lh(13.0)), txt(13.0, 400), t.c("onSurfaceVariant"), Align::Left); }
             y += h + crate::tokens::ISLAND_GAP;
         }
+        // the rest live in the right sidebar's Notifications tab
+        if more > 0 { ui::chip(c, cx, x, y, NOTIF_MORE, Some("open_in_new"), &format!("+{more} more"), false); }
     }
 
     /// An opened notification: its app and age, the title, the body (scrolls past a few lines), then Back, Open and Dismiss.
@@ -1142,7 +1153,7 @@ impl Island {
             let br = R::new(x, y, w, ask_h(body_full));
             c.hit(br, NOTIF_BODY);
             let f = txt(13.0, 400);
-            self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - 8.0, body_full), f, t.c("onSurface"), Align::Left));
+            self.body_scroll.region(c, cx, br, body_full, |c, top| c.para(&body, R::new(br.x, top, br.w - crate::tokens::BAR_ROOM, body_full), f, t.c("onSurface"), Align::Left));
             y += br.h + crate::tokens::SP_M;
         }
         // Back on the left; Open (the app that sent it, if it names one) and Dismiss on the right
@@ -1159,7 +1170,7 @@ impl Island {
     /// Height of a notification's title and body when they wrap to the panel width.
     fn notif_text_h(&self, g: &Gfx, n: &Value) -> (f32, f32) {
         let w = self.width.get() - 2.0 * PAD;
-        (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - 8.0))
+        (g.measure_wrapped(&s(n, "title"), txt(13.0, 500), w), g.measure_wrapped(&s(n, "body"), txt(13.0, 400), w - crate::tokens::BAR_ROOM))
     }
 
     /// The app target of the open notification (what Open launches), "" if none.
@@ -1246,6 +1257,8 @@ impl Island {
 
 impl View for Island {
     fn accepts_files(&self) -> bool { true }
+    /// The scroll areas only take the wheel: the whole-panel one would otherwise show the hand everywhere.
+    fn hand(&self, id: u32) -> bool { !matches!(id, 0 | PANEL_SCROLL | CHOICE_SCROLL | LYRICS | ASK_Q | NOTIF_BODY) }
     fn size(&self, g: &Gfx, cx: &Ctx, _: f32) -> (f32, f32) {
         self.adapt_width(g);
         (self.width.get() + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM, (Self::content_h(&self.plan(g, cx)) + 2.0 * PAD + 2.0 * crate::tokens::ISLAND_SHADOW_ROOM).min(self.max_h))
@@ -1277,7 +1290,8 @@ impl View for Island {
         }
         self.panel_full = Self::content_h(&plan);
         self.panel_view = (h - 2.0 * PAD).max(1.0);
-        let viewport = R::new(x, y, self.width.get() - 2.0 * PAD, self.panel_view);
+        // the viewport reaches into the right padding (up to the 1 px border) so the scrollbar sits there, clear of the sections
+        let viewport = R::new(x, y, self.width.get() - PAD - 1.0, self.panel_view);
         c.hit(viewport, PANEL_SCROLL);
         let mut scroll = std::mem::take(&mut self.panel_scroll);
         let hit_start = c.hits.len();
@@ -1298,7 +1312,7 @@ impl View for Island {
                     Sec::Tabs(running, inbox) => self.tabs(c, cx, x, y, *running, *inbox),
                     Sec::Empty(msg) => c.text(*msg, R::new(x, y, self.width.get() - 2.0 * PAD, 16.0), txt(12.5, 400), cx.theme.c("onSurfaceVariant"), Align::Left),
                     Sec::Agents(l, counts) => self.agents(c, cx, x, y, l, *counts),
-                    Sec::Notifs(l) => self.notifs(c, cx, x, y, l),
+                    Sec::Notifs(l, more) => self.notifs(c, cx, x, y, l, *more),
                     Sec::NotifDetail(n) => self.notif_detail(c, cx, x, y, n),
                     Sec::Clips(l, note) => self.clips_sec(c, cx, x, y, l, note),
                     Sec::Send(send) => send.paint(c, cx, x, y, self.width.get() - 2.0 * PAD),
@@ -1358,6 +1372,10 @@ impl View for Island {
                     std::thread::spawn(move || { let a: Vec<&str> = ids.iter().map(String::as_str).collect(); crate::proc::bridge(&cfg, "notifications-dismiss", &a); });
                 }
                 NOTIF_BACK => self.notif_open = None,
+                NOTIF_MORE => {
+                    cx.actions.push(Action::Close("island-panel".into()));
+                    cx.actions.push(Action::open("sidebar-right"));
+                }
                 NOTIF_OPEN => {
                     let open = self.open_target();
                     if !open.is_empty() { crate::bridge::sys::open_and_point(&open); }
@@ -1598,18 +1616,32 @@ mod tests {
     }
 
     #[test]
+    fn the_hand_shows_on_controls_not_on_scroll_areas() {
+        let island = Island::new((664.0, 900.0));
+        for id in [0, PANEL_SCROLL, CHOICE_SCROLL, LYRICS, ASK_Q, NOTIF_BODY] { assert!(!island.hand(id), "{id} only scrolls"); }
+        for id in [PLAY, SEEK, ASK_SEND, TAB, SESSION, NOTIF_OPEN] { assert!(island.hand(id), "{id} is a control"); }
+    }
+
+    #[test]
     fn each_tab_shows_its_own_sections_and_asks_stay_out_of_the_tabs() {
         let mut island = Island::new((0.0, 0.0));
         island.tab = 0;
         assert!(island.in_tab(&Sec::Media) && island.in_tab(&Sec::Timer) && !island.in_tab(&Sec::Agents(vec![], (0, 0, 0))));
         island.tab = 1;
-        assert!(island.in_tab(&Sec::Agents(vec![], (0, 0, 0))) && !island.in_tab(&Sec::Notifs(vec![])));
+        assert!(island.in_tab(&Sec::Agents(vec![], (0, 0, 0))) && !island.in_tab(&Sec::Notifs(vec![], 0)));
         island.tab = 2;
-        assert!(island.in_tab(&Sec::Notifs(vec![])) && island.in_tab(&Sec::NotifDetail(json!({}))) && !island.in_tab(&Sec::Media));
+        assert!(island.in_tab(&Sec::Notifs(vec![], 0)) && island.in_tab(&Sec::NotifDetail(json!({}))) && !island.in_tab(&Sec::Media));
         island.tab = 3;
-        assert!(island.in_tab(&Sec::Clips(vec![], String::new())) && !island.in_tab(&Sec::Media) && !island.in_tab(&Sec::Notifs(vec![])));
+        assert!(island.in_tab(&Sec::Clips(vec![], String::new())) && !island.in_tab(&Sec::Media) && !island.in_tab(&Sec::Notifs(vec![], 0)));
         island.tab = 0;
         assert!(!island.in_tab(&Sec::Clips(vec![], String::new())), "the clipboard has its own tab now");
+    }
+
+    #[test]
+    fn a_cut_short_notification_list_reserves_room_for_the_more_chip() {
+        let list = vec![json!({"title": "a"}), json!({"title": "b", "body": "x"})];
+        assert_eq!(notifs_h(&list, 7) - notifs_h(&list, 0), crate::tokens::ISLAND_GAP + crate::tokens::CHIP_H);
+        assert_eq!(notifs_h(&[], 7), notifs_h(&[], 0), "an empty list shows no chip");
     }
 
     #[test]

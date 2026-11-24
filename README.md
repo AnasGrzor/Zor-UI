@@ -359,7 +359,9 @@ each other** lines a dragged card up with the edges and centers of other cards a
 drag freely).
 
 **Log.** Zor UI writes one line per user action and per preset or wallpaper step to `zorui.log` in its data folder
-(moved to `zorui.log.old` past 1 MB), so a silent failure can be traced afterwards.
+(moved to `zorui.log.1` past 5 MB, with the ten newest old copies kept), so a silent failure can be traced afterwards.
+Frame-trace lines go to `zorui.frametrace.log`. The buddy's LinkedIn and X posts, with their exact text and how each
+ended, are listed under `history` in `social.json` in the same folder.
 
 **Presets.** Settings > Presets lists the community gallery. **Apply** downloads the preset's wallpaper and
 applies its color scheme, workspace labels (for example 一 二 三), bar layout and style, desktop card positions and

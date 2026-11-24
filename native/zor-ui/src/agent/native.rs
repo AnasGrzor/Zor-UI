@@ -2,7 +2,7 @@
 //! back through `parse_step`, the same validator the JSON protocol uses, so both paths accept and refuse the same things.
 //! `run_native_loop` runs it for a Claude model when native tools are on (`agent::native_on`).
 
-use super::{delegate, fit_to_budget, parse_step, Call, Step, MAX_SAY};
+use super::{delegate, fit_to_budget, parse_step, Call, Step, MAX_ANSWER};
 use crate::assist::Turn;
 use crate::bridge::native_tools;
 use serde_json::{json, Value};
@@ -20,7 +20,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("search", "Shows a web search to the user in the browser. Only when they ask to see or open a search.", &[("arg", "the search query")], &["arg"]),
         tool("web_search", "Looks the query up and returns the top results as text, for facts, news, prices and anything uncertain.", &[("arg", "the search query")], &["arg"]),
         tool("read_url", "Returns the text of a web page, for example one from web_search.", &[("arg", "an https:// address")], &["arg"]),
-        tool("open", "Starts an installed app or game.", &[("arg", "the app or game name")], &["arg"]),
+        tool("open", "Starts an installed app or game. \"last game\" starts the game the user played last.", &[("arg", "the app or game name, or last game")], &["arg"]),
         tool("find_app", "Lists installed apps and games matching a name.", &[("arg", "the name")], &["arg"]),
         tool("open_url", "Opens a web page in the browser.", &[("arg", "an https:// address")], &["arg"]),
         tool("play", "Searches for music and plays it. Without the Spotify app it uses the browser.", &[("query", "song or artist"), ("service", "spotify, youtube, youtube music, or empty")], &["query"]),
@@ -38,6 +38,7 @@ pub fn tool_schemas() -> Vec<Value> {
         tool("see_screen", "Looks at the user's screen and answers. Only when they ask about what is on it.", &[("arg", "the question")], &["arg"]),
         tool("remember", "Keeps a fact about the user for later: when they ask you to remember something, or when it will matter next time. Never a password, key or account number.", &[("arg", "the fact in one short sentence")], &["arg"]),
         tool("forget", "Deletes the remembered fact that matches, when the user asks you to forget something.", &[("arg", "words from the fact to forget")], &["arg"]),
+        tool("search_memory", "Looks up facts you stored about the user that were not given with this request. Use it when the answer depends on something about the user you were not told here.", &[("arg", "words to look for")], &["arg"]),
         tool("session_search", "Finds past conversations with the buddy that mention the words, including ones older than the last few turns. Only when the user asks what was said or done before.", &[("arg", "words to look for")], &["arg"]),
         tool("take_over","Controls the mouse and keyboard for a task no other tool can reach. The user is asked first; use it last.", &[("arg", "the task")], &["arg"]),
         tool("list_tree", "Lists the files and folders in the developer workspace set in Settings. Only for a request about the project or its code.", &[("arg", "folder inside the workspace, or empty for its top")], &[]),
@@ -80,7 +81,7 @@ pub fn run_native_loop(model: &str, system: &str, temp: f64, history: &[Value], 
         if turn.calls.is_empty() && turn.bad.is_empty() {
             let text = turn.text.trim();
             if text.is_empty() { return Err("I got no answer from the AI.".into()); }
-            return Ok(crate::assist::short(text, MAX_SAY));
+            return Ok(crate::assist::short(text, MAX_ANSWER));
         }
         // the assistant's turn goes back as it was sent: its text, then each tool call (a call that failed keeps an empty input)
         let mut content = vec![];
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(r, Ok("Opened Spotify.".into()));
         let second = seen.borrow()[1].clone();
         assert_eq!(second["temperature"], 0.4);
-        assert_eq!(second["tools"].as_array().unwrap().len(), 34, "the tool list goes with every turn");
+        assert_eq!(second["tools"].as_array().unwrap().len(), 35, "the tool list goes with every turn");
         let msgs = second["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][0]["id"], "toolu_1");
@@ -253,7 +254,7 @@ mod tests {
     #[test]
     fn the_schema_lists_the_same_tools_as_the_system_text() {
         let names: Vec<String> = tool_schemas().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names.len(), 34);
+        assert_eq!(names.len(), 35);
         for n in &names {
             assert!(super::super::SYSTEM.contains(&format!("\"do\":\"{n}\"")), "{n} is not in SYSTEM");
         }

@@ -110,9 +110,9 @@ pub fn default_voice(character: &str) -> String {
     builtin_id(if BUILTIN_CHARACTERS.contains(&character) { character } else { "neutral" })
 }
 
-/// The built-in profiles: one per character, bound to the Windows voice.
+/// Character profiles plus the Piper-only JARVIS voice.
 pub fn builtin_profiles() -> Vec<VoiceProfile> {
-    BUILTIN_CHARACTERS.iter().map(|c| VoiceProfile {
+    let mut profiles: Vec<VoiceProfile> = BUILTIN_CHARACTERS.iter().map(|c| VoiceProfile {
         id: builtin_id(c),
         name: c.to_string(),
         description: "Built-in character voice".into(),
@@ -124,7 +124,20 @@ pub fn builtin_profiles() -> Vec<VoiceProfile> {
             ProviderBinding { provider: "piper".into(), voice: "en_US-lessac-medium".into(), model: None, ext: json!({ "v": EXT_VERSION }) },
             ProviderBinding { provider: "openai".into(), voice: "alloy".into(), model: Some("tts-1".into()), ext: json!({ "v": EXT_VERSION }) },
         ],
-    }).collect()
+    }).collect();
+    profiles.push(VoiceProfile {
+        id: builtin_id("jarvis"),
+        name: "JARVIS".into(),
+        description: "British English, local Piper voice".into(),
+        tags: vec!["built-in".into()],
+        settings: SpeechSettings { speed: 1.0 / 1.15, ..Default::default() },
+        reference: None,
+        bindings: vec![ProviderBinding {
+            provider: "piper".into(), voice: super::catalog::JARVIS_ID.into(),
+            model: None, ext: json!({ "v": EXT_VERSION }),
+        }],
+    });
+    profiles
 }
 
 /// A random UUID (version 4 layout) for a new profile. Not cryptographic; it only needs to be unique here.
@@ -188,9 +201,21 @@ mod tests {
     #[test]
     fn builtins_cover_every_character_on_the_windows_voice() {
         let b = builtin_profiles();
-        assert_eq!(b.len(), BUILTIN_CHARACTERS.len());
-        assert!(b.iter().all(|p| p.binding_for("windows").map(|x| x.voice.as_str()) == Some("male")));
+        assert_eq!(b.len(), BUILTIN_CHARACTERS.len() + 1);
+        assert!(b.iter().filter(|p| p.id != builtin_id("jarvis")).all(|p| p.binding_for("windows").map(|x| x.voice.as_str()) == Some("male")));
         assert_eq!(builtin_id("gojo"), "builtin:gojo");
+    }
+
+    #[test]
+    fn jarvis_resolves_to_a_downloadable_piper_model_at_its_original_speed() {
+        let profile = builtin_profiles().into_iter().find(|p| p.id == builtin_id("jarvis")).unwrap();
+        let binding = profile.binding_for("piper").unwrap();
+        let catalog = super::super::manifest::parse(&super::super::catalog::piper()).unwrap();
+        let model = catalog.models.iter().find(|m| m.id == binding.voice).unwrap();
+        assert_eq!(model.files.len(), 2);
+        assert!(model.files.iter().any(|f| f.file == "jarvis-high.onnx.json"));
+        assert_eq!(super::super::piper::scale_for(profile.settings.speed), "1.150");
+        assert!(profile.binding_for("windows").is_none());
     }
 
     #[test]

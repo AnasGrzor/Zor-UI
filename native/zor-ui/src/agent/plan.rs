@@ -155,7 +155,7 @@ pub struct Entry { pub key: String, pub side: bool, pub status: Outcome, pub det
 pub enum Outcome { Running, Done, Failed, Declined, Blocked }
 
 impl Outcome {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self { Outcome::Running => "running", Outcome::Done => "done", Outcome::Failed => "failed", Outcome::Declined => "declined", Outcome::Blocked => "blocked" }
     }
     fn from_name(s: &str) -> Option<Outcome> {
@@ -166,7 +166,7 @@ impl Outcome {
 /// Reads and memory edits may repeat. Every other tool changes something outside the buddy, and an unknown one counts as a change.
 pub fn side_effect(call: &Call) -> bool {
     !matches!(call, Call::WebSearch(_) | Call::ReadUrl(_) | Call::FindApp(_) | Call::FindFile(_) | Call::SeeScreen(_) | Call::Remember(_) | Call::Forget(_)
-        | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::GitStatus | Call::SessionSearch(_))
+        | Call::ListTree(_) | Call::ReadFile(_) | Call::SearchCode(_) | Call::GitStatus | Call::SessionSearch(_) | Call::SearchMemory(_))
 }
 
 /// The identity of a step: the call as the buddy holds it.
@@ -212,17 +212,18 @@ fn saved_at(text: &str) -> Option<i64> {
 }
 
 /// The steps of one request as it runs. With no task id (the database can't be used) nothing is saved and the request goes on.
-pub struct Steps { id: Option<i64>, entries: Vec<Entry>, blocked: Vec<String> }
+/// `shown` is the same tool steps as the chat window draws them (`label::tool_label`); it is not saved with the task.
+pub struct Steps { id: Option<i64>, entries: Vec<Entry>, blocked: Vec<String>, shown: Vec<(&'static str, String, Outcome)> }
 
 impl Steps {
     /// `interrupted`: the step records of the earlier interrupted tasks (`tasks::interrupted_steps`).
     pub fn new(id: Option<i64>, interrupted: &[String]) -> Steps {
-        Steps { id, entries: vec![], blocked: blocked_keys(interrupted) }
+        Steps { id, entries: vec![], blocked: blocked_keys(interrupted), shown: vec![] }
     }
 
     /// A resumed task: its record so far (`prior`) is kept and new steps are added to it.
     pub fn resumed(id: Option<i64>, prior: Vec<Entry>, interrupted: &[String]) -> Steps {
-        Steps { id, entries: prior, blocked: blocked_keys(interrupted) }
+        Steps { id, entries: prior, blocked: blocked_keys(interrupted), shown: vec![] }
     }
 
     /// Adds a note to the record (a plan that could not be made, a re-plan, a wait). Notes are not tool steps.
@@ -238,6 +239,8 @@ impl Steps {
         let refuse = side && self.blocked.contains(&k);
         let (status, detail) = if refuse { (Outcome::Blocked, "already tried in an interrupted task".to_string()) } else { (Outcome::Running, String::new()) };
         self.entries.push(Entry { key: k, side, status, detail });
+        let (icon, label) = super::label::tool_label(call);
+        self.shown.push((icon, label, status));
         self.save();
         refuse.then(|| "I already tried that in a task the app cut off, so I won't repeat it. Ask me again if you want it done.".to_string())
     }
@@ -247,6 +250,7 @@ impl Steps {
         if let Some(last) = self.entries.last_mut().filter(|s| s.status == Outcome::Running) {
             last.status = match (res.is_ok(), declined) { (_, true) => Outcome::Declined, (true, _) => Outcome::Done, _ => Outcome::Failed };
             last.detail = assist::short(match res { Ok(r) => r, Err(e) => e }, 200);
+            if let Some(s) = self.shown.iter_mut().rev().find(|s| s.2 == Outcome::Running) { s.2 = last.status; }
         }
         self.save();
     }
@@ -254,6 +258,26 @@ impl Steps {
     fn save(&self) {
         if self.id.is_some() { tasks::save_steps(self.id, &encode(&self.entries)); }
     }
+
+    /// What this request's tools did (`did_text`), for the turn the conversation keeps.
+    pub fn did(&self) -> String { did_text(&self.entries) }
+
+    /// The tool steps as the chat window shows them, as JSON: `[{"icon", "label", "status"}]`, status one of running, done,
+    /// failed, declined, blocked.
+    pub fn shown_json(&self) -> String {
+        serde_json::Value::from(self.shown.iter().map(|(icon, label, st)| json!({ "icon": icon, "label": label, "status": st.name() })).collect::<Vec<_>>()).to_string()
+    }
+}
+
+/// The longest summary of a task's tool steps a turn carries, in characters.
+pub const DID_MAX: usize = 400;
+
+/// The tool steps of a task as one short line, `ReadFile("a.txt") done; Open("steam") failed`, notes left out, at most
+/// `DID_MAX` characters. Empty when no tool ran. The model reads it with the answer, so a later "which files did you touch?"
+/// is answered from what ran, not from memory.
+pub fn did_text(entries: &[Entry]) -> String {
+    let steps: Vec<String> = entries.iter().filter(|e| !e.key.starts_with(NOTE)).map(|e| format!("{} {}", assist::short(&e.key, 80), e.status.name())).collect();
+    assist::short(&steps.join("; "), DID_MAX)
 }
 
 #[cfg(test)]
@@ -289,9 +313,9 @@ mod tests {
         let unstamped = r#"[{"key":"x","side":true,"status":"done"}]"#.to_string();
         assert!(blocked_keys_at(&[unstamped], saved).is_empty(), "a record with no stamp counts as old");
         // within one request: a Steps that starts with a recent interrupted record refuses the repeat, and an old one doesn't
-        let mut steps = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[record], saved) };
+        let mut steps = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[record], saved), shown: vec![] };
         assert!(steps.begin(&msg).is_some(), "the repeat is refused in the same request");
-        let mut fresh = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[encode_at(&[entry(&msg, Outcome::Done)], saved)], saved + BLOCK_WINDOW_SECS + 1) };
+        let mut fresh = Steps { id: None, entries: vec![], blocked: blocked_keys_at(&[encode_at(&[entry(&msg, Outcome::Done)], saved)], saved + BLOCK_WINDOW_SECS + 1), shown: vec![] };
         assert!(fresh.begin(&msg).is_none());
     }
 
@@ -421,5 +445,15 @@ mod tests {
         steps.end(&Err("no".into()), true);
         let got: Vec<Outcome> = steps.entries.iter().map(|e| e.status).collect();
         assert_eq!(got, vec![Outcome::Blocked, Outcome::Done, Outcome::Failed, Outcome::Declined]);
+    }
+
+    #[test]
+    fn did_text_lists_tool_steps_and_leaves_notes_out() {
+        let mut list = vec![entry(&Call::ReadFile("a.txt".into()), Outcome::Done), entry(&Call::Open("steam".into()), Outcome::Failed)];
+        list.insert(0, Entry { key: format!("{NOTE}plan"), side: false, status: Outcome::Done, detail: "x".into() });
+        assert_eq!(did_text(&list), "ReadFile(\"a.txt\") done; Open(\"steam\") failed");
+        assert_eq!(did_text(&[]), "");
+        let many: Vec<Entry> = (0..50).map(|i| entry(&Call::ReadFile(format!("file{i}.txt")), Outcome::Done)).collect();
+        assert!(did_text(&many).chars().count() <= DID_MAX + 1, "capped, plus the ellipsis");
     }
 }

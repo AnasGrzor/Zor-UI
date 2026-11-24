@@ -1,12 +1,20 @@
 //! zorui.log in the data folder: one timestamped line per user action and per preset / wallpaper step, so a
-//! silent failure can be traced afterwards. The file is moved to zorui.log.old once it passes 1 MB.
+//! silent failure can be traced afterwards. Past `MAX` the file moves to zorui.log.1, the older copies move up one
+//! (zorui.log.2 ...), and only the one past `KEEP` is dropped. Frame-trace lines go to their own file, so their rate can't
+//! push the real lines out.
 
 use std::{io::Write, path::Path};
 
-const MAX: u64 = 1_000_000;
+/// The size at which a log file moves to its first old copy.
+const MAX: u64 = 5_000_000;
+/// Old copies kept per log file, zorui.log.1 being the newest.
+const KEEP: u32 = 10;
 
 /// Appends `msg` to zorui.log.
 pub fn line(msg: &str) { write_to(&path(), msg); }
+
+/// Appends a TEMP frametrace line to zorui.frametrace.log, which rotates on its own.
+pub fn trace(msg: &str) { write_to(&path().with_extension("frametrace.log"), msg); }
 
 /// The real zorui.log in the data folder.
 fn real_path() -> std::path::PathBuf { crate::conf::data_dir().join("zorui.log") }
@@ -34,8 +42,19 @@ impl std::io::Write for Sink {
 /// A formatted event without its trailing newline (`line` adds its own).
 fn event_text(b: &[u8]) -> String { String::from_utf8_lossy(b).trim_end().to_string() }
 
+/// The `n`th old copy of `path`, as in zorui.log.3.
+fn old(path: &Path, n: u32) -> std::path::PathBuf { path.with_extension(format!("log.{n}")) }
+
+/// Shifts the old copies up one and moves `path` to the first; the copy past `KEEP` is the only one dropped.
+fn rotate(path: &Path) {
+    let _ = std::fs::remove_file(old(path, KEEP));
+    // from the top down, since a rename can't replace a file on Windows
+    for n in (1..KEEP).rev() { let _ = std::fs::rename(old(path, n), old(path, n + 1)); }
+    let _ = std::fs::rename(path, old(path, 1));
+}
+
 fn write_to(path: &Path, msg: &str) {
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX) { let _ = std::fs::rename(path, path.with_extension("log.old")); }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX) { rotate(path); }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     // one line per entry, however many the message has
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) { let _ = writeln!(f, "[unix {secs}] {}", msg.replace('\n', " ")); }
@@ -73,7 +92,22 @@ mod tests {
         std::fs::write(&p, vec![b'x'; MAX as usize + 1]).unwrap();
         write_to(&p, "fresh");
         assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 1);
-        assert!(d.join("zorui.log.old").exists());
+        assert!(d.join("zorui.log.1").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rotation_keeps_the_newest_copies_in_order() {
+        let d = std::env::temp_dir().join(format!("zor-ui-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("zorui.log");
+        for n in 0..KEEP + 3 { std::fs::write(&p, format!("gen {n}")).unwrap(); rotate(&p); }
+        let newest = KEEP + 2;
+        assert_eq!(std::fs::read_to_string(old(&p, 1)).unwrap(), format!("gen {newest}"), "the newest copy is .1");
+        assert_eq!(std::fs::read_to_string(old(&p, KEEP)).unwrap(), format!("gen {}", newest + 1 - KEEP), "KEEP copies survive");
+        assert!(!old(&p, KEEP + 1).exists(), "nothing past KEEP");
+        assert_eq!(old(&p.with_extension("frametrace.log"), 2).file_name().unwrap(), "zorui.frametrace.log.2");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

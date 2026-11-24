@@ -76,7 +76,6 @@ pub fn migrate(section: &Value, a_char: &str, b_char: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::profile;
     use serde_json::json;
 
     #[test]
@@ -84,7 +83,7 @@ mod tests {
         let c = VoiceConfig::load(&Value::Null, "gojo", "geto");
         assert_eq!(c.provider, "windows");
         assert_eq!(c.buddies, ["builtin:gojo".to_string(), "builtin:geto".to_string()]);
-        assert_eq!(c.profiles.len(), profile::BUILTIN_CHARACTERS.len(), "only the built-ins exist yet");
+        assert_eq!(c.profiles.len(), builtin_profiles().len(), "only the built-ins exist yet");
     }
 
     #[test]
@@ -126,7 +125,7 @@ mod tests {
             { "id": "builtin:gojo", "name": "shadow" }
         ]});
         let c = VoiceConfig::load(&section, "gojo", "geto");
-        assert_eq!(c.profiles.len(), profile::BUILTIN_CHARACTERS.len() + 1);
+        assert_eq!(c.profiles.len(), builtin_profiles().len() + 1);
         assert!(c.profiles.iter().any(|p| p.id == "user-1"));
         assert!(c.profiles.iter().any(|p| p.id == "builtin:gojo" && p.name == "gojo"), "a user entry cannot replace a built-in");
     }

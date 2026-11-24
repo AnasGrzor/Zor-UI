@@ -56,6 +56,7 @@ pub const BINDS: &[Bind] = &[
     b!("restart", "Shell", "Restart the bar and reload GlazeWM", ["{m}+Ctrl+R"], Zor, "restart"),
     b!("buddy", "Shell", "Talk to the primary buddy", ["{m}+B"], Zor, "buddy listen"),
     b!("buddy-look", "Shell", "Talk to the buddy about your screen", ["Double RAlt"], Zor, "buddy look"),
+    b!("buddy-chat", "Shell", "Chat with the buddy: every task as a chat, Live voice mode", ["{m}+Shift+B"], Zor, "open buddy-chat"),
     b!("terminal", "Apps", "Terminal", ["{m}+Enter", "{m}+T"], Exec, "wt"),
     b!("files", "Apps", "File Explorer", ["{m}+E"], Exec, "explorer"),
     b!("browser", "Apps", "Edge", ["{m}+W"], Exec, "msedge"),

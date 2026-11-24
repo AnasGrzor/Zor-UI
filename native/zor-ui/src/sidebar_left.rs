@@ -11,18 +11,16 @@ mod anime;
 mod football;
 mod home;
 mod img;
-mod md;
 mod translate;
 
 use crate::{
-    app::{self, Action, Ctx},
+    app::{Action, Ctx},
     conf::Config,
     gfx::{alpha, Canvas, Gfx, R},
     proc, ui,
     win::{Input, View},
 };
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
 
 const TABS: [(&str, &str, &str); 5] = [("home", "home", "Home"), ("ai", "neurology", "AI"), ("translate", "translate", "Translate"), ("anime", "photo_library", "Anime"), ("football", "sports_soccer", "Football")];
 const TAB0: u32 = 1; // hit ids 1..=5
@@ -145,19 +143,11 @@ impl View for SidebarLeft {
 /// `--render` mode: loads run inline so one paint shows their result.
 fn sync() -> bool { std::env::var_os("ZORUI_RENDER_TAB").is_some() }
 
-/// Repaint everything (a thread delivered something).
-fn wake() { app::post(Box::new(|_| {})); }
 
 fn bg(f: impl FnOnce() + Send + 'static) { if sync() { f() } else { std::thread::spawn(f); } }
 
-/// Where a thread leaves its answers for the tab to pick up at the next paint.
-pub struct Inbox<T>(Arc<Mutex<Vec<T>>>);
-impl<T> Clone for Inbox<T> { fn clone(&self) -> Self { Inbox(self.0.clone()) } }
-impl<T> Inbox<T> {
-    pub fn new() -> Inbox<T> { Inbox(Arc::new(Mutex::new(vec![]))) }
-    pub fn push(&self, v: T) { if let Ok(mut q) = self.0.lock() { q.push(v); } }
-    pub fn take(&self) -> Vec<T> { self.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default() }
-}
+// the chat pieces live in chat_ui, shared with the buddy chat window; the tabs reach them through here
+pub use crate::chat_ui::{dots, field, md, wake, Inbox};
 
 /// One bridge command on a thread; `done` gets its JSON line (Null when it failed) and then the UI wakes.
 fn call(cx: &Ctx, name: &str, args: Vec<String>, done: impl FnOnce(Value) + Send + 'static) {
@@ -171,22 +161,6 @@ fn call(cx: &Ctx, name: &str, args: Vec<String>, done: impl FnOnce(Value) + Send
 
 /// `bridge('config-set', key, JSON.stringify(v))` in the background.
 fn config_set(cx: &Ctx, key: &str, v: Value) { if !sync() { call(cx, "config-set", vec![key.into(), v.to_string()], |_| {}); } }
-
-/// Three pulsing dots centred on (x, y): the "busy" mark (`.dots` / `.spinner`).
-fn dots(c: &mut Canvas, cx: &Ctx, x: f32, y: f32) {
-    let phase = crate::hub::now_ms() / 1000.0;
-    for i in 0..3 {
-        let a = 0.2 + 0.8 * (((phase - i as f64 * 0.15) * std::f64::consts::TAU).sin() * 0.5 + 0.5) as f32;
-        c.circle(x + (i as f32 - 1.0) * 10.0, y, 3.0, alpha(cx.theme.c("primary"), a));
-    }
-}
-
-/// `.field`: bordered input surface.
-fn field(c: &mut Canvas, cx: &Ctx, r: R, focus: bool) {
-    let edge = if focus { cx.theme.c("primary") } else { cx.theme.c("outlineVariant") };
-    c.rect(r, 17.0, edge);
-    c.rect(R::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0), 16.0, cx.theme.c("surfaceContainer"));
-}
 
 /// `.err`: a red-tinted message box. Returns its height.
 fn err_box(c: &mut Canvas, cx: &Ctx, r: R, msg: &str) -> f32 {

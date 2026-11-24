@@ -98,6 +98,7 @@ thread_local! {
     /// The pointer is over a resizable window's edge (see `edge_at`): WM_SETCURSOR shows the matching arrow.
     static EDGE_HOT: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((0, 0)) };
     /// The pointer is over a clickable element (a registered hit): WM_SETCURSOR shows the hand.
+    static TEXT_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HAND_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -159,6 +160,10 @@ pub struct Win {
     bits: *mut u8,
     px: (i32, i32),
     hits: Vec<(R, u32)>,
+    texts: Vec<crate::gfx::TextRun>,
+    selection: Option<((usize, usize), (usize, usize))>,
+    text_press: Option<(f32, f32)>,
+    selecting: bool,
     bars: Vec<crate::ui::Bar>,
     /// Scrollbar being dragged: (bar id, pointer offset inside the thumb).
     sdrag: Option<(u32, f32)>,
@@ -174,10 +179,11 @@ pub struct Win {
     painted: std::time::Instant,
     /// The last paint left a scroll glide running: needs 16 ms frames until it settles.
     pub gliding: bool,
-    /// The island panel's open animation: when it started, and whether it grows up from the bottom edge.
-    pub grow: Option<(std::time::Instant, bool)>,
+    /// The island panel's open animation: when it started, and the pill it morphs out of (window px).
+    /// Kept after it finishes, so the close shrinks back into the same pill.
+    pub grow: Option<(std::time::Instant, R)>,
     /// The island panel's close animation: the grow played backwards, from when it closed.
-    pub shrink: Option<(std::time::Instant, bool)>,
+    pub shrink: Option<(std::time::Instant, R)>,
 }
 
 struct Drag { start: POINT, from: POINT, moved: bool, snap: Vec<(i32, i32, i32, i32)> }
@@ -222,7 +228,7 @@ impl Win {
             } else { None };
             let dc = CreateCompatibleDC(None);
             Ok(Win { hwnd, part: crate::perf::group(title), view, file_drop, drag_key: None, appbar: false, dc, dib: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), px: (0, 0),
-                hits: vec![], bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None, shrink: None })
+                hits: vec![], texts: vec![], selection: None, text_press: None, selecting: false, bars: vec![], sdrag: None, hover: 0, press: 0, drag: None, rsz: None, held: false, last: (u64::MAX, String::new(), 0, (0, 0)), painted: std::time::Instant::now(), gliding: false, grow: None, shrink: None })
         }
     }
 
@@ -235,6 +241,11 @@ impl Win {
                 let _ = SetWindowPos(self.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
+    }
+
+    /// Keeps the window above every other window, or lets it go back among them (the buddy chat's pin).
+    pub fn set_topmost(&self, on: bool) {
+        unsafe { let _ = SetWindowPos(self.hwnd, if on { HWND_TOPMOST } else { HWND_NOTOPMOST }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
     }
 
     /// Puts a topmost window above the other topmost ones (a tooltip over the popup it describes).
@@ -340,7 +351,7 @@ impl Win {
         let px = ((w * s).ceil() as i32, (h * s).ceil() as i32);
         let now = (cx.ver, key, self.hover, px);
         if !force && now == self.last { return; }
-        if !force { let why = if self.last.0 != now.0 { "ver" } else if self.last.1 != now.1 { "key" } else if self.last.2 != now.2 { "hover" } else { "px" }; crate::log::line(&format!("[frametrace-why] {} {why}", self.part)); } // TEMP frametrace
+        if !force { let why = if self.last.0 != now.0 { "ver" } else if self.last.1 != now.1 { "key" } else if self.last.2 != now.2 { "hover" } else { "px" }; crate::log::trace(&format!("[frametrace-why] {} {why}", self.part)); } // TEMP frametrace
         self.last = now;
         unsafe {
             if px != self.px || self.bits.is_null() {
@@ -368,43 +379,73 @@ impl Win {
             crate::ui::MOVING.with(|m| m.set(false));
             crate::ui::BARS.with(|b| b.borrow_mut().clear());
             let t0 = std::time::Instant::now();
+            c.selection = self.selection;
             self.view.paint(&mut c, cx);
+            let selection_changed = self.selection.is_some() && (self.texts.len() != c.texts.len() || self.texts.iter().zip(&c.texts).any(|(a, b)| a.text != b.text));
+            self.texts = std::mem::take(&mut c.texts);
             crate::perf::paint(&self.part, t0.elapsed().as_nanos() as u64);
             self.gliding = crate::ui::MOVING.with(|m| m.get());
             self.hits = std::mem::take(&mut c.hits);
             if let Some(drop) = &self.file_drop { drop.update(self.view.file_regions(&self.hits, w, h)); }
             self.bars = crate::ui::BARS.with(|b| std::mem::take(&mut *b.borrow_mut()));
             drop(c);
+            if selection_changed {
+                self.selection = None;
+                self.text_press = None;
+                self.selecting = false;
+                self.update(g, cx, true);
+                return;
+            }
             let size = SIZE { cx: pw as i32, cy: ph as i32 };
             let src = POINT::default();
-            let (mut size, mut src, mut alpha, mut dst) = (size, src, 255u8, None);
+            let mut alpha = 255u8;
             if !cx.motion { self.grow = None; self.shrink = None; } // reduced motion: the panel appears and goes at full size
-            if let Some((t0, bottom)) = self.grow {
-                let (rows, a, done) = crate::anim::grow(t0.elapsed().as_secs_f32(), ph as i32);
-                if done { self.grow = None; } else {
-                    self.gliding = true; // 16 ms frames until it has grown
-                    (size.cy, alpha) = (rows, a);
-                    if bottom {
-                        src.y = ph as i32 - rows;
-                        let (x, y) = self.pos();
-                        dst = Some(POINT { x, y: y + src.y });
-                    }
+            // the shrink is the open curve backwards: the card at the close, the pill at the end
+            let morph = match (self.grow, self.shrink) {
+                (_, Some((t0, from))) => Some(((crate::anim::GROW_SECS - t0.elapsed().as_secs_f32()).max(0.0), from, true)),
+                (Some((t0, from)), None) => Some((t0.elapsed().as_secs_f32(), from, false)),
+                _ => None,
+            };
+            if let Some((at, from, closing)) = morph {
+                // the card sits ISLAND_SHADOW_ROOM inside the window (island.rs and island_legacy.rs both draw it there).
+                // shortcut: the shadow outside the card is cut while it morphs and shows when it is done; drawing it per
+                // frame needs the view to paint at the morph's size.
+                let room = crate::tokens::ISLAND_SHADOW_ROOM * s;
+                let to = R::new(room, room, pw as f32 - 2.0 * room, ph as f32 - 2.0 * room);
+                let (shape, rad, a, done) = crate::anim::morph(at, from, to, crate::tokens::ISLAND_PANEL_R * s);
+                if closing || !done {
+                    self.gliding = true; // 16 ms frames until it has grown or shrunk
+                    alpha = a;
+                    crate::anim::clip_round(std::slice::from_raw_parts_mut(self.bits, (pw * ph * 4) as usize), pw as usize, shape, rad);
                 }
             }
-            if let Some((t0, bottom)) = self.shrink {
-                // the open curve backwards: full height at the close, the island's edge at the end
-                let left = (crate::anim::GROW_SECS - t0.elapsed().as_secs_f32()).max(0.0);
-                let (rows, a, _) = crate::anim::grow(left, ph as i32);
-                self.gliding = true; // 16 ms frames until it has shrunk
-                (size.cy, alpha) = (rows, a);
-                src.y = if bottom { ph as i32 - rows } else { 0 };
-                dst = None;
-                if bottom { let (x, y) = self.pos(); dst = Some(POINT { x, y: y + src.y }); }
-            }
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
-            let _ = UpdateLayeredWindow(self.hwnd, None, dst.as_ref().map(|d| d as *const POINT), Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
+            let _ = UpdateLayeredWindow(self.hwnd, None, None, Some(&size), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
         }
         self.painted = std::time::Instant::now();
+    }
+
+    fn text_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        self.texts.iter().enumerate().rev().find(|(_, t)| t.contains(x, y)).map(|(i, t)| (i, t.index(x, y)))
+    }
+
+    pub fn selection_key(&mut self, ev: &Input) -> bool {
+        if let Input::Key { vk: 0x43, ctrl: true, .. } = ev {
+            if let Some((a, b)) = self.selection {
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                if a == b { return false; }
+                let mut parts = Vec::new();
+                for i in a.0..=b.0 {
+                    let Some(t) = self.texts.get(i) else { return false; };
+                    let start = if i == a.0 { a.1 } else { 0 };
+                    let end = if i == b.0 { b.1 } else { t.text.len() };
+                    if let Some(text) = t.text.get(start..end) { parts.push(text); }
+                }
+                crate::util::clipboard_set(&parts.join("\n"));
+                return true;
+            }
+        }
+        false
     }
 
     fn hit_at(&self, x: f32, y: f32) -> u32 {
@@ -449,6 +490,20 @@ impl Win {
                     }
                 }
                 WM_MOUSEMOVE => {
+                    if let Some((sx, sy)) = self.text_press {
+                        let (x, y) = self.xy(lp);
+                        if self.selecting || (x - sx).powi(2) + (y - sy).powi(2) >= 16.0 {
+                            self.selecting = true;
+                            if let Some(end) = self.text_at(x, y).or_else(|| self.texts.iter().enumerate().min_by(|(_, a), (_, b)| {
+                                let dist = |r: R| (x - x.clamp(r.x, r.x + r.w)).powi(2) + (y - y.clamp(r.y, r.y + r.h)).powi(2);
+                                dist(a.rect).total_cmp(&dist(b.rect))
+                            }).map(|(i, t)| (i, t.index(x, y)))) {
+                                if let Some((start, _)) = self.selection { self.selection = Some((start, end)); }
+                            }
+                            cx.ver += 1;
+                        }
+                        return false;
+                    }
                     if let Some(d) = &mut self.drag {
                         let mut p = POINT::default();
                         let _ = GetCursorPos(&mut p);
@@ -490,12 +545,15 @@ impl Win {
                         self.view.input(Input::Drag(self.press, x, y, Phase::Move), cx);
                     }
                     let id = self.hit_lp(lp);
+                    let (x, y) = self.xy(lp);
+                    TEXT_HOT.with(|h| h.set(self.text_at(x, y).is_some()));
                     HAND_HOT.with(|h| h.set(self.view.hand(id)));
                     if id != self.hover { self.hover = id; self.view.input(Input::Hover(id), cx); }
                     let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut t);
                 }
                 WM_MOUSELEAVE => {
+                    TEXT_HOT.with(|h| h.set(false));
                     HAND_HOT.with(|h| h.set(false));
                     if EDGE_HOT.with(|e| e.replace((0, 0))) != (0, 0) || self.hover != 0 { self.hover = 0; self.view.input(Input::Hover(0), cx); }
                 }
@@ -523,6 +581,18 @@ impl Win {
                         SetCapture(self.hwnd);
                         return false;
                     }
+                    if msg == WM_LBUTTONDOWN {
+                        self.selection = None;
+                        if let Some(at) = self.text_at(x, y) {
+                            self.selection = Some((at, at));
+                            self.text_press = Some((x, y));
+                            self.selecting = false;
+                            SetCapture(self.hwnd);
+                            cx.ver += 1;
+                            return false;
+                        }
+                        cx.ver += 1;
+                    }
                     if msg == WM_LBUTTONDOWN && self.press != 0 {
                         self.held = true;
                         self.view.input(Input::Drag(self.press, x, y, Phase::Start), cx);
@@ -539,6 +609,10 @@ impl Win {
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                     let _ = ReleaseCapture();
+                    if msg == WM_LBUTTONUP && self.text_press.take().is_some() {
+                        if self.selecting { self.selecting = false; self.press = 0; return false; }
+                        self.selection = None;
+                    }
                     if self.sdrag.take().is_some() { return false; }
                     if self.rsz.take().is_some() { self.view.resize_end(); return false; }
                     if self.held && msg == WM_LBUTTONUP {
@@ -547,6 +621,7 @@ impl Win {
                         self.view.input(Input::Drag(self.press, x, y, Phase::End), cx);
                     }
                     if let Some(d) = self.drag.take() { crate::guides::clear(); if d.moved { return true; } }
+                    if msg == WM_RBUTTONUP && self.selection_key(&Input::Key { vk: 0x43, ctrl: true, shift: false, alt: false }) { return false; }
                     let id = self.hit_lp(lp);
                     if id != 0 && id == self.press {
                         let b = match msg { WM_RBUTTONUP => Btn::Right, WM_MBUTTONUP => Btn::Middle, _ => Btn::Left };
@@ -603,6 +678,10 @@ pub unsafe fn early(hwnd: HWND, msg: u32, _wp: WPARAM, lp: LPARAM) -> Option<LRE
             let c = match (ex, ey) { (0, _) => IDC_SIZENS, (_, 0) => IDC_SIZEWE, _ if ex == ey => IDC_SIZENWSE, _ => IDC_SIZENESW };
             SetCursor(LoadCursorW(None, c).unwrap_or_default());
             Some(LRESULT(1))
+        }
+        WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT && TEXT_HOT.with(|h| h.get()) => {
+            SetCursor(LoadCursorW(None, IDC_IBEAM).unwrap_or_default());
+            return Some(LRESULT(1));
         }
         WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT && HAND_HOT.with(|h| h.get()) => {
             SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());

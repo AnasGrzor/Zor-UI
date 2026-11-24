@@ -10,12 +10,12 @@
 
 /// A settings page. `body` matches on this with no catch-all arm, so a new page cannot be left undrawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page { Quick, Wallpapers, Presets, Bar, Island, Sidebar, Keys, Buddies, Contacts, Creator, Voice, Services, Usage, About }
+pub enum Page { Quick, Wallpapers, Presets, Bar, Island, Sidebar, Keys, Buddies, Contacts, Commands, Creator, Voice, Services, Usage, About }
 
 impl Page {
-    pub const ALL: [Page; 14] = [
+    pub const ALL: [Page; 15] = [
         Page::Quick, Page::Wallpapers, Page::Presets, Page::Bar, Page::Island, Page::Sidebar, Page::Keys,
-        Page::Buddies, Page::Contacts, Page::Creator, Page::Voice, Page::Services, Page::Usage, Page::About,
+        Page::Buddies, Page::Contacts, Page::Commands, Page::Creator, Page::Voice, Page::Services, Page::Usage, Page::About,
     ];
 }
 
@@ -47,7 +47,7 @@ pub struct PageDef {
 }
 
 /// Every page, in the order they appear inside their category.
-pub const PAGES: [PageDef; 14] = [
+pub const PAGES: [PageDef; 15] = [
     PageDef { page: Page::Quick, key: "quick", icon: "tune", title: "Quick", blurb: "Wallpaper, colors and the switches you reach for most", cat: Category::Personalization },
     PageDef { page: Page::Wallpapers, key: "wallpapers", icon: "animated_images", title: "Wallpapers", blurb: "Pick a picture or a live wallpaper", cat: Category::Personalization },
     PageDef { page: Page::Presets, key: "presets", icon: "palette", title: "Presets", blurb: "Save and swap whole looks", cat: Category::Personalization },
@@ -57,6 +57,7 @@ pub const PAGES: [PageDef; 14] = [
     PageDef { page: Page::Keys, key: "keys", icon: "keyboard", title: "Keybinds", blurb: "Every keyboard shortcut", cat: Category::Interface },
     PageDef { page: Page::Buddies, key: "buddies", icon: "pets", title: "Buddies", blurb: "The characters that live on your desktop", cat: Category::BuddiesVoice },
     PageDef { page: Page::Contacts, key: "contacts", icon: "contacts", title: "Contacts", blurb: "The people the buddy can message by voice", cat: Category::BuddiesVoice },
+    PageDef { page: Page::Commands, key: "commands", icon: "bolt", title: "Commands", blurb: "Your own phrases that make the buddy do several things", cat: Category::BuddiesVoice },
     PageDef { page: Page::Creator, key: "creator", icon: "person_add", title: "Create a buddy", blurb: "Turn a picture into a buddy that looks like your character", cat: Category::BuddiesVoice },
     PageDef { page: Page::Voice, key: "voice", icon: "mic", title: "Voice", blurb: "Talk to the buddy, what it may do for you, and the speech model", cat: Category::BuddiesVoice },
     PageDef { page: Page::Services, key: "services", icon: "hub", title: "Services", blurb: "API keys, models and sign-ins", cat: Category::System },

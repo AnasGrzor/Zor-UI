@@ -379,6 +379,7 @@ impl SidebarRight {
         let r = R::new(x0, y, cw, content.min(240.0));
         let mut sc = std::mem::take(&mut self.sc_mixer);
         let mut rects = vec![];
+        let cw = cw - ui::bar_room(content, r.h); // room for the scrollbar once the list overflows
         sc.region(c, cx, r, content, |c, top| {
             if n == 0 { c.text("No app is playing audio", R::new(r.x, top, r.w, 17.0), txt(13.0, 400), cx.theme.c("onSurfaceVariant"), Align::Left); }
             for (i, m) in s.mixer.iter().enumerate() {

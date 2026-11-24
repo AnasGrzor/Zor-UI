@@ -154,6 +154,17 @@ impl PiperTts {
     /// Whether a Piper process is up right now.
     pub fn running(&self) -> bool { lock(&self.slot).is_some() }
 
+    /// Makes sure `slot` holds a Piper process for `model` at `speed`, starting one (and its idle watcher) if not.
+    fn ensure(&self, slot: &mut Option<Session>, model: &Path, speed: f32) -> Result<(), ProviderError> {
+        let key = session_key(model, speed);
+        if slot.as_ref().is_some_and(|s| s.key == key) { return Ok(()); }
+        *slot = None;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *slot = Some(Session::spawn(id, key, &self.exe, &session_args(model, speed))?);
+        watch(self.slot.clone(), id, self.idle);
+        Ok(())
+    }
+
     /// The .onnx model of voice `id`, if the voice is complete (its .onnx.json config is there too).
     fn model_for(&self, id: &str) -> Option<PathBuf> {
         if !super::manifest::valid_model_id(id) { return None; }
@@ -195,16 +206,10 @@ impl TtsProvider for PiperTts {
             .ok_or_else(|| ProviderError::Other(format!("no Piper voice installed called '{}'", req.voice_id)))?;
         if cancel.is_cancelled() { return Err(ProviderError::Cancelled); }
         let out = self.tmp.join(format!("{}.wav", new_id()));
-        let key = session_key(&model, req.settings.speed);
         let outcome = {
             // held for the whole line: the idle watcher waits for it, and a second line waits its turn
             let mut slot = lock(&self.slot);
-            if !slot.as_ref().is_some_and(|s| s.key == key) {
-                *slot = None;
-                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                *slot = Some(Session::spawn(id, key.clone(), &self.exe, &session_args(&model, req.settings.speed))?);
-                watch(self.slot.clone(), id, self.idle);
-            }
+            self.ensure(&mut slot, &model, req.settings.speed)?;
             let s = slot.as_mut().expect("started above");
             let r = s.request(&json_line(&req.text, &out), &out.to_string_lossy(), cancel, LINE_TIMEOUT);
             if r.is_ok() { s.last_used = Instant::now(); }
@@ -217,6 +222,11 @@ impl TtsProvider for PiperTts {
         let w = wav::parse(&bytes.map_err(|_| ProviderError::InvalidAudio("Piper wrote no audio".into()))?)?;
         let samples = audio::normalize(&w.samples, w.rate, w.channels)?;
         Ok(SynthesisResult { audio: AudioOutput::Pcm { samples, rate: audio::INTERNAL_RATE, channels: 1 } })
+    }
+
+    /// Starts Piper with the voice's model now, so it has loaded by the time the first line comes.
+    fn warm(&self, req: &SynthesisRequest) {
+        if let Some(model) = self.model_for(&req.voice_id) { let _ = self.ensure(&mut lock(&self.slot), &model, req.settings.speed); }
     }
 
     /// Stops the Piper process now. The next line starts it again.

@@ -29,15 +29,17 @@ pub mod library;
 pub mod record;
 pub mod openai;
 pub mod piper;
+pub mod download;
 #[cfg(test)]
 pub mod mock;
 
-use contract::{AudioOutput, ProviderCapabilities, ProviderError, SharedProvider, SpeechSettings, SynthesisRequest};
+use contract::{AudioOutput, Cancel, ProviderCapabilities, ProviderError, SharedProvider, SpeechSettings, SynthesisRequest};
 use queue::{Job, Priority, Push, Queue};
 use registry::Registry;
 use config::VoiceConfig;
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -66,7 +68,14 @@ pub struct Engine {
     queue: Mutex<Queue>,
     wake: Condvar,
     config: Mutex<VoiceConfig>,
+    /// The line being heard now, for Live mode's caption. Empty once the queue goes quiet.
+    saying: Mutex<String>,
+    /// True while the player thread plays a line, so the maker thread leaves `saying` to it.
+    playing: AtomicBool,
 }
+
+/// A line made ahead, handed from the maker thread to the player: its cancel, its text and its audio.
+type Made = (Cancel, String, Result<contract::SynthesisResult, ProviderError>);
 
 /// Locks, and reads through a poisoned lock: a panic in one synthesis must not silence every later line.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|p| p.into_inner()) }
@@ -82,13 +91,21 @@ impl Engine {
         let mut registry = Registry::new();
         for p in providers { let _ = registry.register(p); }
         registry.activate_builtin(fallback);
-        let e = Arc::new(Engine { registry: Mutex::new(registry), queue: Mutex::new(Queue::new(MAX_PENDING)), wake: Condvar::new(), config: Mutex::new(config) });
-        let worker = e.clone();
-        std::thread::Builder::new().name("zor-voice".into()).spawn(move || worker.run()).ok();
+        let e = Arc::new(Engine {
+            registry: Mutex::new(registry), queue: Mutex::new(Queue::new(MAX_PENDING)), wake: Condvar::new(), config: Mutex::new(config),
+            saying: Mutex::new(String::new()), playing: AtomicBool::new(false),
+        });
+        // a rendezvous channel: the maker hands a line over only when the player is free, so it makes one line ahead, no more
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Made>(0);
+        let maker = e.clone();
+        std::thread::Builder::new().name("zor-voice".into()).spawn(move || maker.make(tx)).ok();
+        let player = e.clone();
+        std::thread::Builder::new().name("zor-voice-play".into()).spawn(move || player.play(rx)).ok();
         e
     }
 
-    fn run(&self) {
+    /// The maker thread: synthesizes the next line while the player plays the one before it.
+    fn make(&self, tx: std::sync::mpsc::SyncSender<Made>) {
         loop {
             let (job, cancel) = {
                 let mut q = lock(&self.queue);
@@ -97,22 +114,49 @@ impl Engine {
                     q = self.wake.wait(q).unwrap_or_else(|p| p.into_inner());
                 }
             };
+            // a provider that plays while it synthesizes (Windows) is heard now, so its caption is set now
+            { let mut s = lock(&self.saying); if !self.playing.load(Ordering::Relaxed) { s.clone_from(&job.req.text); } }
             let active = lock(&self.registry).active();
             let outcome = match active {
                 Some(p) => p.synthesize(&job.req, &cancel),
                 None => Err(ProviderError::Other("no voice provider is active".into())),
             };
+            if tx.send((cancel, job.req.text, outcome)).is_err() { return; }
+        }
+    }
+
+    /// The player thread: plays each made line in turn, then marks it finished in the queue.
+    fn play(&self, rx: std::sync::mpsc::Receiver<Made>) {
+        for (cancel, text, outcome) in rx {
             match outcome {
                 Ok(r) => if let AudioOutput::Pcm { samples, rate, .. } = r.audio {
-                    if let Err(e) = playback::play(&samples, rate, &cancel) {
-                        if e != ProviderError::Cancelled { crate::log::line(&format!("voice: {e}")); }
+                    if !cancel.is_cancelled() {
+                        { *lock(&self.saying) = text; self.playing.store(true, Ordering::Relaxed); }
+                        if let Err(e) = playback::play(&samples, rate, &cancel) {
+                            if e != ProviderError::Cancelled { crate::log::line(&format!("voice: {e}")); }
+                        }
+                        self.playing.store(false, Ordering::Relaxed);
                     }
                 },
                 Err(ProviderError::Cancelled) => {}
                 Err(e) => crate::log::line(&format!("voice: {e}")),
             }
-            lock(&self.queue).finish();
+            let mut q = lock(&self.queue);
+            q.finish(&cancel);
+            if q.is_idle() { lock(&self.saying).clear(); }
         }
+    }
+
+    /// The line being heard now, or "" when the voice is quiet.
+    pub fn saying(&self) -> String { lock(&self.saying).clone() }
+
+    /// Gets the active provider ready to speak as Buddy slot `slot` (Piper loads its model), off this thread.
+    pub fn warm(&self, slot: usize) {
+        let voice = lock(&self.config).buddies[slot.min(1)].clone();
+        let Some(p) = lock(&self.registry).active() else { return };
+        let Ok((voice_id, model_id, settings)) = resolve(&lock(&self.config), &voice, p.id()) else { return };
+        let req = SynthesisRequest { voice_id, model_id, text: String::new(), settings };
+        std::thread::spawn(move || p.warm(&req));
     }
 
     /// Queues `text` for the voice of Buddy `slot` (0 = a, 1 = b). Returns what the queue did with it.
@@ -126,11 +170,24 @@ impl Engine {
 
     /// Queues `text` in voice profile `voice_id` on the active provider. Errors say why it cannot speak.
     pub fn speak_as(&self, voice_id: &str, text: &str, priority: Priority) -> Result<Push, String> {
+        self.queue_line(voice_id, text, priority, false)
+    }
+
+    /// Queues `text` as Buddy slot `slot` after whatever is playing or waiting, cutting nothing.
+    pub fn speak_after(&self, slot: usize, text: &str) -> Option<Push> {
+        let voice = lock(&self.config).buddies[slot.min(1)].clone();
+        match self.queue_line(&voice, text, Priority::Reply, true) {
+            Ok(push) => Some(push),
+            Err(why) => { crate::log::line(&format!("voice: {why}")); None }
+        }
+    }
+
+    fn queue_line(&self, voice_id: &str, text: &str, priority: Priority, after: bool) -> Result<Push, String> {
         if text.trim().is_empty() { return Err("there is nothing to say".into()); }
         let provider_id = lock(&self.registry).active().map(|p| p.id()).ok_or("no voice provider is active")?;
         let (voice, model, settings) = resolve(&lock(&self.config), voice_id, provider_id)?;
         let job = Job { priority, req: SynthesisRequest { voice_id: voice, model_id: model, text: text.into(), settings } };
-        let push = lock(&self.queue).push(job);
+        let push = { let mut q = lock(&self.queue); if after { q.append(job) } else { q.push(job) } };
         self.wake.notify_one();
         Ok(push)
     }
@@ -277,17 +334,26 @@ fn installed_providers() -> Vec<SharedProvider> {
 }
 
 /// Downloads through curl, as the rest of the app does. Used by the install step.
-pub fn fetch(url: &str) -> Option<Vec<u8>> { crate::bridge::common::get_bytes(url, &[], 900) }
+pub fn fetch(url: &str) -> Option<Vec<u8>> { download::fetch(url) }
 
 /// Installs a catalog provider: its package and the models named, each with its approval (see
 /// `lifecycle::install_manifest`). Nothing is downloaded unless every item has one.
 pub fn install_catalog(id: &str, approvals: &[lifecycle::Approval]) -> Result<(), String> {
+    static INSTALL_LOCK: Mutex<()> = Mutex::new(());
+    let _install = INSTALL_LOCK.try_lock().map_err(|_| "A voice download is already running".to_string())?;
+    download::begin();
+    let result = (|| {
     let raw = catalog::find(id).ok_or_else(|| format!("no provider '{id}' in the catalog"))?;
     let m = manifest::parse(&raw)?;
     let mut store = lifecycle::Store::load(&store_path());
     lifecycle::install_manifest(&mut store, &providers_root(), &models_root(), &m, &raw, approvals, &fetch, &lifecycle::extract_with_tar)
         .map_err(|e| e.to_string())?;
-    store.save(&store_path()).map_err(|e| e.to_string())
+    store.save(&store_path()).map_err(|e| e.to_string())?;
+    download::clear_cache(&m);
+    Ok(())
+    })();
+    download::finish(&result);
+    result
 }
 
 /// The endpoint's setup, shared with the engine, which refreshes it from config on every change.
@@ -330,8 +396,21 @@ fn engine() -> &'static Arc<Engine> {
 /// Speaks `text` as Buddy slot `slot`. Non-blocking: the line is queued and synthesized on the voice thread.
 pub fn speak(slot: usize, text: &str, priority: Priority) -> Option<Push> { engine().speak(slot, text, priority) }
 
+/// The line being heard now, or "" when the voice is quiet. Live mode's caption shows it.
+pub fn saying() -> String { engine().saying() }
+
+/// Loads the voice for Buddy slot `slot` ahead of the first line (Live mode calls it as it listens).
+pub fn warm(slot: usize) { engine().warm(slot) }
+
+/// Speaks `text` as Buddy slot `slot` once the lines before it finish. Live mode speaks a streamed answer this way.
+/// Waiting text is capped at `queue::APPEND_CHARS`; past it the line is dropped.
+pub fn speak_after(slot: usize, text: &str) -> Option<Push> { engine().speak_after(slot, text) }
+
 /// Silences the voice and drops queued lines.
 pub fn stop() { engine().stop() }
+
+/// True when nothing is being said and nothing waits to be said (Live mode listens again then).
+pub fn idle() -> bool { lock(&engine().queue).is_idle() }
 
 /// What the last switch said, for the Settings page: "Using piper", or why it could not switch.
 static STATUS: Mutex<String> = Mutex::new(String::new());
@@ -367,6 +446,12 @@ pub fn refresh_providers() {
 /// Whether provider `id` is installed (recorded in voice-install.json).
 pub fn installed(id: &str) -> bool {
     lifecycle::Store::load(&store_path()).providers.iter().any(|p| p.id == id)
+}
+
+/// Whether the JARVIS model is installed. Reads the install record, which lists only hash-checked models,
+/// because files copied in by hand can exist and still crash Piper.
+pub fn jarvis_installed() -> bool {
+    lifecycle::Store::load(&store_path()).models.iter().any(|m| m.provider == "piper" && m.id == catalog::JARVIS_ID)
 }
 
 /// Whether an OpenAI key is saved for the Services page.
@@ -448,6 +533,37 @@ mod tests {
     }
 
     #[test]
+    fn sentences_spoken_after_each_other_all_play_in_order() {
+        let slow = MockTts::new("mock").with_delay(Duration::from_millis(200));
+        let spoken = slow.spoken.clone();
+        let e = Engine::start(vec![Arc::new(slow)], cfg_for("mock", "v1"));
+        e.configure(cfg_for("mock", "v1")).unwrap();
+        for s in ["one.", "two.", "three.", "four.", "five.", "six."] {
+            assert_eq!(e.speak_after(0, s), Some(Push::Queued), "{s} cut nothing");
+        }
+        assert!(wait_for(&spoken, "six."));
+        let said = lock(&spoken).clone();
+        let order: Vec<_> = said.iter().filter(|s| s.ends_with('.') && s.len() < 7).cloned().collect();
+        assert_eq!(order, ["one.", "two.", "three.", "four.", "five.", "six."]);
+    }
+
+    #[test]
+    fn saying_is_the_line_being_heard_and_empty_once_quiet() {
+        let slow = MockTts::new("mock").with_delay(Duration::from_millis(300));
+        let spoken = slow.spoken.clone();
+        let e = Engine::start(vec![Arc::new(slow)], cfg_for("mock", "v1"));
+        e.configure(cfg_for("mock", "v1")).unwrap();
+        e.speak_after(0, "first line.");
+        let until = Instant::now() + Duration::from_secs(3);
+        while e.saying() != "first line." && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(e.saying(), "first line.");
+        assert!(wait_for(&spoken, "first line."));
+        while !lock(&e.queue).is_idle() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(e.saying(), "", "cleared once the queue is quiet");
+    }
+
+    #[test]
     fn a_failed_switch_keeps_the_working_provider() {
         let bad: SharedProvider = Arc::new(MockTts::new("bad").failing_health());
         let e = Engine::start(vec![Arc::new(windows::WindowsTts), bad], cfg_for("windows", "male"));
@@ -498,9 +614,9 @@ mod tests {
 
     #[test]
     fn a_catalog_download_is_the_sum_of_its_files_with_one_approval_each() {
-        assert_eq!(download_bytes("piper"), Some(22_477_236 + 63_201_294 + 4_885));
+        assert_eq!(download_bytes("piper"), Some(22_477_236 + 63_201_294 + 4_885 + 114_199_011 + 7_262));
         let a = approvals_for("piper").unwrap();
-        assert_eq!(a.len(), 2, "the package and the voice");
+        assert_eq!(a.len(), 3, "the package and both voices");
         assert!(download_bytes("nope").is_none());
     }
 
@@ -544,10 +660,10 @@ mod tests {
         assert_eq!(lock(&e.registry).active().unwrap().id(), "fast", "nothing switched");
     }
 
-    /// Installs Piper for real (an 86 MB download, checked against its hashes) into a temp data folder, then speaks.
+    /// Installs Piper for real (a 200 MB download, checked against its hashes) into a temp data folder, then speaks.
     /// Run: cargo test --release piper_installs_end_to_end -- --ignored
     #[test]
-    #[ignore = "downloads Piper (about 86 MB); run with --ignored"]
+    #[ignore = "downloads Piper (about 200 MB); run with --ignored"]
     fn piper_installs_end_to_end() {
         use contract::{Cancel, TtsProvider};
         let base = std::env::temp_dir().join(format!("zorui-e2e-{}", profile::new_id()));

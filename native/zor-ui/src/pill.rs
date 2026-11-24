@@ -66,7 +66,11 @@ pub fn meter(rms: f32, peak: f32, floor: f32) {
 }
 /// The text heard so far; "" clears it.
 pub fn partial(t: &str) { if let Ok(mut s) = TEXT.lock() { *s = t.trim().to_string(); } }
-fn heard() -> String { TEXT.lock().map(|s| s.clone()).unwrap_or_default() }
+pub fn heard() -> String { TEXT.lock().map(|s| s.clone()).unwrap_or_default() }
+/// The microphone's loudness now (RMS, about 0 to 0.3), for the chat window's Live orb.
+pub fn loudness() -> f32 { f32::from_bits(LEVEL.load(Ordering::Relaxed)) }
+/// The listening state now (`LISTENING`, `THINKING`, or 0).
+pub fn state() -> u8 { STATE.load(Ordering::Relaxed) }
 
 /// The words shown in the live line: the whole text if it fits in `max` characters, else its latest words after an ellipsis.
 pub fn tail(text: &str, max: usize) -> String {

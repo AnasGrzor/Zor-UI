@@ -421,7 +421,7 @@ impl Np {
             Some(Lyr::Missing) => return msg(c, "No lyrics found"),
             Some(Lyr::Found(l)) => l.clone(),
         };
-        let wrap_w = if centre { r.w - 20.0 } else { r.w * 0.82 };
+        let wrap_w = if centre { r.w - 10.0 - crate::tokens::BAR_ROOM } else { r.w * 0.82 }; // centred: 10 px inset left, scrollbar room right
         match &*lyr {
             Lyrics::Plain(lines) => {
                 let hs: Vec<f32> = lines.iter().map(|l| c.g.measure_wrapped(l, txt(13.0, 400), wrap_w) + 6.0).collect();

@@ -304,7 +304,7 @@ impl Tab for Football {
         let content: f32 = heights.iter().sum();
         self.dims = (content, view.h);
         let (hover, now_24) = (c.hover, cx.cfg.get("use24h").as_bool() != Some(false));
-        let w = view.w - 8.0;
+        let w = view.w - ui::bar_room(content, view.h);
         let mut y_at = 0.0;
         let mut calls: Vec<(Item, f32)> = vec![];
         for (it, h) in items.into_iter().zip(&heights) { calls.push((it, y_at)); y_at += h; }

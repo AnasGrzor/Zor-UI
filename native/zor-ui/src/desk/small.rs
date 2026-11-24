@@ -24,6 +24,8 @@ const ITEM0: u32 = 100;
 const AREA: u32 = 1;
 const GO: u32 = 2;
 const INNER: f32 = W - 8.0 - 28.0; // .pad content width
+/// The note text's width: the scroll area is INNER wide and its scrollbar keeps the right BAR_ROOM.
+const NOTE_W: f32 = INNER - crate::tokens::BAR_ROOM;
 const ROW_GAP: f32 = 8.0; // .item padding 4px 0
 
 fn head() -> f32 { 12.0 + 13.0 * LH + 8.0 }
@@ -195,7 +197,7 @@ impl Notes {
     pub fn key(&self) -> String { hub::get(NOTES).map_or(0, |s| s.len()).to_string() }
 
     pub fn size(&self, g: &crate::gfx::Gfx) -> f32 {
-        head() + note_view_h(g.measure_wrapped(&self.text(), txt(13.0, 400), INNER)) + 12.0 + 8.0
+        head() + note_view_h(g.measure_wrapped(&self.text(), txt(13.0, 400), NOTE_W)) + 12.0 + 8.0
     }
 
     pub fn paint(&mut self, c: &mut Canvas, cx: &Ctx) {
@@ -206,16 +208,16 @@ impl Notes {
         let r = R::new(18.0, y, INNER, h);
         c.hit(r, AREA);
         let f = txt(13.0, 400);
-        let content = c.g.measure_wrapped(&self.tb.text, f, INNER);
+        let content = c.g.measure_wrapped(&self.tb.text, f, NOTE_W);
         self.content = content.max(h);
         self.view = h;
         if std::mem::take(&mut self.follow) {
-            let (_, top, ch) = c.g.caret(&self.tb.text, f, INNER, true, self.tb.caret);
+            let (_, top, ch) = c.g.caret(&self.tb.text, f, NOTE_W, true, self.tb.caret);
             if let Some(t) = caret_follow(self.scroll.y, top, ch, h) { self.scroll.to(t, self.content, h); }
         }
         let (tb, focus) = (&mut self.tb, self.focused);
         self.scroll.region(c, cx, r, self.content, |c, top| {
-            tb.draw(c, cx, R::new(r.x, top, INNER, content.max(h)), f, "Write something", focus);
+            tb.draw(c, cx, R::new(r.x, top, NOTE_W, content.max(h)), f, "Write something", focus);
         });
     }
 

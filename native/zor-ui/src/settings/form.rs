@@ -324,13 +324,18 @@ impl Settings {
 
     /// `seg`: a segmented choice. Options are (value, label).
     pub fn seg(&mut self, p: &mut Pen, path: &str, opts: &[(&str, &str)], label: &str, ic: &str) {
-        p.tag(label, "");
-        let Some(r) = p.row(40.0) else { return };
-        let cur = self.gs(p.cx, path);
+        self.seg_sub(p, path, opts, label, "", ic);
+    }
+
+    /// `seg` with small text under the label, for help that belongs to this one control.
+    pub fn seg_sub(&mut self, p: &mut Pen, path: &str, opts: &[(&str, &str)], label: &str, sub: &str, ic: &str) {
+        p.tag(label, sub);
         let widths: Vec<f32> = opts.iter().map(|o| 28.0 + p.c.g.measure(o.1, txt(12.5, 400)).0.ceil()).collect();
         let total: f32 = widths.iter().sum::<f32>() + 2.0 * (opts.len() as f32 - 1.0);
-        p.left(r, ic, label, "", total);
-        let (mut x, y) = (r.x + r.w - total, r.y + 2.0);
+        let Some(r) = p.row_sub(40.0, ic, sub, total) else { return };
+        let cur = self.gs(p.cx, path);
+        p.left(r, ic, label, sub, total);
+        let (mut x, y) = (r.x + r.w - total, r.y + (r.h - 36.0) / 2.0);
         let group = R::new(x, y, total, 36.0);
         p.c.clip_round(group, 18.0, |c| {
             for ((v, l), w) in opts.iter().zip(&widths) {

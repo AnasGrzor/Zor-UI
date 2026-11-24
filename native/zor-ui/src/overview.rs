@@ -353,7 +353,7 @@ impl Overview {
             let (sel, dragging) = (self.sel, self.drag.as_ref().filter(|d| d.moving).map(|d| d.idx));
             sc.region(c, cx, body, content, |c, top| {
                 for (j, win) in ws.wins.iter().enumerate() {
-                    let r = R::new(body.x, top + j as f32 * (TILE + 6.0), body.w, TILE);
+                    let r = R::new(body.x, top + j as f32 * (TILE + 6.0), body.w - ui::bar_room(content, body.h), TILE);
                     if r.y + r.h < body.y || r.y > body.y + body.h { continue; }
                     let i = first + j;
                     tile(c, cx, r, win, Some(TILES + i as u32), i == sel, dragging == Some(i));
@@ -375,7 +375,8 @@ impl Overview {
         let items = self.clip_items();
         if items.is_empty() { return msg(c, if v["items"].as_array().is_some_and(|a| !a.is_empty()) { "Nothing matches" } else { "Clipboard history is empty" }); }
         self.sel = self.sel.min(items.len() - 1);
-        let (f, tw) = (txt(13.5, 400), g.w - 28.0 - 20.0 - 12.0 - 12.0 - 40.0);
+        let rw = g.w - crate::tokens::BAR_ROOM; // row width: the scrollbar keeps the right BAR_ROOM
+        let (f, tw) = (txt(13.5, 400), rw - 28.0 - 20.0 - 12.0 - 12.0 - 40.0);
         let hs: Vec<f32> = items.iter().map(|i| 20.0 + c.g.measure_wrapped(i["text"].as_str().filter(|s| !s.is_empty()).unwrap_or("Image"), f, tw).min(3.0 * 13.5 * ui::LH)).collect();
         let content = hs.iter().sum::<f32>() + 6.0 * (hs.len() - 1) as f32;
         let tops: Vec<f32> = hs.iter().scan(0.0, |y, h| { let t = *y; *y += h + 6.0; Some(t) }).collect();
@@ -384,7 +385,7 @@ impl Overview {
         let (sel, now) = (self.sel, hub::now_ms() / 1000.0);
         self.clip_scroll.region(c, cx, g, content, |c, top| {
             for (k, it) in items.iter().enumerate() {
-                let r = R::new(g.x, top + tops[k], g.w, hs[k]);
+                let r = R::new(g.x, top + tops[k], rw, hs[k]);
                 if r.y + r.h < g.y || r.y > g.y + g.h { continue; }
                 let over = c.hit(r, CLIPS + k as u32);
                 c.rect(r, 17.0, t.c(if over { "surfaceContainerHigh" } else { "surfaceContainer" }));

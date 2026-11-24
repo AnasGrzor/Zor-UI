@@ -14,6 +14,9 @@ pub struct Job {
     pub req: SynthesisRequest,
 }
 
+/// The most text `Queue::append` lets wait, for every caller: about a minute of speech.
+pub const APPEND_CHARS: usize = 1000;
+
 #[derive(Debug, PartialEq)]
 pub enum Push {
     /// The line now playing was cancelled to make room.
@@ -25,18 +28,19 @@ pub enum Push {
 
 pub struct Queue {
     pending: VecDeque<Job>,
-    running: Option<(Priority, Cancel)>,
+    /// Lines taken and not finished: the one playing and the one being made ahead of it.
+    running: Vec<(Priority, Cancel)>,
     max_pending: usize,
 }
 
 impl Queue {
     pub fn new(max_pending: usize) -> Queue {
-        Queue { pending: VecDeque::new(), running: None, max_pending }
+        Queue { pending: VecDeque::new(), running: Vec::new(), max_pending }
     }
 
     pub fn push(&mut self, job: Job) -> Push {
-        if let Some((running, _)) = &self.running {
-            if *running > job.priority {
+        if let Some(running) = self.running.iter().map(|(p, _)| *p).max() {
+            if running > job.priority {
                 if self.pending.len() >= self.max_pending { return Push::Dropped; }
                 self.pending.push_back(job);
                 return Push::Queued;
@@ -44,12 +48,20 @@ impl Queue {
         }
         // Newest wins: anything waiting at this level or below is stale now.
         self.pending.retain(|j| j.priority > job.priority);
-        let cut = match &self.running {
-            Some((_, cancel)) => { cancel.cancel(); true }
-            None => false,
-        };
+        // every running line ranks at most this one here, so all of them stop
+        let cut = !self.running.is_empty();
+        for (_, cancel) in &self.running { cancel.cancel(); }
         self.pending.push_back(job);
         if cut { Push::Cut } else { Push::Queued }
+    }
+
+    /// Queues `job` after the line playing and the lines waiting, and cuts nothing, so the sentences of one
+    /// streamed answer play in order. A line that would take the waiting text past `APPEND_CHARS` is dropped.
+    pub fn append(&mut self, job: Job) -> Push {
+        let waiting: usize = self.pending.iter().map(|j| j.req.text.chars().count()).sum();
+        if waiting + job.req.text.chars().count() > APPEND_CHARS { return Push::Dropped; }
+        self.pending.push_back(job);
+        Push::Queued
     }
 
     /// The most important waiting line (the oldest of equal rank) starts running.
@@ -60,19 +72,20 @@ impl Queue {
         }
         let job = self.pending.remove(best?)?;
         let cancel = Cancel::new();
-        self.running = Some((job.priority, cancel.clone()));
+        self.running.push((job.priority, cancel.clone()));
         Some((job, cancel))
     }
 
-    pub fn finish(&mut self) { self.running = None; }
+    /// The line taken with `cancel` is done (played, failed or cut).
+    pub fn finish(&mut self, cancel: &Cancel) { self.running.retain(|(_, c)| !c.same(cancel)); }
 
-    /// Silences everything: cancels the running line and drops the waiting ones.
+    /// Silences everything: cancels the running lines and drops the waiting ones.
     pub fn stop(&mut self) {
-        if let Some((_, cancel)) = &self.running { cancel.cancel(); }
+        for (_, cancel) in &self.running { cancel.cancel(); }
         self.pending.clear();
     }
 
-    pub fn is_idle(&self) -> bool { self.running.is_none() && self.pending.is_empty() }
+    pub fn is_idle(&self) -> bool { self.running.is_empty() && self.pending.is_empty() }
     pub fn pending_len(&self) -> usize { self.pending.len() }
 }
 
@@ -89,9 +102,9 @@ mod tests {
     fn a_line_waits_when_nothing_is_playing_and_plays_in_order() {
         let mut q = Queue::new(4);
         assert_eq!(q.push(job(Priority::Reply, "a")), Push::Queued);
-        let (j, _) = q.take().unwrap();
+        let (j, c) = q.take().unwrap();
         assert_eq!(j.req.text, "a");
-        q.finish();
+        q.finish(&c);
         assert!(q.is_idle());
     }
 
@@ -117,13 +130,41 @@ mod tests {
     fn a_waiting_reply_starts_before_an_older_ambient_remark() {
         let mut q = Queue::new(4);
         q.push(job(Priority::Urgent, "playing"));
-        let _ = q.take();
+        let (_, c) = q.take().unwrap();
         assert_eq!(q.push(job(Priority::Ambient, "older remark")), Push::Queued);
         assert_eq!(q.push(job(Priority::Reply, "newer reply")), Push::Queued);
-        q.finish();
-        assert_eq!(q.take().unwrap().0.req.text, "newer reply", "rank beats arrival order");
-        q.finish();
+        q.finish(&c);
+        let (j, c) = q.take().unwrap();
+        assert_eq!(j.req.text, "newer reply", "rank beats arrival order");
+        q.finish(&c);
         assert_eq!(q.take().unwrap().0.req.text, "older remark");
+    }
+
+    #[test]
+    fn appended_lines_stop_at_the_central_cap() {
+        let mut q = Queue::new(4);
+        let line = "x".repeat(APPEND_CHARS / 2);
+        assert_eq!(q.append(job(Priority::Reply, &line)), Push::Queued);
+        assert_eq!(q.append(job(Priority::Reply, &line)), Push::Queued, "exactly at the cap still fits");
+        assert_eq!(q.append(job(Priority::Reply, "one more")), Push::Dropped);
+        assert_eq!(q.pending_len(), 2);
+    }
+
+    #[test]
+    fn a_cut_stops_the_playing_line_and_the_one_made_ahead() {
+        let mut q = Queue::new(4);
+        q.append(job(Priority::Reply, "playing."));
+        q.append(job(Priority::Reply, "made ahead."));
+        let (_, playing) = q.take().unwrap();
+        let (_, ahead) = q.take().unwrap();
+        q.finish(&ahead);
+        assert!(!q.is_idle(), "the playing line still runs after the other one finishes");
+        let (_, ahead) = { q.append(job(Priority::Reply, "next.")); q.take().unwrap() };
+        assert_eq!(q.push(job(Priority::Reply, "new question")), Push::Cut);
+        assert!(playing.is_cancelled() && ahead.is_cancelled());
+        q.finish(&playing);
+        q.finish(&ahead);
+        assert_eq!(q.take().unwrap().0.req.text, "new question");
     }
 
     #[test]

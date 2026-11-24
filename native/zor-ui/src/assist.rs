@@ -91,18 +91,75 @@ impl Drop for Busy {
 /// How long an answer stays in the island banner (ms), so one you looked away from can still be read.
 const ANSWER_BANNER_MS: f64 = 60_000.0;
 
-/// Says what a task returned: a success is a short bubble and an island banner, a failure stays (see `fail_later`).
+/// What a click on the buddy's answer banner opens: the chat window (bar.rs).
+pub const OPEN_CHAT: &str = "zorui:buddy-chat";
+
+/// Says what a task returned: a success is a short bubble (cut to `MAX_SAY`; the chat has it all) and an island banner whose
+/// click opens the chat, a failure stays (see `fail_later`).
 fn report(r: Result<String, String>) {
     match r {
         Ok(s) => {
             if let Ok(mut l) = LAST.lock() { *l = Some(s.clone()); }
-            say_later(&s, say_secs(&s));
-            let text = s.clone();
-            crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text, until: crate::hub::now_ms() + ANSWER_BANNER_MS, open: String::new() })));
+            let line = short(&s, crate::agent::MAX_SAY);
+            say_later(&line, say_secs(&line));
+            crate::app::post(Box::new(move |cx| cx.notif = Some(crate::app::Notif { app: "Zor UI".into(), text: line, until: crate::hub::now_ms() + ANSWER_BANNER_MS, open: OPEN_CHAT.into() })));
         }
         Err(e) => fail_later(&e),
     }
 }
+
+/// What happened to a request the chat window sent, for that window (`take_events`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatEvent {
+    /// The microphone heard this (empty: nothing was caught, or recording failed).
+    Heard(String),
+    /// The request `said` ended with this answer or error.
+    Answered { said: String, result: Result<String, String> },
+}
+
+/// Events of requests sent to a chat (`conv` given), oldest first, as (conversation, event). Capped, so a closed window can't
+/// make it grow.
+static EVENTS: Mutex<Vec<(String, ChatEvent)>> = Mutex::new(Vec::new());
+const EVENTS_MAX: usize = 32;
+
+fn push_event(conv: &str, e: ChatEvent) {
+    if let Ok(mut v) = EVENTS.lock() {
+        v.push((conv.to_string(), e));
+        let over = v.len().saturating_sub(EVENTS_MAX);
+        v.drain(..over);
+    }
+}
+
+/// The request running now as the chat window draws it while it runs: the answer as it is being written, and its tool steps.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveChat { pub conversation: String, pub text: String, pub tools: String }
+
+static LIVE_CHAT: Mutex<Option<LiveChat>> = Mutex::new(None);
+
+fn with_live_chat(conv: &str, f: impl FnOnce(&mut LiveChat)) {
+    if let Ok(mut l) = LIVE_CHAT.lock() {
+        let cur = l.get_or_insert_with(LiveChat::default);
+        if cur.conversation != conv { *cur = LiveChat { conversation: conv.to_string(), ..LiveChat::default() }; }
+        f(cur);
+    }
+    crate::chat_ui::wake();
+}
+
+/// The model's reply so far (`acc`), for the chat window: the `say` text of a JSON reply (a tool step shows nothing), or the
+/// plain text. Each model call starts its text again.
+pub fn live_text(conv: &str, acc: &str) {
+    let shown = if acc.trim_start().starts_with('{') { crate::agent::partial_say(acc) } else { Some(acc.to_string()) };
+    if let Some(s) = shown.filter(|s| !s.trim().is_empty()) { with_live_chat(conv, |l| l.text = s); }
+}
+
+/// The request's tool steps so far (`plan::Steps::shown_json`), for the chat window.
+pub fn live_tools(conv: &str, tools: &str) { with_live_chat(conv, |l| l.tools = tools.to_string()); }
+
+/// The running request as the chat window draws it, if it is in `conv`.
+pub fn live_chat(conv: &str) -> Option<LiveChat> { LIVE_CHAT.lock().ok().and_then(|l| l.clone()).filter(|l| l.conversation == conv) }
+
+/// Every event waiting, oldest first; the chat window keeps those of the chat it shows.
+pub fn take_events() -> Vec<(String, ChatEvent)> { EVENTS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default() }
 
 /// Asks to hear the last answer again: "say that again", "repeat that", "what did you say".
 pub fn is_replay(said: &str) -> bool {
@@ -145,7 +202,8 @@ pub fn parse(said: &str) -> Intent {
         };
         if !to.is_empty() && !text.is_empty() { return Intent::Message { to: to.to_string(), text: text.to_string(), via: via.to_string() }; }
     }
-    if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run "]) { return Intent::Open(app_name_of(&a).to_string()); }
+    // "last game" before app_name_of, which would cut " game" off
+    if let Some(a) = rest(&["open up ", "open ", "launch ", "start ", "run "]) { return Intent::Open(if crate::lastgame::asks(&a) { "last game".into() } else { app_name_of(&a).to_string() }); }
     if let Some(p) = rest(&["play "]) {
         // "lofi on spotify": the last " on " names the service, unless what follows is too long to be one
         let (query, service) = match p.to_ascii_lowercase().rfind(" on ") {
@@ -312,6 +370,7 @@ pub fn enabled(cfg: &Config) -> bool { cfg.get("buddies.listen").as_bool().unwra
 /// One action's switch in Settings; on unless turned off.
 /// Starts the installed app or game that best matches `name` (Start Menu shortcuts, Steam games).
 pub fn launch_app(cfg: &Config, name: &str) -> Result<String, String> {
+    if crate::lastgame::asks(name) { return crate::lastgame::open(cfg); }
     if let Some(r) = open_installed(cfg, name) { return r; }
     // "discord and valorant": each app opens here, and the ones not installed are said, without a round trip to the AI
     let parts = split_apps(name);
@@ -701,8 +760,11 @@ pub fn fold_turn(events: &[Value]) -> Turn {
 
 /// Runs one `ai-chat` conversation and returns its reply with any tool calls. A stream error fails the whole reply.
 /// Gives up when nothing arrives for `wait_secs`.
-pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> {
-    let turn = stream_turn_raw(cfg, convo, wait_secs)?;
+pub fn stream_turn(cfg: &Config, convo: &str, wait_secs: u64) -> Result<Turn, String> { stream_turn_with(cfg, convo, wait_secs, |_| {}) }
+
+/// `stream_turn`, and `live` gets the text so far after each delta (the chat window streams it, `live_text`).
+pub fn stream_turn_with(cfg: &Config, convo: &str, wait_secs: u64, live: impl FnMut(&str)) -> Result<Turn, String> {
+    let turn = stream_turn_live(cfg, convo, wait_secs, live)?;
     if let Some(u) = turn.usage {
         crate::log::line(&format!("buddy usage: {} in, {} out", u.input, u.output));
         provider::add(u);
@@ -926,38 +988,75 @@ fn watch_step(cfg: &Config, area: [i32; 4]) {
         let goal = GOAL.lock().map(|g| g.clone()).unwrap_or_default();
         crate::log::line(&format!("walkthrough: step {} clicked", STEP.load(Ordering::SeqCst)));
         STEPPING.store(true, Ordering::SeqCst);
-        ask_as(&cfg, &next_step_question(&goal), true);
+        ask_as(&cfg, &next_step_question(&goal), true, None);
     });
 }
 
 /// Runs `said` on a worker thread and shows the result in the primary buddy's bubble. A request that comes while another
 /// runs is refused at once, so two never share the cancel flag and the token total.
-pub fn ask(cfg: &Config, said: &str) { ask_as(cfg, said, false) }
+pub fn ask(cfg: &Config, said: &str) { ask_as(cfg, said, false, None) }
 
-/// `ask`, or with `look` the words go to screen help whatever they say (the look hotkey).
-fn ask_as(cfg: &Config, said: &str, look: bool) {
-    let Some(busy) = try_busy() else { say_later("I'm still working on the last request.", 3.0); return; };
+/// `ask` in the chat `conv` (the chat window): the turn is saved there and its outcome comes back as a `ChatEvent`.
+pub fn ask_in(cfg: &Config, said: &str, conv: &str) { ask_as(cfg, said, false, Some(conv.to_string())) }
+
+/// `ask`, or with `look` the words go to screen help whatever they say (the look hotkey). `conv`: the chat it is said in; None is
+/// a request from outside a chat, which gets its own (`agent::desktop_conversation`).
+fn ask_as(cfg: &Config, said: &str, look: bool, conv: Option<String>) {
+    let Some(busy) = try_busy() else {
+        let busy_line = "I'm still working on the last request.";
+        say_later(busy_line, 3.0);
+        if let Some(c) = &conv { push_event(c, ChatEvent::Answered { said: said.to_string(), result: Err(busy_line.into()) }); }
+        return;
+    };
     WALK.fetch_add(1, Ordering::SeqCst); // a new request ends a walkthrough's wait for a click, and its box
     crate::highlight::hide();
     let (cfg, said) = (Config(cfg.0.clone()), said.to_string());
     std::thread::spawn(move || {
         let _busy = busy; // held until this request ends, also when it panics
-        if is_replay(&said) { let a = last_answer(); say_later(&a, say_secs(&a)); return; }
+        if is_replay(&said) {
+            let a = last_answer();
+            say_later(&a, say_secs(&a));
+            if let Some(c) = &conv { push_event(c, ChatEvent::Answered { said: said.clone(), result: Ok(a) }); }
+            return;
+        }
         say_later("On it…", 3.0);
-        // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
-        let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
-        let r = if look { see_screen(&cfg, said.trim()) } else { match run(parse(&said), &cfg) {
-            Err(e) if falls_back(&parse(&said), &e, ai_on) => crate::agent::ask_with_note(&cfg, said.trim(), &fallback_note(&e)),
-            r => r,
-        } };
+        // one task, one conversation: the chat it was said in, else a new one
+        let chat = conv.clone().unwrap_or_else(crate::agent::desktop_conversation);
+        // Fixed commands bypass the agent's history writer. Keep their recognized
+        // words and result too, before Answered clears the chat's pending line.
+        let history_before = crate::agent::history::VERSION.load(Ordering::Relaxed);
+        crate::agent::set_pc_conversation(Some(chat.clone()));
+        let r = if look { see_screen(&cfg, said.trim()) }
+            // a custom command from Settings: each of its steps runs as if it had been said
+            else if let Some(steps) = crate::commands::matching(&cfg.strs("buddies.commands"), &said) { crate::commands::run_steps(&steps, |s| do_said(&cfg, s)) }
+            else { do_said(&cfg, &said) };
+        crate::agent::set_pc_conversation(None);
+        if let Ok(answer) = &r {
+            if crate::agent::history::VERSION.load(Ordering::Relaxed) == history_before {
+                crate::agent::history::save(&chat, &said, answer);
+            }
+        }
+        if let Ok(mut l) = LIVE_CHAT.lock() { *l = None; } // the request is over: its saved turn shows from now on
+        if let Some(c) = &conv { push_event(c, ChatEvent::Answered { said: said.clone(), result: r.clone() }); }
         report(r);
     });
+}
+
+/// Does what `said` asks: a fixed command when it parses as one, and the AI when it doesn't or the fixed command failed.
+fn do_said(cfg: &Config, said: &str) -> Result<String, String> {
+    // Intent is not Clone and run consumes it, so the (pure, cheap) parse runs twice
+    let ai_on = cfg.get("buddies.listenAi").as_bool().unwrap_or(true);
+    match run(parse(said), cfg) {
+        Err(e) if falls_back(&parse(said), &e, ai_on) => crate::agent::ask_with_note(cfg, said.trim(), &fallback_note(&e)),
+        r => r,
+    }
 }
 
 /// True when a fixed command failed and the AI should get the sentence instead. Not when the AI is off, not for a
 /// feature the user turned off in Settings, and not for Message, Screen, Drive or Chat (those asked or went to the AI already).
 pub fn falls_back(intent: &Intent, err: &str, ai_on: bool) -> bool {
-    ai_on && matches!(intent, Intent::Open(_) | Intent::Play { .. } | Intent::Search(_)) && !err.contains("turned off")
+    // Playback already exhausts its routes. Handing it to the model starts them again.
+    ai_on && matches!(intent, Intent::Open(_) | Intent::Search(_)) && !err.contains("turned off")
 }
 
 /// The note the AI gets with the request after a fixed command failed: why the fixed command could not do it. It goes to the AI
@@ -974,16 +1073,22 @@ fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
 
 /// Starts recording: the bridge prints states and then the text, which goes to `ask`. With `look` what you say is a
 /// question about the screen (the look hotkey).
-pub fn listen_as(cfg: &Config, look: bool) {
+pub fn listen_as(cfg: &Config, look: bool) { listen_into(cfg, look, None) }
+
+/// `listen_as` for the chat `conv` (its mic button and Live mode): the words go to that chat, and what was heard comes back
+/// as a `ChatEvent`. With a chat it always stops on silence (Auto), whatever the dictation setting says, so Live mode can
+/// listen hands-free.
+pub fn listen_into(cfg: &Config, look: bool, conv: Option<String>) {
     // a question from the take-over is waiting: your words answer it. Otherwise speaking to the buddy hands a take-over's mouse back.
     let answering = crate::drive::waiting() || crate::bridge::permit::waiting();
     if !answering { crate::drive::request_stop(); crate::browse::request_stop(); }
     let cfg2 = Config(cfg.0.clone());
     let model = cfg.str("buddies.model").to_string();
     let mic = cfg.str("buddies.mic").to_string();
-    crate::pill::set_mode(cfg.str("buddies.listenMode"));
+    let mode = if conv.is_some() { "auto" } else { cfg.str("buddies.listenMode") };
+    crate::pill::set_mode(mode);
     crate::pill::set_look(look);
-    let args = listen_args(&model, &mic, cfg.str("buddies.listenMode"));
+    let args = listen_args(&model, &mic, mode);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let s = proc::stream(cfg, "buddy-listen", &args, move |line| {
         let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
@@ -994,12 +1099,18 @@ pub fn listen_as(cfg: &Config, look: bool) {
             Some("thinking") => crate::pill::set(crate::pill::THINKING),
             _ => {}
         }
-        if let Some(e) = v["error"].as_str() { crate::pill::set(0); fail_later(&short(e, 110)); }
-        if let Some(t) = v["text"].as_str() {
+        if let Some(e) = v["error"].as_str() {
             crate::pill::set(0);
+            fail_later(&short(e, 110));
+            if let Some(c) = &conv { push_event(c, ChatEvent::Heard(String::new())); }
+        }
+        if let Some(t) = v["text"].as_str() {
+            crate::pill::partial(t.trim());
+            crate::pill::set(0);
+            if let Some(c) = &conv { push_event(c, ChatEvent::Heard(t.trim().to_string())); }
             if t.trim().is_empty() { say_later("I didn't catch that.", 3.0); }
             else if answering && (crate::drive::reply_spoken(t) || crate::bridge::permit::answer_with(t)) {} // the take-over or a Claude Code permission heard you
-            else { ask_as(&cfg2, t, look); }
+            else { ask_as(&cfg2, t, look, conv.clone()); }
         }
     });
     if s.is_none() { crate::pill::set(0); fail_later("I can't start listening."); }
@@ -1093,6 +1204,7 @@ mod tests {
         assert_eq!(parse("Google rust lifetimes"), Intent::Search("rust lifetimes".into()));
         assert_eq!(parse("Open the game Valorant."), Intent::Open("Valorant".into()));
         assert_eq!(parse("open Spotify"), Intent::Open("Spotify".into()));
+        assert_eq!(parse("open my last game"), Intent::Open("last game".into()), "not cut down to \"my last\"");
         assert_eq!(parse("open the Spotify app"), Intent::Open("Spotify".into()), "the web lookup gets the bare name");
         assert_eq!(web_version("Spotify"), Some(("Spotify", "https://open.spotify.com")));
         assert_eq!(web_version(" YouTube Music "), Some(("YouTube Music", "https://music.youtube.com")));
@@ -1313,7 +1425,8 @@ mod tests {
     fn a_failed_fixed_command_falls_back_to_the_ai() {
         let (open, play, search) = (Intent::Open("a timer".into()), Intent::Play { query: "x".into(), service: String::new() }, Intent::Search("x".into()));
         let err = "No app called a timer.";
-        for i in [&open, &play, &search] { assert!(falls_back(i, err, true), "{i:?}"); }
+        for i in [&open, &search] { assert!(falls_back(i, err, true), "{i:?}"); }
+        assert!(!falls_back(&play, err, true), "playback must not restart through the AI");
         for i in [&open, &play, &search] { assert!(!falls_back(i, err, false), "{i:?}: the AI is off"); }
         assert!(!falls_back(&open, "Opening apps is turned off in Settings.", true), "a feature turned off stays off");
         assert!(!falls_back(&Intent::Message { to: "a".into(), text: "b".into(), via: String::new() }, err, true));

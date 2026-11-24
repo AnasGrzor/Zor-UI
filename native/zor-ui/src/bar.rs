@@ -419,7 +419,7 @@ impl Bar {
 
     /// Opens a popup on this bar's monitor (openHere).
     fn open_here(&self, cx: &mut Ctx, name: &str) {
-        cx.actions.push(Action::Open { name: name.into(), mon: Some((self.mon.0, self.mon.1)), at: None });
+        cx.actions.push(Action::Open { name: name.into(), mon: Some((self.mon.0, self.mon.1)), at: None, pill: None });
     }
 
     fn art(&mut self, g: &Gfx, cx: &Ctx, px: u32) -> Option<Pixmap> {
@@ -1281,6 +1281,7 @@ impl Bar {
             (ISLAND, Btn::Left) if crate::app::Notif::target(&cx.notif, hub::now_ms()).is_some() => {
                 match crate::app::Notif::target(&cx.notif, hub::now_ms()) {
                     Some(crate::bridge::claude_acct::CANCEL) => crate::bridge::claude_acct::cancel(), // the auto-switch banner
+                    Some(crate::assist::OPEN_CHAT) => cx.actions.push(crate::app::Action::open("buddy-chat")), // the buddy's answer
                     // a notification: show what it said in the island (its Open button launches the app)
                     Some(_) => if let Some(last) = hub::get("zor-ui.notifLast") {
                         hub::set("zor-ui.notifOpen", Some(last));
@@ -1319,7 +1320,7 @@ impl Bar {
         let Some((_, r)) = self.pills.iter().find(|p| p.0 == TRAY) else { return };
         let s = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
         let (ax, ay) = anchor(self.edge, self.origin, *r, s);
-        cx.actions.push(Action::Open { name: "tray-flyout".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)) });
+        cx.actions.push(Action::Open { name: "tray-flyout".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)), pill: None });
     }
 
     /// openIslandPanel() in bar.js: the panel opens under the island.
@@ -1330,7 +1331,8 @@ impl Bar {
         let Some((_, r)) = self.pills.iter().find(|p| p.0 == ISLAND) else { return };
         let s = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() } as f32 / 96.0;
         let (ax, ay) = anchor(self.edge, self.origin, *r, s);
-        cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)) });
+        let pill = Some(((r.w * s).round() as i32, (r.h * s).round() as i32)); // the panel morphs out of it
+        cx.actions.push(Action::Open { name: "island-panel".into(), mon: Some((self.mon.0, self.mon.1)), at: Some((ax, ay)), pill });
     }
 }
 

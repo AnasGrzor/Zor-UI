@@ -222,18 +222,25 @@ impl SidebarRight {
         let groups = group(&s.notifs);
         // layout: per group the row heights, so the scroll range is known before drawing
         let lh = 13.0 * 1.35;
-        let layout: Vec<(f32, Vec<Row>)> = groups.iter().map(|g| {
-            let rows: Vec<Row> = g.items.iter().take(5).enumerate().map(|(i, n)| {
-                let time = ago_text(n.time);
-                let tw = c.g.measure(&time, txt(11.0, 400)).0.ceil();
-                let w = list.w - 20.0 - 4.0 - 8.0 - tw;
-                let th = lines_h(c.g, &n.title, txt(13.0, 500), w, lh, 4);
-                let bh = lines_h(c.g, &n.body, txt(13.0, 400), w, lh, 4);
-                Row { h: 12.0 + th + bh + if i > 0 { 1.0 } else { 0.0 }, th, bh, time, tw }
-            }).collect();
-            (8.0 + 24.0 + 4.0 + rows.iter().map(|r| r.h).sum::<f32>() + if g.items.len() > 5 { 4.0 + 14.4 } else { 0.0 } + 8.0, rows)
-        }).collect();
-        let content = layout.iter().map(|l| l.0).sum::<f32>() + 6.0 * (layout.len() - 1) as f32;
+        let lay = |cw: f32| {
+            let layout: Vec<(f32, Vec<Row>)> = groups.iter().map(|g| {
+                let rows: Vec<Row> = g.items.iter().take(5).enumerate().map(|(i, n)| {
+                    let time = ago_text(n.time);
+                    let tw = c.g.measure(&time, txt(11.0, 400)).0.ceil();
+                    let w = cw - 20.0 - 4.0 - 8.0 - tw;
+                    let th = lines_h(c.g, &n.title, txt(13.0, 500), w, lh, 4);
+                    let bh = lines_h(c.g, &n.body, txt(13.0, 400), w, lh, 4);
+                    Row { h: 12.0 + th + bh + if i > 0 { 1.0 } else { 0.0 }, th, bh, time, tw }
+                }).collect();
+                (8.0 + 24.0 + 4.0 + rows.iter().map(|r| r.h).sum::<f32>() + if g.items.len() > 5 { 4.0 + 14.4 } else { 0.0 } + 8.0, rows)
+            }).collect::<Vec<_>>();
+            let content = layout.iter().map(|l| l.0).sum::<f32>() + 6.0 * (layout.len() - 1) as f32;
+            (layout, content)
+        };
+        // cards give the scrollbar room only once they overflow; narrower cards wrap taller, so they still do
+        let (mut layout, mut content) = lay(list.w);
+        if content > list.h { (layout, content) = lay(list.w - crate::tokens::BAR_ROOM); }
+        let card_w = list.w - ui::bar_room(content, list.h);
         let mut sc = std::mem::take(&mut self.sc_notif);
         // the island sends the id of the notification that was clicked
         if let Some(v) = hub::get(FOCUS) {
@@ -249,7 +256,7 @@ impl SidebarRight {
                 let (gy, next) = (y, y + gh + 6.0);
                 y = next;
                 if gy + gh < list.y || gy > list.y + list.h { continue; }
-                let card = R::new(list.x, gy, list.w, *gh);
+                let card = R::new(list.x, gy, card_w, *gh);
                 c.rect(card, 17.0, t.c("surfaceContainer"));
                 let letter = g.app.chars().next().map(|ch| ch.to_string()).unwrap_or_default();
                 c.circle(card.x + 21.0, gy + 20.0, 11.0, t.c("secondaryContainer"));
@@ -289,13 +296,14 @@ impl SidebarRight {
         let first = windows::Win32::Foundation::SYSTEMTIME { wYear: self.cal.0 as u16, wMonth: self.cal.1 as u16, wDay: 1, ..Default::default() };
         let month = crate::util::date_fmt(&first, "MMMM yyyy");
         let mut sc = std::mem::take(&mut self.sc_page);
+        let w = pr.w - ui::bar_room(content, pr.h);
         sc.region(c, cx, pr, content, |c, top| {
             let cr = R::new(pr.x, top + 2.0, 28.0 + c.g.measure(&month, txt(13.0, 500)).0.ceil(), 32.0);
             c.rect(cr, 16.0, t.c("secondaryContainer"));
             c.text(&month, R::new(cr.x + 14.0, cr.y, cr.w - 28.0, 32.0), txt(13.0, 500), t.c("onSecondaryContainer"), Align::Left);
-            ui::icon_btn(c, cx, R::new(pr.x + pr.w - 72.0, top, 36.0, 36.0), ID_CAL, "chevron_left", ui::IconKind::Plain, 20.0, false);
-            ui::icon_btn(c, cx, R::new(pr.x + pr.w - 36.0, top, 36.0, 36.0), ID_CAL + 1, "chevron_right", ui::IconKind::Plain, 20.0, false);
-            let colw = (pr.w - 12.0) / 7.0;
+            ui::icon_btn(c, cx, R::new(pr.x + w - 72.0, top, 36.0, 36.0), ID_CAL, "chevron_left", ui::IconKind::Plain, 20.0, false);
+            ui::icon_btn(c, cx, R::new(pr.x + w - 36.0, top, 36.0, 36.0), ID_CAL + 1, "chevron_right", ui::IconKind::Plain, 20.0, false);
+            let colw = (w - 12.0) / 7.0;
             let gy = top + 42.0;
             for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
                 c.text(d, R::new(pr.x + i as f32 * (colw + 2.0), gy, colw, 26.4), txt(11.5, 400), t.c("onSurfaceVariant"), Align::Center);
@@ -320,9 +328,16 @@ impl SidebarRight {
         let list = R::new(pr.x, pr.y, pr.w, (add - 8.0 - pr.y).max(0.0));
         let items = todos();
         if items.is_empty() { empty(c, cx, list, "checklist", "Nothing to do"); } else {
-            let tw = pr.w - 98.0;
-            let hs: Vec<f32> = items.iter().map(|x| (c.g.measure_wrapped(x["text"].as_str().unwrap_or(""), txt(13.5, 400), tw) + 12.0).max(44.0)).collect();
-            let content = hs.iter().sum::<f32>() + 6.0 * (hs.len() - 1) as f32;
+            let lay = |row_w: f32| {
+                let hs: Vec<f32> = items.iter().map(|x| (c.g.measure_wrapped(x["text"].as_str().unwrap_or(""), txt(13.5, 400), row_w - 98.0) + 12.0).max(44.0)).collect();
+                let content = hs.iter().sum::<f32>() + 6.0 * (hs.len() - 1) as f32;
+                (hs, content)
+            };
+            // rows give the scrollbar room only once they overflow; narrower rows wrap taller, so they still do
+            let (mut hs, mut content) = lay(list.w);
+            if content > list.h { (hs, content) = lay(list.w - crate::tokens::BAR_ROOM); }
+            let row_w = list.w - ui::bar_room(content, list.h);
+            let tw = row_w - 98.0;
             let mut sc = std::mem::take(&mut self.sc_todo);
             sc.region(c, cx, list, content, |c, top| {
                 let mut y = top;
@@ -332,7 +347,7 @@ impl SidebarRight {
                     if ry + h < list.y || ry > list.y + list.h { continue; }
                     let done = x["done"].as_bool() == Some(true);
                     let text = x["text"].as_str().unwrap_or("");
-                    c.rect(R::new(list.x, ry, list.w, *h), 17.0, t.c("surfaceContainer"));
+                    c.rect(R::new(list.x, ry, row_w, *h), 17.0, t.c("surfaceContainer"));
                     let ck = R::new(list.x + 12.0, ry + (h - 22.0) / 2.0, 22.0, 22.0);
                     if done {
                         c.circle(ck.x + 11.0, ck.y + 11.0, 11.0, t.c("primary"));
@@ -347,7 +362,7 @@ impl SidebarRight {
                     c.para(text, tr, txt(13.5, 400), col, Align::Left);
                     // shortcut: the strike-through is drawn for one-line tasks only
                     if done && *h <= 44.0 { let w = c.g.measure(text, txt(13.5, 400)).0.min(tw); c.line((tr.x, ry + h / 2.0), (tr.x + w, ry + h / 2.0), 1.2, col); }
-                    ui::icon_btn(c, cx, R::new(list.x + list.w - 44.0, ry + (h - 36.0) / 2.0, 36.0, 36.0), ID_TODO_DEL + i as u32, "delete", ui::IconKind::Plain, 20.0, false);
+                    ui::icon_btn(c, cx, R::new(list.x + row_w - 44.0, ry + (h - 36.0) / 2.0, 36.0, 36.0), ID_TODO_DEL + i as u32, "delete", ui::IconKind::Plain, 20.0, false);
                 }
             });
             self.sc_todo = sc;
@@ -410,11 +425,12 @@ impl SidebarRight {
         let list = R::new(pr.x, cy + 56.0 + 12.0, pr.w, (pr.y + pr.h - cy - 68.0).max(0.0));
         let content = if laps.is_empty() { 0.0 } else { laps.len() as f32 * 32.3 - 4.0 };
         let mut sc = std::mem::take(&mut self.sc_laps);
+        let row_w = list.w - ui::bar_room(content, list.h);
         sc.region(c, cx, list, content, |c, top| {
             for (i, l) in laps.iter().enumerate() {
                 let y = top + i as f32 * 32.3;
                 if y + 28.3 < list.y || y > list.y + list.h { continue; }
-                let r = R::new(list.x, y, list.w, 28.3);
+                let r = R::new(list.x, y, row_w, 28.3);
                 c.rect(r, 12.0, t.c("surfaceContainer"));
                 c.text(&format!("Lap {}", laps.len() - i), R::new(r.x + 12.0, r.y, 200.0, r.h), txt(13.0, 400), t.c("onSurface"), Align::Left);
                 c.text(&sw_text(*l), R::new(r.x + r.w - 212.0, r.y, 200.0, r.h), txt(13.0, 400), t.c("onSurface"), Align::Right);

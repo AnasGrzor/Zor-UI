@@ -145,7 +145,7 @@ impl Tab for Anime {
 
         // grid
         let view = R::new(r.x, r.y + 96.0, r.w, (r.h - 96.0).max(40.0));
-        let colw = ((view.w - 8.0 - GAP) / 2.0).floor();
+        let colw = ((view.w - crate::tokens::BAR_ROOM - GAP) / 2.0).floor();
         let aspects: Vec<f32> = self.items.iter().map(|it| if it.w > 0.0 && it.h > 0.0 { it.h / it.w } else { 1.0 }).collect();
         let (pos, grid_h) = masonry(&aspects, colw);
         // footer: error, spinner, load more or the empty note
@@ -181,7 +181,7 @@ impl Tab for Anime {
             // footer
             let fy = top + grid_h + 6.0;
             let mut y = fy;
-            if !error.is_empty() { y += err_box(c, cx, R::new(view.x, y, view.w - 8.0, 0.0), &error) + 10.0; }
+            if !error.is_empty() { y += err_box(c, cx, R::new(view.x, y, view.w - crate::tokens::BAR_ROOM, 0.0), &error) + 10.0; }
             if loading { dots(c, cx, view.x + view.w / 2.0, y + 20.0); }
             else if !empty {
                 let w = c.g.measure("Load more", txt(13.0, 400)).0.ceil() + 28.0;

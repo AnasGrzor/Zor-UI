@@ -24,6 +24,8 @@ mod guides;
 mod highlight;
 mod glaze;
 mod buddy;
+mod buddy_chat;
+mod chat_ui;
 mod hub;
 #[cfg(test)]
 mod headless_test;
@@ -35,6 +37,8 @@ mod mixer_app;
 mod keymap;
 mod cast;
 mod claude_usage;
+mod commands;
+mod lastgame;
 mod log;
 mod messaging;
 mod lyrics;
@@ -55,6 +59,7 @@ mod screen;
 mod settings;
 mod sidebar_left;
 mod sidebar_right;
+mod social;
 mod sys;
 mod tray;
 mod tokens;
@@ -131,6 +136,17 @@ fn main() {
         let _single = CreateMutexW(None, true, w!("zor-ui-native"));
         if GetLastError() == ERROR_ALREADY_EXISTS { return; }
         if app::App::start(arg("--all").is_some()).is_err() { return; }
+        // Start a voice install with its progress page visible (also useful for setup scripts).
+        if arg("--install-voices").is_some() {
+            hub::set(settings::GOTO, Some("voice".into()));
+            app::post(Box::new(|cx| cx.actions.push(app::Action::Open {
+                name: "settings".into(), mon: None, at: None, pill: None,
+            })));
+            std::thread::spawn(|| {
+                let result = voice::approvals_for("piper").and_then(|approvals| voice::install_catalog("piper", &approvals));
+                if result.is_ok() { voice::refresh_providers(); }
+            });
+        }
         bridge::update::spawn();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

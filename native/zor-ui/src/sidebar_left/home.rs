@@ -95,7 +95,7 @@ impl Home {
             Lyr::Missing => note(c, "No lyrics found"),
             Lyr::Found(l) => {
                 let f = txt(14.0, 400);
-                let w = r.w - 16.0;
+                let w = r.w - 8.0 - crate::tokens::BAR_ROOM; // 8 px inset on the left, scrollbar room on the right
                 let key = (format!("{}|{}|{}", m.id, m.title, m.artist), r.w as u32);
                 let texts: Vec<&str> = match &*l {
                     Lyrics::Synced(v) => v.iter().map(|x| if x.1.is_empty() { "\u{266A}" } else { x.1.as_str() }).collect(),

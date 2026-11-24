@@ -9,7 +9,11 @@ const PIPER_ZIP_SHA: &str = "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f7
 const PIPER_ZIP_SIZE: u64 = 22_477_236;
 const VOICE_BASE: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium";
 
-/// The Piper manifest: the Windows build and the Lessac (US English, medium) voice.
+// Pin JARVIS downloads so the files always match the verified hashes.
+const JARVIS_BASE: &str = "https://huggingface.co/jgkawell/jarvis/resolve/37f8763122312665f091d1fc760abaf1f79b02cc/en/en_GB/jarvis/high";
+pub const JARVIS_ID: &str = "en_GB-jarvis-high";
+
+/// The Piper runtime with Lessac and JARVIS voices.
 pub fn piper() -> Value {
     json!({
         "id": "piper",
@@ -31,6 +35,19 @@ pub fn piper() -> Value {
                   "url": format!("{VOICE_BASE}/en_US-lessac-medium.onnx.json"),
                   "sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
                   "size_bytes": 4_885 }
+            ]
+        }, {
+            "id": JARVIS_ID,
+            "name": "JARVIS, British English (high)",
+            "files": [
+                { "file": "jarvis-high.onnx",
+                  "url": format!("{JARVIS_BASE}/jarvis-high.onnx"),
+                  "sha256": "9791877d9c099fabbf30be2825e011451c39b3431e21e81e866f5b6507e72993",
+                  "size_bytes": 114_199_011 },
+                { "file": "jarvis-high.onnx.json",
+                  "url": format!("{JARVIS_BASE}/jarvis-high.onnx.json"),
+                  "sha256": "d0b8772d81c1da2fcdfd79e90bff027f46f040450e1deb89b43a9f6b1946c5a7",
+                  "size_bytes": 7_262 }
             ]
         }]
     })

@@ -93,6 +93,8 @@ pub const WS_ACTIVE_W: f32 = 44.0;
 pub const NAV_ITEM_H: f32 = 38.0;
 pub const NAV_STEP: f32 = 45.0;
 pub const NAV_R: f32 = 12.0;
+/// Room above each category's first page in the rail, for the category name (11 px text plus air).
+pub const NAV_HEAD_H: f32 = 28.0;
 /// Left edge and width of the rail, the divider line between rail and page, and the left edge of the page.
 /// The rail ends 16 px before the divider and the page starts 35 px after it.
 pub const NAV_X: f32 = 22.0;
@@ -105,10 +107,15 @@ pub const DIVIDER_COLLAPSED_X: f32 = NAV_X + NAV_COLLAPSED_W + 16.0;
 pub const PAGE_COLLAPSED_X: f32 = DIVIDER_COLLAPSED_X + 35.0;
 /// Top edge of the page area. The title starts here, so this is the air above it (the rail starts at 22).
 pub const PAGE_Y: f32 = 44.0;
+/// Air above and below the section jump chips under a Settings page title.
+pub const JUMP_PAD: f32 = 8.0;
 /// Corner radius for interactive preview studios and cards.
 pub const STUDIO_R: f32 = 16.0;
 /// Room kept free on the Settings page's right edge for the scrollbar: cards stop this far from the thumb's side.
 pub const SCROLL_GUTTER: f32 = 24.0;
+/// Room any other scrolled list keeps free on its right for `ui::Scroll::region`'s thumb. The hovered
+/// thumb starts 6 px in from the edge, so content stops 8 px before it.
+pub const BAR_ROOM: f32 = 14.0;
 
 // ---- island panel ----
 /// Width of the Dynamic Island panel (the window adds a margin each side for the shadow), and the transport buttons in it.
@@ -239,6 +246,13 @@ mod tests {
         // previous, play (60 px) and next sit in a row inside the panel's 15 px border and padding
         assert!(ISLAND_W - 30.0 >= 2.0 * TRANSPORT_BTN + 60.0 + 2.0 * 10.0);
         assert!(TRANSPORT_BTN >= 44.0, "a comfortable tap target");
+    }
+
+    #[test]
+    fn scrolled_content_clears_the_hovered_thumb() {
+        // ui::Scroll::region draws the hovered thumb from 6 px in from the right edge
+        assert!(BAR_ROOM - 6.0 >= 8.0);
+        assert!(SCROLL_GUTTER >= BAR_ROOM);
     }
 
     #[test]

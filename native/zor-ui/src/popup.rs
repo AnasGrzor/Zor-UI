@@ -38,6 +38,7 @@ pub fn make(name: &str, area: (f32, f32)) -> Option<Box<dyn View>> {
         "sidebar-right" => Box::new(SidebarRight::new(area)),
         "settings" => Box::new(Settings::new(area)),
         "keybinds" => Box::new(Settings::new(area).on_page("keys")),
+        crate::buddy_chat::NAME => Box::new(crate::buddy_chat::BuddyChat::new(area)),
         _ => return None,
     })
 }
@@ -54,6 +55,8 @@ pub fn area(name: &str, w: f32, h: f32, edge: Edge) -> (f32, f32) {
         // the pages need about 900 px; a narrow screen gets all it has
         "settings" | "keybinds" => ((w * 0.64).max(900.0_f32.min(w - 24.0)).round(), (h * 0.8).min(900.0).round()), // a portrait screen would stretch it into a tall empty column
         "island-panel" => ((664.0_f32).min(w - bar_w - 24.0), (h - bar_h - 24.0).max(1.0)), // monitor bounds include the shadow and a margin below the bar
+        // a chat reads best at about the width of a page; a small screen gets what it has, never less than the window's minimum
+        crate::buddy_chat::NAME => ((w * 0.6).clamp(720.0, 1100.0).min((w - bar_w - 24.0).max(720.0)).round(), (h * 0.78).clamp(480.0, 900.0).round()),
         _ => (400.0, 300.0),
     }
 }
@@ -88,6 +91,22 @@ pub fn spot(name: &str, mon: RECT, s: f32, px: (i32, i32), at: Option<(i32, i32)
     }
 }
 
+/// Where the island panel's morph starts, in window px: a pill-sized shape on the window's face toward the bar,
+/// centred on the pill (`at`, the anchor `spot` used; the window's middle without one). `pos` is the window's
+/// top-left and `win` its size, both physical px.
+pub fn grow_from(edge: Edge, at: Option<(i32, i32)>, pos: (i32, i32), win: (i32, i32), pill: (i32, i32)) -> crate::gfx::R {
+    let (ax, ay) = at.unwrap_or((pos.0 + win.0 / 2, pos.1 + win.1 / 2));
+    let (w, h) = (pill.0.min(win.0) as f32, pill.1.min(win.1) as f32);
+    let x = ((ax - pos.0) as f32 - w / 2.0).clamp(0.0, win.0 as f32 - w);
+    let y = ((ay - pos.1) as f32 - h / 2.0).clamp(0.0, win.1 as f32 - h);
+    match edge {
+        Edge::Top => crate::gfx::R::new(x, 0.0, w, h),
+        Edge::Bottom => crate::gfx::R::new(x, win.1 as f32 - h, w, h),
+        Edge::Left => crate::gfx::R::new(0.0, y, w, h),
+        Edge::Right => crate::gfx::R::new(win.0 as f32 - w, y, w, h),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +128,19 @@ mod tests {
         // centred under the island but kept on the monitor
         assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-960, 60)), Edge::Top), (-1172, 60));
         assert_eq!(spot("island-panel", MON, 1.0, (424, 500), Some((-1900, 60)), Edge::Top), (-1920, 60));
+    }
+
+    #[test]
+    fn the_panel_grows_from_the_pill_on_the_face_toward_the_bar() {
+        use crate::gfx::R;
+        // under a centred pill at the top; the window was kept on the monitor, so the pill sits off-centre in it
+        assert_eq!(grow_from(Edge::Top, Some((500, 60)), (278, 60), (444, 717), (200, 32)), R::new(122.0, 0.0, 200.0, 32.0));
+        assert_eq!(grow_from(Edge::Top, Some((10, 60)), (0, 60), (444, 717), (200, 32)), R::new(0.0, 0.0, 200.0, 32.0), "kept inside the window");
+        assert_eq!(grow_from(Edge::Bottom, Some((500, 1020)), (278, 300), (444, 717), (200, 32)), R::new(122.0, 685.0, 200.0, 32.0));
+        assert_eq!(grow_from(Edge::Left, Some((70, 400)), (70, 150), (444, 500), (32, 200)), R::new(0.0, 150.0, 32.0, 200.0));
+        assert_eq!(grow_from(Edge::Right, Some((1850, 400)), (1406, 150), (444, 500), (32, 200)), R::new(412.0, 150.0, 32.0, 200.0));
+        // no pill (a shortcut): the middle of the bar-side face
+        assert_eq!(grow_from(Edge::Top, None, (278, 60), (444, 717), (160, 32)), R::new(142.0, 0.0, 160.0, 32.0));
     }
 
     #[test]

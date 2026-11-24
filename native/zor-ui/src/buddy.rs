@@ -40,7 +40,8 @@ static TALK: AtomicBool = AtomicBool::new(false);
 /// Says `s` as Buddy `slot`'s voice through the Voice API (src/voice): the provider, its voice and the queue
 /// are chosen there, so this file names no provider. Off unless "native": {"gojoVoice": true}.
 fn speak(slot: usize, s: &str) {
-    if !TALK.load(Ordering::Relaxed) { return; }
+    // Live mode in the buddy chat speaks the answer as it streams; the bubble saying it too would say it twice
+    if !TALK.load(Ordering::Relaxed) || crate::buddy_chat::live_on() { return; }
     crate::voice::speak(slot, s, crate::voice::queue::Priority::Reply);
 }
 

@@ -1,7 +1,7 @@
 //! Motion for the island: a spring that keeps its speed when the target moves, and the colour fade
 //! between two activities.
 
-use crate::gfx::Color;
+use crate::gfx::{Color, R};
 use std::time::Instant;
 
 /// Stiffness and damping of the island's width spring. Damping ratio 0.68 overshoots by about 5%.
@@ -56,18 +56,44 @@ pub fn fade(elapsed: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Seconds the island panel takes to grow out of the island.
+/// Seconds the island panel takes to grow out of the island pill.
 pub const GROW_SECS: f32 = 0.26;
-/// Share of the panel's height that shows on the first frame.
-const GROW_FROM: f32 = 0.12;
+/// Pill size (CSS px) a panel opened without a pill to grow from (a shortcut, the buddy) starts at.
+pub const PILL_FALLBACK: (f32, f32) = (160.0, 32.0);
 
-/// The panel `elapsed` seconds after it opened, for a window `h` px tall: (rows showing, opacity 0..=255, finished).
-/// It grows from the island's edge with an ease-out and fades in over the first 40% of the time.
-pub fn grow(elapsed: f32, h: i32) -> (i32, u8, bool) {
+/// The panel `elapsed` seconds after it opened: the card's shape (rect and corner radius, in window px), the
+/// window's opacity, and whether it is done. The shape eases out from the pill `from` (a capsule) to the card
+/// `to` (corners `r_to`). The opacity rises fast (a square root over the first 30%), so the pill-sized shape
+/// shows by the second frame and a shrink still ends fully transparent.
+pub fn morph(elapsed: f32, from: R, to: R, r_to: f32) -> (R, f32, u8, bool) {
     let t = (elapsed / GROW_SECS).clamp(0.0, 1.0);
     let e = 1.0 - (1.0 - t).powi(3);
-    let rows = ((GROW_FROM + (1.0 - GROW_FROM) * e) * h as f32).round() as i32;
-    (rows.clamp(1, h.max(1)), ((t / 0.4).min(1.0) * 255.0).round() as u8, t >= 1.0)
+    let l = |a: f32, b: f32| a + (b - a) * e;
+    let r = R::new(l(from.x, to.x), l(from.y, to.y), l(from.w, to.w).max(1.0), l(from.h, to.h).max(1.0));
+    let rad = l(from.w.min(from.h) / 2.0, r_to).min(r.w.min(r.h) / 2.0);
+    (r, rad, ((t / 0.3).sqrt().min(1.0) * 255.0).round() as u8, t >= 1.0)
+}
+
+/// Clears the premultiplied BGRA pixels `px` (`w` px a row) outside the rounded rect `r` with corners `rad`,
+/// with a 1 px soft edge: the panel shows only the morph's current shape.
+pub fn clip_round(px: &mut [u8], w: usize, r: R, rad: f32) {
+    let (cx, cy, hx, hy) = (r.x + r.w / 2.0, r.y + r.h / 2.0, r.w / 2.0, r.h / 2.0);
+    // the rounded box's signed distance at a pixel centre, as 0..=1 coverage
+    let cover = |x: f32, y: f32| {
+        let (qx, qy) = ((x - cx).abs() - hx + rad, (y - cy).abs() - hy + rad);
+        let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad;
+        (0.5 - d).clamp(0.0, 1.0)
+    };
+    for (y, row) in px.chunks_exact_mut(w.max(1) * 4).enumerate() {
+        let (top, bot) = (y as f32, y as f32 + 1.0);
+        if bot <= r.y || top >= r.y + r.h { row.fill(0); continue; }
+        let solid = top >= r.y + rad && bot <= r.y + r.h - rad; // no corner on this row: only the sides need work
+        for (x, p) in row.chunks_exact_mut(4).enumerate() {
+            if solid && x as f32 >= r.x && x as f32 + 1.0 <= r.x + r.w { continue; }
+            let k = cover(x as f32 + 0.5, y as f32 + 0.5);
+            if k < 1.0 { for b in p.iter_mut() { *b = (*b as f32 * k) as u8; } }
+        }
+    }
 }
 
 /// Control points of `cubic-bezier(.45,0,.2,1)`, the island's shrink curve (the Coucou close curve).
@@ -233,22 +259,42 @@ mod tests {
     }
 
     #[test]
-    fn grow_starts_small_and_transparent_and_ends_whole() {
-        assert_eq!(grow(0.0, 500), (60, 0, false));
-        assert_eq!(grow(GROW_SECS, 500), (500, 255, true));
-        let (mid, a, _) = grow(GROW_SECS / 2.0, 500);
-        assert!(mid > 250 && mid < 500 && a == 255, "mid {mid} alpha {a}");
-        assert_eq!(grow(1.0, 0).0, 1); // never an empty size
+    fn morph_starts_as_the_pill_and_ends_as_the_card() {
+        let (pill, card) = (R::new(122.0, 0.0, 200.0, 32.0), R::new(12.0, 12.0, 420.0, 693.0));
+        let (r, rad, a, done) = morph(0.0, pill, card, 28.0);
+        assert_eq!((r, rad, a, done), (pill, 16.0, 0, false), "a capsule the pill's size, not yet visible");
+        assert_eq!(morph(GROW_SECS, pill, card, 28.0), (card, 28.0, 255, true));
+        let (mid, rad, a, _) = morph(GROW_SECS / 2.0, pill, card, 28.0);
+        assert!(mid.w > 200.0 && mid.w < 420.0 && mid.h > 32.0 && mid.h < 693.0 && a == 255, "{mid:?} alpha {a}");
+        assert!(rad > 16.0 && rad < 28.0);
+        assert!(morph(GROW_SECS * 0.05, pill, card, 28.0).2 > 80, "the pill shape shows by the second frame");
+        assert_eq!(morph(1.0, R::new(0.0, 0.0, 0.0, 0.0), R::new(0.0, 0.0, 0.0, 0.0), 28.0).0.w, 1.0); // never an empty size
     }
 
     #[test]
     fn a_shrink_is_the_grow_played_backwards() {
-        // the close feeds grow the time left: full height at the close, the island's edge (and transparent) at the end
-        let rows = |t: f32| grow((GROW_SECS - t).max(0.0), 500).0;
-        assert_eq!(rows(0.0), 500);
-        assert_eq!(rows(GROW_SECS), (GROW_FROM * 500.0).round() as i32);
-        assert!(rows(GROW_SECS / 2.0) < 500 && rows(GROW_SECS / 2.0) > rows(GROW_SECS));
-        assert_eq!(grow(0.0, 500).1, 0);
+        // the close feeds morph the time left: the card at the close, the pill (transparent) at the end
+        let (pill, card) = (R::new(122.0, 0.0, 200.0, 32.0), R::new(12.0, 12.0, 420.0, 693.0));
+        let w = |t: f32| morph((GROW_SECS - t).max(0.0), pill, card, 28.0).0.w;
+        assert_eq!(w(0.0), 420.0);
+        assert_eq!(w(GROW_SECS), 200.0);
+        assert!(w(GROW_SECS / 2.0) < 420.0 && w(GROW_SECS / 2.0) > 200.0);
+    }
+
+    #[test]
+    fn clip_round_keeps_only_the_shape() {
+        let px = |rad: f32| { let mut p = vec![255u8; 10 * 10 * 4]; clip_round(&mut p, 10, R::new(2.0, 2.0, 6.0, 6.0), rad); p };
+        let at = |p: &[u8], x: usize, y: usize| p[(y * 10 + x) * 4 + 3];
+        let square = px(0.0);
+        assert_eq!((at(&square, 0, 0), at(&square, 1, 5), at(&square, 9, 9)), (0, 0, 0), "outside is cleared");
+        assert_eq!((at(&square, 2, 2), at(&square, 5, 5), at(&square, 7, 7)), (255, 255, 255), "inside is kept");
+        let mut round = vec![255u8; 20 * 20 * 4];
+        clip_round(&mut round, 20, R::new(2.0, 2.0, 16.0, 16.0), 4.0);
+        let at = |x: usize, y: usize| round[(y * 20 + x) * 4 + 3];
+        assert_eq!(at(2, 2), 0, "the corner is cut");
+        assert!(at(3, 3) > 0 && at(3, 3) < 255, "the curve has a soft edge");
+        assert_eq!((at(10, 2), at(2, 10), at(10, 10)), (255, 255, 255), "edges and middle stay");
+        assert!(round.chunks(4).all(|c| c.iter().all(|&b| b == c[3])), "every channel scales with alpha (premultiplied)");
     }
 
     #[test]

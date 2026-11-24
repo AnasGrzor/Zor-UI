@@ -132,11 +132,27 @@ pub fn install_manifest(
     if let Some(pkg) = &m.package { Approval::find(approvals, &m.id, pkg.size_bytes)?; }
     for model in &m.models { Approval::find(approvals, &model.id, model.size_bytes())?; }
     let package_approval = approvals.iter().find(|a| a.what == m.id).cloned().unwrap_or(Approval { what: m.id.clone(), size_bytes: 0 });
-    install_provider(store, providers_root, m, raw, &package_approval, fetch, extract)?;
+    let provider_dir = providers_root.join(&m.id);
+    let runtime_ready = store.providers.iter().any(|p| p.id == m.id && p.version == m.version)
+        && provider_dir.join(&m.command).is_file();
+    if !runtime_ready {
+        install_provider(store, providers_root, m, raw, &package_approval, fetch, extract)?;
+    }
     for model in &m.models {
+        let dir = models_root.join(&m.id).join(&model.id);
+        let verified = model.files.iter().all(|f| {
+            std::fs::read(dir.join(&f.file)).is_ok_and(|bytes|
+                bytes.len() as u64 == f.download.size_bytes && sha256::hex(&bytes) == f.download.sha256)
+        });
+        if verified {
+            store.models.retain(|entry| !(entry.provider == m.id && entry.id == model.id));
+            store.models.push(InstalledModel { provider: m.id.clone(), id: model.id.clone(), dir, sha256: model.files[0].download.sha256.clone() });
+            continue;
+        }
         let a = approvals.iter().find(|a| a.what == model.id).cloned().ok_or_else(|| InstallError::NotApproved(model.id.clone()))?;
         install_model(store, models_root, &m.id, model, &a, fetch)?;
     }
+    std::fs::write(provider_dir.join(FILE), raw.to_string()).map_err(|e| InstallError::Io(e.to_string()))?;
     Ok(())
 }
 
@@ -335,6 +351,17 @@ mod tests {
         let dir = providers.join(&m.id);
         assert!(dir.join("bin").join("tts.exe").is_file() && dir.join(FILE).is_file());
         assert!(!dir.join("package.zip").exists(), "the package is removed after unpacking");
+        // Updating an intact install must not contact the network or unpack the runtime.
+        install_manifest(&mut store, &providers, &models, &m, &raw, &approvals,
+            &|url| panic!("unexpected repeat download: {url}"),
+            &|_, _| panic!("installed runtime was unpacked again")).unwrap();
+        // A damaged voice must be fetched again, without replacing the runtime.
+        std::fs::write(models.join(&m.id).join("voice-a").join("a.onnx"), b"broken").unwrap();
+        install_manifest(&mut store, &providers, &models, &m, &raw, &approvals,
+            &serve(table(&m.models[0], &files)),
+            &|_, _| panic!("installed runtime was unpacked again")).unwrap();
+        assert_eq!(std::fs::read(models.join(&m.id).join("voice-a").join("a.onnx")).unwrap(), b"model");
+
         assert_eq!(store.providers[0].version, "1.2.0");
         assert_eq!(store.models.len(), 1);
 

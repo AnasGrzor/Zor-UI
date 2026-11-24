@@ -207,6 +207,8 @@ impl Bar {
     /// The scroll position that puts the grabbed thumb under pointer y.
     pub fn target(&self, y: f32, grab: f32) -> f32 { ((y - grab - self.track.y) / (self.track.h - self.th).max(1.0)).clamp(0.0, 1.0) * self.range }
 }
+/// Width a list's content gives up on its right so `Scroll::region`'s thumb never touches it: `BAR_ROOM` once it scrolls, else 0.
+pub fn bar_room(content_h: f32, view_h: f32) -> f32 { if content_h > view_h { crate::tokens::BAR_ROOM } else { 0.0 } }
 /// First hit id of the scrollbars; `Win` handles these itself and never passes them to the view.
 pub const SBAR: u32 = 0xFFFF_0000;
 thread_local! {
@@ -435,6 +437,8 @@ impl TextBox {
         let (cxp, cyp, ch) = c.g.caret(&self.text, f, r.w, wrap, self.caret);
         if !wrap { self.off.set((cxp - (r.w - 2.0)).max(0.0)); }
         let off = self.off.get();
+        let selectable = c.selectable;
+        c.selectable = false;
         c.clip_round(r, 0.0, |c| {
             if self.text.is_empty() {
                 if wrap { c.para(placeholder, r, f, muted, Align::Left) } else { c.text(placeholder, r, f, muted, Align::Left) }
@@ -464,6 +468,7 @@ impl TextBox {
                 c.rect(R::new(r.x + cxp - off, y, 1.5, ch), 0.75, t.c("primary"));
             }
         });
+        c.selectable = selectable;
     }
 }
 
@@ -624,6 +629,12 @@ mod tests {
         s.pend.set(Some(900.0));
         s.apply_drag(500.0, 200.0);
         assert_eq!(s.y, 300.0);
+    }
+
+    #[test]
+    fn bar_room_only_while_scrolling() {
+        assert_eq!(super::bar_room(100.0, 100.0), 0.0);
+        assert_eq!(super::bar_room(101.0, 100.0), crate::tokens::BAR_ROOM);
     }
 
     #[test]

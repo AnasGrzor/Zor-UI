@@ -22,7 +22,7 @@ pub enum Risk {
 pub fn risk_of(call: &Call) -> Risk {
     use Call::*;
     match call {
-        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) => Risk::ReadOnly,
+        Search(_) | WebSearch(_) | ReadUrl(_) | FindApp(_) | FindFile(_) | SeeScreen(_) | ListTree(_) | ReadFile(_) | SearchCode(_) | GitStatus | Metrics(_) | SessionSearch(_) | SearchMemory(_) => Risk::ReadOnly,
         Open(_) | Url(_) | Play { .. } | Media(_) | Volume(_) | Brightness(_) | Radio { .. } | Clip(_) | OpenFile(_)
         | Wallpaper(_) | Message { .. } | Remember(_) | Forget(_) => Risk::Reversible,
         // lock can be undone by signing in; every other power action ends the session
@@ -210,6 +210,23 @@ pub fn auto_skips(call: &Call, auto: bool, at_pc: bool) -> bool { auto && at_pc 
 /// Auto mode for a request made at the PC, for the browser's first-step question.
 fn auto_here(cfg: &Config) -> bool { cfg.bool(AUTO_KEY) && super::at_pc() }
 
+/// Auto mode for a request made at the PC (the browser's in-page questions and a take-over's risky clicks use it).
+pub fn auto_at_pc(cfg: &Config) -> bool { auto_here(cfg) }
+
+/// Words of a step that spends money. In auto mode these still ask: a purchase can't be taken back the way a message can be
+/// deleted.
+const MONEY: [&str; 12] = ["pay", "payment", "buy", "purchase", "order", "checkout", "transfer", "subscribe", "subscription", "donate", "tip", "bid"];
+
+/// Whether a step (its question or its button's label) spends money.
+pub fn spends_money(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("check out") || t.contains("place order") || t.split(|c: char| !c.is_alphanumeric()).any(|w| MONEY.contains(&w))
+}
+
+/// Whether auto mode answers an in-page question itself (a send, a post, a delete, Enter, a pop-up's yes): auto mode is on at
+/// the PC and the step spends no money.
+pub fn auto_answers(auto: bool, question: &str) -> bool { auto && !spends_money(question) }
+
 /// Whether a failed call may be tried once more. Only read-only calls: a retry of anything that acts (open, play, save,
 /// power) could do it twice.
 pub fn may_retry(call: &Call) -> bool { risk_of(call) == Risk::ReadOnly }
@@ -258,6 +275,18 @@ mod tests {
         assert_eq!(risk_of(&Call::Open("Spotify".into())), Risk::Reversible);
         assert_eq!(risk_of(&Call::Volume("up".into())), Risk::Reversible);
         assert_eq!(risk_of(&Call::Remember("My sister is called Lina".into())), Risk::Reversible);
+    }
+
+    #[test]
+    fn auto_mode_answers_in_page_questions_but_never_one_that_spends_money() {
+        assert!(auto_answers(true, "The buddy wants to use \"Send\" in the browser. Allow it?"));
+        assert!(auto_answers(true, "The buddy wants to press Enter in the browser, which can send or submit. Allow it?"));
+        assert!(auto_answers(true, "The buddy wants to click \"Delete post\". Allow it?"));
+        assert!(!auto_answers(true, "The buddy wants to use \"Buy now\" in the browser. Allow it?"));
+        assert!(!auto_answers(true, "The buddy wants to click \"Place order\". Allow it?"));
+        assert!(!auto_answers(true, "The buddy wants to use \"Proceed to checkout\" in the browser. Allow it?"));
+        assert!(!auto_answers(false, "The buddy wants to use \"Send\" in the browser. Allow it?"), "off: it asks");
+        assert!(!spends_money("Reorder the list"), "a word that only contains a money word is not one");
     }
 
     #[test]

@@ -37,10 +37,28 @@ const MENU0: u32 = 10;
 const NAV_ITEM_H: f32 = crate::tokens::NAV_ITEM_H;
 const NAV_STEP: f32 = crate::tokens::NAV_STEP;
 
-/// The rail's scrolling page list: its rect (from `top` down to just above Close) and the full height of all pages.
+const NAV_HEAD_H: f32 = crate::tokens::NAV_HEAD_H;
+
+/// The rail's rows in nav order: (PAGES index, row top from the list top, the category heading drawn above it).
+/// Each category's first page gets `NAV_HEAD_H` of room above it for the heading.
+fn nav_rows() -> Vec<(usize, f32, Option<registry::Category>)> {
+    let (mut y, mut last) = (0.0, None);
+    registry::nav_order().into_iter().map(|i| {
+        let cat = PAGES[i].cat;
+        let head = (last != Some(cat)).then_some(cat);
+        if head.is_some() { y += NAV_HEAD_H; }
+        last = Some(cat);
+        let row = (i, y, head);
+        y += NAV_STEP;
+        row
+    }).collect()
+}
+
+/// The rail's scrolling page list: its rect (from `top` down to just above Close) and the full height of all rows.
 fn nav_list(top: f32, win_h: f32) -> (R, f32) {
     let bottom = win_h - 22.0 - NAV_ITEM_H - 8.0;
-    (R::new(crate::tokens::NAV_X, top, crate::tokens::NAV_W, (bottom - top).max(0.0)), PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H))
+    let ch = nav_rows().last().map_or(0.0, |r| r.1 + NAV_ITEM_H);
+    (R::new(crate::tokens::NAV_X, top, crate::tokens::NAV_W, (bottom - top).max(0.0)), ch)
 }
 const TOAST_MS: f64 = 3200.0;
 /// How long a Claude account's Remove stays armed after its first click.
@@ -178,6 +196,8 @@ pub struct Settings {
     rendering: bool,
     /// Every page's (page, section, label, sub), built when the first search is typed.
     index: Vec<(usize, String, String, String)>,
+    /// The open page's section titles, for the jump chips under its title. Rebuilt every frame.
+    sections: Vec<String>,
 }
 
 pub fn preview_path(name: &str) -> PathBuf {
@@ -242,7 +262,7 @@ impl Settings {
             nav_collapsed: false, page_scrolls: HashMap::new(), inbox: Inbox::default(), cfgc: Config::parse(""),
             over: HashMap::new(), glass_prev: None, buddy_sprites: Default::default(), creator_prev: None, creator_sprites: Default::default(), acts: vec![], fields: HashMap::new(), focus: None, active: true, menu: None, picker: None, pick_path: None, sl: None, drag_val: None, toast: None, flash: None,
             busy: String::new(), info: Info::default(), wallpaper_draft: None, wallpaper_preview_cache: vec![], online: Load::Idle, local: Load::Idle, we: Load::Idle, we_list: Load::Idle, keys: Load::Idle, rec: None, claude: Load::Idle, claude_arm: None, mons: Load::Idle, wmons: Load::Idle,
-            models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![],
+            models: Load::Idle, we_type: "all".into(), imgs: HashMap::new(), bl: None, bl_focus: None, bl_geo: vec![], rendering: env.is_some(), index: vec![], sections: vec![],
         };
         if std::env::var("ZORUI_RENDER_DEMO").is_ok() { s.demo(); }
         // `--render settings` has no pointer, so this opens the colour picker for the picture
@@ -540,6 +560,7 @@ impl Settings {
                 "seed" => self.act(cx, Act::Do("seed", String::new())),
                 "agent-name" | "agent-dir" | "agent-file" => self.act(cx, Act::Do("add-agent", String::new())),
                 "contact-name" | "contact-value" => self.act(cx, Act::Do("add-contact", String::new())),
+                "cmd-words" | "cmd-steps" => self.act(cx, Act::Do("add-cmd", String::new())),
                 k if k.starts_with("bname-") => { let slot = &k[6..]; let id = self.gs(cx, &format!("buddies.{slot}.character")); self.act(cx, Act::Do("rename-buddy", format!("{slot}:{id}"))) }
                 k if k.starts_with("key-") => self.act(cx, Act::Do("save-key", k[4..].to_string())),
                 "voice-name" => self.act(cx, Act::Do("voice-add", String::new())),
@@ -1072,6 +1093,33 @@ impl Settings {
                     for k in ["contact-name", "contact-value", "contact-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
                 }
             }
+            "add-cmd" => {
+                let val = |s: &Self, k: &str| s.fields.get(k).map(|f| f.tb.text.clone()).unwrap_or_default();
+                let Some(entry) = crate::commands::format_command(&val(self, "cmd-words"), &val(self, "cmd-steps")) else {
+                    self.toast("Give the words and at least one step, without = in the words");
+                    return;
+                };
+                let original = Some(val(self, "cmd-edit")).filter(|o| !o.is_empty());
+                let cur = crate::commands::with_command(&self.garr(cx, "buddies.commands"), original.as_deref(), entry);
+                self.set("buddies.commands", json!(cur));
+                for k in ["cmd-words", "cmd-steps", "cmd-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
+                self.toast("Command saved");
+            }
+            "edit-cmd" => {
+                let Some((words, steps)) = crate::commands::parse_command(&arg) else { return };
+                for (k, v) in [("cmd-words", words), ("cmd-steps", steps.join("; ")), ("cmd-edit", arg.clone())] {
+                    self.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(&v);
+                }
+            }
+            "cancel-cmd" => { for k in ["cmd-words", "cmd-steps", "cmd-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } } }
+            "del-cmd" => {
+                let mut cur = self.garr(cx, "buddies.commands");
+                cur.retain(|e| *e != arg);
+                self.set("buddies.commands", json!(cur));
+                if self.fields.get("cmd-edit").is_some_and(|f| f.tb.text == arg) {
+                    for k in ["cmd-words", "cmd-steps", "cmd-edit"] { if let Some(f) = self.fields.get_mut(k) { f.tb.set(""); } }
+                }
+            }
             "cancel-task" => crate::agent::cancel_running(),
             "dev-workspace" => match crate::agent::developer::create_test_workspace() {
                 Ok(dir) => { self.set("buddies.developerWorkspace", json!(dir.display().to_string())); self.toast("Test project ready and set as the workspace"); }
@@ -1181,14 +1229,14 @@ impl View for Settings {
 
     fn key(&self, _: &Ctx) -> String {
         // the Usage page redraws every second
-        let tick = if self.current_page() == Page::Usage { (hub::now_ms() / 1000.0) as u64 } else { 0 };
+        let tick = if self.current_page() == Page::Usage || crate::voice::download::progress().running { (hub::now_ms() / 1000.0) as u64 } else { 0 };
         format!("{}{}{tick}{}", self.toast.is_some(), self.busy, self.flash.is_some())
     }
 
     fn frame_ms(&self) -> u32 {
         if self.rendering { 0 }
         else if self.scroll.moving() { 16 }
-        else if self.toast.is_some() || self.flash.is_some() || !self.busy.is_empty() || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
+        else if self.toast.is_some() || self.flash.is_some() || !self.busy.is_empty() || crate::voice::download::progress().running || self.loading() || self.bl.as_ref().is_some_and(|b| b.ghost) { 50 }
         else if self.current_page() == Page::Usage { 1000 }
         else if (self.focus.is_some() && self.active) || self.picker.is_some() { 500 }
         else { 0 }
@@ -1233,7 +1281,8 @@ impl View for Settings {
         let list_top = self.nav(&mut nav);
         let mut nav_acts = std::mem::take(&mut nav.acts);
         let (lr, ch) = nav_list(list_top, h);
-        let lr = R::new(crate::tokens::NAV_X, lr.y, nav_w, lr.h);
+        // the list reaches BAR_ROOM into the 16 px before the divider, so the scrollbar sits there, clear of the rows
+        let lr = R::new(crate::tokens::NAV_X, lr.y, nav_w + crate::tokens::BAR_ROOM, lr.h);
         c.hit(lr, NAV_BG);
         (self.nav_h, self.nav_view) = (ch, lr.h);
         let mut sc = std::mem::take(&mut self.nav_scroll);
@@ -1241,19 +1290,34 @@ impl View for Settings {
             let mut pen = Pen::new(c, cx, crate::tokens::NAV_X, top, nav_w, 0.0, h);
             pen.acts = std::mem::take(&mut nav_acts);
             // rows are placed by nav position; the page index (Act::Page, self.page) stays the PAGES index
-            for (row, i) in registry::nav_order().into_iter().enumerate() {
-                let y = top + row as f32 * NAV_STEP;
+            for (i, dy, head) in nav_rows() {
+                let y = top + dy;
+                if let Some(cat) = head {
+                    let hr = R::new(crate::tokens::NAV_X, y - NAV_HEAD_H, nav_w, NAV_HEAD_H);
+                    if collapsed {
+                        // no room for the name: a short line between groups (the first group needs none)
+                        if dy > NAV_HEAD_H { pen.c.rect(R::new(hr.x + 12.0, hr.y + hr.h / 2.0, hr.w - 24.0, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.6)); }
+                    } else {
+                        let tr = R::new(hr.x + 16.0, hr.y + 8.0, hr.w - 24.0, hr.h - 12.0);
+                        pen.c.text(&registry::category_name(cat).to_uppercase(), tr, txt(11.0, 600), cx.theme.c("onSurfaceVariant"), Align::Left);
+                    }
+                }
                 if y + NAV_ITEM_H < lr.y || y > lr.y + lr.h { continue; } // hit spots ignore the clip
                 self.nav_item(&mut pen, R::new(crate::tokens::NAV_X, y, nav_w, NAV_ITEM_H), PAGES[i].icon, PAGES[i].title, Act::Page(i), i == self.page);
             }
             nav_acts = pen.acts;
         });
+        // more pages below the cut: a line in the gap above Close, so the cut row reads as scrolled, not broken
+        if ch > lr.h + 0.5 && sc.y < ch - lr.h - 0.5 {
+            c.rect(R::new(crate::tokens::NAV_X, lr.y + lr.h + 4.0, nav_w, 1.0), 0.0, alpha(cx.theme.c("outlineVariant"), 0.6));
+        }
         self.nav_scroll = sc;
         self.nav_n = nav_acts.len() as u32;
 
         // page: measure (card heights, content height), then draw what is on screen
         let r = R::new(page_x, crate::tokens::PAGE_Y, w - page_x - 22.0, h - crate::tokens::PAGE_Y - 22.0);
         c.hit(r, BG); // the wheel needs a spot under it; it also keeps a press here from dragging the window
+        self.sections = if self.query().is_empty() { self.section_names(c, cx, r.w - crate::tokens::SCROLL_GUTTER) } else { vec![] };
         let (ch, heads, tags) = {
             let mut dry = Pen::new(c, cx, r.x, r.y, r.w - crate::tokens::SCROLL_GUTTER, r.y, r.y + r.h);
             dry.dry = true;
@@ -1541,16 +1605,11 @@ impl Settings {
         let line = y0 + 62.0;
         p.c.rect(R::new(x, line, w, 1.0), 0.0, alpha(p.col("outlineVariant"), 0.5));
         let mut y = line + 1.0 + 8.0 + 4.0;
-        // .cfgbtn
-        let b = R::new(x, y, w, 48.0);
-        p.c.rect(b, 23.0, p.col("secondaryContainer"));
-        let id = p.act(Act::Do("editcfg", String::new()));
-        if p.c.hit(b, id) { p.c.rect(b, 23.0, alpha(p.col("onSecondaryContainer"), 0.08)); }
-        p.c.icon("edit", R::new(x + 16.0, y, 20.0, 48.0), ico(20.0, false), p.col("onSecondaryContainer"));
-        p.c.text("Config file", R::new(x + 46.0, y, w - 60.0, 48.0), txt(14.0, 400), p.col("onSecondaryContainer"), Align::Left);
-        y += 48.0 + 18.0; // air between the Config file button and the search box
-        let sb = R::new(x, y, w, 40.0);
+        // search box, then the Config file button as an icon beside it (a full-width button cost the page list 66 px)
+        let sb = R::new(x, y, w - 40.0 - 8.0, 40.0);
         self.field_ui(p, SEARCH, None, Kind::Plain, sb, "Search settings (/)", 20.0, false);
+        let bid = p.act(Act::Do("editcfg", String::new()));
+        ui::icon_btn(p.c, p.cx, R::new(x + w - 40.0, y, 40.0, 40.0), bid, "edit", ui::IconKind::Tonal, 20.0, false);
         y += 40.0 + 14.0;
         self.nav_item(p, R::new(x, p.c.h - 22.0 - NAV_ITEM_H, w, NAV_ITEM_H), "close", "Close", Act::Do("close", String::new()), false);
         y
@@ -1590,7 +1649,7 @@ impl Settings {
         let opts = m.opts.clone();
         m.scroll.region(c, cx, inner, ch - 8.0, |c, top| {
             for (i, (v, label)) in opts.iter().enumerate().take(980) {
-                let r = R::new(inner.x, top + i as f32 * 36.0, inner.w, 36.0);
+                let r = R::new(inner.x, top + i as f32 * 36.0, inner.w - crate::ui::bar_room(ch - 8.0, inner.h), 36.0);
                 if r.y + r.h < inner.y || r.y > inner.y + inner.h { continue; }
                 let sel = cur.as_ref() == Some(v) || (v == &json!("") && cur.as_ref().is_some_and(Value::is_null));
                 if sel { c.rect(r, 12.0, cx.theme.c("secondaryContainer")); }
@@ -1736,6 +1795,27 @@ mod tests {
         assert_eq!(st.garr(&cx, "buddies.contacts"), ["ali=discord:9"]);
     }
 
+    #[test]
+    fn commands_are_added_edited_and_deleted() {
+        let (mut st, mut cx) = (s(), Ctx::new(false));
+        let put = |st: &mut Settings, cx: &mut Ctx, words: &str, steps: &str| {
+            for (k, v) in [("cmd-words", words), ("cmd-steps", steps)] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
+            st.do_named(cx, "add-cmd", String::new());
+        };
+        put(&mut st, &mut cx, "game time", "open discord; open last game");
+        put(&mut st, &mut cx, "", "open discord");
+        assert_eq!(st.garr(&cx, "buddies.commands"), ["game time=open discord; open last game"], "no words adds nothing");
+        assert_eq!(st.fields["cmd-steps"].tb.text, "open discord", "a refused form keeps what was typed");
+        st.do_named(&mut cx, "edit-cmd", "game time=open discord; open last game".into());
+        assert_eq!(st.fields["cmd-steps"].tb.text, "open discord; open last game");
+        st.fields.get_mut("cmd-steps").unwrap().tb.set("open steam");
+        st.do_named(&mut cx, "add-cmd", String::new());
+        assert_eq!(st.garr(&cx, "buddies.commands"), ["game time=open steam"]);
+        assert_eq!(st.fields["cmd-edit"].tb.text, "", "saving ends the edit");
+        st.do_named(&mut cx, "del-cmd", "game time=open steam".into());
+        assert!(st.garr(&cx, "buddies.commands").is_empty());
+    }
+
     fn put_contact(st: &mut Settings, cx: &mut Ctx, name: &str, app: &str, value: &str) {
         for (k, v) in [("contact-name", name), ("contact-value", value)] { st.fields.entry(k.into()).or_insert_with(|| Field::new(false)).tb.set(v); }
         st.do_named(cx, "contact-app", app.into());
@@ -1862,8 +1942,23 @@ mod tests {
         // The list scrolls rather than clipping: every page's row fits in the scroll height, at any window height.
         for h in [870.0, 1200.0] {
             let (r, ch) = nav_list(209.0, h);
-            assert_eq!(ch, PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H), "scroll height at window {h}");
+            let rows = nav_rows();
+            assert_eq!(ch, rows.last().unwrap().1 + NAV_ITEM_H, "scroll height at window {h}");
+            assert_eq!(ch, PAGES.len() as f32 * NAV_STEP - (NAV_STEP - NAV_ITEM_H) + registry::CATEGORIES.len() as f32 * NAV_HEAD_H);
             assert!(r.h > 0.0, "the list has room at window {h}");
+        }
+    }
+
+    #[test]
+    fn each_category_gets_one_heading_above_its_first_page() {
+        let rows = nav_rows();
+        assert_eq!(rows.len(), PAGES.len());
+        let heads: Vec<_> = rows.iter().filter_map(|r| r.2).collect();
+        assert_eq!(heads, registry::CATEGORIES.iter().map(|c| c.cat).collect::<Vec<_>>());
+        assert_eq!(rows[0].1, NAV_HEAD_H, "room for the first heading");
+        for w in rows.windows(2) {
+            let gap = if w[1].2.is_some() { NAV_STEP + NAV_HEAD_H } else { NAV_STEP };
+            assert_eq!(w[1].1 - w[0].1, gap, "rows never overlap a heading");
         }
     }
 
@@ -2095,11 +2190,12 @@ mod tests {
     }
 
     #[test]
-    fn the_creator_has_its_own_page_after_contacts_and_sensible_defaults() {
+    fn the_creator_has_its_own_page_after_contacts_and_commands_and_sensible_defaults() {
         let keys: Vec<&str> = PAGES.iter().map(|p| p.key).collect();
         let c = keys.iter().position(|k| *k == "contacts").unwrap();
-        assert_eq!((keys[c + 1], PAGES[c + 1].title), ("creator", "Create a buddy"));
-        assert_eq!(super::page_from_key(Some("creator")), c + 1);
+        assert_eq!((keys[c + 1], PAGES[c + 1].title), ("commands", "Commands"));
+        assert_eq!((keys[c + 2], PAGES[c + 2].title), ("creator", "Create a buddy"));
+        assert_eq!(super::page_from_key(Some("creator")), c + 2);
         let mut st = s();
         let cx = Ctx::new(false);
         assert_eq!((st.gn(&cx, "buddies.make.height"), st.gb(&cx, "buddies.make.trim"), st.gb(&cx, "buddies.make.flip"), st.gs(&cx, "buddies.make.special")), (64.0, true, false, "aura".to_string()));

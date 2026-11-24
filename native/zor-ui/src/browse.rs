@@ -143,7 +143,10 @@ fn works(program: &str, args: &[&str]) -> bool {
 }
 
 /// %LOCALAPPDATA%\zor-ui: the server runs here, with the profile and its output files in folders below it.
-fn home() -> PathBuf { PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("zor-ui") }
+pub fn home() -> PathBuf { PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("zor-ui") }
+
+/// The buddy's browser profile, where its logins live (`social::login` opens it visibly).
+pub fn profile_dir() -> PathBuf { home().join("browser-profile") }
 
 /// The file a result names for its page list, as in "- [Snapshot](browser-output\page-1.yml)". The server writes the list
 /// to a file and answers with this link. Only a .yml below the server's folder is accepted: the path comes from the server.
@@ -234,7 +237,10 @@ pub fn page() -> String { PAGE.lock().map(|p| p.clone()).unwrap_or_default() }
 pub fn run(_permit: &policy::Cleared, cfg: &Config, tool: &str, args: &Value, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
     if !enabled(cfg) { return Err(OFF.into()); }
     if stopped() { return Err(STOPPED.into()); } // Esc while the AI was thinking: the step it then picked is not run
-    let permit = policy::check_browser(tool, args, &page(), approved(), confirm)?;
+    // auto mode answers the page's questions itself (a send, Enter, a delete), but never one that spends money
+    let auto = policy::auto_at_pc(cfg);
+    let mut gated = |q: &str| if policy::auto_answers(auto, q) { crate::log::line("auto mode: a browser step ran without asking"); true } else { confirm(q) };
+    let permit = policy::check_browser(tool, args, &page(), approved(), &mut gated)?;
     exec(permit)
 }
 

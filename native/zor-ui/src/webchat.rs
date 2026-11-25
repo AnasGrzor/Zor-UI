@@ -106,6 +106,18 @@ pub fn tab_titles() -> Vec<(String, bool)> {
     browser_windows().into_iter().flat_map(|w| tab_items(&uia, w)).map(|t| (t.title, t.selected)).collect()
 }
 
+/// Selects the tab `pick` chooses (from the tabs' titles and whether each is selected), which wakes a tab the browser put to sleep,
+/// and returns its window. The window is not brought forward. None without such a tab. Call from a worker thread.
+pub fn select_tab(pick: impl Fn(&[(String, bool)]) -> Option<usize>) -> Option<HWND> {
+    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    let uia = unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let tabs: Vec<Tab> = browser_windows().into_iter().flat_map(|w| tab_items(&uia, w)).collect();
+    let tab = &tabs[pick(&tabs.iter().map(|t| (t.title.clone(), t.selected)).collect::<Vec<_>>())?];
+    let sel = unsafe { tab.element.GetCurrentPattern(UIA_SelectionItemPatternId) }.ok()?.cast::<IUIAutomationSelectionItemPattern>().ok()?;
+    unsafe { sel.Select() }.ok()?;
+    Some(tab.window)
+}
+
 /// The focused element if it is an address bar showing a page of `host`.
 fn focused_address(uia: &IUIAutomation, host: &str) -> Option<IUIAutomationValuePattern> {
     let el = unsafe { uia.GetFocusedElement() }.ok()?;

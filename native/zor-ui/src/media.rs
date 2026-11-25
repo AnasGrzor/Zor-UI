@@ -226,6 +226,28 @@ fn by_id<'a>(all: &'a [Session], id: &str) -> Option<&'a Session> {
     all.iter().find(|s| s.SourceAppUserModelId().is_ok_and(|x| x == id))
 }
 
+/// Runs a control or seek on the sessions as last listed (`cur` when a control names none). `Msg::Changed` does nothing.
+fn act(m: Msg, all: &[Session], cur: Option<&Session>, prev: &mut HashMap<String, Media>) {
+    match m {
+        Msg::Control(id, c) => {
+            let s = id.and_then(|id| by_id(all, &id)).or(cur);
+            let _ = chain(c).iter().any(|step| match (step, s) {
+                (Step::Session(n), Some(s)) => session_control(s, n),
+                (Step::Session(_), None) => false,
+                (Step::MediaKey, _) => { crate::log::line(&format!("media control {c}: session refused, sent the media key")); media_key(); true }
+            });
+        }
+        Msg::Seek(id, secs) => {
+            if let Some(s) = by_id(all, &id) {
+                let done = s.TryChangePlaybackPositionAsync((secs * 1e7) as i64).and_then(|a| a.get()).unwrap_or(false);
+                // browsers refresh their timeline snapshot late, so move our own clock now (lyrics follow it)
+                if done { if let Some(p) = prev.get_mut(&id) { seeked(p, secs, crate::hub::now_ms()); } }
+            }
+        }
+        Msg::Changed => {}
+    }
+}
+
 /// `on` gets (the current session, every session) after each change.
 pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
     let (tx, rx) = mpsc::channel();
@@ -259,26 +281,12 @@ pub fn start_media(on: impl Fn(Option<Media>, Vec<Media>) + Send + 'static) {
             if last.as_ref() != Some(&view) { if let Ok(mut s) = SESSIONS.lock() { *s = view.1.clone(); } on(view.0.clone(), view.1.clone()); last = Some(view.clone()); }
             prev = view.1.iter().map(|m| (m.id.clone(), m.clone())).collect();
             match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(Msg::Control(id, c)) => {
-                    let s = id.and_then(|id| by_id(&all, &id)).or(cur.as_ref());
-                    let _ = chain(c).iter().any(|step| match (step, s) {
-                        (Step::Session(n), Some(s)) => session_control(s, n),
-                        (Step::Session(_), None) => false,
-                        (Step::MediaKey, _) => { crate::log::line(&format!("media control {c}: session refused, sent the media key")); media_key(); true }
-                    });
-                }
-                Ok(Msg::Seek(id, secs)) => {
-                    if let Some(s) = by_id(&all, &id) {
-                        let done = s.TryChangePlaybackPositionAsync((secs * 1e7) as i64).and_then(|a| a.get()).unwrap_or(false);
-                        // browsers refresh their timeline snapshot late, so move our own clock now (lyrics follow it)
-                        if done { if let Some(p) = prev.get_mut(&id) { seeked(p, secs, crate::hub::now_ms()); } }
-                    }
-                }
                 Ok(Msg::Changed) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(m) => act(m, &all, cur.as_ref(), &mut prev),
                 Err(_) => return,
             }
-            // coalesce bursts of events, but keep a queued control / seek
-            while let Ok(m) = rx.try_recv() { if !matches!(m, Msg::Changed) { let _ = tx.send(m); break; } }
+            // coalesce bursts of change events into one re-read, but run a queued control / seek now, not after that re-read
+            while let Ok(m) = rx.try_recv() { if !matches!(m, Msg::Changed) { act(m, &all, cur.as_ref(), &mut prev); } }
         }
     });
 }

@@ -212,6 +212,34 @@ fn press_until_playing(window: HWND) -> Result<String, String> {
     Err("I pressed Play but the player didn't start".into())
 }
 
+/// Resumes Spotify Web when a "play" through Windows started nothing: a paused tab the browser put to sleep has no media session
+/// left to take it. Selecting the tab wakes it (its window stays where it is), then the player bar's own Play is pressed and the bar
+/// is checked for Pause. Call from a worker thread.
+pub fn resume_spotify_tab() -> Result<String, String> {
+    let titles: Vec<String> = media::sessions().iter().filter(|m| m.browser()).map(|m| m.title.clone()).collect();
+    let window = webchat::select_tab(|t| pick_spotify_tab(t, &titles)).ok_or("there is no Spotify tab to resume")?;
+    let uia = uia().ok_or("I can't use UI Automation")?;
+    let playing = |uia: &IUIAutomation| spotify_state(uia, window).filter(|s| s.0).map(|s| format!("Playing {} on Spotify.", s.1));
+    // a woken page builds its player bar again before its Play button shows up
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(said) = playing(&uia) { return Ok(said); }
+        let bar_top = unsafe { uia.ElementFromHandle(window).and_then(|w| w.CurrentBoundingRectangle()) }.map_or(i32::MAX, |r| r.top + (r.bottom - r.top) * 85 / 100);
+        if let Some((_, _, _, el)) = play_buttons(&uia, window).into_iter().find(|b| b.2.trim().eq_ignore_ascii_case("play") && b.0 >= bar_top) {
+            let pressed = unsafe { el.GetCurrentPattern(UIA_InvokePatternId) }.ok().and_then(|p| p.cast::<IUIAutomationInvokePattern>().ok()).is_some_and(|p| unsafe { p.Invoke() }.is_ok());
+            crate::log::line(&format!("resume: pressed the Spotify tab's Play (invoked: {pressed})"));
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < end {
+                if let Some(said) = playing(&uia) { return Ok(said); }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            return Err("I pressed Play in the Spotify tab but it didn't start".into());
+        }
+        if std::time::Instant::now() >= end { return Err("the Spotify tab shows no Play button".into()); }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 pub(crate) fn exe_name(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;

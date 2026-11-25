@@ -527,6 +527,41 @@ pub fn media_word(arg: &str) -> Option<&'static str> {
     }
 }
 
+/// "play" through Windows. When no session starts playing within 1.5 s, the Spotify tab is woken and played instead
+/// (`playsong::resume_spotify_tab`), since a tab the browser put to sleep has no session to take it. Call from a worker thread.
+fn play_or_wake() -> Result<String, String> {
+    let before = crate::media::sessions();
+    crate::media::control("play");
+    let end = Instant::now() + std::time::Duration::from_millis(1500);
+    while Instant::now() < end {
+        if crate::playsong::started(&before, &crate::media::sessions()).is_some() { return Ok("Done.".into()); }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    crate::log::line("media play: nothing started, waking the Spotify tab");
+    crate::playsong::resume_spotify_tab().map_err(|e| format!("Nothing started playing, and {e}."))
+}
+
+/// The `crate::media::control` word for a request that is only a player command ("pause", "next song", "stop the music"), so it
+/// runs without a model call. Any other word ("play interstellar", "stop the task") returns None and goes to the model. "stop",
+/// "back" and "last" mean the player only next to a word for it, since alone they can mean the buddy or a window.
+pub fn media_asked(said: &str) -> Option<&'static str> {
+    const FILLER: [&str; 10] = ["please", "the", "this", "it", "can", "you", "now", "go", "to", "a"];
+    const NOUN: [&str; 7] = ["music", "song", "track", "video", "playback", "spotify", "youtube"];
+    let words: Vec<String> = said.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
+    let noun = words.iter().any(|w| NOUN.contains(&w.as_str()));
+    let mut verbs = words.iter().filter(|w| !FILLER.contains(&w.as_str()) && !NOUN.contains(&w.as_str()));
+    let (Some(v), None) = (verbs.next(), verbs.next()) else { return None };
+    match v.as_str() {
+        "pause" => Some("pause"),
+        "stop" if noun => Some("pause"),
+        "play" | "resume" | "unpause" | "continue" => Some("play"),
+        "next" | "skip" => Some("next"),
+        "previous" | "prev" => Some("previous"),
+        "back" | "last" if noun => Some("previous"),
+        _ => None,
+    }
+}
+
 /// What the AI asked the speaker volume to do.
 #[derive(Debug, PartialEq)]
 pub enum Vol { Step(i32), Mute(bool), Set(f32) }
@@ -799,7 +834,7 @@ fn exec(permit: &policy::Cleared, cfg: &Config, confirm: &mut dyn FnMut(&str) ->
             crate::drive::start_with_chat(permit, cfg, g, None, None, true, done, chat)
         }
         Call::Media(_) if !assist::allowed(cfg, "media") => Err("Player control is turned off in Settings.".into()),
-        Call::Media(w) => match media_word(w) { Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
+        Call::Media(w) => match media_word(w) { Some("play") => play_or_wake(), Some(m) => { crate::media::control(m); Ok("Done.".into()) } None => Err(format!("Unknown player command \"{w}\".")) },
         Call::Browser { tool, args } => {
             crate::browse::run(permit, cfg, tool, args, confirm)
         }
@@ -1139,6 +1174,9 @@ pub fn ask_in(cfg: &Config, said: &str, note: &str, origin: &Origin) -> Result<S
         } else if let Some(what) = metrics::asked_for(said) {
             crate::log::line(&format!("buddy fast path: {what} read without the model"));
             Some(match metrics::read(what) { Ok(a) | Err(a) => a })
+        } else if let Some(m) = media_asked(said).filter(|_| assist::allowed(cfg, "media")) {
+            crate::log::line(&format!("buddy fast path: media {m} without the model"));
+            Some(if m == "play" { match play_or_wake() { Ok(a) | Err(a) => a } } else { crate::media::control(m); "Done.".to_string() })
         } else { None };
         if let Some(answer) = fast {
             with_turns(conv, |t| remember(t, said, &answer, "", Instant::now(), keep_for(conv)));
@@ -1754,6 +1792,17 @@ mod tests {
         assert_eq!(call("{\"do\":\"find_file\",\"arg\":\"cv\"}"), Some(Call::FindFile("cv".into())));
         assert!(matches!(parse_step("{\"do\":\"radio\",\"state\":\"on\"}"), Step::Bad(m) if m.contains("which")));
         assert!(matches!(parse_step("{\"do\":\"power\"}"), Step::Bad(_)));
+    }
+
+    #[test]
+    fn a_bare_player_command_skips_the_model() {
+        for (said, want) in [("pause", "pause"), ("Pause the music.", "pause"), ("can you stop the song", "pause"), ("play", "play"), ("resume", "play"),
+            ("next song", "next"), ("skip this track", "next"), ("previous", "previous"), ("go back a song", "previous"), ("last track please", "previous")] {
+            assert_eq!(media_asked(said), Some(want), "{said:?}");
+        }
+        for said in ["stop", "go back", "play interstellar", "pause and open discord", "next step", "skip the intro", "", "music"] {
+            assert_eq!(media_asked(said), None, "{said:?}");
+        }
     }
 
     #[test]

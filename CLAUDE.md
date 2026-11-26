@@ -37,3 +37,30 @@ Every control, card, chip, row, badge and text block gets room around it. Text n
 - Layout tests: when a height function such as `agent_h` or `session_h` changes, update its test, so the reserved height matches what the draw code uses.
 
 **Why:** squeezed rows read as broken, and the island is small, so every missing pixel shows.
+
+## Every new feature logs what it does
+
+A feature isn't done until its log shows what happened. The log is how the user and the next agent find out why something didn't work.
+
+- Log through `crate::log::line` (it writes to `%LOCALAPPDATA%\zor-ui\zorui.log`). Bridge code that runs as a child process writes `{"error": ...}` lines that the app logs.
+- Log when the feature starts, each decision it makes (what it picked, what it skipped and why), what it got as input, what it did, and the result.
+- Every error path and every fallback writes a line that says what failed and what the feature did instead. A silent `return`, `.ok()` or `let _ =` on a path the user would notice is a bug.
+- Log what was heard, asked or chosen, but never secrets, keys, tokens or passwords.
+- Don't log once per frame or once per audio chunk. Log events.
+
+**Why:** the wake word failed for hours and the log had no line saying what it heard or why it ignored it, so nobody could tell what was wrong.
+
+## Verify the work in the real app
+
+"Tests pass" and "it compiles" are not proof that a feature works, and a report may not use them as proof. Before saying a feature works, run it and watch it work.
+
+`.claude/verify-gate.js` (a Stop hook in `.claude/settings.json`) enforces this. If the app's code under `native/` changed during a turn, the agent can't finish until the installed app is the new release build, the real program has run since the last change, and zorui.log has been read since that run.
+
+- Run the real build: the installed copy after a deploy, or the bridge directly (`zorui.exe --bridge <stream> ...`). Use the feature the way the user will.
+- When the real input needs the user (their voice, their device), make a stand-in: a Windows text-to-speech WAV, a sample file, a test window. Feed it through the same code path the feature uses.
+- Read zorui.log after the run and check that the feature's lines are there and say what you expected.
+- Check what it costs: memory (private bytes) and CPU of the running app before and after, for anything that runs all the time.
+- If it doesn't work, or works only partly, fix it and run it again. Keep iterating until everything the user asked for works. Don't hand back a half-working feature, and don't take a shortcut that skips part of the request.
+- In the report, say what you ran and what you saw (log lines, numbers, output). If something truly can't be checked from here, name it, say why, say what you checked instead, and tell the user exactly how to test it.
+
+**Why:** the user got features that compiled and passed tests but did nothing in the real app.

@@ -33,7 +33,7 @@ the dock and the Claude usage watcher.
 
 - **Bar and Dynamic Island.** Workspaces, clock, weather, system icons, tray, media and the active window, with a
   layout you can rearrange by drag and drop. The island expands for the song, timer, notifications, screen
-  recording and AI agents. On a monitor covered by a full-screen window the bar hides, and the other monitor's
+  recording and AI agents. Drop files on it to send them to your phone with LocalSend. On a monitor covered by a full-screen window the bar hides, and the other monitor's
   bar stays.
 - **AI agents in the island.** Claude Code, Codex, Gemini CLI or anything that can pipe JSON to
   `zorui.exe --agent <name>` shows up when it needs a permission or an answer, with its usage limits in the panel.
@@ -43,8 +43,9 @@ the dock and the Claude usage watcher.
   notifications, calendar, to-do, pomodoro and stopwatch.
 - **Buddies.** Small animated characters that walk on your bar, talk, comment on what your PC is doing and keep
   each other company. See [Buddies](#buddies).
-- **Buddy assistant.** Ask a buddy for something in plain words: play a song, open an app, reply to a message or
-  do a task on screen. See [The buddy assistant](#the-buddy-assistant).
+- **Buddy assistant.** Ask a buddy for something in plain words, by hotkey, by wake word or in its chat window: play
+  a song, open an app, reply to a message, explain what's on screen or do a task there. See
+  [The buddy assistant](#the-buddy-assistant).
 - **Several Claude accounts.** Keep more than one Claude Code login, switch between them, and let Zor UI switch
   when one nears its usage limit. See [Claude accounts](#claude-accounts).
 - **Settings app.** Every option, galleries for Wallpaper Engine wallpapers and community presets, a Usage page
@@ -155,6 +156,34 @@ sees each result. When a tool fails, the buddy tries another way. If Spotify won
 the song in the browser instead. With each request the AI gets the time, the window in front and the current track.
 It treats window and track titles as text, never as instructions. The buddy remembers the last six exchanges for ten
 minutes.
+
+**Talking to the buddy.** `Mod+B` records you and the buddy acts on what you say. **Dictation mode** in **Settings >
+Voice** sets when the recording stops: Auto stops when you stop talking, Toggle at the next press, Hold when you let go.
+With **Listen for a wake word** on, the microphone stays open and "Hey Gojo, play lofi" or "Gojo, open Spotify" works
+without a key. The wake word is the buddy's name unless you set another one. Speech becomes text on this PC.
+**Echo cancellation** (Windows' Voice Capture DSP) removes what your speakers play, music and the buddy's own voice
+included, from what the microphone hears. **Noise suppression** removes fans, keys and room noise with DeepFilterNet 3,
+which is built into `zorui.exe`. Both are on by default.
+
+**Player commands.** A request that is only a player command, such as "pause", "next song" or "stop the music", runs at
+once without asking the AI. If "play" starts nothing within 1.5 seconds, the buddy selects the Spotify tab, which wakes
+a tab the browser put to sleep, and presses its Play button.
+
+**Screen help.** With **Let the buddy see my screen** on, tap Right Alt twice and ask about the screen ("where is the
+export button?"). The buddy sends a picture of each monitor and a numbered list of the front window's buttons, fields
+and links to the AI. It then flies to the control the answer points at and outlines it for 9 seconds. A question asked
+within 2 minutes of the last one carries the last three questions and answers, so "and then?" works. A how-to question
+runs as a walkthrough: the buddy gives one step, outlines what to click, waits up to 60 seconds for that click, then
+looks again. It stops after the last step, after 8 steps, or when you ask something else. The setting is off by
+default, and with it off nothing is captured.
+
+**Buddy chat.** `Mod+Shift+B` opens a chat window with the buddy. Every request shows there as a chat, and Live mode
+lets you talk to it by voice.
+
+**Memory.** The buddy keeps facts you tell it in the PC's own chat, such as "my sister is called Lina" or "I prefer
+short answers", and the names of projects it sees, so "open zor ui in VS Code" finds the project when its window is
+closed. Questions, requests and remote chats are skipped, and anything that looks like a secret is not kept.
+**Settings** labels each fact with where it came from. Turn this off with **Learn from what I say**.
 
 **Playing a song.** The buddy tries four routes in order and stops at the first one that starts something new. The
 routes are the Spotify app, a Spotify Web tab that is already open (your login is in it), a YouTube tab that is
@@ -274,6 +303,9 @@ Every key below can be changed in Settings > Keybinds: click a key, press the ne
 | `Mod+Ctrl+T` | Pick a wallpaper (image or video) and regenerate colors |
 | `Mod+Ctrl+D` | Toggle dark / light |
 | `Mod+Ctrl+R` | Restart the bar and reload GlazeWM |
+| `Mod+B` | Talk to the primary buddy |
+| Right Alt twice | Ask the buddy about your screen |
+| `Mod+Shift+B` | Buddy chat |
 | `Mod+Shift+G` | Game mode: stop the bar, widgets, launcher and live wallpaper to free RAM. Press again to bring them back. |
 | `Mod+Enter` or `Mod+T` | Terminal |
 | `Mod+E` / `Mod+W` / `Mod+C` | File Explorer / Edge / VS Code |
@@ -322,11 +354,17 @@ monitor to `Videos\Recordings` with the sound you choose in Settings > Services 
 translate** freezes the screen: drag over some text, and Windows' OCR reads it and the translation (into the
 translator's language) is drawn on top and copied. Windows only reads languages added in Settings > Time &
 language > Language. **Color picker** copies the hex code of any pixel, and **Power plan** switches between
-Windows' power plans. The brightness slider acts on the monitor the sidebar is on, including external monitors
+Windows' power plans. The arrow on the **Wi-Fi** tile lists the networks in range and the one on **Bluetooth** lists
+paired devices. Click one to connect or disconnect it. A network with no saved password opens Windows' own list. The
+brightness slider acts on the monitor the sidebar is on, including external monitors
 that support DDC/CI.
 
 **Bar.** Hover the clock, CPU/RAM, weather, network speed or system icons for details. When the volume or
 microphone changes, the island shows the new level for a moment.
+
+**Send to phone.** Drag files from Explorer over the island and it expands with "Release to send to your phone". Drop
+them and they go to the phone over [LocalSend](https://localsend.org), which must be open on the phone and on the same
+network. The island remembers the phone. With several nearby, you pick one in the island's LocalSend section.
 
 **Updates.** Settings > About shows the version and a **Check for updates** button, which looks for a newer
 release right away. It downloads the release's `zorui-app.zip` and runs its `install.ps1`, which restarts the shell.
@@ -396,12 +434,11 @@ equivalents for theming:
 
 ## Still not done
 
-- end4's AI **tools**: there, the AI can run shell commands and edit the shell config. Here it only chats, on purpose.
+- end4's AI **tools** in the sidebar chat: there, the AI can run shell commands and edit the shell config. Here the
+  sidebar chat only chats, on purpose. The buddy assistant has its own tools and asks before it takes over.
 - Uploading your own preset to the gallery. The gallery stores Linux configs, so Windows setups are saved locally instead.
 - Hyprland-only settings pages (animations, decorations, monitor layout). GlazeWM's equivalents live in its `config.yaml`.
 - A do-not-disturb toggle. Windows 11 has no API for it.
-- Wi-Fi and Bluetooth device lists. Use the toggle's right-click, which opens Windows Settings.
-- Recording sound with the screen. The recorder captures video only.
 - More than two buddies, other languages for their lines, and a custom voice.
 - Tray icon tooltips, and bars rebuilt after a monitor change only reserve their strip after a restart.
 - Songs from other music apps. The buddy plays through Spotify or YouTube only.
@@ -414,6 +451,7 @@ equivalents for theming:
 
 - Windows 10 or 11.
 - Building the native shell needs Rust. The GNU toolchain is enough.
+- Building pulls DeepFilterNet from its GitHub repository (tag `v0.5.6`), so the first build needs git access.
 - Voice listening downloads the sherpa-onnx speech engine (about 20 MB) from GitHub the first time you use it.
 
 ## Credits

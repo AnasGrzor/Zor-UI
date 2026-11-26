@@ -57,6 +57,11 @@ pub fn run(cfg: &Config, args: &[&str]) -> Option<Value> {
         }
         "wifi" => Some(json!({ "wifi": set_radio(RadioKind::WiFi, &value) })),
         "bluetooth" => Some(json!({ "bluetooth": set_radio(RadioKind::Bluetooth, &value) })),
+        "wifi-list" => Some(super::wireless::wifi_list()),
+        "bt-list" => Some(super::wireless::bt_list()),
+        // a network with no saved password goes to Windows' own list; a device this can't connect, to Bluetooth settings
+        "wifi-connect" => { let r = super::wireless::wifi_connect(&value); if r["flyout"] == true { shell("ms-availablenetworks:", ""); } Some(r) }
+        "bt-connect" => { let r = super::wireless::bt_connect(&value); if r["settings"] == true { shell("ms-settings:bluetooth", ""); } Some(r) }
         "caffeine" => Some(json!({ "caffeine": switch_caffeine() })),
         "powerplan" => {
             let mut plans = power_plans();

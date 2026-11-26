@@ -1065,6 +1065,12 @@ pub fn fallback_note(err: &str) -> String {
     format!("(I first tried it as a fixed command and it failed: {err} Find another way.)")
 }
 
+/// Bridge flags that turn off echo cancellation or noise suppression, when Settings has them off.
+fn clean_args(cfg: &Config) -> Vec<String> {
+    let off = |k: &str| cfg.get(k).as_bool() == Some(false);
+    [("buddies.echoCancel", "--no-echo"), ("buddies.denoise", "--no-denoise")].iter().filter(|(k, _)| off(k)).map(|(_, f)| f.to_string()).collect()
+}
+
 /// Bridge arguments for the speech model folder and microphone name; empty ones are left out.
 fn listen_args(model: &str, mic: &str, mode: &str) -> Vec<String> {
     let mode = if mode == "auto" { "" } else { mode }; // Auto is what the recorder does without the flag
@@ -1088,7 +1094,8 @@ pub fn listen_into(cfg: &Config, look: bool, conv: Option<String>) {
     let mode = if conv.is_some() { "auto" } else { cfg.str("buddies.listenMode") };
     crate::pill::set_mode(mode);
     crate::pill::set_look(look);
-    let args = listen_args(&model, &mic, mode);
+    let mut args = listen_args(&model, &mic, mode);
+    args.extend(clean_args(cfg));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let s = proc::stream(cfg, "buddy-listen", &args, move |line| {
         let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
@@ -1124,6 +1131,99 @@ pub fn press_again(cfg: &Config) -> bool {
     toggle
 }
 
+/// The always-on listener for "hey <name>" (buddies.wake), with the bridge arguments it was started with.
+static WAKE: Mutex<Option<(proc::Stream, Vec<String>)>> = Mutex::new(None);
+/// The latest settings, for the listener's thread: names and switches changed in Settings apply without restarting it.
+static WAKE_CFG: Mutex<Option<Config>> = Mutex::new(None);
+
+/// Starts or stops the "hey <name>" listener to match Settings, and restarts it when the microphone or speech model changes.
+pub fn wake_sync(cfg: &Config) {
+    let on = enabled(cfg) && cfg.get("buddies.wake").as_bool().unwrap_or(false);
+    if let Ok(mut c) = WAKE_CFG.lock() { *c = Some(Config(cfg.0.clone())); }
+    let Ok(mut w) = WAKE.lock() else { return };
+    let mut args = listen_args(cfg.str("buddies.model"), cfg.str("buddies.mic"), "auto");
+    args.extend(clean_args(cfg));
+    args.push("--wake".into());
+    if !on { *w = None; return; }
+    if w.as_ref().is_some_and(|(_, a)| *a == args) { return; }
+    *w = None; // the old one lets go of the model first
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let s = proc::stream(cfg, "buddy-listen", &a, |line| {
+        let v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+        if let Some(e) = v["error"].as_str() { crate::log::line(&format!("wake listener: {e}")); }
+        let Some(heard) = v["heard"].as_str() else { return };
+        // the hotkey's recording or a running request already has these words
+        if crate::pill::active() || busy() { crate::log::line(&format!("wake: ignored {heard:?}, already listening or busy")); return; }
+        let Some(cfg) = WAKE_CFG.lock().ok().and_then(|c| c.as_ref().map(|c| Config(c.0.clone()))) else { return };
+        let words = wake_words(&cfg);
+        match after_wake(heard, &words) {
+            None => crate::log::line(&format!("wake: heard {heard:?}, no wake word {words:?} in it")),
+            // just the name: listen for the request, as the hotkey does
+            Some(rest) if rest.is_empty() => {
+                crate::log::line(&format!("wake: heard {heard:?}, only the wake word: listening for the request"));
+                crate::app::post(Box::new(|cx| cx.actions.push(crate::app::Action::Command("buddy listen".into()))));
+            }
+            Some(rest) => { crate::log::line(&format!("wake: heard {heard:?}, request {rest:?}")); ask(&cfg, &rest); }
+        }
+    });
+    *w = s.map(|s| (s, args));
+}
+
+/// What wakes the buddy: the wake word set in Settings (buddies.wakeWord), else the buddies' names.
+fn wake_words(cfg: &Config) -> Vec<String> {
+    let own = cfg.str("buddies.wakeWord").trim();
+    if own.is_empty() { wake_names(cfg) } else { vec![own.to_string()] }
+}
+
+/// The names the buddies answer to when no wake word is set: each one's own name, else its character's. The second buddy's
+/// only while it is on.
+pub fn wake_names(cfg: &Config) -> Vec<String> {
+    ["a", "b"].iter().filter(|k| **k == "a" || cfg.bool("buddies.b.on")).map(|k| {
+        let own = cfg.str(&format!("buddies.{k}.name")).trim().to_string();
+        if !own.is_empty() { return own; }
+        crate::cast::pick_with(crate::cast::custom_on(cfg), cfg.get("buddies.custom"), cfg.str(&format!("buddies.{k}.character"))).0.label.to_string()
+    }).collect()
+}
+
+/// Words said before a name to call the buddy. "a" and "hay" are how recognizers often write "hey".
+const WAKE_GREETINGS: [&str; 8] = ["hey", "hi", "hello", "ok", "okay", "yo", "a", "hay"];
+
+/// The request after the wake word in `heard` ("Hey Gojo, play woh" gives "play woh", "Gojo" gives ""), or None when there is none.
+/// The name counts at the start, or anywhere right after a greeting. Recognizers split names and get a letter wrong, so
+/// "Go Jo" and "Gojoe" count too.
+pub fn after_wake(heard: &str, names: &[String]) -> Option<String> {
+    let bare = |w: &str| w.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let words: Vec<&str> = heard.split_whitespace().collect();
+    let greeting = |i: usize| WAKE_GREETINGS.contains(&bare(words[i]).as_str());
+    let starts = std::iter::once(usize::from(!words.is_empty() && greeting(0))).chain((0..words.len()).filter(|&i| greeting(i)).map(|i| i + 1));
+    for at in starts {
+        for name in names.iter().map(|n| bare(n)).filter(|n| !n.is_empty()) {
+            for n in 1..=3 {
+                let Some(said) = words.get(at..at + n) else { break };
+                if close(&said.iter().map(|w| bare(w)).collect::<String>(), &name) { return Some(words[at + n..].join(" ")); }
+            }
+        }
+    }
+    None
+}
+
+/// Same word, or one letter off for names of four letters or more.
+fn close(said: &str, name: &str) -> bool {
+    if said == name { return true; }
+    let (a, b): (Vec<char>, Vec<char>) = (said.chars().collect(), name.chars().collect());
+    if b.len() < 4 || a.len().abs_diff(b.len()) > 1 { return false; }
+    // edit distance, one row at a time
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut prev = std::mem::replace(&mut row[0], i + 1);
+        for (j, cb) in b.iter().enumerate() {
+            let next = (prev + usize::from(ca != cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            prev = std::mem::replace(&mut row[j + 1], next);
+        }
+    }
+    row[b.len()] <= 1
+}
+
 /// Stops a recording in progress and hides the pill (the hotkey pressed a second time).
 pub fn cancel() {
     crate::pill::set(0);
@@ -1135,6 +1235,36 @@ pub fn cancel() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wake_word_starts_the_request_and_forgives_how_names_are_heard() {
+        let names = vec!["Gojo".to_string(), "Mary Jane".to_string()];
+        let w = |s: &str| after_wake(s, &names);
+        assert_eq!(w("Hey Gojo, play woh.").as_deref(), Some("play woh."));
+        assert_eq!(w("Hey, go to.").as_deref(), Some(""), "how Parakeet heard the user's own \"hey Gojo\"");
+        assert_eq!(w("gojo play woh").as_deref(), Some("play woh"));
+        assert_eq!(w("A go jo open discord").as_deref(), Some("open discord"), "split name, misheard hey");
+        assert_eq!(w("hey gojoe pause").as_deref(), Some("pause"), "one letter off");
+        assert_eq!(w("so um hey Gojo play woh").as_deref(), Some("play woh"), "after a greeting mid-sentence");
+        assert_eq!(w("hey mary jane what time is it").as_deref(), Some("what time is it"));
+        assert_eq!(w("Hey Gojo").as_deref(), Some(""), "just the name: listen next");
+        assert_eq!(w("I told gojo to play woh"), None, "the name mid-sentence without a greeting");
+        assert_eq!(w("hey there play woh"), None);
+        assert_eq!(w(""), None);
+        assert_eq!(after_wake("hey yuj play", &["Yuji".to_string()]).as_deref(), Some("play"));
+        assert_eq!(after_wake("hey ri play", &["Rin".to_string()]), None, "short names must match exactly");
+    }
+
+    #[test]
+    fn the_buddies_answer_to_their_own_name_else_their_characters() {
+        let c = cfg(serde_json::json!({ "buddies": { "a": { "character": "gojo", "name": "" }, "b": { "on": false, "character": "geto", "name": "Sugu" } } }));
+        assert_eq!(wake_names(&c), ["Gojo"]);
+        let c = cfg(serde_json::json!({ "buddies": { "a": { "character": "gojo", "name": " Satoru " }, "b": { "on": true, "character": "geto", "name": "" } } }));
+        assert_eq!(wake_names(&c), ["Satoru", "Geto"]);
+        assert_eq!(wake_words(&c), ["Satoru", "Geto"], "no wake word set: the names wake them");
+        let c = cfg(serde_json::json!({ "buddies": { "wakeWord": " Jarvis ", "a": { "character": "gojo", "name": "Satoru" } } }));
+        assert_eq!(wake_words(&c), ["Jarvis"], "a wake word set takes the place of the names");
+    }
 
     #[test]
     fn a_second_request_is_refused_while_one_runs_and_the_flag_frees_on_drop() {
@@ -1684,6 +1814,8 @@ mod tests {
         assert_eq!(listen_args("D:/m", "MR720", ""), ["--model", "D:/m", "--mic", "MR720"]);
         assert_eq!(listen_args("", "MR720", ""), ["--mic", "MR720"]);
         assert_eq!(listen_args("", "", "hold"), ["--mode", "hold"]);
+        assert!(clean_args(&cfg(serde_json::json!({}))).is_empty(), "both on by default");
+        assert_eq!(clean_args(&cfg(serde_json::json!({ "buddies": { "echoCancel": false, "denoise": false } }))), ["--no-echo", "--no-denoise"]);
     }
 
     #[test]

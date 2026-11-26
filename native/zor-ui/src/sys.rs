@@ -102,11 +102,16 @@ fn ipv4(idx: u32) -> Option<String> {
 pub fn rate(b: f64) -> String { if b >= 1e6 { format!("{:.1} MB/s", b / 1e6) } else { format!("{} KB/s", (b / 1e3).round()) } }
 pub fn gb(b: f64) -> String { format!("{:.1} GB", b / 1_073_741_824.0) }
 
+/// The Wi-Fi icon for a signal quality of 0-100.
+pub fn wifi_bars(signal: u32) -> &'static str {
+    match signal { s if s >= 80 => "signal_wifi_4_bar", s if s >= 60 => "network_wifi_3_bar", s if s >= 40 => "network_wifi_2_bar", s if s >= 20 => "network_wifi_1_bar", _ => "signal_wifi_0_bar" }
+}
+
 /// networkIcon() in core.js.
 pub fn net_icon(n: Option<&Net>) -> &'static str {
     match n.map(|n| n.kind) {
         Some("ethernet") => "lan",
-        Some("wifi") => match n.map_or(0, |n| n.signal) { s if s >= 80 => "signal_wifi_4_bar", s if s >= 60 => "network_wifi_3_bar", s if s >= 40 => "network_wifi_2_bar", s if s >= 20 => "network_wifi_1_bar", _ => "signal_wifi_0_bar" },
+        Some("wifi") => wifi_bars(n.map_or(0, |n| n.signal)),
         Some("proprietary_virtual") => "vpn_lock",
         Some(_) => "lan",
         None => "signal_wifi_off",

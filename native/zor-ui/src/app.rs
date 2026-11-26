@@ -278,6 +278,7 @@ impl App {
             cpu: util::Cpu::new(), netmon: sys::NetMon::default(), ticks: 0, msg, frame: 0, hires: false, game: None, game_votes: 0, started: false, _streams: vec![],
         };
         app.reload();
+        assist::wake_sync(&app.cx.cfg);
         desk::sync(&mut app);
         buddy::sync(&mut app);
         // an interrupted task with a plan resumes from its next step, or waits for the user (agent::resume_on_start)
@@ -560,6 +561,7 @@ impl App {
             });
         }
         if n.is_multiple_of(2) && self.reload() {
+            assist::wake_sync(&self.cx.cfg);
             desk::sync(self);
             buddy::sync(self);
             pill::sync(self);

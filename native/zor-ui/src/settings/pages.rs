@@ -1263,6 +1263,11 @@ impl Settings {
         p.h2("mic", "Voice commands", "");
         p.card(|p| {
             self.sw(p, "buddies.listen", "Talk to the primary buddy", "The hotkey (default Alt+B) records you and the buddy acts on what you say. Tap Right Alt twice to ask about your screen", "mic");
+            self.sw(p, "buddies.wake", "Listen for a wake word", "Say \"Hey <wake word>, play ...\" or \"<wake word>, open ...\" without pressing anything. The microphone stays on, and what you say becomes text on this PC", "record_voice_over");
+            if self.gb(p.cx, "buddies.wake") {
+                let names = crate::assist::wake_names(&p.cx.cfg).join(" or ");
+                self.text_ph(p, "buddies.wakeWord", "Wake word", "What you say after \"hey\". Empty: the buddy's name", "badge", &names);
+            }
             self.seg_sub(p, "buddies.listenMode", &[("auto", "Auto"), ("toggle", "Toggle"), ("hold", "Hold")], "Dictation mode", "Auto stops when you stop talking. Toggle records until you press the hotkey again. Hold records while you hold the hotkey.", "keyboard_voice");
             self.sw(p, "buddies.allow.search", "Search the web", "\"search for ...\" opens a Google search in your browser", "search");
             self.sw(p, "buddies.allow.open", "Open apps and games", "\"open <name>\" starts a Start Menu app or a Steam game", "rocket_launch");
@@ -1293,6 +1298,8 @@ impl Settings {
             let mut mics = vec![(json!(""), "Windows default".to_string())];
             mics.extend(crate::assist::mics().into_iter().map(|m| (json!(m), m)));
             self.pick(p, "buddies.mic", mics, "Microphone", "The one the buddy listens with", "mic", 260.0);
+            self.sw(p, "buddies.echoCancel", "Echo cancellation", "Takes what your speakers play (music, the buddy's own voice) out of what the microphone hears. Not needed with headphones", "spatial_audio_off");
+            self.sw(p, "buddies.denoise", "Noise suppression", "Takes fans, keys and room noise out with DeepFilterNet, on this PC. Uses a little CPU while the microphone is on", "noise_aware");
             self.speech_model(p);
             let w = chip_w(p.c, "Open folder", true);
             let sub = "Put another model folder (the one with tokens.txt) here and it shows up in the list above";

@@ -211,6 +211,25 @@ pub fn defs(i: &DefIn) -> Vec<Def> {
     ]
 }
 
+// ------------------------------------------------------------------ Wi-Fi and Bluetooth menus
+
+/// A row of the Wi-Fi or Bluetooth tile menu: icon, label, and what the click hands to toggles' connect
+/// action (an SSID or a device address; empty for the last row, which opens Windows' settings page).
+pub type RadioRow = (&'static str, String, String);
+
+/// Menu rows from toggles' `wifi-list` / `bt-list` answer: a tick on connected ones, then the settings row.
+pub fn radio_rows(wifi: bool, v: &Value) -> Vec<RadioRow> {
+    let s = |i: &Value, k: &str| i[k].as_str().unwrap_or("").to_string();
+    let key = if wifi { "networks" } else { "devices" };
+    let mut rows: Vec<RadioRow> = v[key].as_array().map(|a| a.iter().map(|i| {
+        let on = i["connected"].as_bool() == Some(true);
+        let icon = if on { "check" } else if wifi { crate::sys::wifi_bars(i["signal"].as_u64().unwrap_or(0) as u32) } else { "bluetooth" };
+        (icon, s(i, if wifi { "ssid" } else { "name" }), s(i, if wifi { "ssid" } else { "addr" }))
+    }).filter(|r| !r.2.is_empty()).collect()).unwrap_or_default();
+    rows.push(("settings", (if wifi { "Wi-Fi settings" } else { "Bluetooth settings" }).into(), String::new()));
+    rows
+}
+
 // ------------------------------------------------------------------ notifications
 
 pub struct Group { pub app: String, pub items: Vec<Notif> }
@@ -371,6 +390,16 @@ mod tests {
         assert!(lock(&sh).notifs.is_empty());
     }
     use super::*;
+
+    #[test]
+    fn radio_menu_rows() {
+        let v = json!({ "networks": [{ "ssid": "Home", "signal": 70, "connected": true }, { "ssid": "Cafe", "signal": 30, "connected": false }] });
+        assert_eq!(radio_rows(true, &v), vec![("check", "Home".into(), "Home".into()), ("network_wifi_1_bar", "Cafe".into(), "Cafe".into()), ("settings", "Wi-Fi settings".into(), String::new())]);
+        let v = json!({ "devices": [{ "name": "Buds", "addr": "bbbbbbbbbbbb", "connected": false }] });
+        assert_eq!(radio_rows(false, &v), vec![("bluetooth", "Buds".into(), "bbbbbbbbbbbb".into()), ("settings", "Bluetooth settings".into(), String::new())]);
+        // an error answer (radio off, no adapter) still offers the settings page
+        assert_eq!(radio_rows(true, &json!({ "error": "x" })).len(), 1);
+    }
 
     fn cfg() -> Config { Config::parse("{}") }
     fn input(s: &Shared) -> DefIn<'_> {

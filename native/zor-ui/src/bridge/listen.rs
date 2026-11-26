@@ -76,7 +76,8 @@ fn wav_bytes(audio: &[f32]) -> Vec<u8> {
 /// environment variable, not the command line, so a path can't inject script.
 /// shortcut: PowerShell start-up adds ~1 s; move to SAPI through the windows crate if it bothers.
 fn windows_transcribe(audio: &[f32]) -> Result<String, String> {
-    let file = std::env::temp_dir().join(format!("zorui-listen-{}.wav", std::process::id()));
+    static N: AtomicU64 = AtomicU64::new(0); // the wake loop and a hotkey recording can transcribe at once, so each gets its own file
+    let file = std::env::temp_dir().join(format!("zorui-listen-{}-{}.wav", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     std::fs::write(&file, wav_bytes(audio)).map_err(|e| format!("{}: {e}", file.display()))?;
     let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Speech; \
                   $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine; \
@@ -93,6 +94,7 @@ fn windows_transcribe(audio: &[f32]) -> Result<String, String> {
 }
 
 fn listen(args: &[String], out: &Sink) {
+    if args.iter().any(|a| a == "--wake") { return wake(args, out); }
     let wav = arg(args, "--wav");
     let dir = parakeet_dir(arg(args, "--model"));
     out.emit(&json!({ "state": "starting" }));
@@ -104,7 +106,7 @@ fn listen(args: &[String], out: &Sink) {
     std::thread::scope(|sc| {
         let worker = loader.map(|l| sc.spawn(|| partials(l, &live, &stop, out)));
         let audio = if wav.is_empty() {
-            record(arg(args, "--mic"), dictate_mode(arg(args, "--mode")), out, worker.is_some().then_some(&live))
+            record(arg(args, "--mic"), dictate_mode(arg(args, "--mode")), out, worker.is_some().then_some(&live), &stop_file(), clean(args))
         } else {
             out.emit(&json!({ "state": "listening" }));
             read_wav(Path::new(wav))
@@ -123,6 +125,38 @@ fn listen(args: &[String], out: &Sink) {
         };
         out.emit(&match text { Ok(t) => json!({ "text": t }), Err(e) => json!({ "error": e }) });
     });
+}
+
+/// `--wake`: listens until the stream is dropped. Each phrase said is transcribed (Parakeet stays loaded the whole time)
+/// and sent as {"heard": text}; the app decides whether it starts with a buddy's name (assist::after_wake).
+fn wake(args: &[String], out: &Sink) {
+    let dir = parakeet_dir(arg(args, "--model"));
+    let mic = arg(args, "--mic");
+    // noise suppression stays off here: it would run all the time and keep its model loaded
+    let clean = Clean { noise: false, ..clean(args) };
+    crate::log::line(&format!("wake: listening on {:?}, echo cancellation {}, transcribing with {}", if mic.is_empty() { "the default mic" } else { mic },
+        if clean.echo { "on" } else { "off" }, if dir.is_empty() { "Windows speech recognition" } else { "Parakeet" }));
+    let rec = match (!dir.is_empty()).then(|| Recognizer::new(&dir)).transpose() {
+        Ok(r) => r,
+        Err(e) => { out.emit(&json!({ "error": e })); return; }
+    };
+    let never = std::env::temp_dir().join("zorui-wake-never"); // nobody writes it: only dropping the stream ends the loop
+    while !out.stopped() {
+        match record(mic, Dictate::Auto, out, None, &never, clean) {
+            // a muted or missing mic: try again later instead of spinning
+            Err(e) => { out.emit(&json!({ "error": e })); for _ in 0..300 { if out.stopped() { return; } std::thread::sleep(Duration::from_millis(100)); } }
+            // under half a second is a cough or a click, not "hey" and a name
+            Ok(Some(a)) if a.len() >= RATE as usize / 2 => {
+                let secs = a.len() as f32 / RATE as f32;
+                match match &rec { Some(r) => r.transcribe(&a), None => windows_transcribe(&a) } {
+                    Ok(t) if t.trim().is_empty() => crate::log::line(&format!("wake: {secs:.1} s of sound, no words in it")),
+                    Ok(t) => { out.emit(&json!({ "heard": t.trim() })); }
+                    Err(e) => { out.emit(&json!({ "error": e })); }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
 }
 
 /// Longest stretch of audio (seconds) decoded for a live line; older speech just scrolls off it.
@@ -177,7 +211,7 @@ impl Vad {
     /// Feeds one chunk: (its loudness, whether the recording is over).
     fn push(&mut self, a: &[f32]) -> (f32, bool) {
         self.n += 1;
-        let rms = (a.iter().map(|x| x * x).sum::<f32>() / a.len().max(1) as f32).sqrt();
+        let rms = rms(a);
         if self.noise.len() < 3 { // the first 0.3 s measures the mic's noise floor
             self.noise.push(rms);
             self.level = threshold(&self.noise);
@@ -195,6 +229,8 @@ impl Vad {
         (rms, done)
     }
 }
+
+fn rms(a: &[f32]) -> f32 { (a.iter().map(|x| x * x).sum::<f32>() / a.len().max(1) as f32).sqrt() }
 
 fn friendly(d: &IMMDevice) -> String {
     unsafe {
@@ -221,32 +257,53 @@ pub(super) unsafe fn pick_mic(en: &IMMDeviceEnumerator, name: &str) -> windows::
 
 /// Mono 16 kHz audio; None when nobody spoke. Err when the microphone cannot be opened.
 /// `live` collects every chunk too, for the live text.
-fn record(mic: &str, mode: Dictate, out: &Sink, live: Option<&Mutex<Vec<f32>>>) -> Result<Option<Vec<f32>>, String> {
+/// What cleans the microphone's sound before it is heard. Both are on unless the bridge gets --no-echo / --no-denoise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clean { pub echo: bool, pub noise: bool }
+
+pub fn clean(args: &[String]) -> Clean {
+    Clean { echo: !args.iter().any(|a| a == "--no-echo"), noise: !args.iter().any(|a| a == "--no-denoise") }
+}
+
+/// Set once echo cancellation delivered no audio on this PC: later recordings skip it.
+static ECHO_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// `stop`: the file whose appearance ends the recording (`stop_file` for the hotkey).
+fn record(mic: &str, mode: Dictate, out: &Sink, live: Option<&Mutex<Vec<f32>>>, stop: &Path, clean: Clean) -> Result<Option<Vec<f32>>, String> {
     let held = if mode == Dictate::Hold { keys_down() } else { vec![] };
     // released before we even started: nothing to hold, so stop on silence like Auto
     let mode = if mode == Dictate::Hold && held.is_empty() { Dictate::Auto } else { mode };
-    let _ = std::fs::remove_file(stop_file());
+    let _ = std::fs::remove_file(stop);
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let e = |what: &str| { let what = what.to_string(); move |err: windows::core::Error| format!("{what}: {err}") };
         let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(e("microphone"))?;
         let dev = pick_mic(&en, mic).map_err(e("no microphone"))?;
-        let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).map_err(e("microphone"))?;
-        // shared mode converts to the format asked for, so the mic's own rate and channels don't matter
-        let fmt = WAVEFORMATEX { wFormatTag: 3 /* WAVE_FORMAT_IEEE_FLOAT */, nChannels: 1, nSamplesPerSec: RATE, nAvgBytesPerSec: RATE * 4, nBlockAlign: 4, wBitsPerSample: 32, cbSize: 0 };
-        client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, 10_000_000, 0, &fmt, None).map_err(e("microphone"))?;
-        let cap: IAudioCaptureClient = client.GetService().map_err(e("microphone"))?;
-        client.Start().map_err(e("microphone"))?;
+        // echo cancellation records the mic itself; without it (off, or it would not start) the mic is read directly
+        let echo = (clean.echo && !ECHO_BROKEN.load(Ordering::Relaxed)).then(|| super::aec::Aec::open(&en, &dev))
+            .and_then(|r| r.map_err(|err| crate::log::line(&format!("echo cancellation is off for this recording: {err}"))).ok());
+        let plain = if echo.is_some() { None } else {
+            let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).map_err(e("microphone"))?;
+            // shared mode converts to the format asked for, so the mic's own rate and channels don't matter
+            let fmt = WAVEFORMATEX { wFormatTag: 3 /* WAVE_FORMAT_IEEE_FLOAT */, nChannels: 1, nSamplesPerSec: RATE, nAvgBytesPerSec: RATE * 4, nBlockAlign: 4, wBitsPerSample: 32, cbSize: 0 };
+            client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, 10_000_000, 0, &fmt, None).map_err(e("microphone"))?;
+            let cap: IAudioCaptureClient = client.GetService().map_err(e("microphone"))?;
+            client.Start().map_err(e("microphone"))?;
+            Some((client, cap))
+        };
+        let mut denoise = clean.noise.then(super::denoise::Denoise::new)
+            .and_then(|r| r.map_err(|err| crate::log::line(&format!("noise suppression is off for this recording: {err}"))).ok());
         out.emit(&json!({ "state": "listening" }));
         let (mut vad, mut pending) = (if mode == Dictate::Auto { Vad::new() } else { Vad::manual() }, Vec::<f32>::new());
         let (chunk, started) = ((RATE / 10) as usize, std::time::Instant::now());
-        let mut stalled = false;
+        let (mut stalled, mut any) = (false, false);
         let result = (|| -> windows::core::Result<()> {
             while !out.stopped() {
                 std::thread::sleep(Duration::from_millis(10));
-                if stop_wanted(mode, &held) { return Ok(()); }
-                if vad.n == 0 && started.elapsed() > Duration::from_secs(3) { stalled = true; break; } // a muted or unplugged mic delivers nothing
-                while cap.GetNextPacketSize()? > 0 {
+                if stop_wanted(mode, &held, stop) { return Ok(()); }
+                if !any && started.elapsed() > Duration::from_secs(3) { stalled = true; break; } // a muted or unplugged mic delivers nothing
+                if let Some(a) = &echo { a.read(&mut pending)?; }
+                while let Some((_, cap)) = plain.as_ref().filter(|(_, c)| c.GetNextPacketSize().is_ok_and(|n| n > 0)) {
                     let (mut data, mut frames, mut flags) = (std::ptr::null_mut::<u8>(), 0u32, 0u32);
                     cap.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
                     let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null();
@@ -256,6 +313,8 @@ fn record(mic: &str, mode: Dictate, out: &Sink, live: Option<&Mutex<Vec<f32>>>) 
                 }
                 while pending.len() >= chunk {
                     let a: Vec<f32> = pending.drain(..chunk).collect();
+                    let a = match denoise.as_mut() { Some(d) => d.run(&a), None => a };
+                    any = true;
                     if let Some(l) = live { if let Ok(mut l) = l.lock() { l.extend_from_slice(&a); } }
                     let (rms, done) = vad.push(&a);
                     let peak = a.iter().fold(0.0f32, |m, x| m.max(x.abs()));
@@ -265,7 +324,14 @@ fn record(mic: &str, mode: Dictate, out: &Sink, live: Option<&Mutex<Vec<f32>>>) 
             }
             Ok(())
         })();
-        let _ = client.Stop();
+        if let Some((client, _)) = &plain { let _ = client.Stop(); }
+        // echo cancellation that delivers nothing: record this take, and the ones after it, without it
+        if echo.is_some() && (stalled || result.is_err()) {
+            crate::log::line(&format!("echo cancellation gave no audio, recording without it: {result:?}"));
+            ECHO_BROKEN.store(true, Ordering::Relaxed);
+            drop((echo, denoise));
+            return record(mic, mode, out, live, stop, clean);
+        }
         result.map_err(e("microphone"))?;
         if stalled { return Err("No audio is coming from the microphone. Check that it is plugged in, not muted, and allowed under Settings > Privacy > Microphone.".into()); }
         Ok((!vad.got.is_empty()).then_some(vad.got))
@@ -393,11 +459,8 @@ fn keys_down() -> Vec<u16> {
 fn all_released(held: &[u16], down: impl Fn(u16) -> bool) -> bool { held.iter().all(|k| !down(*k)) }
 
 /// A recording should end now: someone asked (the hotkey again in Toggle mode, the pill's stop button in any mode),
-/// or Hold's keys came up.
-fn stop_wanted(mode: Dictate, held: &[u16]) -> bool { stop_wanted_with(mode, held, &stop_file()) }
-
-/// `stop_wanted` with the stop-request file named, so a test can use its own.
-fn stop_wanted_with(mode: Dictate, held: &[u16], file: &Path) -> bool {
+/// or Hold's keys came up. `file` is the stop-request file.
+fn stop_wanted(mode: Dictate, held: &[u16], file: &Path) -> bool {
     file.exists() || (mode == Dictate::Hold && { let eaten = crate::keymap::eaten_held(); all_released(held, |k| key_down(k) || eaten.contains(&k)) })
 }
 
@@ -481,19 +544,34 @@ pub fn download_model(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The sherpa-onnx DLL's module handle, loaded once (downloaded first if missing).
+fn sherpa_dll() -> Result<usize, String> {
+    static DLL: OnceLock<Result<usize, String>> = OnceLock::new();
+    DLL.get_or_init(|| unsafe {
+        let dir = sherpa_dir();
+        if !DLLS.iter().all(|d| dir.join(d).is_file()) { fetch_sherpa(&dir)?; }
+        LoadLibraryExW(PCWSTR(HSTRING::from(dir.join(DLLS[0]).as_os_str()).as_ptr()), None, LOAD_WITH_ALTERED_SEARCH_PATH)
+            .map(|h| h.0 as usize).map_err(|e| format!("could not load the speech engine: {e}"))
+    }).clone()
+}
+
+/// sherpa-onnx's function `n` as the function-pointer type `F`, which must match its C signature.
+unsafe fn sherpa_fn<F: Copy>(n: &str) -> Result<F, String> {
+    let dll = windows::Win32::Foundation::HMODULE(sherpa_dll()? as _);
+    let c = CString::new(n).unwrap();
+    let f = GetProcAddress(dll, windows::core::PCSTR(c.as_ptr() as _)).ok_or(format!("speech engine is missing {n}"))?;
+    assert_eq!(size_of::<F>(), size_of_val(&f), "{n} is not a function pointer type");
+    Ok(std::mem::transmute_copy(&f))
+}
+
 fn api() -> Result<&'static Api, String> {
     static API: OnceLock<Result<Api, String>> = OnceLock::new();
     API.get_or_init(|| unsafe {
-        let dir = sherpa_dir();
-        if !DLLS.iter().all(|d| dir.join(d).is_file()) { fetch_sherpa(&dir)?; }
-        let dll = LoadLibraryExW(PCWSTR(HSTRING::from(dir.join(DLLS[0]).as_os_str()).as_ptr()), None, LOAD_WITH_ALTERED_SEARCH_PATH)
-            .map_err(|e| format!("could not load the speech engine: {e}"))?;
-        let sym = |n: &str| { let c = CString::new(n).unwrap(); GetProcAddress(dll, windows::core::PCSTR(c.as_ptr() as _)).ok_or(format!("speech engine is missing {n}")) };
         Ok(Api {
-            create: std::mem::transmute::<unsafe extern "system" fn() -> isize, Fn1>(sym("SherpaOnnxCreateOfflineRecognizer")?), destroy: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineRecognizer")?),
-            stream: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void) -> *const c_void>(sym("SherpaOnnxCreateOfflineStream")?), destroy_stream: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineStream")?),
-            accept: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void, i32, *const f32, i32)>(sym("SherpaOnnxAcceptWaveformOffline")?), decode: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void, *const c_void)>(sym("SherpaOnnxDecodeOfflineStream")?),
-            result: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void) -> *const *const c_char>(sym("SherpaOnnxGetOfflineStreamResult")?), destroy_result: std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "C" fn(*const c_void)>(sym("SherpaOnnxDestroyOfflineRecognizerResult")?),
+            create: sherpa_fn("SherpaOnnxCreateOfflineRecognizer")?, destroy: sherpa_fn("SherpaOnnxDestroyOfflineRecognizer")?,
+            stream: sherpa_fn("SherpaOnnxCreateOfflineStream")?, destroy_stream: sherpa_fn("SherpaOnnxDestroyOfflineStream")?,
+            accept: sherpa_fn("SherpaOnnxAcceptWaveformOffline")?, decode: sherpa_fn("SherpaOnnxDecodeOfflineStream")?,
+            result: sherpa_fn("SherpaOnnxGetOfflineStreamResult")?, destroy_result: sherpa_fn("SherpaOnnxDestroyOfflineRecognizerResult")?,
         })
     }).as_ref().map_err(Clone::clone)
 }
@@ -660,9 +738,9 @@ mod tests {
         // the live app's own stop file in %TEMP% must not decide this, so the test names its own
         let file = std::env::temp_dir().join(format!("zorui-test-stop-{}", std::process::id()));
         let _ = std::fs::remove_file(&file);
-        assert!(!stop_wanted_with(Dictate::Auto, &[], &file));
+        assert!(!stop_wanted(Dictate::Auto, &[], &file));
         std::fs::write(&file, b"").unwrap(); // the pill's stop button ends a recording in any mode
-        assert!(stop_wanted_with(Dictate::Auto, &[], &file) && stop_wanted_with(Dictate::Toggle, &[], &file));
+        assert!(stop_wanted(Dictate::Auto, &[], &file) && stop_wanted(Dictate::Toggle, &[], &file));
         let _ = std::fs::remove_file(&file);
     }
 

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 dist/
 native/zor-ui/src/cast_personal.rs
+output/

@@ -36,6 +36,7 @@ windows = { version = "0.58", features = [
   "Win32_Media",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
+  "Win32_Media_DxMediaObjects",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
   "Win32_NetworkManagement_WiFi",
@@ -80,6 +81,10 @@ windows = { version = "0.58", features = [
   "Win32_System_ProcessStatus",
   "Foundation_Collections",
   "Devices_Radios",
+  "Devices_Enumeration",
+  "Win32_Media_KernelStreaming",
+  "Win32_Devices_DeviceAndDriverInstallation",
+  "Win32_System_IO",
   "ApplicationModel_DataTransfer",
   "UI_Notifications",
   "Win32_Devices_Display",
@@ -88,6 +93,9 @@ windows = { version = "0.58", features = [
   "Win32_System_RemoteDesktop",
   "Win32_System_Environment",
 ] }
+# DeepFilterNet 3 noise suppression (official repo, pinned to its release tag; crates.io only has an old version without it)
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
 rusqlite = { version = "0.38", features = ["bundled"] }
 # the Discord bot (messaging/discord.rs). Off by default: the normal build does not compile it.
 serenity = { version = "0.12.5", default-features = false, features = ["client", "gateway", "model", "http", "rustls_backend"], optional = true }

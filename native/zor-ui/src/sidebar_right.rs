@@ -26,6 +26,8 @@ const ID_RELOAD: u32 = 2;
 const ID_POWER: u32 = 3;
 const ID_BG: u32 = 4; // whole panel: gives the wheel a target over empty space
 const ID_POWER_ITEM: u32 = 10; // + 0..5
+const ID_WIFI_MENU: u32 = 17; // the chevron on the Wi-Fi tile: networks in range
+const ID_BT_MENU: u32 = 18; // the chevron on the Bluetooth tile: paired devices
 const ID_REC_MENU: u32 = 19; // the chevron on the Screen record tile
 const ID_TOGGLE: u32 = 20; // + 0..16
 const ID_SLIDER: u32 = 40; // volume, mic, brightness
@@ -162,6 +164,16 @@ impl SidebarRight {
         cx.actions.push(Action::Menu(record_items(&cx.cfg), (p.x, p.y)));
     }
 
+    /// The Wi-Fi or Bluetooth menu at the pointer, once the list is read (the tile shows busy meanwhile).
+    fn radio_menu(&self, wifi: bool) {
+        let mut p = windows::Win32::Foundation::POINT::default();
+        unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p); }
+        self.exec(if wifi { "wifi" } else { "bluetooth" }, move |cfg, _| {
+            let rows = radio_rows(wifi, &proc::run(cfg, "toggles", &["-Action", if wifi { "wifi-list" } else { "bt-list" }]));
+            crate::app::post(Box::new(move |cx| cx.actions.push(Action::Menu(radio_items(wifi, rows), (p.x, p.y)))));
+        });
+    }
+
     fn toggle(&mut self, id: &'static str, cx: &mut Ctx) {
         match id {
             "wifi" => self.exec(id, |cfg, sh| if let Some(b) = proc::run(cfg, "toggles", &["-Action", "wifi"])["wifi"].as_bool() { lock(sh).wifi = Some(b); }),
@@ -212,6 +224,7 @@ impl SidebarRight {
             ID_SETTINGS => { cx.actions.push(Action::open("settings")); Self::close(cx); }
             // right-click on Screen record: pick what it records (microphone, system sound, both, none)
             ID_REC_MENU => Self::record_menu(cx),
+            ID_WIFI_MENU | ID_BT_MENU => self.radio_menu(id == ID_WIFI_MENU),
             _ if right && (ID_TOGGLE..ID_TOGGLE + 16).contains(&id) && self.tg.get((id - ID_TOGGLE) as usize).is_some_and(|t| t.0 == "record") => Self::record_menu(cx),
             _ if right && (ID_TOGGLE..ID_TOGGLE + 16).contains(&id) => {
                 if let Some(&(_, page)) = self.tg.get((id - ID_TOGGLE) as usize).filter(|t| !t.1.is_empty()) { proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", page]); }
@@ -338,13 +351,15 @@ impl SidebarRight {
             c.circle(r.x + 29.0, r.y + 29.0, 19.0, a(bub));
             c.icon(d.icon, R::new(r.x + 10.0, r.y + 9.0, 38.0, 40.0), ico(20.0, d.on), a(fg));
             let tx = r.x + 58.0;
-            let menu = d.id == "record";   // the tile with a chevron that opens its sound menu
+            // tiles with a chevron that opens a menu: Screen record's sound, Wi-Fi's networks, Bluetooth's devices
+            let menu_id = match d.id { "record" => Some(ID_REC_MENU), "wifi" => Some(ID_WIFI_MENU), "bluetooth" => Some(ID_BT_MENU), _ => None };
+            let menu = menu_id.is_some();
             let tw = r.w - 58.0 - if menu { 34.0 } else { 12.0 };
             c.text(d.label, R::new(tx, r.y + 14.0, tw, 16.2), txt(13.5, 500), a(fg), Align::Left);
             c.text(&d.sub, R::new(tx, r.y + 30.2, tw, 13.8), txt(11.5, 400), a(sub), Align::Left);
             if menu {
                 let cr = R::new(r.x + r.w - 32.0, r.y + 13.0, 28.0, 32.0);
-                if c.hit(cr, ID_REC_MENU) { c.rect(cr, 14.0, a(bub)); }
+                if c.hit(cr, menu_id.unwrap_or(ID_REC_MENU)) { c.rect(cr, 14.0, a(bub)); }
                 c.icon("expand_more", cr, ico(20.0, false), a(fg));
             }
         }
@@ -410,6 +425,14 @@ fn output_items(devs: &[media::OutDev], sh: &Sh) -> Vec<crate::menu::Item> {
             std::thread::spawn(move || if media::set_output(&id) { lock(&sh).out_name = name; repaint(); });
         })
     }).collect()
+}
+
+/// Menu items for `radio_rows`: a network or device row connects (or disconnects) it, the last opens Windows' settings page.
+fn radio_items(wifi: bool, rows: Vec<RadioRow>) -> Vec<crate::menu::Item> {
+    rows.into_iter().map(|(icon, label, arg)| crate::menu::Item::new(icon, &label, move |cx: &mut Ctx| {
+        if arg.is_empty() { proc::run_bg(&cx.cfg, "toggles", &["-Action", "settings", "-Value", if wifi { "network-wifi" } else { "bluetooth" }]); }
+        else { proc::run_bg(&cx.cfg, "toggles", &["-Action", if wifi { "wifi-connect" } else { "bt-connect" }, "-Value", &arg]); }
+    })).collect()
 }
 
 /// One menu row per `record.audio` choice, the current one ticked; a row saves that choice for the next recording.
@@ -548,6 +571,7 @@ mod tests {
     #[test]
     fn background_id_is_unique_and_main_scroll_moves_on_wheel() {
         assert!(![ID_SETTINGS, ID_RELOAD, ID_POWER].contains(&ID_BG));
+        for id in [ID_WIFI_MENU, ID_BT_MENU, ID_REC_MENU] { assert!(!(ID_POWER_ITEM..ID_POWER_ITEM + 5).contains(&id) && !(ID_TOGGLE..ID_TOGGLE + 16).contains(&id), "{id}"); }
         assert!(!(ID_TOGGLE..ID_TOGGLE + 16).contains(&ID_BG));
         let mut sc = Sc { content: 2000.0, view: 500.0, ..Default::default() };
         sc.wheel(-120);
